@@ -1,0 +1,308 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { createClientSupervisor } from "../src/client-supervisor.mjs";
+import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
+import { createAgentWorker } from "../src/runtime.mjs";
+
+const id = (index) => index.toString(16).padStart(64, "0");
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test("FIFO concurrency gate admits at most two reasoners in arrival order", async () => {
+  const gate = createConcurrencyGate({ limit: 2 });
+  const releases = Array.from({ length: 5 }, deferred);
+  const entered = [];
+  let active = 0;
+  let peak = 0;
+  const jobs = releases.map((release, index) => gate.run(async () => {
+    entered.push(index);
+    active += 1;
+    peak = Math.max(peak, active);
+    await release.promise;
+    active -= 1;
+    return index;
+  }));
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(entered, [0, 1]);
+  releases[1].resolve();
+  await jobs[1];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(entered, [0, 1, 2]);
+  releases[0].resolve();
+  await jobs[0];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(entered, [0, 1, 2, 3]);
+  releases[2].resolve();
+  releases[3].resolve();
+  await Promise.all([jobs[2], jobs[3]]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(entered, [0, 1, 2, 3, 4]);
+  releases[4].resolve();
+  assert.deepEqual(await Promise.all(jobs), [0, 1, 2, 3, 4]);
+  assert.equal(peak, 2);
+});
+
+test("shutdown abort prevents a just-admitted queued reasoner from starting", async () => {
+  const gate = createConcurrencyGate({ limit: 1 });
+  const release = deferred();
+  const first = gate.run(() => release.promise);
+  const controller = new AbortController();
+  let invoked = false;
+  const second = gate.run(async () => { invoked = true; }, { signal: controller.signal });
+  release.resolve();
+  controller.abort();
+  await first;
+  await assert.rejects(second, { name: "AbortError" });
+  assert.equal(invoked, false);
+});
+
+test("one coordinator creates ten isolated loops and never gives transport credentials to runners", async () => {
+  const deliveryInputs = [];
+  const runnerInputs = [];
+  const workers = [];
+  const instances = Array.from({ length: 10 }, (_, index) => ({
+    instanceId: id(index + 1),
+    mailbox: {
+      meshUrl: "https://thetriangle.dev",
+      meshToken: `transport-secret-${index}`,
+      recipientId: `agent_${index.toString(16).padStart(32, "0")}`,
+    },
+    runner: { command: `/trusted/adapter-${index % 2}`, args: [] },
+    runnerEnvironment: {
+      PATH: "/usr/bin",
+      TRIANGLE_INSTANCE_ID: id(index + 1),
+      TRIANGLE_INSTANCE_TEMP_ROOT: `/private/instances/${id(index + 1)}`,
+      ...(index % 2 === 0
+        ? { CODEX_CLI: "/trusted/codex", CODEX_HOME: `/models/${id(index + 1)}` }
+        : { HERMES_CLI: "/trusted/hermes", HERMES_HOME: `/models/${id(index + 1)}` }),
+    },
+  }));
+
+  const supervisor = createClientSupervisor({
+    instances,
+    createDeliveryClient(config) {
+      deliveryInputs.push(config);
+      return { instanceId: config.recipientId };
+    },
+    createRunner(config) {
+      runnerInputs.push(config);
+      return { async run() { return { status: "completed", text: "ok" }; } };
+    },
+    createWorker(config) {
+      workers.push(config);
+      return {
+        async runOnce() { return { found: 0, processed: 0 }; },
+        async watch() { return { processed: 0, stopped: true }; },
+      };
+    },
+  });
+
+  assert.equal(deliveryInputs.length, 10);
+  assert.equal(runnerInputs.length, 10);
+  assert.equal(workers.length, 10);
+  assert.deepEqual(supervisor.instanceIds, instances.map(({ instanceId }) => instanceId));
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(deliveryInputs[index].meshToken, `transport-secret-${index}`);
+    assert.equal(runnerInputs[index].environment.TRIANGLE_INSTANCE_ID, instances[index].instanceId);
+    assert.equal(JSON.stringify(runnerInputs[index]).includes("transport-secret"), false);
+    assert.equal(runnerInputs[index].meshToken, undefined);
+    assert.equal(runnerInputs[index].mailbox, undefined);
+  }
+});
+
+test("supervisor applies global limit while preserving per-instance single-flight", async () => {
+  const releases = Array.from({ length: 4 }, deferred);
+  let active = 0;
+  let peak = 0;
+  const workers = [];
+  const supervisor = createClientSupervisor({
+    instances: releases.map((_, index) => ({
+      instanceId: id(index + 1),
+      mailbox: { meshToken: `token-${index}` },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(index + 1) },
+    })),
+    createDeliveryClient: () => ({}),
+    createRunner: (_config, context) => ({
+      async run() {
+        const index = Number.parseInt(context.instanceId, 16) - 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        await releases[index].promise;
+        active -= 1;
+        return { status: "completed", text: "ok" };
+      },
+    }),
+    createWorker({ runner }) {
+      let running;
+      const worker = {
+        runOnce() {
+          running ??= runner.run({}).finally(() => { running = undefined; });
+          return running;
+        },
+        async watch() { return { processed: 0, stopped: true }; },
+      };
+      workers.push(worker);
+      return worker;
+    },
+    maxConcurrentReasoners: 2,
+  });
+
+  const duplicate = workers[0].runOnce();
+  const all = [duplicate, workers[0].runOnce(), ...workers.slice(1).map((worker) => worker.runOnce())];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(active, 2);
+  releases[0].resolve();
+  releases[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  releases[2].resolve();
+  releases[3].resolve();
+  await Promise.all(all);
+  assert.equal(peak, 2);
+  assert.equal(all[0], all[1]);
+  assert.equal(supervisor.instanceIds.length, 4);
+});
+
+test("one failing mailbox loop does not stop peers and shutdown waits for every loop", async () => {
+  const stopped = [];
+  const supervisor = createClientSupervisor({
+    instances: [0, 1, 2].map((index) => ({
+      instanceId: id(index + 1), mailbox: { meshToken: `token-${index}` },
+      runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(index + 1) },
+    })),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
+    createWorker(_config, context) {
+      return {
+        async runOnce() { return { found: 0, processed: 0 }; },
+        async watch({ signal }) {
+          if (context.instanceId === id(1)) throw new Error("isolated failure");
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          stopped.push(context.instanceId);
+          return { processed: 0, stopped: true };
+        },
+      };
+    },
+    logger: { error() {} },
+  });
+
+  const controller = new AbortController();
+  const watching = supervisor.watch({ signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await watching;
+  assert.deepEqual(stopped, [id(2), id(3)]);
+  assert.deepEqual(result.instances.map(({ instanceId, stopped: didStop }) => [instanceId, didStop]), [
+    [id(1), false], [id(2), true], [id(3), true],
+  ]);
+});
+
+test("runOnce reports one failed instance without discarding successful peer results", async () => {
+  const supervisor = createClientSupervisor({
+    instances: [0, 1, 2].map((index) => ({
+      instanceId: id(index + 1), mailbox: { meshToken: `token-${index}` },
+      runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(index + 1) },
+    })),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
+    createWorker(_config, context) {
+      return {
+        async runOnce() {
+          if (context.instanceId === id(2)) throw new Error("isolated cycle failure");
+          return { found: 1, processed: 1 };
+        },
+        async watch() { return { processed: 0, stopped: true }; },
+      };
+    },
+    logger: { error() {} },
+  });
+
+  assert.deepEqual(await supervisor.runOnce(), {
+    instances: [
+      { instanceId: id(1), found: 1, processed: 1 },
+      { instanceId: id(2), found: null, processed: 0, failed: true },
+      { instanceId: id(3), found: 1, processed: 1 },
+    ],
+  });
+});
+
+test("a sole failed runOnce instance stays non-idle until its retry succeeds", async () => {
+  let attempts = 0;
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1), mailbox: { meshToken: "token" },
+      runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
+    createWorker() {
+      return {
+        async runOnce() {
+          attempts += 1;
+          if (attempts === 1) throw new Error("retry me");
+          return { found: 0, processed: 0 };
+        },
+        async watch() { return { processed: 0, stopped: true }; },
+      };
+    },
+    logger: { error() {} },
+  });
+
+  const failed = await supervisor.runOnce();
+  assert.equal(failed.instances[0].failed, true);
+  assert.notEqual(failed.instances[0].found, 0);
+  assert.deepEqual(await supervisor.runOnce(), {
+    instances: [{ instanceId: id(1), found: 0, processed: 0 }],
+  });
+  assert.equal(attempts, 2);
+});
+
+test("adaptive idle polling uses deterministic bounded backoff and jitter", async () => {
+  const sleeps = [];
+  const randomValues = [0, 1, 0.5, 0.5];
+  const controller = new AbortController();
+  const worker = createAgentWorker({
+    deliveryClient: {
+      async listUnread() { return []; },
+      async completeAndAcknowledge() {},
+    },
+    runner: { async run() { return { status: "completed", text: "unused" }; } },
+    pollIntervalMs: 10,
+    maxIdlePollIntervalMs: 40,
+    idleJitterRatio: 0.25,
+    random: () => randomValues.shift() ?? 0.5,
+  });
+
+  await worker.watch({
+    signal: controller.signal,
+    sleep: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      if (sleeps.length === 4) controller.abort();
+    },
+  });
+  assert.deepEqual(sleeps, [10, 25, 40, 40]);
+});
+
+test("supervisor rejects duplicate instances and unsafe or credential-bearing runner environments", () => {
+  const base = {
+    instanceId: id(1), mailbox: { meshToken: "secret" }, runner: { command: "/trusted/runner" },
+    runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+  };
+  const dependencies = {
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+  };
+  assert.throws(() => createClientSupervisor({ instances: [base, base], ...dependencies }), /duplicate/i);
+  assert.throws(() => createClientSupervisor({
+    instances: [{ ...base, runnerEnvironment: { ...base.runnerEnvironment, MESH_AGENT_TOKEN: "leak" } }],
+    ...dependencies,
+  }), /runner environment/i);
+});
