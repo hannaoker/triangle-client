@@ -6,6 +6,8 @@ public enum ModelValidationError: Error, Equatable, Sendable {
     case invalidAgentID
     case invalidMailboxHandle
     case invalidToken
+    case invalidPublicJWK
+    case invalidWorkloadID
 }
 
 public struct ProfileName: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -328,6 +330,7 @@ public enum HelperCommand: String, CaseIterable, Equatable, Sendable {
 public enum WorkerKind: String, CaseIterable, Equatable, Sendable {
     case codex
     case hermes
+    case antigravity
 }
 
 public struct ParsedCommand: Equatable, Sendable {

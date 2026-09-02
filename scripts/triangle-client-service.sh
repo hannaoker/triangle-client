@@ -72,7 +72,14 @@ PY
 
 runtime_cli() {
   local agent=$1 candidate=""
-  if [[ "$agent" == codex ]]; then candidate=${CODEX_CLI:-}; else candidate=${HERMES_CLI:-}; fi
+  if [[ "$agent" == codex ]]; then
+    candidate=${CODEX_CLI:-}
+  elif [[ "$agent" == hermes ]]; then
+    candidate=${HERMES_CLI:-}
+  elif [[ "$agent" == antigravity ]]; then
+    candidate=${ANTIGRAVITY_CLI:-${AGY_CLI:-}}
+    if [[ -z "$candidate" ]]; then candidate=$(command -v agy 2>/dev/null || true); fi
+  fi
   if [[ -z "$candidate" ]]; then candidate=$(command -v "$agent" 2>/dev/null || true); fi
   [[ -n "$candidate" ]] || return 1
   printf '%s\n' "$candidate"
@@ -91,7 +98,7 @@ stage_one_runtime() {
 prepare_runtime_records() {
   runtime_records=()
   local agent record eligible=0
-  for agent in codex hermes; do
+  for agent in codex hermes antigravity; do
     if runtime_cli "$agent" >/dev/null; then
       record=$(stage_one_runtime "$agent") || return
       runtime_records+=("$record")
@@ -159,7 +166,7 @@ prepare_runtime_transaction() {
 }
 
 validate_v4_available() {
-  manifest_is_v4 codex || manifest_is_v4 hermes || {
+  manifest_is_v4 codex || manifest_is_v4 hermes || manifest_is_v4 antigravity || {
     echo "Triangle Client requires at least one trusted version 4 supervisor-capable runtime" >&2
     return 1
   }
@@ -176,6 +183,7 @@ def strict_object(pairs):
         value[key]=item
     return value
 if not os.path.exists(instances): print("empty"); raise SystemExit(0)
+any_enabled=False
 for directory in (root, instances):
     info=os.lstat(directory)
     if os.path.realpath(directory) != directory or not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
@@ -188,13 +196,16 @@ for name in os.listdir(instances):
     try:
         with open(path, encoding="utf-8") as stream: value=json.load(stream, object_pairs_hook=strict_object)
     except (ValueError, json.JSONDecodeError): raise SystemExit("invalid or duplicate Triangle Client registry entry")
-    if not isinstance(value, dict) or set(value) != {"version","profile","instanceId","runtimeAdapter","enabled"}: raise SystemExit("invalid Triangle Client registry entry")
+    if not isinstance(value, dict): raise SystemExit("invalid Triangle Client registry entry")
+    legacy_keys = {"version","profile","instanceId","runtimeAdapter","enabled"}
+    current_keys = legacy_keys | {"deliveryMode"}
+    if set(value) not in {frozenset(legacy_keys), frozenset(current_keys)}: raise SystemExit("invalid Triangle Client registry entry")
     profile=value["profile"]
     if type(value["version"]) is not int or value["version"] != 1 or not isinstance(profile, str) or not profile or len(profile.encode()) > 64 or "/" in profile or "\\" in profile or any(unicodedata.category(c) == "Cc" for c in profile): raise SystemExit("invalid Triangle Client registry entry")
     expected=hashlib.sha256(b"triangle-client-instance-v1\0"+profile.encode()).hexdigest()
-    if value["instanceId"] != expected or name != expected+".json" or value["runtimeAdapter"] not in {"codex","hermes"} or type(value["enabled"]) is not bool: raise SystemExit("invalid Triangle Client registry entry")
-    if value.get("enabled") is True: print("enabled"); raise SystemExit(0)
-print("empty")
+    if value["instanceId"] != expected or name != expected+".json" or value["runtimeAdapter"] not in {"codex","hermes","antigravity"} or type(value["enabled"]) is not bool or value.get("deliveryMode", "worker") not in {"worker","mcp-interactive"}: raise SystemExit("invalid Triangle Client registry entry")
+    any_enabled = any_enabled or value["enabled"]
+print("enabled" if any_enabled else "empty")
 PY
 }
 

@@ -39,10 +39,18 @@ public enum WorkerLauncherContractCases {
             let request = try require(executor.request, "worker was not executed")
             try expect(request.environment["MESH_ORIGIN"] == "https://thetriangle.dev", "origin not exact")
             try expect(request.environment["MESH_AGENT_TOKEN"] == token, "token not exact")
-            let expected = worker == .codex ? "CODEX_AGENT_ID" : "HERMES_AGENT_ID"
-            let inactive = worker == .codex ? "HERMES_AGENT_ID" : "CODEX_AGENT_ID"
+            let expected = worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")
+            let inactiveKeys: [String] = {
+                switch worker {
+                case .codex: return ["HERMES_AGENT_ID", "ANTIGRAVITY_AGENT_ID"]
+                case .hermes: return ["CODEX_AGENT_ID", "ANTIGRAVITY_AGENT_ID"]
+                case .antigravity: return ["CODEX_AGENT_ID", "HERMES_AGENT_ID"]
+                }
+            }()
             try expect(request.environment[expected] == agentID, "agent ID not exact")
-            try expect(request.environment[inactive] == nil, "inactive agent ID remained")
+            for inactive in inactiveKeys {
+                try expect(request.environment[inactive] == nil, "inactive agent ID remained")
+            }
         }
     }
 
@@ -54,7 +62,7 @@ public enum WorkerLauncherContractCases {
         )
         let ambient = [
             "MESH_ORIGIN": "https://evil.example", "MESH_AGENT_TOKEN": "stolen",
-            "MESH_OTHER_SELECTOR": "bad", "CODEX_AGENT_ID": "bad", "HERMES_AGENT_ID": "bad",
+            "MESH_OTHER_SELECTOR": "bad", "CODEX_AGENT_ID": "bad", "HERMES_AGENT_ID": "bad", "ANTIGRAVITY_AGENT_ID": "bad",
             "TRIANGLE_PROJECT_ROOT": "/evil", "TRIANGLE_CREDENTIAL_ROOT": "/evil/credentials",
             "PATH": "/evil/bin", "UNRELATED_SECRET": "must-not-pass",
         ]
@@ -62,7 +70,7 @@ public enum WorkerLauncherContractCases {
             .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: ambient)
         let env = try require(executor.request, "worker missing").environment
         try expect(env["MESH_ORIGIN"] == "https://thetriangle.dev" && env["MESH_AGENT_TOKEN"] == token, "ambient credential won")
-        try expect(env["MESH_OTHER_SELECTOR"] == nil && env["HERMES_AGENT_ID"] == nil, "ambient selector survived")
+        try expect(env["MESH_OTHER_SELECTOR"] == nil && env["HERMES_AGENT_ID"] == nil && env["ANTIGRAVITY_AGENT_ID"] == nil, "ambient selector survived")
         try expect(env["TRIANGLE_PROJECT_ROOT"] == "/trusted" && env["TRIANGLE_CREDENTIAL_ROOT"] == nil, "caller selected project or credential root")
         try expect(env["PATH"] == "/trusted/bin" && env["UNRELATED_SECRET"] == nil, "ambient environment was inherited")
     }
@@ -342,7 +350,7 @@ private final class ResolverFixture {
             "packages/agent-worker/src/runtime.mjs",
             "packages/agent-worker/runners/runner-common.mjs",
             "packages/agent-worker/runners/codex-runner.mjs",
-            "codex/worker/agent-worker.json",
+            "agents/codex/worker/agent-worker.json",
         ]
         if manifestVersion == 4 {
             artifactNames += [

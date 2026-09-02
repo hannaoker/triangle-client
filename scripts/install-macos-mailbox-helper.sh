@@ -4,7 +4,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 usage() {
-  echo "Usage: $0 [--local-ad-hoc] [--install-client | --install-worker <codex|hermes> --profile <name>]" >&2
+  echo "Usage: $0 [--local-ad-hoc] [--install-client | --install-worker <codex|hermes|antigravity> --profile <name>]" >&2
   exit 64
 }
 
@@ -42,7 +42,7 @@ if [[ $install_client -eq 1 ]]; then
 fi
 if [[ -n "$worker" || -n "$profile" ]]; then
   [[ $install_client -eq 0 ]] || usage
-  [[ "$worker" == "codex" || "$worker" == "hermes" ]] || usage
+  [[ "$worker" == "codex" || "$worker" == "hermes" || "$worker" == "antigravity" ]] || usage
   [[ "$profile" =~ ^[^/\\[:cntrl:]]{1,64}$ ]] || usage
 fi
 
@@ -84,6 +84,9 @@ client_hash_target="${manifest_dir}/triangle-client.sha256"
 client_metadata_target="${manifest_dir}/triangle-client-install.json"
 
 swift_command=/usr/bin/swift
+if [[ -x /opt/homebrew/opt/swift/bin/swift ]]; then
+  swift_command=/opt/homebrew/opt/swift/bin/swift
+fi
 codesign_command=/usr/bin/codesign
 worker_service="${project_root}/scripts/triangle-worker-service.sh"
 client_service="${project_root}/scripts/triangle-client-service.sh"
@@ -238,7 +241,11 @@ PY
 trap rollback EXIT
 trap 'exit 130' HUP INT TERM
 
-"$swift_command" build -c release --package-path "$package_root" --scratch-path "$build_root"
+swift_build_args=(build -c release --package-path "$package_root" --scratch-path "$build_root")
+if [[ $local_ad_hoc -eq 1 ]]; then
+  swift_build_args+=(-Xswiftc -DTRIANGLE_LOCAL_AD_HOC)
+fi
+"$swift_command" "${swift_build_args[@]}"
 source_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${build_root}/release/triangle-mailbox")
 client_source_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${build_root}/release/triangle-client")
 [[ "$source_binary" == "${build_root}/"* ]] || { echo "release build escaped installer scratch directory" >&2; exit 1; }
@@ -256,6 +263,8 @@ client_staged="${temporary}/triangle-client"
 
 entitlements="${temporary}/entitlements.plist"
 if [[ $local_ad_hoc -eq 1 ]]; then
+  # Ad-hoc signatures cannot carry restricted entitlements such as
+  # keychain-access-groups; AMFI rejects the binary if they are embedded.
   "$codesign_command" --force --sign - --identifier "$identifier" "$staged"
   "$codesign_command" --force --sign - --identifier "$identifier" "$client_staged"
 else
@@ -380,6 +389,17 @@ installed_client_digest=$(/usr/bin/shasum -a 256 "$client_target" | /usr/bin/awk
 committed=1
 trap - EXIT HUP INT TERM
 /bin/rm -rf "$temporary"
+
+mesh_cli_source="${project_root}/skills/triangle-mesh-a2a/scripts/mesh_client.py"
+if [[ -f "$mesh_cli_source" ]]; then
+  /bin/cp -p "$mesh_cli_source" "$bin_dir/mesh"
+  /bin/chmod 755 "$bin_dir/mesh"
+  for mesh_link_dir in "$HOME/.local/bin" "$HOME/.hermes/bin"; do
+    if [[ -d "$mesh_link_dir" ]]; then
+      /bin/ln -sf "$bin_dir/mesh" "$mesh_link_dir/mesh" 2>/dev/null || true
+    fi
+  done
+fi
 
 if [[ -n "$worker" ]]; then
   TRIANGLE_MAILBOX_HELPER="$target" TRIANGLE_MAILBOX_PROFILE="$profile" \

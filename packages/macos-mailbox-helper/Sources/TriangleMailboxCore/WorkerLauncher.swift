@@ -60,17 +60,17 @@ public struct WorkerLauncher: Sendable {
         inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws {
         _ = inheritedEnvironment // Ambient state is intentionally never inherited by the worker.
-        let adapter: RuntimeAdapter = worker == .codex ? .codex : .hermes
+        let adapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
         let instance = try ClientInstance(profile: profile, runtimeAdapter: adapter)
         let command = try resolver.resolve(worker, instance: instance)
         let credential = try await gate.credential(for: profile)
         var environment = command.environment
         environment.keys.filter { key in
-            key.hasPrefix("MESH_") || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID"
+            key.hasPrefix("MESH_") || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
         }.forEach { environment.removeValue(forKey: $0) }
         environment["MESH_ORIGIN"] = credential.origin.value
         environment["MESH_AGENT_TOKEN"] = credential.binding.token.secretValue
-        environment[worker == .codex ? "CODEX_AGENT_ID" : "HERMES_AGENT_ID"] = credential.agentID.value
+        environment[worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")] = credential.agentID.value
         try executor.execute(WorkerExecutionRequest(
             executable: command.executable,
             arguments: command.arguments,
@@ -83,7 +83,7 @@ public struct WorkerLauncher: Sendable {
 public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSupervisorCommandResolving {
     private static let allowedEnvironment: Set<String> = [
         "PATH", "LANG", "LC_ALL", "NO_COLOR",
-        "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS", "CODEX_CLI", "HERMES_CLI",
+        "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS", "CODEX_CLI", "HERMES_CLI", "ANTIGRAVITY_CLI",
     ]
     private let applicationRoot: URL
 
@@ -95,7 +95,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             "packages/agent-worker/src/runtime.mjs",
             "packages/agent-worker/runners/runner-common.mjs",
             "packages/agent-worker/runners/\(worker.rawValue)-runner.mjs",
-            "\(worker.rawValue)/worker/agent-worker.json",
+            "agents/\(worker.rawValue)/worker/agent-worker.json",
         ])
         if manifestVersion == 3 { return legacy }
         if manifestVersion == 4 {
@@ -114,7 +114,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     }
 
     public func resolve(_ worker: WorkerKind, instance: ClientInstance) throws -> WorkerCommand {
-        let expectedAdapter: RuntimeAdapter = worker == .codex ? .codex : .hermes
+        let expectedAdapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
         guard instance.runtimeAdapter == expectedAdapter,
               instance.instanceID == .derive(profile: instance.profile)
         else { throw WorkerLauncherError.invalidManifest }
@@ -130,17 +130,22 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         catch { throw WorkerLauncherError.invalidManifest }
         let requiredReleaseEnvironment: Set<String> = [
             "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
-            worker == .codex ? "CODEX_CLI" : "HERMES_CLI",
+            worker == .codex ? "CODEX_CLI" : (worker == .hermes ? "HERMES_CLI" : "ANTIGRAVITY_CLI"),
         ]
+        let inactiveCLIs: [String] = {
+            switch worker {
+            case .codex: return ["HERMES_CLI", "ANTIGRAVITY_CLI"]
+            case .hermes: return ["CODEX_CLI", "ANTIGRAVITY_CLI"]
+            case .antigravity: return ["CODEX_CLI", "HERMES_CLI"]
+            }
+        }()
         guard let requiredArtifacts = Self.artifactPaths(for: worker, manifestVersion: manifest.version),
               Set(manifest.environment.keys) == requiredReleaseEnvironment,
               Set(manifest.environment.keys).isSubset(of: Self.allowedEnvironment),
               manifest.environment["TRIANGLE_PROJECT_ROOT"] == manifest.projectRoot,
               Set(manifest.artifacts.keys) == requiredArtifacts,
               !manifest.environment.keys.contains(where: { $0.hasPrefix("MESH_") || $0.hasSuffix("_AGENT_ID") }),
-              worker == .codex
-                ? manifest.environment["HERMES_CLI"] == nil
-                : manifest.environment["CODEX_CLI"] == nil,
+              inactiveCLIs.allSatisfy({ manifest.environment[$0] == nil }),
               manifest.environment.values.allSatisfy({ !$0.contains("\0") && !$0.contains("\n") && !$0.contains("\r") })
         else { throw WorkerLauncherError.invalidManifest }
 
@@ -164,7 +169,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let address = SHA256.hash(data: Data((addressLines.joined(separator: "\n") + "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         guard canonicalProject.lastPathComponent == address else { throw WorkerLauncherError.integrityMismatch }
         let script = canonicalProject.appendingPathComponent("packages/agent-worker/src/cli.mjs")
-        let config = canonicalProject.appendingPathComponent("\(worker.rawValue)/worker/agent-worker.json")
+        let config = canonicalProject.appendingPathComponent("agents/\(worker.rawValue)/worker/agent-worker.json")
         let home = root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         guard root.path == home.appendingPathComponent("Library/Application Support/The Triangle", isDirectory: true).path else {
             throw WorkerLauncherError.unsafeInstallation
@@ -184,7 +189,17 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         trustedEnvironment["TRIANGLE_MODEL_ROOTS"] = modelRoot.path
         trustedEnvironment["TRIANGLE_INSTANCE_ID"] = instance.instanceID.value
         trustedEnvironment["TRIANGLE_INSTANCE_TEMP_ROOT"] = instanceTemp.path
-        trustedEnvironment[worker == .codex ? "CODEX_HOME" : "HERMES_HOME"] = modelRoot.path
+        trustedEnvironment[worker == .codex ? "CODEX_HOME" : (worker == .hermes ? "HERMES_HOME" : "ANTIGRAVITY_HOME")] = modelRoot.path
+        if worker == .hermes {
+            try provisionHermesEnvironment(home: home, modelRoot: modelRoot)
+        }
+        if worker == .antigravity {
+            let geminiCLI = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
+            if FileManager.default.fileExists(atPath: geminiCLI.path) {
+                let canonical = try checkedDirectory(geminiCLI, exactMode: nil)
+                trustedEnvironment["TRIANGLE_WRITABLE_RUNTIME_ROOTS"] = canonical.path
+            }
+        }
         return WorkerCommand(
             executable: node,
             arguments: [script.path, "--config", config.path, "--watch"],
@@ -194,7 +209,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     }
 
     public func resolveAdapter(for instance: ClientInstance) throws -> WorkerCommand {
-        let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : .hermes
+        let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
         let base = try resolve(worker, instance: instance)
         let runner = base.workingDirectory.appendingPathComponent("packages/agent-worker/runners/\(worker.rawValue)-runner.mjs")
         try checkedFile(runner, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
@@ -210,7 +225,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         guard !instances.isEmpty else { throw WorkerLauncherError.invalidManifest }
         var attempted = Set<WorkerKind>()
         for instance in instances {
-            let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : .hermes
+            let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
             guard attempted.insert(worker).inserted else { continue }
             let base = try resolve(worker, instance: instance)
             let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
@@ -311,6 +326,47 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let digest = SHA256.hash(data: try boundedRead(url, maximum: 128 * 1024 * 1024))
         let actual = digest.map { String(format: "%02x", $0) }.joined()
         guard actual == expected else { throw WorkerLauncherError.integrityMismatch }
+    }
+
+    private func provisionHermesEnvironment(home: URL, modelRoot: URL) throws {
+        let destination = modelRoot.appendingPathComponent(".env")
+        var destinationMetadata = stat()
+        if lstat(destination.path, &destinationMetadata) == 0 {
+            guard (destinationMetadata.st_mode & S_IFMT) == S_IFREG,
+                  destinationMetadata.st_uid == getuid(),
+                  destinationMetadata.st_mode & 0o777 == 0o600
+            else { throw WorkerLauncherError.unsafeInstallation }
+            return
+        }
+        let source = home.appendingPathComponent(".hermes/.env")
+        var sourceMetadata = stat()
+        guard lstat(source.path, &sourceMetadata) == 0,
+              (sourceMetadata.st_mode & S_IFMT) == S_IFREG,
+              sourceMetadata.st_uid == getuid(),
+              sourceMetadata.st_mode & 0o777 == 0o600
+        else { return }
+        let temporary = modelRoot.appendingPathComponent(".env-\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw WorkerLauncherError.unsafeInstallation }
+        defer { close(descriptor) }
+        let sourceHandle = try FileHandle(forReadingFrom: source)
+        defer { try? sourceHandle.close() }
+        let payload = try sourceHandle.read(upToCount: 256 * 1024) ?? Data()
+        guard payload.count <= 256 * 1024 else { throw WorkerLauncherError.unsafeInstallation }
+        try payload.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < payload.count {
+                let count = Darwin.write(descriptor, raw.baseAddress!.advanced(by: offset), payload.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw WorkerLauncherError.unsafeInstallation }
+                offset += count
+            }
+        }
+        guard fsync(descriptor) == 0 else { throw WorkerLauncherError.unsafeInstallation }
+        guard rename(temporary.path, destination.path) == 0 else {
+            unlink(temporary.path)
+            throw WorkerLauncherError.unsafeInstallation
+        }
     }
 }
 

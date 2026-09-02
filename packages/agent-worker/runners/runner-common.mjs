@@ -76,7 +76,8 @@ function runtimeFamilies(env, activeWorker) {
     }
     return realpathSync(current);
   };
-  for (const name of [activeWorker === "codex" ? "CODEX_CLI" : "HERMES_CLI"]) {
+  const activeCliName = activeWorker === "codex" ? "CODEX_CLI" : (activeWorker === "hermes" ? "HERMES_CLI" : "ANTIGRAVITY_CLI");
+  for (const name of [activeCliName]) {
     const cli = env[name];
     if (!cli || !path.isAbsolute(cli) || !existsSync(cli)) continue;
     const executable = realpathSync(cli);
@@ -90,8 +91,8 @@ function runtimeFamilies(env, activeWorker) {
     if (!interpreterPath || !path.isAbsolute(interpreterPath) || !existsSync(interpreterPath)) throw new Error("Installed Hermes interpreter is unavailable");
     const venv = path.dirname(path.dirname(entry));
     const interpreterPrefix = path.dirname(path.dirname(resolveSymlinkChain(interpreterPath)));
-    families.push(venv, interpreterPrefix);
     const agentRoot = path.dirname(venv);
+    families.push(venv, interpreterPrefix, agentRoot);
     for (const finder of globSync(path.join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py"))) {
       const mappingLine = readFileSync(finder, "utf8").match(/^MAPPING:.*$/m)?.[0] || "";
       for (const match of mappingLine.matchAll(/'([^']+)'/g)) {
@@ -105,6 +106,10 @@ function runtimeFamilies(env, activeWorker) {
     }
   }
   return { families: [...new Set(families.map((entry) => realpathSync(entry)))], aliases: [...new Set(aliases)] };
+}
+
+function collapseToOuterRoots(roots) {
+  return roots.filter((root) => !roots.some((other) => other !== root && root.startsWith(`${other}${path.sep}`)));
 }
 
 function sandboxRegex(value) {
@@ -122,7 +127,10 @@ export function sandboxCommand(command, args, env = process.env) {
   if (env.TRIANGLE_MODEL_STATE_BASE !== expectedModelStateInput) throw new Error("TRIANGLE_MODEL_STATE_BASE must lexically equal the application-owned model state base");
   const modelStateBase = requirePlainComponents(homeInput, expectedModelStateInput, "TRIANGLE_MODEL_STATE_BASE");
   const modelRoots = rootList(env.TRIANGLE_MODEL_ROOTS, "TRIANGLE_MODEL_ROOTS");
-  const runtimeRoots = rootList(env.TRIANGLE_RUNTIME_ROOTS, "TRIANGLE_RUNTIME_ROOTS");
+  const runtimeRoots = collapseToOuterRoots(rootList(env.TRIANGLE_RUNTIME_ROOTS, "TRIANGLE_RUNTIME_ROOTS"));
+  const writableRuntimeRoots = typeof env.TRIANGLE_WRITABLE_RUNTIME_ROOTS === "string" && env.TRIANGLE_WRITABLE_RUNTIME_ROOTS.trim()
+    ? rootList(env.TRIANGLE_WRITABLE_RUNTIME_ROOTS, "TRIANGLE_WRITABLE_RUNTIME_ROOTS")
+    : [];
   const instanceId = env.TRIANGLE_INSTANCE_ID;
   if (typeof instanceId !== "string" || !/^[a-f0-9]{64}$/.test(instanceId)) throw new Error("TRIANGLE_INSTANCE_ID must be an opaque 64-character identifier");
   if (overlaps(project, credentials)) {
@@ -146,11 +154,15 @@ export function sandboxCommand(command, args, env = process.env) {
     if (candidate === "/" || (home && candidate === home)) throw new Error("Model/runtime root is an unsafe broad HOME or filesystem root");
     if (overlaps(candidate, credentials)) throw new Error("Model/runtime root must not overlap the credential root");
   }
-  const workerNames = [["codex", env.CODEX_HOME], ["hermes", env.HERMES_HOME]].filter(([, value]) => Boolean(value));
+  const workerNames = [["codex", env.CODEX_HOME], ["hermes", env.HERMES_HOME], ["antigravity", env.ANTIGRAVITY_HOME]].filter(([, value]) => Boolean(value));
   if (workerNames.length !== 1) throw new Error("Exactly one active worker model home is required");
   const activeWorker = workerNames[0][0];
-  const inactiveCli = activeWorker === "codex" ? "HERMES_CLI" : "CODEX_CLI";
-  if (typeof env[inactiveCli] === "string") throw new Error(`${inactiveCli} is an inactive CLI for the ${activeWorker} worker`);
+  const allCliNames = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
+  for (const [worker, cliKey] of Object.entries(allCliNames)) {
+    if (worker !== activeWorker && typeof env[cliKey] === "string") {
+      throw new Error(`${cliKey} is an inactive CLI for the ${activeWorker} worker`);
+    }
+  }
   const { families: approvedRuntimeFamilies, aliases: runtimeAliases } = runtimeFamilies(env, activeWorker);
   const signedSystemFamilies = ["/System", "/usr", "/bin", "/sbin", "/Library/Apple"].filter(existsSync).map((entry) => realpathSync(entry));
   for (const runtimeRoot of runtimeRoots) {
@@ -161,6 +173,14 @@ export function sandboxCommand(command, args, env = process.env) {
   const temporaryInput = path.join(homeInput, "Library", "Caches", "The Triangle", "instances", instanceId);
   if (env.TRIANGLE_INSTANCE_TEMP_ROOT !== temporaryInput) throw new Error("Instance temp root must select the exact Triangle instance");
   const temporary = requirePlainComponents(homeInput, temporaryInput, "worker temporary root", { create: true });
+  for (const writableRoot of writableRuntimeRoots) {
+    if (!runtimeRoots.some((entry) => writableRoot === entry || writableRoot.startsWith(`${entry}${path.sep}`))) {
+      throw new Error("Every writable runtime root must be within a runtime root");
+    }
+    if (overlaps(writableRoot, credentials) || overlaps(writableRoot, project) || overlaps(writableRoot, modelStateBase) || overlaps(writableRoot, temporary)) {
+      throw new Error("Writable runtime root must not overlap credential, project, model, or temp roots");
+    }
+  }
   const isolatedRoots = [project, credentials, temporary, ...runtimeRoots];
   for (let left = 0; left < isolatedRoots.length; left += 1) {
     for (let right = left + 1; right < isolatedRoots.length; right += 1) {
@@ -177,7 +197,7 @@ export function sandboxCommand(command, args, env = process.env) {
       throw new Error("Model state must not overlap project, credential, temp, or runtime roots");
     }
   }
-  for (const [name, value] of [["CODEX_HOME", env.CODEX_HOME], ["HERMES_HOME", env.HERMES_HOME]]) {
+  for (const [name, value] of [["CODEX_HOME", env.CODEX_HOME], ["HERMES_HOME", env.HERMES_HOME], ["ANTIGRAVITY_HOME", env.ANTIGRAVITY_HOME]]) {
     if (!value) continue;
     const cliHome = canonicalRoot(value, name);
     if (!modelRoots.some((entry) => cliHome === entry || cliHome.startsWith(`${entry}${path.sep}`))) throw new Error(`${name} must be within a model root`);
@@ -214,6 +234,7 @@ export function sandboxCommand(command, args, env = process.env) {
     ...readableRoots.map((entry) => `(allow file-read* (${lstatSync(entry).isDirectory() ? "subpath" : "literal"} "${sandboxLiteral(entry)}"))`),
     ...modelRoots.map((entry) => `(allow file-read* file-write* (subpath "${sandboxLiteral(entry)}"))`),
     `(allow file-read* file-write* (subpath "${sandboxLiteral(temporary)}"))`,
+    ...writableRuntimeRoots.map((entry) => `(allow file-read* file-write* (subpath "${sandboxLiteral(entry)}"))`),
     ...["/dev/null", "/dev/random", "/dev/urandom"].filter(existsSync).map((entry) => `(allow file-read* file-write* (literal "${entry}"))`),
     `(deny file-read* file-write* (subpath "${sandboxLiteral(credentials)}"))`,
     `(deny file-read* file-write* (regex #"^${sandboxRegex(project)}/(.*/)?[.]env[^/]*(/.*)?$"))`,
@@ -242,14 +263,17 @@ export async function readRequest(stream = process.stdin) {
   return request;
 }
 
-export function invoke(command, args, { input, sandbox = sandboxCommand } = {}) {
+export function invoke(command, args, { input, sandbox = sandboxCommand, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
-    const sandboxed = sandbox(command, args);
+    const sandboxed = sandbox(command, args, env);
     const child = spawn(sandboxed.command, sandboxed.args, {
       shell: false,
       detached: false,
+      cwd: typeof env.TRIANGLE_INSTANCE_TEMP_ROOT === "string" && path.isAbsolute(env.TRIANGLE_INSTANCE_TEMP_ROOT)
+        ? env.TRIANGLE_INSTANCE_TEMP_ROOT
+        : undefined,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...createRunnerEnvironment(), ...sandboxed.env },
+      env: { ...createRunnerEnvironment(env), ...sandboxed.env },
     });
     const stdout = [];
     const stderr = [];

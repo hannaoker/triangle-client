@@ -13,4 +13,5 @@ struct MCPProxyTests {
     @Test("durable profile resumes in a fresh proxy") func resume() async throws { try await MCPProxyContractCases.freshProxyResume() }
     @Test("ineligible gates never forward MCP") func gateFailures() async throws { try await MCPProxyContractCases.gateFailuresNeverForward() }
     @Test("URLSession supports the MCP forwarding contract") func urlSession() async throws { try await MCPProxyContractCases.urlSessionMCPContract() }
+    @Test("workload JWT and DPoP when key present") func workloadAuth() async throws { try await MCPProxyContractCases.workloadJWTAndDPoP() }
 }

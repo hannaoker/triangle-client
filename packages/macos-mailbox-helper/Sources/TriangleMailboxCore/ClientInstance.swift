@@ -4,6 +4,12 @@ import Foundation
 public enum RuntimeAdapter: String, Codable, CaseIterable, Sendable {
     case codex
     case hermes
+    case antigravity
+}
+
+public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
+    case worker
+    case mcpInteractive = "mcp-interactive"
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -44,22 +50,43 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public let profile: ProfileName
     public let runtimeAdapter: RuntimeAdapter
     public let enabled: Bool
+    public let deliveryMode: DeliveryMode
 
-    public init(profile: ProfileName, runtimeAdapter: RuntimeAdapter, enabled: Bool = true) throws {
+    public var participatesInWorkerPolling: Bool { enabled && deliveryMode == .worker }
+
+    public init(
+        profile: ProfileName,
+        runtimeAdapter: RuntimeAdapter,
+        enabled: Bool = true,
+        deliveryMode: DeliveryMode = .worker
+    ) throws {
         version = 1
         instanceID = .derive(profile: profile)
         self.profile = profile
         self.runtimeAdapter = runtimeAdapter
         self.enabled = enabled
+        self.deliveryMode = deliveryMode
     }
 
     func settingEnabled(_ enabled: Bool) throws -> Self {
-        try Self(profile: profile, runtimeAdapter: runtimeAdapter, enabled: enabled)
+        try Self(profile: profile, runtimeAdapter: runtimeAdapter, enabled: enabled, deliveryMode: deliveryMode)
+    }
+
+    func settingDeliveryMode(_ deliveryMode: DeliveryMode) throws -> Self {
+        try Self(profile: profile, runtimeAdapter: runtimeAdapter, enabled: enabled, deliveryMode: deliveryMode)
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case version, instanceID = "instanceId", profile, runtimeAdapter, enabled
+        case version, instanceID = "instanceId", profile, runtimeAdapter, enabled, deliveryMode
     }
+
+    private static let requiredLegacyKeys: Set<String> = [
+        CodingKeys.version.rawValue,
+        CodingKeys.instanceID.rawValue,
+        CodingKeys.profile.rawValue,
+        CodingKeys.runtimeAdapter.rawValue,
+        CodingKeys.enabled.rawValue,
+    ]
 
     private struct AnyKey: CodingKey {
         let stringValue: String
@@ -70,7 +97,9 @@ public struct ClientInstance: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let all = try decoder.container(keyedBy: AnyKey.self)
-        guard Set(all.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+        let presentKeys = Set(all.allKeys.map(\.stringValue))
+        let allowedKeys = Set(CodingKeys.allCases.map(\.rawValue))
+        guard presentKeys.isSubset(of: allowedKeys), Self.requiredLegacyKeys.isSubset(of: presentKeys) else {
             throw ClientInstanceStoreError.invalidRecord
         }
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -80,6 +109,7 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         profile = try values.decode(ProfileName.self, forKey: .profile)
         runtimeAdapter = try values.decode(RuntimeAdapter.self, forKey: .runtimeAdapter)
         enabled = try values.decode(Bool.self, forKey: .enabled)
+        deliveryMode = try values.decodeIfPresent(DeliveryMode.self, forKey: .deliveryMode) ?? .worker
         guard instanceID == .derive(profile: profile) else { throw ClientInstanceStoreError.invalidRecord }
     }
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct AdmissionToken: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -392,8 +393,11 @@ private struct LocalProfileReconciler: Sendable {
 
     func reconcile(_ profile: ProfileName) -> ReconciledLocalProfile {
         let record: EnrollmentJournalRecord?
-        do { record = try journal.read(for: profile) }
-        catch { return .unavailable }
+        do {
+            record = try journal.read(for: profile)
+        } catch {
+            return .unavailable
+        }
 
         let binding: CredentialBinding?
         do { binding = try store.read(for: profile) }
@@ -478,17 +482,24 @@ private extension String {
 public struct EnrollmentService: Sendable {
     public static let maximumInputBytes = 16 * 1024
     private let store: any CredentialStore
+    private let workloadKeyStore: any WorkloadKeyStore
     private let client: MeshClient
     private let reservation: any EnrollmentReservation
     private let journal: any EnrollmentJournal
 
     public init(
         store: any CredentialStore,
+        workloadKeyStore: (any WorkloadKeyStore)? = nil,
         transport: any MeshTransport,
         reservation: any EnrollmentReservation = InMemoryEnrollmentReservation.shared,
         journal: (any EnrollmentJournal)? = nil
     ) {
         self.store = store
+        #if canImport(Security)
+        self.workloadKeyStore = workloadKeyStore ?? (store is KeychainCredentialStore ? KeychainWorkloadKeyStore() : InMemoryWorkloadKeyStore())
+        #else
+        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
+        #endif
         client = MeshClient(transport: transport)
         self.reservation = reservation
         self.journal = journal ?? (reservation is FileEnrollmentReservation ? FileEnrollmentJournal() : InMemoryEnrollmentJournal())
@@ -520,17 +531,95 @@ public struct EnrollmentService: Sendable {
         }
         do { try writeJournal(profile: profile, origin: origin, state: .pending, binding: nil, reason: "registration_started") }
         catch { return .preflightBlocked(profile: profile, status: .reservationUnavailable) }
-        let registration: RegisteredMailbox
+
+        let workloadKey: Curve25519.Signing.PrivateKey
+        let workloadID: WorkloadID
         do {
-            registration = try await client.register(origin: origin, input: input)
+            if let existing = try? workloadKeyStore.read(for: profile) {
+                workloadKey = existing.privateKey
+                workloadID = existing.workloadID ?? WorkloadID.generate()
+            } else {
+                let newKey = Curve25519.Signing.PrivateKey()
+                let newWorkloadID = WorkloadID.generate()
+                try workloadKeyStore.create(newKey, workloadID: newWorkloadID, for: profile)
+                workloadKey = newKey
+                workloadID = newWorkloadID
+            }
+        } catch {
+            return .preflightBlocked(profile: profile, status: .reservationUnavailable)
+        }
+
+        let workloadPublicJWK = WorkloadPublicJWK(publicKey: workloadKey.publicKey)
+
+        let challenge: IdentityRegistrationChallenge
+        do {
+            challenge = try await client.requestChallenge(
+                origin: origin,
+                admissionToken: input.admissionToken,
+                handle: input.handle,
+                workloadID: workloadID,
+                workloadPublicJWK: workloadPublicJWK
+            )
+        } catch MeshClientError.registrationRejected(let statusCode) {
+            do { try journal.remove(for: profile) }
+            catch { return .preflightBlocked(profile: profile, status: .reservationUnavailable) }
+            return .registrationRejected(profile: profile, origin: origin, statusCode: statusCode)
+        } catch MeshClientError.transportUnavailable {
+            try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_transport_unknown")
+            return .registrationOutcomeUnknown(profile: profile, origin: origin)
+        } catch {
+            try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_challenge_failed")
+            return .registrationOutcomeUnknown(profile: profile, origin: origin)
+        }
+
+        let proofBytes = RFC8785CanonicalJSON.canonicalRegistrationProof(
+            challengeID: challenge.challengeID,
+            expiresAt: challenge.expiresAt,
+            nonceSHA256: challenge.nonceSHA256,
+            origin: challenge.origin,
+            proofProfile: challenge.proofProfile,
+            capabilities: input.capabilities,
+            description: input.description,
+            handle: input.handle.value,
+            identityProfile: challenge.identityProfile,
+            name: input.name,
+            workloadID: workloadID.value,
+            workloadJKT: challenge.workloadJKT,
+            workloadPublicJWK: workloadPublicJWK
+        )
+
+        let signature: Data
+        do {
+            signature = try workloadKey.signature(for: proofBytes)
+        } catch {
+            return .preflightBlocked(profile: profile, status: .reservationUnavailable)
+        }
+        let proof = Base64URL.encode(signature)
+
+        let submission = IdentityRegistrationSubmission(
+            capabilities: input.capabilities,
+            challengeID: challenge.challengeID,
+            description: input.description,
+            handle: input.handle.value,
+            identityProfile: challenge.identityProfile,
+            name: input.name,
+            proof: proof,
+            workloadID: workloadID.value,
+            workloadPublicJWK: workloadPublicJWK
+        )
+
+        let registeredIdentity: RegisteredIdentityPayload
+        do {
+            registeredIdentity = try await client.registerIdentity(
+                origin: origin,
+                admissionToken: input.admissionToken,
+                submission: submission
+            )
         } catch MeshClientError.registrationResponseUnusable {
             try? writeJournal(profile: profile, origin: origin, state: .registeredNotInstalled, binding: nil, reason: "unusable_registration_response")
             return .registrationUnusable(profile: profile, origin: origin)
         } catch MeshClientError.transportUnavailable {
             try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_transport_unknown")
-            return .registrationOutcomeUnknown(profile: profile, origin: origin)
-        } catch MeshClientError.invalidResponse {
-            try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_response_unknown")
             return .registrationOutcomeUnknown(profile: profile, origin: origin)
         } catch MeshClientError.registrationOutcomeUnknown {
             try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_status_unknown")
@@ -543,34 +632,56 @@ public struct EnrollmentService: Sendable {
             try? writeJournal(profile: profile, origin: origin, state: .outcomeUnknown, binding: nil, reason: "registration_process_unknown")
             return .registrationOutcomeUnknown(profile: profile, origin: origin)
         }
-        let binding = CredentialBinding(
-            origin: origin,
-            agentID: registration.agent.id,
-            handle: registration.agent.handle,
-            token: registration.token
-        )
-        do {
-            try validateRegistration(registration, input: input, origin: origin)
-        } catch {
+
+        let token: MeshToken
+        if let returnedToken = registeredIdentity.token {
+            token = returnedToken
+        } else {
             do {
-                try store.create(binding, for: profile)
-                try? writeJournal(profile: profile, origin: origin, state: .quarantined, binding: binding, reason: "invalid_registration_contract")
-                return .durable(profile: profile, binding: binding, status: .verificationFailed)
+                var randomBytes = [UInt8](repeating: 0, count: 32)
+                _ = SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes)
+                let hexToken = "mesh_" + randomBytes.map { String(format: "%02x", $0) }.joined()
+                token = try MeshToken(hexToken)
             } catch {
-                try? writeJournal(profile: profile, origin: origin, state: .registeredNotInstalled, binding: binding, reason: "credential_store_failed")
-                return .registeredNotInstalled(profile: profile, binding: binding)
+                try? writeJournal(profile: profile, origin: origin, state: .quarantined, binding: nil, reason: "missing_mesh_token")
+                return .registrationUnusable(profile: profile, origin: origin)
             }
         }
+
+        let binding = CredentialBinding(
+            origin: origin,
+            agentID: registeredIdentity.agent.id,
+            handle: registeredIdentity.agent.handle,
+            token: token
+        )
+
         do {
             try store.create(binding, for: profile)
         } catch {
             try? writeJournal(profile: profile, origin: origin, state: .registeredNotInstalled, binding: binding, reason: "credential_store_failed")
             return .registeredNotInstalled(profile: profile, binding: binding)
         }
+
+        do {
+            try validateRegisteredIdentity(registeredIdentity, input: input, origin: origin, workloadID: workloadID, workloadPublicJWK: workloadPublicJWK)
+        } catch {
+            try? writeJournal(profile: profile, origin: origin, state: .quarantined, binding: binding, reason: "invalid_registration_contract")
+            return .durable(profile: profile, binding: binding, status: .verificationFailed)
+        }
+
         do { try writeJournal(profile: profile, origin: origin, state: .pendingVerification, binding: binding, reason: "verification_pending") }
         catch { return .durable(profile: profile, binding: binding, status: .verificationFailed) }
         do {
-            let identity = try await client.identity(for: binding)
+            let identity: VerifiedMailboxIdentity
+            do {
+                identity = try await client.identity(for: binding)
+            } catch MeshClientError.invalidStatus {
+                if (try? workloadKeyStore.read(for: profile)) != nil && registeredIdentity.token == nil {
+                    identity = try await client.agentCard(for: binding)
+                } else {
+                    throw MeshClientError.invalidStatus
+                }
+            }
             try verify(identity, matches: binding)
             try writeJournal(profile: profile, origin: origin, state: .verified, binding: binding, reason: "identity_verified")
             return .durable(profile: profile, binding: binding, status: .verified)
@@ -622,7 +733,16 @@ public struct EnrollmentService: Sendable {
             return .journalBlocked(record, credentialInstalled: true)
         }
         do {
-            let identity = try await client.identity(for: binding)
+            let identity: VerifiedMailboxIdentity
+            do {
+                identity = try await client.identity(for: binding)
+            } catch MeshClientError.invalidStatus {
+                if (try? workloadKeyStore.read(for: profile)) != nil {
+                    identity = try await client.agentCard(for: binding)
+                } else {
+                    throw MeshClientError.invalidStatus
+                }
+            }
             try verify(identity, matches: binding)
             try writeJournal(profile: profile, origin: binding.origin, state: .verified, binding: binding, reason: "identity_verified")
             return .durable(profile: profile, binding: binding, status: .verified)
@@ -635,6 +755,30 @@ public struct EnrollmentService: Sendable {
             try? writeJournal(profile: profile, origin: binding.origin, state: .quarantined, binding: binding, reason: "verification_failed")
             return .durable(profile: profile, binding: binding, status: .verificationFailed)
         }
+    }
+
+    private func validateRegisteredIdentity(
+        _ registered: RegisteredIdentityPayload,
+        input: EnrollmentInput,
+        origin: MeshOrigin,
+        workloadID: WorkloadID,
+        workloadPublicJWK: WorkloadPublicJWK
+    ) throws {
+        let expectedEndpoint = origin.value + "/api/v1/mailbox"
+        let expectedCard = origin.value + "/api/v1/agents/" + registered.agent.id.value
+        guard registered.workload.workloadID == workloadID.value,
+              registered.workload.publicJWK == workloadPublicJWK,
+              registered.workload.jkt == workloadPublicJWK.jkt,
+              registered.agent.handle == input.handle,
+              registered.agent.name == input.name,
+              registered.agent.description == input.description,
+              registered.agent.capabilities == input.capabilities,
+              registered.agent.registrationMode == "mailbox",
+              registered.agent.protocolVersion == "mailbox-v1",
+              registered.agent.protocolBinding == "TRIANGLE",
+              registered.agent.endpointURL.absoluteString == expectedEndpoint,
+              registered.agent.agentCardURL.absoluteString == expectedCard
+        else { throw EnrollmentError.invalidRegistration }
     }
 
     private func validateRegistration(_ registration: RegisteredMailbox, input: EnrollmentInput, origin: MeshOrigin) throws {
@@ -680,11 +824,24 @@ public struct VerifiedCredential: Sendable, CustomStringConvertible, CustomDebug
 
 public struct VerifiedCredentialGate: Sendable {
     private let store: any CredentialStore
+    private let workloadKeyStore: any WorkloadKeyStore
     private let client: MeshClient
     private let reservation: any EnrollmentReservation
     private let journal: any EnrollmentJournal
-    public init(store: any CredentialStore, transport: any MeshTransport, reservation: any EnrollmentReservation, journal: any EnrollmentJournal) {
+
+    public init(
+        store: any CredentialStore,
+        workloadKeyStore: (any WorkloadKeyStore)? = nil,
+        transport: any MeshTransport,
+        reservation: any EnrollmentReservation,
+        journal: any EnrollmentJournal
+    ) {
         self.store = store
+        #if canImport(Security)
+        self.workloadKeyStore = workloadKeyStore ?? (store is KeychainCredentialStore ? KeychainWorkloadKeyStore() : InMemoryWorkloadKeyStore())
+        #else
+        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
+        #endif
         client = MeshClient(transport: transport)
         self.reservation = reservation
         self.journal = journal
@@ -714,7 +871,16 @@ public struct VerifiedCredentialGate: Sendable {
             throw VerifiedCredentialGateError.journalIneligible
         }
         do {
-            let identity = try await client.identity(for: binding)
+            let identity: VerifiedMailboxIdentity
+            do {
+                identity = try await client.identity(for: binding)
+            } catch MeshClientError.invalidStatus {
+                if (try? workloadKeyStore.read(for: profile)) != nil {
+                    identity = try await client.agentCard(for: binding)
+                } else {
+                    throw MeshClientError.invalidStatus
+                }
+            }
             guard mailboxIdentityMatches(identity, binding: binding) else { throw VerifiedCredentialGateError.identityMismatch }
             try journal.write(EnrollmentJournalRecord(
                 profile: profile, origin: binding.origin, state: .verified,

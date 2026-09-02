@@ -233,7 +233,6 @@ test("listUnread authenticates and normalizes canonical mailbox deliveries", asy
     },
   ]);
 });
-
 test("listUnread does not query room history for empty mailbox", async () => {
   const { fetchImpl, state } = createMailboxFetch({});
   const client = createMailboxClient(
@@ -1945,4 +1944,119 @@ test("ack failure retries the same claim and reconciles without regenerating", a
   assert.equal(scenario.state.appendCount, 1);
   assert.equal(ackAttempts, 2);
   assert.deepEqual(await scenario.client.listUnread(), []);
+});
+
+test("identity-v1 workload key exchanges token challenge and sends DPoP proof on mailbox calls", async () => {
+  const rawKey = crypto.randomBytes(32);
+  const pkcs8 = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), rawKey]);
+  const privKey = crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
+  const pubKey = crypto.createPublicKey(privKey);
+  const jwk = pubKey.export({ format: "jwk" });
+  const workloadId = "workload_11111111111111111111111111111111";
+
+  const calls = [];
+  const fakeToken = "kms_signed_jwt_access_token_12345";
+  const fetchImpl = async (request) => {
+    const url = new URL(request.url);
+    const body = request.body ? await request.json() : null;
+    calls.push({
+      url,
+      method: request.method,
+      headers: Object.fromEntries(request.headers.entries()),
+      body,
+    });
+
+    if (url.pathname === "/api/v1/identity/token-challenges") {
+      return json({
+        challenge: {
+          challenge_id: "challenge_test_123",
+          workload_id: workloadId,
+          principal_id: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          origin: "https://mesh.test",
+          audience: "https://mesh.test",
+          nonce: "test_nonce_12345",
+          expires_at: new Date(Date.now() + 60000).toISOString(),
+        },
+      });
+    }
+
+    if (url.pathname === "/api/v1/identity/tokens") {
+      return json({
+        access_token: fakeToken,
+        token_type: "DPoP",
+        expires_in: 300,
+      });
+    }
+
+    if (url.pathname === "/api/v1/agents/me") {
+      return json({
+        agent: {
+          id: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          handle: "dawn-gemini-mini-two",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/v1/mailbox") {
+      return json({ items: [] });
+    }
+
+    return json({ error: "not_found" }, 404);
+  };
+
+  const client = createMailboxClient(
+    {
+      meshUrl: "https://mesh.test",
+      meshToken: "fallback_token_not_used",
+      recipientId: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      workloadId,
+      workloadPrivateKey: rawKey.toString("base64"),
+    },
+    { fetchImpl },
+  );
+
+  const items = await client.listUnread();
+  assert.deepEqual(items, []);
+
+  // Verify sequence of network calls
+  const paths = calls.map((c) => c.url.pathname);
+  assert.deepEqual(paths, [
+    "/api/v1/identity/token-challenges",
+    "/api/v1/identity/tokens",
+    "/api/v1/mailbox",
+  ]);
+
+  // Verify challenge call
+  assert.equal(calls[0].body.workload_id, workloadId);
+
+  // Verify token exchange call
+  assert.equal(calls[1].body.challenge_id, "challenge_test_123");
+  assert.deepEqual(calls[1].body.requested_scopes, ["mailbox.read", "mailbox.write"]);
+  const proofSegments = calls[1].body.proof.split(".");
+  assert.equal(proofSegments.length, 3);
+  const proofHeader = JSON.parse(Buffer.from(proofSegments[0], "base64url").toString());
+  assert.equal(proofHeader.alg, "EdDSA");
+  assert.equal(proofHeader.typ, "mesh-workload-proof+jwt");
+  assert.equal(proofHeader.kid, workloadId);
+
+  // Verify mailbox call uses Authorization: Bearer <fakeToken> and DPoP proof
+  const mailboxCall = calls[2];
+  assert.equal(mailboxCall.headers.authorization, `Bearer ${fakeToken}`);
+  assert.ok(mailboxCall.headers.dpop);
+  const dpopSegments = mailboxCall.headers.dpop.split(".");
+  assert.equal(dpopSegments.length, 3);
+  const dpopHeader = JSON.parse(Buffer.from(dpopSegments[0], "base64url").toString());
+  assert.equal(dpopHeader.alg, "EdDSA");
+  assert.equal(dpopHeader.typ, "dpop+jwt");
+  assert.equal(dpopHeader.jwk.x, jwk.x);
+
+  const dpopPayload = JSON.parse(Buffer.from(dpopSegments[1], "base64url").toString());
+  assert.equal(dpopPayload.htm, "GET");
+  assert.equal(dpopPayload.htu, "https://mesh.test/api/v1/mailbox?after=0&limit=1");
+  const expectedAth = crypto.createHash("sha256").update(fakeToken, "utf8").digest("base64url");
+  assert.equal(dpopPayload.ath, expectedAth);
+
+  // Subsequent call should reuse cached token without re-fetching challenge
+  await client.listUnread();
+  assert.equal(calls.filter((c) => c.url.pathname === "/api/v1/identity/tokens").length, 1);
 });

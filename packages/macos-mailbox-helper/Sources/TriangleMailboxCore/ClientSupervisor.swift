@@ -73,28 +73,40 @@ public struct ClientSupervisor: Sendable {
 
     private let instanceStore: any ClientInstanceStore
     private let gate: VerifiedCredentialGate
+    private let workloadKeyStore: any WorkloadKeyStore
     private let resolver: any ClientSupervisorCommandResolving
     private let processRunner: any ClientSupervisorProcessRunning
 
     public init(
         instanceStore: any ClientInstanceStore,
         gate: VerifiedCredentialGate,
+        workloadKeyStore: (any WorkloadKeyStore)? = nil,
         resolver: any ClientSupervisorCommandResolving,
         processRunner: any ClientSupervisorProcessRunning
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
+        #if canImport(Security)
+        self.workloadKeyStore = workloadKeyStore ?? KeychainWorkloadKeyStore()
+        #else
+        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
+        #endif
         self.resolver = resolver
         self.processRunner = processRunner
     }
 
     public func prepareEnabledInstances() async throws -> PreparedClientSupervisorLaunch {
-        let enabled: [ClientInstance]
+        let allInstances: [ClientInstance]
         do {
-            enabled = try instanceStore.list().filter(\.enabled)
+            allInstances = try instanceStore.list()
         } catch {
             throw ClientSupervisorError.invalidInstances
         }
+        let deliveryOmissions = allInstances.compactMap { instance -> OmittedClientSupervisorInstance? in
+            guard instance.enabled, instance.deliveryMode == .mcpInteractive else { return nil }
+            return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_mcp_interactive")
+        }
+        let enabled = allInstances.filter(\.participatesInWorkerPolling)
         guard !enabled.isEmpty,
               Set(enabled.map(\.profile)).count == enabled.count,
               enabled.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
@@ -126,7 +138,7 @@ public struct ClientSupervisor: Sendable {
 
         var prepared: [PreparedBootstrapInstance] = []
         var publicInstances: [PreparedClientSupervisorInstance] = []
-        var omitted = runtimeOmissions
+        var omitted = deliveryOmissions + runtimeOmissions
         for (instance, command) in resolved {
             let credential: VerifiedCredential
             do {
@@ -136,13 +148,16 @@ public struct ClientSupervisor: Sendable {
                 continue
             }
             try validateAdapterSecretConfinement(command, credential: credential)
+            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             prepared.append(PreparedBootstrapInstance(
                 instanceId: instance.instanceID.value,
                 mailbox: PreparedBootstrapMailbox(
                     meshUrl: credential.origin.value,
                     meshToken: credential.binding.token.secretValue,
                     recipientId: credential.agentID.value,
-                    pageLimit: 1
+                    pageLimit: 1,
+                    workloadId: workloadRecord?.workloadID?.value,
+                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
@@ -245,6 +260,8 @@ private struct PreparedBootstrapMailbox: Encodable {
     let meshToken: String
     let recipientId: String
     let pageLimit: Int
+    let workloadId: String?
+    let workloadPrivateKey: String?
 }
 private struct PreparedBootstrapRunner: Encodable {
     let command: String
@@ -343,6 +360,7 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
                 )
                 try readinessOutput.fileHandleForReading.close()
                 try writeReadinessMarker(generation: generation, configDigest: expectedDigest)
+                try writeActivationMarker(generation: generation, configDigest: expectedDigest)
             }
         } catch {
             try? input.fileHandleForWriting.close()
@@ -428,6 +446,47 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
         }
         close(descriptor)
         guard rename(temporary.path, readinessMarkerURL.path) == 0 else { unlink(temporary.path); throw ClientSupervisorError.processFailed }
+        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0, fsync(directory) == 0 else { if directory >= 0 { close(directory) }; throw ClientSupervisorError.processFailed }
+        close(directory)
+    }
+
+    private func writeActivationMarker(generation: String, configDigest: String) throws {
+        let parent = activationMarkerURL.deletingLastPathComponent()
+        var metadata = stat()
+        guard lstat(parent.path, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR,
+              metadata.st_uid == getuid(), metadata.st_mode & 0o777 == 0o700,
+              parent.standardizedFileURL.resolvingSymlinksInPath().path == parent.standardizedFileURL.path
+        else { throw ClientSupervisorError.processFailed }
+        let document: [String: Any] = [
+            "version": 1,
+            "generation": generation,
+            "parentPid": Int(parentPID),
+            "configDigest": configDigest,
+            "activatedAtMilliseconds": Int64(Date().timeIntervalSince1970 * 1000),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+        let temporary = parent.appendingPathComponent(".activate-\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw ClientSupervisorError.processFailed }
+        do {
+            guard fchmod(descriptor, 0o600) == 0 else { throw ClientSupervisorError.processFailed }
+            try data.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < data.count {
+                    let count = Darwin.write(descriptor, raw.baseAddress!.advanced(by: offset), data.count - offset)
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0 else { throw ClientSupervisorError.processFailed }
+                    offset += count
+                }
+            }
+            guard fsync(descriptor) == 0 else { throw ClientSupervisorError.processFailed }
+        } catch {
+            close(descriptor); unlink(temporary.path); throw error
+        }
+        close(descriptor)
+        guard rename(temporary.path, activationMarkerURL.path) == 0 else { unlink(temporary.path); throw ClientSupervisorError.processFailed }
         let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0, fsync(directory) == 0 else { if directory >= 0 { close(directory) }; throw ClientSupervisorError.processFailed }
         close(directory)

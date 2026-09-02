@@ -2,7 +2,7 @@
 
 An adapter converts one authenticated MESH mailbox delivery into one textual
 reply. It is local execution code, not a transport and not an identity holder.
-The trusted host selects an integrity-checked Codex or Hermes adapter for each
+The trusted host selects an integrity-checked Codex, Hermes, or Antigravity adapter for each
 profile; the Node coordinator invokes that exact command without a shell.
 
 ## Request schema

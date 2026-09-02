@@ -3,14 +3,14 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <render|prepare-runtime|install|start|stop|status|uninstall> <hermes|codex>" >&2
+  echo "Usage: $0 <render|prepare-runtime|install|start|stop|status|uninstall> <hermes|codex|antigravity>" >&2
   exit 2
 }
 
 [[ $# -eq 2 ]] || usage
 action=$1
 agent=$2
-[[ "$agent" == "hermes" || "$agent" == "codex" ]] || usage
+[[ "$agent" == "hermes" || "$agent" == "codex" || "$agent" == "antigravity" ]] || usage
 
 project_root=$(cd "$(dirname "$0")/.." && pwd)
 installer="${project_root}/scripts/triangle-worker-install.py"
@@ -43,7 +43,14 @@ ensure_tree() {
 runtime_inputs() {
   node_path=$(command -v node)
   node_path=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$node_path")
-  if [[ "$agent" == "codex" ]]; then cli_path="${CODEX_CLI:-}"; else cli_path="${HERMES_CLI:-}"; fi
+  if [[ "$agent" == "codex" ]]; then
+    cli_path="${CODEX_CLI:-}"
+  elif [[ "$agent" == "hermes" ]]; then
+    cli_path="${HERMES_CLI:-}"
+  elif [[ "$agent" == "antigravity" ]]; then
+    cli_path="${ANTIGRAVITY_CLI:-${AGY_CLI:-}}"
+    if [[ -z "$cli_path" ]]; then cli_path=$(command -v agy 2>/dev/null || true); fi
+  fi
   if [[ -z "$cli_path" ]]; then cli_path=$(command -v "$agent"); fi
   cli_path=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$cli_path")
 }

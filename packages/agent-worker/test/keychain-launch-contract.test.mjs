@@ -112,7 +112,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
     assert.equal(manifest.environment[mutableName], undefined, `shared runtime manifest contains ${mutableName}`);
   }
   assert.deepEqual(Object.keys(manifest.artifacts).sort(), [
-    "codex/worker/agent-worker.json",
+    "agents/codex/worker/agent-worker.json",
     "packages/agent-worker/runners/codex-runner.mjs",
     "packages/agent-worker/runners/runner-common.mjs",
     "packages/agent-worker/src/cli.mjs",

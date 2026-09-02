@@ -14,8 +14,14 @@ public final class FileHandleMCPProxyOutput: MCPProxyOutput, @unchecked Sendable
         self.stderr = stderr
     }
 
-    public func writeStdout(_ data: Data) { stdout.write(data) }
-    public func writeStderr(_ data: Data) { stderr.write(data) }
+    public func writeStdout(_ data: Data) {
+        stdout.write(data)
+        try? stdout.synchronize()
+    }
+    public func writeStderr(_ data: Data) {
+        stderr.write(data)
+        try? stderr.synchronize()
+    }
 }
 
 public protocol MCPProxyInput: AnyObject, Sendable {
@@ -95,16 +101,47 @@ public enum MCPProxyRunResult: Equatable, Sendable {
     case terminatedForSecretInvariant
 }
 
+private struct MCPProxySession {
+    let credential: VerifiedCredential
+    let workloadAuth: WorkloadTokenManager?
+
+    func authorizationHeaders(method: String, url: URL) async throws -> [String: String] {
+        if let workloadAuth {
+            return try await workloadAuth.authorizationHeaders(method: method, url: url)
+        }
+        return ["Authorization": credential.authorizationValue]
+    }
+
+    var protectedValues: [String] {
+        var values = [credential.binding.token.secretValue, credential.authorizationValue]
+        if let accessToken = workloadAuth?.activeAccessToken {
+            values.append(accessToken)
+            values.append("Bearer \(accessToken)")
+        }
+        return values
+    }
+}
+
 public struct MCPProxy: Sendable {
     public static let maximumMessageBytes = 16 * 1024
     public static let maximumResponseBytes = 64 * 1024
 
     private let gate: VerifiedCredentialGate
+    private let workloadKeyStore: any WorkloadKeyStore
     private let transport: any MeshTransport
 
-    public init(gate: VerifiedCredentialGate, transport: any MeshTransport) {
+    public init(
+        gate: VerifiedCredentialGate,
+        transport: any MeshTransport,
+        workloadKeyStore: (any WorkloadKeyStore)? = nil
+    ) {
         self.gate = gate
         self.transport = transport
+        #if canImport(Security)
+        self.workloadKeyStore = workloadKeyStore ?? KeychainWorkloadKeyStore()
+        #else
+        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
+        #endif
     }
 
     public func run(profile: ProfileName, input: Data, output: any MCPProxyOutput) async -> MCPProxyRunResult {
@@ -112,7 +149,7 @@ public struct MCPProxy: Sendable {
     }
 
     public func run(profile: ProfileName, input: any MCPProxyInput, output: any MCPProxyOutput) async -> MCPProxyRunResult {
-        var credential: VerifiedCredential?
+        var session: MCPProxySession?
         while true {
             let line: Data
             do {
@@ -145,46 +182,59 @@ public struct MCPProxy: Sendable {
                 continue
             }
 
-            if credential == nil {
+            if session == nil {
+                let credential: VerifiedCredential
                 do { credential = try await gate.credential(for: profile) }
                 catch {
                     writeDiagnostic(gateReason(error), output: output)
                     return .failed
                 }
+                let workloadAuth: WorkloadTokenManager?
+                if let workloadRecord = try? workloadKeyStore.read(for: profile) {
+                    workloadAuth = try? WorkloadTokenManager(
+                        origin: credential.origin,
+                        workloadRecord: workloadRecord,
+                        transport: transport
+                    )
+                } else {
+                    workloadAuth = nil
+                }
+                session = MCPProxySession(credential: credential, workloadAuth: workloadAuth)
             }
-            guard let credential else { return .failed }
+            guard let session else { return .failed }
 
             // The MCP channel is an operation channel, never a credential
             // import path. Reject even an exact caller-supplied copy before it
             // can be forwarded or reflected by an upstream diagnostic.
-            if dataContainsSecret(line, credential: credential) {
+            if dataContainsSecret(line, session: session) {
                 if !request.isNotification { writeInvariantFailure(output: output) }
                 return .terminatedForSecretInvariant
             }
 
-            let endpoint = URL(string: credential.origin.value + "/api/mcp")!
+            let endpoint = URL(string: session.credential.origin.value + "/api/mcp")!
             let response: MeshHTTPResponse
             do {
+                var headers = [
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                ]
+                headers.merge(try await session.authorizationHeaders(method: "POST", url: endpoint)) { _, new in new }
                 response = try await transport.send(MeshHTTPRequest(
                     method: "POST",
                     url: endpoint,
-                    headers: [
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "Authorization": credential.authorizationValue,
-                    ],
+                    headers: headers,
                     body: line
                 ))
             } catch {
                 if request.isNotification { continue }
                 let diagnostic = errorResponse(id: request.id, code: -32603, message: "upstream unavailable")
-                guard writeAuthenticated(diagnostic, credential: credential, output: output) else {
+                guard writeAuthenticated(diagnostic, session: session, output: output) else {
                     return .terminatedForSecretInvariant
                 }
                 continue
             }
 
-            if containsSecret(response, credential: credential) {
+            if containsSecret(response, session: session) {
                 if !request.isNotification { writeInvariantFailure(output: output) }
                 return .terminatedForSecretInvariant
             }
@@ -196,14 +246,14 @@ public struct MCPProxy: Sendable {
             }
             guard validRemoteEnvelope(response, endpoint: endpoint, requestID: request.id) else {
                 let diagnostic = errorResponse(id: request.id, code: -32603, message: "invalid upstream response")
-                guard writeAuthenticated(diagnostic, credential: credential, output: output) else {
+                guard writeAuthenticated(diagnostic, session: session, output: output) else {
                     return .terminatedForSecretInvariant
                 }
                 continue
             }
             var forwarded = response.body
             forwarded.append(0x0a)
-            if dataContainsSecret(forwarded, credential: credential) {
+            if dataContainsSecret(forwarded, session: session) {
                 write(Data("{\"error\":\"credential_invariant_failed\"}\n".utf8), toStdout: false, output: output)
                 return .terminatedForSecretInvariant
             }
@@ -249,25 +299,31 @@ public struct MCPProxy: Sendable {
         return true
     }
 
-    private func containsSecret(_ response: MeshHTTPResponse, credential: VerifiedCredential) -> Bool {
-        if dataContainsSecret(response.body, credential: credential) { return true }
-        if response.finalURL.absoluteString.contains(credential.binding.token.secretValue) { return true }
-        return response.headers.contains { $0.key.contains(credential.binding.token.secretValue) || $0.value.contains(credential.binding.token.secretValue) }
+    private func containsSecret(_ response: MeshHTTPResponse, session: MCPProxySession) -> Bool {
+        if dataContainsSecret(response.body, session: session) { return true }
+        for protected in session.protectedValues {
+            if response.finalURL.absoluteString.contains(protected) { return true }
+            if response.headers.contains(where: { $0.key.contains(protected) || $0.value.contains(protected) }) {
+                return true
+            }
+        }
+        return false
     }
 
-    private func dataContainsSecret(_ data: Data, credential: VerifiedCredential) -> Bool {
-        let token = credential.binding.token.secretValue
-        if data.range(of: Data(token.utf8)) != nil || data.range(of: Data(credential.authorizationValue.utf8)) != nil {
-            return true
+    private func dataContainsSecret(_ data: Data, session: MCPProxySession) -> Bool {
+        for protected in session.protectedValues {
+            if data.range(of: Data(protected.utf8)) != nil { return true }
         }
         guard let analysis = try? StrictJSONScanner.analyze(data) else { return false }
-        if analysis.sourceStrings.contains(where: { $0.contains(token) || $0.contains(credential.authorizationValue) }) {
-            return true
+        for protected in session.protectedValues {
+            if analysis.sourceStrings.contains(where: { $0.contains(protected) }) { return true }
+            let valueConcatenation = analysis.stringValues.joined()
+            let sourceConcatenation = analysis.sourceStrings.joined()
+            if valueConcatenation.contains(protected) || sourceConcatenation.contains(protected) {
+                return true
+            }
         }
-        let valueConcatenation = analysis.stringValues.joined()
-        let sourceConcatenation = analysis.sourceStrings.joined()
-        return valueConcatenation.contains(token) || valueConcatenation.contains(credential.authorizationValue) ||
-            sourceConcatenation.contains(token) || sourceConcatenation.contains(credential.authorizationValue)
+        return false
     }
 
     private func gateReason(_ error: Error) -> String {
@@ -286,8 +342,8 @@ public struct MCPProxy: Sendable {
         write(Data("{\"error\":\"\(reason)\"}\n".utf8), toStdout: false, output: output)
     }
 
-    private func writeAuthenticated(_ data: Data, credential: VerifiedCredential, output: any MCPProxyOutput) -> Bool {
-        guard !dataContainsSecret(data, credential: credential) else {
+    private func writeAuthenticated(_ data: Data, session: MCPProxySession, output: any MCPProxyOutput) -> Bool {
+        guard !dataContainsSecret(data, session: session) else {
             writeInvariantFailure(output: output)
             return false
         }

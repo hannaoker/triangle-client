@@ -313,7 +313,14 @@ function isSkipEventError(error) {
 }
 
 export function validateMailboxClientOptions(
-  { meshUrl, meshToken, recipientId, pageLimit = DEFAULT_LIMIT } = {},
+  {
+    meshUrl,
+    meshToken,
+    recipientId,
+    pageLimit = DEFAULT_LIMIT,
+    workloadId,
+    workloadPrivateKey,
+  } = {},
 ) {
   const origin = meshOrigin(meshUrl);
   const token = required(meshToken, "meshToken");
@@ -321,12 +328,186 @@ export function validateMailboxClientOptions(
   if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_LIMIT) {
     throw new TypeError(`pageLimit must be between 1 and ${MAX_LIMIT}`);
   }
-  return Object.freeze({
+  const result = {
     meshUrl: origin,
     meshToken: token,
     recipientId: workerId,
     pageLimit,
+  };
+  if (typeof workloadId === "string" && workloadId.trim()) {
+    result.workloadId = workloadId.trim();
+  }
+  if (typeof workloadPrivateKey === "string" && workloadPrivateKey.trim()) {
+    result.workloadPrivateKey = workloadPrivateKey.trim();
+  }
+  return Object.freeze(result);
+}
+
+export function createWorkloadTokenManager({
+  origin,
+  workloadId,
+  workloadPrivateKey,
+  fetchImpl,
+  requestTimeoutMs,
+}) {
+  let rawKeyBytes;
+  if (typeof workloadPrivateKey === "string") {
+    if (workloadPrivateKey.length === 64 && /^[0-9a-fA-F]+$/.test(workloadPrivateKey)) {
+      rawKeyBytes = Buffer.from(workloadPrivateKey, "hex");
+    } else {
+      rawKeyBytes = Buffer.from(workloadPrivateKey, "base64");
+    }
+  } else if (Buffer.isBuffer(workloadPrivateKey)) {
+    rawKeyBytes = workloadPrivateKey;
+  }
+  if (!rawKeyBytes || rawKeyBytes.length !== 32) {
+    throw new TypeError("workloadPrivateKey must be 32 bytes");
+  }
+
+  const pkcs8Der = Buffer.concat([
+    Buffer.from("302e020100300506032b657004220420", "hex"),
+    rawKeyBytes,
+  ]);
+  const privateKey = crypto.createPrivateKey({
+    key: pkcs8Der,
+    format: "der",
+    type: "pkcs8",
   });
+  const publicKey = crypto.createPublicKey(privateKey);
+  const publicJwk = publicKey.export({ format: "jwk" });
+
+  let cachedToken = null;
+  let cachedTokenExpiresAt = 0;
+  let refreshPromise = null;
+
+  function base64url(input) {
+    return Buffer.isBuffer(input)
+      ? input.toString("base64url")
+      : Buffer.from(input).toString("base64url");
+  }
+
+  function signJws(header, payload) {
+    const encHeader = base64url(JSON.stringify(header));
+    const encPayload = base64url(JSON.stringify(payload));
+    const signingInput = `${encHeader}.${encPayload}`;
+    const sig = crypto.sign(null, Buffer.from(signingInput, "ascii"), privateKey).toString("base64url");
+    return `${signingInput}.${sig}`;
+  }
+
+  function createDpopProof(method, fullUrl, accessToken) {
+    const parsed = new URL(fullUrl);
+    if (parsed.username || parsed.password || parsed.hash) {
+      throw new TypeError("Invalid DPoP URL");
+    }
+    const htu = parsed.toString();
+    const ath = crypto.createHash("sha256").update(accessToken, "utf8").digest("base64url");
+    const dpopHeader = {
+      alg: "EdDSA",
+      typ: "dpop+jwt",
+      jwk: { crv: "Ed25519", kty: "OKP", x: publicJwk.x },
+    };
+    const dpopPayload = {
+      htm: method.toUpperCase(),
+      htu,
+      iat: Math.floor(Date.now() / 1000),
+      jti: crypto.randomUUID(),
+      ath,
+    };
+    return signJws(dpopHeader, dpopPayload);
+  }
+
+  async function fetchToken(signal) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (cachedToken && cachedTokenExpiresAt - 30 > nowSec) {
+      return cachedToken;
+    }
+    if (refreshPromise) {
+      return refreshPromise;
+    }
+    refreshPromise = (async () => {
+      try {
+        const challengeUrl = new URL("/api/v1/identity/token-challenges", `${origin}/`);
+        const challengeRes = await fetchImpl(
+          new Request(challengeUrl, {
+            method: "POST",
+            cache: "no-store",
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ workload_id: workloadId }),
+            signal,
+          }),
+        );
+        const challengePayload = await readBoundedJson(challengeRes, challengeRes.status);
+        if (!challengeRes.ok || !challengePayload?.challenge?.challenge_id) {
+          throw new MailboxRequestError(
+            `Failed to obtain workload token challenge (status ${challengeRes.status})`,
+            { status: challengeRes.status },
+          );
+        }
+        const ch = challengePayload.challenge;
+
+        const proofHeader = {
+          alg: "EdDSA",
+          typ: "mesh-workload-proof+jwt",
+          kid: workloadId,
+        };
+        const requestedScopes = ["mailbox.read", "mailbox.write"];
+        const proofPayload = {
+          profile: "mesh.workload-token-proof/1",
+          challenge_id: ch.challenge_id,
+          workload_id: workloadId,
+          principal_id: ch.principal_id,
+          audience: ch.audience ?? ch.origin,
+          nonce: ch.nonce,
+          requested_scopes: requestedScopes,
+        };
+        const proofJws = signJws(proofHeader, proofPayload);
+
+        const tokenUrl = new URL("/api/v1/identity/tokens", `${origin}/`);
+        const tokenRes = await fetchImpl(
+          new Request(tokenUrl, {
+            method: "POST",
+            cache: "no-store",
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              challenge_id: ch.challenge_id,
+              requested_scopes: requestedScopes,
+              proof: proofJws,
+            }),
+            signal,
+          }),
+        );
+        const tokenPayload = await readBoundedJson(tokenRes, tokenRes.status);
+        if (!tokenRes.ok || !tokenPayload?.access_token) {
+          throw new MailboxRequestError(
+            `Failed to exchange workload token (status ${tokenRes.status})`,
+            { status: tokenRes.status },
+          );
+        }
+
+        const lifetime = Number.isSafeInteger(tokenPayload.expires_in)
+          ? tokenPayload.expires_in
+          : 300;
+        cachedToken = tokenPayload.access_token;
+        cachedTokenExpiresAt = Math.floor(Date.now() / 1000) + lifetime;
+        return cachedToken;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+
+    return refreshPromise;
+  }
+
+  return {
+    fetchToken,
+    createDpopProof,
+  };
 }
 
 export function createMailboxClient(
@@ -338,10 +519,23 @@ export function createMailboxClient(
     meshToken: token,
     recipientId: workerId,
     pageLimit,
+    workloadId,
+    workloadPrivateKey,
   } = validateMailboxClientOptions(options);
   validatePositiveInteger(requestTimeoutMs, "requestTimeoutMs");
   if (typeof fetchImpl !== "function") {
     throw new TypeError("fetchImpl must be a function");
+  }
+
+  let workloadTokenManager = null;
+  if (workloadId && workloadPrivateKey) {
+    workloadTokenManager = createWorkloadTokenManager({
+      origin,
+      workloadId,
+      workloadPrivateKey,
+      fetchImpl,
+      requestTimeoutMs,
+    });
   }
 
   let identityPromise;
@@ -374,13 +568,23 @@ export function createMailboxClient(
     signal?.addEventListener?.("abort", abort, { once: true });
     if (signal?.aborted) abort();
     try {
+      let authHeader = `Bearer ${token}`;
+      let dpopHeader;
+      const fullUrl = new URL(path, `${origin}/`).toString();
+      if (workloadTokenManager) {
+        const accessToken = await workloadTokenManager.fetchToken(controller.signal);
+        authHeader = `Bearer ${accessToken}`;
+        dpopHeader = workloadTokenManager.createDpopProof(method, fullUrl, accessToken);
+      }
+
       const fetchPromise = Promise.resolve(fetchImpl(
-        new Request(new URL(path, `${origin}/`), {
+        new Request(fullUrl, {
           method,
           cache: "no-store",
           headers: {
             accept: "application/json",
-            authorization: `Bearer ${token}`,
+            authorization: authHeader,
+            ...(dpopHeader === undefined ? {} : { dpop: dpopHeader }),
             ...(body === undefined ? {} : { "content-type": "application/json" }),
           },
           signal: controller.signal,
@@ -414,17 +618,21 @@ export function createMailboxClient(
   async function ensureActorIdentity(signal) {
     if (identityPromise !== undefined) return identityPromise;
     identityPromise = (async () => {
+      const actorId = boundedId(workerId, "recipientId", AGENT_ID);
+      if (workloadTokenManager) {
+        return actorId;
+      }
       const response = await request("/api/v1/agents/me", { signal });
       if (!response?.agent || typeof response.agent.id !== "string") {
         throw new MailboxRequestError("Mailbox actor identity is invalid");
       }
-      const actorId = boundedId(response.agent.id, "agent.id", AGENT_ID);
-      if (actorId !== workerId) {
+      const verifiedActorId = boundedId(response.agent.id, "agent.id", AGENT_ID);
+      if (verifiedActorId !== actorId) {
         throw new MailboxRequestError(
           "Configured recipientId does not match authenticated actor",
         );
       }
-      return actorId;
+      return verifiedActorId;
     })();
 
     try {

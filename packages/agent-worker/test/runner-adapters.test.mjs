@@ -12,6 +12,10 @@ import {
   createHermesInvocation,
 } from "../runners/hermes-runner.mjs";
 import { createAgentPrompt as createCodexPrompt } from "../runners/codex-runner.mjs";
+import {
+  createAgentPrompt as createAntigravityPrompt,
+  createAntigravityInvocation,
+} from "../runners/antigravity-runner.mjs";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
 
 const request = {
@@ -27,6 +31,7 @@ const request = {
 for (const [name, createPrompt] of [
   ["Hermes", createHermesPrompt],
   ["Codex", createCodexPrompt],
+  ["Antigravity", createAntigravityPrompt],
 ]) {
   test(`${name} adapter produces a bounded peer-response prompt`, () => {
     const prompt = createPrompt(request);
@@ -297,6 +302,18 @@ process.stdin.on("end", () => {
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }
+});
+
+test("Antigravity adapter routes CLI logs into the instance temp root", () => {
+  const invocation = createAntigravityInvocation("ping", {
+    ANTIGRAVITY_CLI: "/usr/bin/agy",
+    TRIANGLE_INSTANCE_TEMP_ROOT: "/tmp/triangle-instance",
+  });
+  assert.equal(invocation.command, "/usr/bin/agy");
+  assert.deepEqual(
+    invocation.args,
+    ["-p", "ping", "--output-format", "text", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
+  );
 });
 
 test("installed Hermes CLI documents the stdin query-file transport without contacting a provider", (t) => {

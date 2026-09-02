@@ -23,6 +23,7 @@ public enum TriangleClientCLIContractCases {
         .init(name: "client output is stable sanitized JSON", run: outputIsSanitized),
         .init(name: "launchd cutover waits for PID stability and activates only after legacy retirement", run: launchdCutoverIsTwoPhase),
         .init(name: "launchd rollback never restores legacy while the client may still be loaded", run: launchdRollbackAvoidsDuplicates),
+        .init(name: "set-delivery-mode reloads worker eligibility without touching credentials", run: setDeliveryModeReloadsWorkerEligibility),
     ]
 
     public static func parserIsClosed() async throws {
@@ -33,12 +34,16 @@ public enum TriangleClientCLIContractCases {
         let parsedEnable = try TriangleClientCommandParser.parse(["agent", "enable", "--profile", "alpha"])
         let parsedDisable = try TriangleClientCommandParser.parse(["agent", "disable", "--profile", "alpha"])
         let parsedRemove = try TriangleClientCommandParser.parse(["agent", "remove", "--profile", "alpha"])
+        let parsedDeliveryMode = try TriangleClientCommandParser.parse([
+            "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "mcp-interactive",
+        ])
         try clientExpect(parsedAdd == .add(profile: alpha, adapter: .codex), "add did not parse")
         try clientExpect(parsedList == .list, "list did not parse")
         try clientExpect(parsedStatus == .status(profile: alpha), "status did not parse")
         try clientExpect(parsedEnable == .enable(profile: alpha), "enable did not parse")
         try clientExpect(parsedDisable == .disable(profile: alpha), "disable did not parse")
         try clientExpect(parsedRemove == .remove(profile: alpha), "remove did not parse")
+        try clientExpect(parsedDeliveryMode == .setDeliveryMode(profile: alpha, mode: .mcpInteractive), "set-delivery-mode did not parse")
 
         let rejected = [
             ["agent", "add", "--adapter", "codex"],
@@ -49,6 +54,8 @@ public enum TriangleClientCLIContractCases {
             ["agent", "delete-credential", "--profile", "alpha"],
             ["agent", "remove", "--profile", "alpha", "--delete-credential"],
             ["agent", "run", "--profile", "alpha", "--command", "/bin/sh"],
+            ["agent", "set-delivery-mode", "--profile", "alpha"],
+            ["agent", "set-delivery-mode", "--profile", "alpha", "--mode", "socket"],
             ["status", "--profile", "alpha"], ["agent", "enable", "--profile", "alpha", "--force"],
         ]
         for arguments in rejected {
@@ -65,7 +72,7 @@ public enum TriangleClientCLIContractCases {
         _ = try await service.execute(.add(profile: fixture.profile, adapter: .codex))
         try clientExpect(fixture.events.values == ["credential", "runtime:codex", "create"], "add mutation occurred before verification/readiness: \(fixture.events.values)")
         try clientExpect(fixture.serviceControl.reloadCount == 1, "first add did not activate the staged client")
-        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true"]], "first activation did not use the exact committed profile")
+        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true:worker"]], "first activation did not use the exact committed profile")
 
         let failed = try Fixture()
         let failing = failed.service(readiness: { _ in throw TriangleClientOperationError.runtimeUnavailable })
@@ -79,7 +86,7 @@ public enum TriangleClientCLIContractCases {
         let fixture = try Fixture()
         let service = fixture.service()
         _ = try await service.execute(.add(profile: fixture.profile, adapter: .codex))
-        for adapter in [RuntimeAdapter.codex, .hermes] {
+        for adapter in [RuntimeAdapter.codex, .hermes, .antigravity] {
             do { _ = try await service.execute(.add(profile: fixture.profile, adapter: adapter)); throw TriangleClientContractFailure("duplicate profile was accepted") }
             catch ClientInstanceStoreError.duplicateProfile {}
         }
@@ -134,7 +141,7 @@ public enum TriangleClientCLIContractCases {
         let service = fixture.service()
         _ = try await service.execute(.add(profile: fixture.profile, adapter: .hermes))
         _ = try await service.execute(.disable(profile: fixture.profile))
-        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:false"], "disable reloaded a stale enabled registry")
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:false:worker"], "disable reloaded a stale enabled registry")
         _ = try await service.execute(.enable(profile: fixture.profile))
         _ = try await service.execute(.remove(profile: fixture.profile))
         try clientExpect(fixture.serviceControl.snapshots.last == [], "remove did not reload the profile-free config")
@@ -279,6 +286,17 @@ public enum TriangleClientCLIContractCases {
             _ = try JSONSerialization.jsonObject(with: output)
         }
         try clientExpect(String(decoding: listed, as: UTF8.self).contains("\"agents\""), "list schema changed")
+    }
+
+    public static func setDeliveryModeReloadsWorkerEligibility() async throws {
+        let fixture = try Fixture()
+        let service = fixture.service()
+        _ = try await service.execute(.add(profile: fixture.profile, adapter: .codex))
+        _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .mcpInteractive))
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:mcp-interactive"], "mcp-interactive mode did not stop worker polling")
+        _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .worker))
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:worker"], "worker mode did not restore polling eligibility")
+        try clientExpect(fixture.credentials.deleteCount == 0, "delivery mode change touched credentials")
     }
 
     public static func launchdCutoverIsTwoPhase() async throws {
@@ -462,6 +480,7 @@ private final class RecordingInstanceStore: ClientInstanceStore, @unchecked Send
     func read(profile: ProfileName) throws -> ClientInstance { try backing.read(profile: profile) }
     func list() throws -> [ClientInstance] { try backing.list() }
     func setEnabled(_ enabled: Bool, profile: ProfileName) throws { try backing.setEnabled(enabled, profile: profile) }
+    func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws { try backing.setDeliveryMode(deliveryMode, profile: profile) }
     func remove(profile: ProfileName) throws { try backing.remove(profile: profile) }
 }
 private final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
@@ -481,8 +500,8 @@ private final class RecordingServiceControl: TriangleClientServiceControlling, @
     func fail(onReloads values: Set<Int>) { lock.withLock { failures.formUnion(values) } }
     func applyAndVerify(shouldRun: Bool) throws {
         let count = lock.withLock { reloadCount += 1; return reloadCount }
-        snapshots.append(try instances.list().map { "\($0.profile.value):\($0.enabled)" })
-        let expected = try instances.list().contains(where: { $0.enabled })
+        snapshots.append(try instances.list().map { "\($0.profile.value):\($0.enabled):\($0.deliveryMode.rawValue)" })
+        let expected = try instances.list().contains(where: { $0.participatesInWorkerPolling })
         if shouldRun != expected { throw TriangleClientLifecycleError.reloadFailed }
         if lock.withLock({ failures.contains(count) }) { throw TriangleClientLifecycleError.reloadFailed }
     }

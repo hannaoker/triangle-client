@@ -14,7 +14,7 @@ import uuid
 import re
 import subprocess
 
-AGENTS = {"codex", "hermes"}
+AGENTS = {"codex", "hermes", "antigravity"}
 LEGACY_COMMON_ARTIFACTS = [
     "packages/agent-worker/src/cli.mjs",
     "packages/agent-worker/src/command-runner.mjs",
@@ -155,7 +155,7 @@ def expected_artifacts(agent, version=4):
         fail("unsupported manifest version")
     return common + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
-        f"{agent}/worker/agent-worker.json",
+        f"agents/{agent}/worker/agent-worker.json",
     ]
 
 
@@ -177,7 +177,8 @@ def discover_runtime_roots(agent, cli):
             fail("Hermes entrypoint lacks an absolute interpreter")
         interpreter = checked_file(os.path.realpath(first[2:].split()[0]), executable=True, owners={os.getuid(), 0})
         venv = os.path.dirname(os.path.dirname(entry))
-        roots.extend([venv, os.path.dirname(os.path.dirname(interpreter))])
+        agent_root = os.path.dirname(venv)
+        roots.extend([venv, os.path.dirname(os.path.dirname(interpreter)), agent_root])
         for finder in glob.glob(os.path.join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py")):
             tree = ast.parse(open(finder, encoding="utf-8").read(), filename=finder)
             for node_value in tree.body:
@@ -186,6 +187,10 @@ def discover_runtime_roots(agent, cli):
                         candidate = value if os.path.exists(value) else value + ".py"
                         if os.path.exists(candidate):
                             roots.append(os.path.realpath(candidate))
+    elif agent == "antigravity":
+        gemini_cli = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
+        if os.path.isdir(gemini_cli):
+            roots.append(os.path.realpath(gemini_cli))
     return os.pathsep.join(dict.fromkeys(map(os.path.realpath, roots)))
 
 
@@ -199,7 +204,7 @@ def strict_manifest(path, agent):
         fail("manifest schema mismatch")
     expected_environment = {
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
-        "CODEX_CLI" if agent == "codex" else "HERMES_CLI",
+        "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
     if value["version"] not in {3, 4} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
@@ -295,7 +300,7 @@ def stage_runtime(args):
             "LC_ALL": "C",
             "TRIANGLE_PROJECT_ROOT": bundle,
             "TRIANGLE_RUNTIME_ROOTS": discover_runtime_roots(args.agent, cli),
-            ("CODEX_CLI" if args.agent == "codex" else "HERMES_CLI"): cli,
+            ("CODEX_CLI" if args.agent == "codex" else ("HERMES_CLI" if args.agent == "hermes" else "ANTIGRAVITY_CLI")): cli,
         }
         manifest = {
             "version": 4, "nodeSHA256": node_hash,

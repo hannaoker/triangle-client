@@ -52,8 +52,14 @@ public final class KeychainCredentialStore: CredentialStore, @unchecked Sendable
 
     public func create(_ binding: CredentialBinding, for profile: ProfileName) throws {
         let encoded = try encode(binding)
-        let query = KeychainQueryBuilder.addQuery(for: profile, encodedBinding: encoded)
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var query = KeychainQueryBuilder.addQuery(for: profile, encodedBinding: encoded)
+        var status = SecItemAdd(query as CFDictionary, nil)
+#if TRIANGLE_LOCAL_AD_HOC
+        if status == -34018 {
+            query = KeychainLegacyAccess.legacyQuery(from: query)
+            status = SecItemAdd(query as CFDictionary, nil)
+        }
+#endif
         guard status == errSecSuccess else {
             throw Self.mapStatus(status)
         }
@@ -63,7 +69,13 @@ public final class KeychainCredentialStore: CredentialStore, @unchecked Sendable
         var result: CFTypeRef?
         let query = KeychainQueryBuilder.copyQuery(for: profile)
 
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        var status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound || status == -34018 {
+            let fallbackStatus = SecItemCopyMatching(KeychainLegacyAccess.legacyQuery(from: query) as CFDictionary, &result)
+            if fallbackStatus == errSecSuccess {
+                status = errSecSuccess
+            }
+        }
         guard status == errSecSuccess else {
             throw Self.mapStatus(status)
         }
@@ -86,17 +98,28 @@ public final class KeychainCredentialStore: CredentialStore, @unchecked Sendable
             throw CredentialStoreError.replacementNotConfirmed
         }
         let attributes: [CFString: Any] = [kSecValueData: try encode(binding)]
-        let status = SecItemUpdate(
-            KeychainQueryBuilder.updateQuery(for: profile) as CFDictionary,
-            attributes as CFDictionary
-        )
+        var query = KeychainQueryBuilder.updateQuery(for: profile)
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound || status == -34018 {
+            let fallbackStatus = SecItemUpdate(KeychainLegacyAccess.legacyQuery(from: query) as CFDictionary, attributes as CFDictionary)
+            if fallbackStatus == errSecSuccess {
+                status = errSecSuccess
+            }
+        }
         guard status == errSecSuccess else {
             throw Self.mapStatus(status)
         }
     }
 
     public func delete(for profile: ProfileName) throws {
-        let status = SecItemDelete(KeychainQueryBuilder.deleteQuery(for: profile) as CFDictionary)
+        var query = KeychainQueryBuilder.deleteQuery(for: profile)
+        var status = SecItemDelete(query as CFDictionary)
+        if status == errSecItemNotFound || status == -34018 {
+            let fallbackStatus = SecItemDelete(KeychainLegacyAccess.legacyQuery(from: query) as CFDictionary)
+            if fallbackStatus == errSecSuccess {
+                status = errSecSuccess
+            }
+        }
         guard status == errSecSuccess else {
             throw Self.mapStatus(status)
         }

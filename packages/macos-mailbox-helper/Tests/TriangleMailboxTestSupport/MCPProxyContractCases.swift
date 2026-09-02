@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @_spi(EnrollmentTesting) import TriangleMailboxCore
 
@@ -21,6 +22,7 @@ public enum MCPProxyContractCases {
         .init(name: "durable profile resumes in a fresh proxy", run: freshProxyResume),
         .init(name: "ineligible gates never forward MCP", run: gateFailuresNeverForward),
         .init(name: "URLSession transport is valid for MCP forwarding", run: urlSessionMCPContract),
+        .init(name: "workload JWT and DPoP when key present", run: workloadJWTAndDPoP),
     ]
 
     public static func validMethodsAndSequentialTurns() async throws {
@@ -330,6 +332,45 @@ public enum MCPProxyContractCases {
             try expect(recording?.mcpRequests.isEmpty ?? true, "ineligible gate forwarded MCP")
             try assertSecretFree(output)
         }
+    }
+
+    public static func workloadJWTAndDPoP() async throws {
+        let workloadID = try WorkloadID("workload_" + String(repeating: "a", count: 32))
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let workloadStore = InMemoryWorkloadKeyStore()
+        try workloadStore.create(privateKey, workloadID: workloadID, for: ProfileName("codex-mailbox-live"))
+        let fakeToken = "kms_signed_jwt_access_token_test"
+        let challengeResponse = MeshHTTPResponse(
+            statusCode: 201,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"challenge":{"challenge_id":"challenge_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workload_id":"\#(workloadID.value)","principal_id":"\#(agentID)","origin":"https://thetriangle.dev","audience":"https://thetriangle.dev","nonce":"test_nonce_value","expires_at":"2099-01-01T00:00:00.000Z"}}"#.utf8),
+            finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/token-challenges")!
+        )
+        let tokenResponse = MeshHTTPResponse(
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"],
+            body: Data(#"{"access_token":"\#(fakeToken)","token_type":"DPoP","expires_in":300}"#.utf8),
+            finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/tokens")!
+        )
+        let mcpResponse = jsonResponse(#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#)
+        let transport = RecordingProxyTransport(identityAndMCP: [challengeResponse, tokenResponse, mcpResponse])
+        let output = BufferProxyOutput()
+        let instance = MCPProxy(
+            gate: VerifiedCredentialGate(store: try installedStore(), transport: transport, reservation: InMemoryEnrollmentReservation(), journal: try installedJournal()),
+            transport: transport,
+            workloadKeyStore: workloadStore
+        )
+        let result = await instance.run(
+            profile: try ProfileName("codex-mailbox-live"),
+            input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8),
+            output: output
+        )
+        try expect(result == .completed, "workload-auth MCP session did not complete")
+        let mcpRequest = transport.mcpRequests.first
+        try expect(mcpRequest?.headers["Authorization"] == "Bearer \(fakeToken)", "workload auth did not attach JWT bearer")
+        try expect(mcpRequest?.headers["DPoP"]?.split(separator: ".").count == 3, "workload auth did not attach DPoP proof")
+        try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(fakeToken), "workload token leaked to output")
+        try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(token), "compatibility bearer leaked to output")
     }
 
     public static func urlSessionMCPContract() async throws {

@@ -18,6 +18,7 @@ public enum TriangleClientAgentCommand: Equatable, Sendable {
     case enable(profile: ProfileName)
     case disable(profile: ProfileName)
     case remove(profile: ProfileName)
+    case setDeliveryMode(profile: ProfileName, mode: DeliveryMode)
 }
 
 public enum TriangleClientCommandParser {
@@ -38,6 +39,13 @@ public enum TriangleClientCommandParser {
             let profile: ProfileName
             do { profile = try ProfileName(rawProfile) } catch { throw TriangleClientCommandParseError.invalidArguments }
             switch action { case "status": return .status(profile: profile); case "enable": return .enable(profile: profile); case "disable": return .disable(profile: profile); default: return .remove(profile: profile) }
+        case "set-delivery-mode":
+            let values = try exactFlags(flags, allowed: ["--profile", "--mode"])
+            guard let rawProfile = values["--profile"], let rawMode = values["--mode"], let mode = DeliveryMode(rawValue: rawMode) else {
+                throw TriangleClientCommandParseError.invalidArguments
+            }
+            do { return .setDeliveryMode(profile: try ProfileName(rawProfile), mode: mode) }
+            catch { throw TriangleClientCommandParseError.invalidArguments }
         default: throw TriangleClientCommandParseError.invalidArguments
         }
     }
@@ -103,20 +111,38 @@ public struct TriangleClientAgentService: Sendable {
             do { try stateCleaner.removeMutableState(for: removed.instanceID) }
             catch { throw TriangleClientLifecycleError.cleanupFailed }
             return try render(operation: "removed", agents: [removed])
+        case let .setDeliveryMode(profile, mode):
+            let lease = try lifecycleLock.acquire(); defer { lease.release() }
+            let previous = try instanceStore.read(profile: profile)
+            try instanceStore.setDeliveryMode(mode, profile: profile)
+            try reloadOrRollback { try instanceStore.setDeliveryMode(previous.deliveryMode, profile: profile) }
+            return try render(operation: "delivery_mode_set", agents: [instanceStore.read(profile: profile)])
         }
     }
 
     private func reloadOrRollback(_ rollback: () throws -> Void) throws {
-        do { try serviceControl.applyAndVerify(shouldRun: try instanceStore.list().contains(where: { $0.enabled })) }
+        do {
+            try serviceControl.applyAndVerify(
+                shouldRun: try instanceStore.list().contains(where: { $0.participatesInWorkerPolling })
+            )
+        }
         catch {
-            do { try rollback(); try serviceControl.applyAndVerify(shouldRun: try instanceStore.list().contains(where: { $0.enabled })) }
+            do { try rollback(); try serviceControl.applyAndVerify(shouldRun: try instanceStore.list().contains(where: { $0.participatesInWorkerPolling })) }
             catch { throw TriangleClientLifecycleError.rollbackFailed }
             throw TriangleClientLifecycleError.reloadFailed
         }
     }
 
     private func render(operation: String, agents: [ClientInstance]) throws -> Data {
-        let document = AgentDocument(version: 1, operation: operation, agents: agents.map { AgentSummary(profile: $0.profile.value, instanceID: $0.instanceID.value, runtimeAdapter: $0.runtimeAdapter.rawValue, enabled: $0.enabled) })
+        let document = AgentDocument(version: 1, operation: operation, agents: agents.map {
+            AgentSummary(
+                profile: $0.profile.value,
+                instanceID: $0.instanceID.value,
+                runtimeAdapter: $0.runtimeAdapter.rawValue,
+                enabled: $0.enabled,
+                deliveryMode: $0.deliveryMode.rawValue
+            )
+        })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         var output = try encoder.encode(document); output.append(0x0a); return output
     }
@@ -124,8 +150,8 @@ public struct TriangleClientAgentService: Sendable {
 
 private struct AgentDocument: Codable, Sendable { let version: Int; let operation: String; let agents: [AgentSummary] }
 private struct AgentSummary: Codable, Sendable {
-    let profile: String; let instanceID: String; let runtimeAdapter: String; let enabled: Bool
-    private enum CodingKeys: String, CodingKey { case profile, instanceID = "instanceId", runtimeAdapter, enabled }
+    let profile: String; let instanceID: String; let runtimeAdapter: String; let enabled: Bool; let deliveryMode: String
+    private enum CodingKeys: String, CodingKey { case profile, instanceID = "instanceId", runtimeAdapter, enabled, deliveryMode }
 }
 
 public struct LaunchdTriangleClientServiceControl: TriangleClientServiceControlling {

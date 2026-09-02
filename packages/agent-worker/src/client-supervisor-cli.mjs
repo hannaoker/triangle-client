@@ -127,6 +127,28 @@ function assertNoDuplicateJSONKeys(text) {
   if (offset !== text.length) fail();
 }
 
+function hasValidMailboxKeys(mailbox) {
+  if (!isObject(mailbox)) return false;
+  const actual = Object.keys(mailbox);
+  const allowed = new Set([
+    "meshToken",
+    "meshUrl",
+    "pageLimit",
+    "recipientId",
+    "workloadId",
+    "workloadPrivateKey",
+  ]);
+  const required = [
+    "meshToken",
+    "meshUrl",
+    "pageLimit",
+    "recipientId",
+  ];
+  if (!required.every((k) => Object.hasOwn(mailbox, k))) return false;
+  if (!actual.every((k) => allowed.has(k))) return false;
+  return true;
+}
+
 function validateInstance(instance, seen) {
   if (!hasExactKeys(instance, EXACT_INSTANCE_KEYS) || !INSTANCE_ID.test(instance.instanceId)) {
     throw invalidBootstrap();
@@ -136,7 +158,7 @@ function validateInstance(instance, seen) {
 
   const { mailbox, runner, runnerEnvironment } = instance;
   if (
-    !hasExactKeys(mailbox, EXACT_MAILBOX_KEYS) ||
+    !hasValidMailboxKeys(mailbox) ||
     !hasExactKeys(runner, EXACT_RUNNER_KEYS) ||
     !nonemptyString(runner.command) ||
     !Array.isArray(runner.args) ||
@@ -165,19 +187,31 @@ function validateInstance(instance, seen) {
 
 function assertMailboxTokensAreConfined(instances) {
   for (const [ownerIndex, owner] of instances.entries()) {
-    const token = owner.mailbox.meshToken;
-    for (const [instanceIndex, instance] of instances.entries()) {
-      const outsideValues = [
-        instance.instanceId,
-        instance.mailbox.meshUrl,
-        instance.mailbox.recipientId,
-        instance.runner.command,
-        ...instance.runner.args,
-        ...Object.values(instance.runnerEnvironment),
-      ];
-      if (instanceIndex !== ownerIndex) outsideValues.push(instance.mailbox.meshToken);
-      if (outsideValues.some((value) => typeof value === "string" && value.includes(token))) {
-        throw invalidBootstrap();
+    const secrets = [owner.mailbox.meshToken];
+    if (owner.mailbox.workloadPrivateKey) {
+      secrets.push(owner.mailbox.workloadPrivateKey);
+    }
+    for (const secret of secrets) {
+      for (const [instanceIndex, instance] of instances.entries()) {
+        const outsideValues = [
+          instance.instanceId,
+          instance.mailbox.meshUrl,
+          instance.mailbox.recipientId,
+          instance.mailbox.workloadId,
+          instance.runner.command,
+          ...instance.runner.args,
+          ...Object.keys(instance.runnerEnvironment),
+          ...Object.values(instance.runnerEnvironment),
+        ].filter(Boolean);
+        if (ownerIndex !== instanceIndex) {
+          outsideValues.push(instance.mailbox.meshToken);
+          if (instance.mailbox.workloadPrivateKey) {
+            outsideValues.push(instance.mailbox.workloadPrivateKey);
+          }
+        }
+        for (const candidate of outsideValues) {
+          if (candidate.includes(secret)) throw invalidBootstrap();
+        }
       }
     }
   }

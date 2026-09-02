@@ -1,0 +1,20 @@
+{
+  "name": "@the-triangle/hermes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "test": "node --test test/*.test.mjs worker/test/*.test.mjs",
+    "test:worker": "node --test worker/test/*.test.mjs",
+    "worker": "node --env-file-if-exists=worker/.env.local worker/hermes-a2a.mjs",
+    "agent-worker": "node ../../packages/agent-worker/src/cli.mjs --config worker/agent-worker.json",
+    "agent-send": "node --env-file-if-exists=worker/.env.local ../../packages/agent-worker/src/outbound-cli.mjs --gateway-url-env AGENT_ORIGIN --internal-token-env GATEWAY_INTERNAL_TOKEN"
+  },
+  "dependencies": {
+    "@the-triangle/a2a-gateway": "0.1.0",
+    "next": "16.3.4",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  }
+}

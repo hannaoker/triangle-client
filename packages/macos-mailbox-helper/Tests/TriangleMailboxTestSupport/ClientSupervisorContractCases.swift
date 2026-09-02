@@ -26,6 +26,7 @@ public enum ClientSupervisorContractCases {
         .init(name: "input failure kills and reaps a child that ignores TERM", run: subprocessIgnoredTerminationIsKilled),
         .init(name: "signal dispositions are preserved and concurrent runs serialize", run: signalPreservationAndSerialization),
         .init(name: "coordinator readiness acknowledgement writes only a fresh private marker", run: readinessMarkerContract),
+        .init(name: "mcp-interactive delivery mode is omitted from coordinator bootstrap", run: mcpInteractiveDeliveryOmitted),
     ]
 
     fileprivate static let origin = "https://thetriangle.dev"
@@ -214,6 +215,22 @@ public enum ClientSupervisorContractCases {
         try expect(!bootstrap.instances.contains { $0.mailbox.meshToken == fixture.specifications[1].token }, "ineligible token reached bootstrap")
     }
 
+    public static func mcpInteractiveDeliveryOmitted() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "interactive-hermes", adapter: .hermes, digit: "2"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.mcpInteractive, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        try expect(launch.instances.count == 1, "mcp-interactive profile was not omitted from bootstrap")
+        try expect(launch.instances[0].instanceID == ClientInstanceID.derive(profile: fixture.specifications[0].profile).value, "wrong profile remained in bootstrap")
+        try expect(launch.omitted.contains { $0.reasonCode == "delivery_mode_mcp_interactive" }, "mcp-interactive omission was not recorded")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "mcp-interactive profile reached coordinator bootstrap")
+        try expect(!bootstrap.instances.contains { $0.instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value }, "interactive profile leaked into bootstrap")
+    }
+
     public static func noEligibleProfile() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "bad-only", adapter: .codex, digit: "9", verificationFails: true),
@@ -367,6 +384,7 @@ public enum ClientSupervisorContractCases {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
         let marker = root.appendingPathComponent("ready.json")
+        let activation = root.appendingPathComponent("activate.json")
         let bootstrap = Data("{}".utf8)
         let digest = SHA256.hash(data: bootstrap).map { String(format: "%02x", $0) }.joined()
         let generation = "11111111-1111-4111-8111-111111111111"
@@ -387,8 +405,13 @@ public enum ClientSupervisorContractCases {
         try expect(value?["parentPid"] as? Int == 4242, "readiness marker was not bound to its host")
         try expect(value?["generation"] as? String == generation, "readiness marker was not bound to coordinator generation")
         try expect(value?["configDigest"] as? String == digest, "readiness marker was not bound to bootstrap")
+        let activationValue = try JSONSerialization.jsonObject(with: Data(contentsOf: activation)) as? [String: Any]
+        try expect(activationValue?["generation"] as? String == generation, "activation marker was not bound to coordinator generation")
+        try expect(activationValue?["parentPid"] as? Int == 4242, "activation marker was not bound to its host")
+        try expect(activationValue?["configDigest"] as? String == digest, "activation marker was not bound to bootstrap")
 
         try FileManager.default.removeItem(at: marker)
+        try? FileManager.default.removeItem(at: activation)
         let mismatch = "cat >/dev/null; printf '%s\\n' '{\"type\":\"triangle-client-supervisor-ready\",\"generation\":\"\(generation)\",\"parentPid\":4242,\"configDigest\":\"\(String(repeating: "0", count: 64))\"}'"
         do {
             _ = try await runner.run(subprocessRequest(arguments: ["-c", mismatch]), standardInput: bootstrap)
@@ -419,6 +442,7 @@ private struct InstanceSpecification: Sendable {
 
 private final class SupervisorFixture: @unchecked Sendable {
     let specifications: [InstanceSpecification]
+    let instanceStore: InMemoryClientInstanceStore
     let credentials: RecordingMultiCredentialStore
     let journal: InMemoryEnrollmentJournal
     let process = RecordingSupervisorProcess()
@@ -432,6 +456,7 @@ private final class SupervisorFixture: @unchecked Sendable {
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
+        instanceStore = instances
         journal = InMemoryEnrollmentJournal()
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]

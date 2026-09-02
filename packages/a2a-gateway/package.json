@@ -1,0 +1,21 @@
+{
+  "name": "@the-triangle/a2a-gateway",
+  "version": "0.1.0",
+  "description": "A stateless A2A 1.0 gateway library — Agent Card, proof endpoint, SendMessage/GetTask/ListTasks, conformance probe, peer token validation, MESH-backed task projection, health, and pagination.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hannaoker/triangle-client.git",
+    "directory": "packages/a2a-gateway"
+  },
+  "exports": {
+    "./app-factory": "./src/app-factory.mjs",
+    "./protocol": "./src/protocol.cjs",
+    "./outbound-a2a": "./src/outbound-a2a.mjs",
+    "./mesh-mailbox-bridge": "./src/mesh-mailbox-bridge.mjs",
+    "./vercel-handler": "./src/vercel-handler.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs test/*.test.mjs"
+  }
+}

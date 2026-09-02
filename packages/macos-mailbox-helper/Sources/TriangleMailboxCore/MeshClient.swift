@@ -179,6 +179,115 @@ public struct MeshClient: Sendable {
         self.transport = transport
     }
 
+    func requestChallenge(
+        origin: MeshOrigin,
+        admissionToken: AdmissionToken,
+        handle: MailboxHandle,
+        workloadID: WorkloadID,
+        workloadPublicJWK: WorkloadPublicJWK
+    ) async throws -> IdentityRegistrationChallenge {
+        guard let url = URL(string: origin.value + "/api/v1/identity/registration-challenges") else {
+            throw MeshClientError.invalidRequest
+        }
+        let bodyObj = ChallengeRequestBody(
+            identityProfile: "mesh.identity/1",
+            handle: handle.value,
+            workloadID: workloadID.value,
+            workloadPublicJWK: workloadPublicJWK
+        )
+        let body = try JSONEncoder().encode(bodyObj)
+        guard body.count <= Self.maximumRequestBytes else {
+            throw MeshClientError.requestTooLarge
+        }
+        let request = MeshHTTPRequest(
+            method: "POST",
+            url: url,
+            headers: [
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Mesh-Admission-Token": admissionToken.rawValue,
+            ],
+            body: body
+        )
+        let response: MeshHTTPResponse
+        do {
+            response = try await transport.send(request)
+        } catch {
+            throw MeshClientError.transportUnavailable
+        }
+        guard response.statusCode == 201 else {
+            if [400, 403, 409, 429].contains(response.statusCode) {
+                throw MeshClientError.registrationRejected(statusCode: response.statusCode)
+            }
+            if response.statusCode == 408 || (500...599).contains(response.statusCode) {
+                throw MeshClientError.registrationOutcomeUnknown
+            }
+            throw MeshClientError.invalidStatus
+        }
+        do {
+            try validate(response, expectedStatus: 201, origin: origin)
+            let decoded = try JSONDecoder().decode(ChallengeResponseEnvelope.self, from: response.body)
+            return decoded.challenge
+        } catch {
+            throw MeshClientError.invalidResponse
+        }
+    }
+
+    func registerIdentity(
+        origin: MeshOrigin,
+        admissionToken: AdmissionToken,
+        submission: IdentityRegistrationSubmission
+    ) async throws -> RegisteredIdentityPayload {
+        guard let url = URL(string: origin.value + "/api/v1/agents/register-mailbox") else {
+            throw MeshClientError.invalidRequest
+        }
+        let body = try JSONEncoder().encode(submission)
+        guard body.count <= Self.maximumRequestBytes else {
+            throw MeshClientError.requestTooLarge
+        }
+        let request = MeshHTTPRequest(
+            method: "POST",
+            url: url,
+            headers: [
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Mesh-Admission-Token": admissionToken.rawValue,
+            ],
+            body: body
+        )
+        let response: MeshHTTPResponse
+        do {
+            response = try await transport.send(request)
+        } catch MeshClientError.responseTooLargeAfterResponse(let statusCode) {
+            if statusCode == 201 { throw MeshClientError.registrationResponseUnusable }
+            if statusCode == 408 || (500...599).contains(statusCode) { throw MeshClientError.registrationOutcomeUnknown }
+            throw MeshClientError.invalidStatus
+        }
+        guard response.statusCode == 201 else {
+            do {
+                try validateEnvelope(response, origin: origin)
+            } catch MeshClientError.redirectRejected {
+                throw MeshClientError.redirectRejected
+            } catch {
+                throw MeshClientError.registrationOutcomeUnknown
+            }
+            if response.statusCode == 408 || (500...599).contains(response.statusCode) {
+                throw MeshClientError.registrationOutcomeUnknown
+            }
+            if [400, 403, 409, 429].contains(response.statusCode) {
+                throw MeshClientError.registrationRejected(statusCode: response.statusCode)
+            }
+            try validate(response, expectedStatus: 201, origin: origin)
+            throw MeshClientError.registrationRejected(statusCode: response.statusCode)
+        }
+        do {
+            try validate(response, expectedStatus: 201, origin: origin)
+            return try JSONDecoder().decode(RegisteredIdentityPayload.self, from: response.body)
+        } catch {
+            throw MeshClientError.registrationResponseUnusable
+        }
+    }
+
     func register(origin: MeshOrigin, input: EnrollmentInput) async throws -> RegisteredMailbox {
         let payload = RegistrationPayload(
             handle: input.handle.value,
@@ -236,16 +345,34 @@ public struct MeshClient: Sendable {
     }
 
     func identity(for binding: CredentialBinding) async throws -> VerifiedMailboxIdentity {
-        guard let url = URL(string: binding.origin.value + "/api/v1/agents/me") else {
+        guard let meURL = URL(string: binding.origin.value + "/api/v1/agents/me") else {
+            throw MeshClientError.invalidRequest
+        }
+        let meRequest = MeshHTTPRequest(
+            method: "GET",
+            url: meURL,
+            headers: [
+                "Accept": "application/json",
+                "Authorization": "Bearer \(binding.token.secretValue)",
+            ]
+        )
+        let response = try await transport.send(meRequest)
+        try validate(response, expectedStatus: 200, origin: binding.origin)
+        do {
+            return try JSONDecoder().decode(IdentityEnvelope.self, from: response.body).agent
+        } catch {
+            throw MeshClientError.invalidResponse
+        }
+    }
+
+    func agentCard(for binding: CredentialBinding) async throws -> VerifiedMailboxIdentity {
+        guard let url = URL(string: binding.origin.value + "/api/v1/agents/" + binding.agentID.value) else {
             throw MeshClientError.invalidRequest
         }
         let request = MeshHTTPRequest(
             method: "GET",
             url: url,
-            headers: [
-                "Accept": "application/json",
-                "Authorization": "Bearer \(binding.token.secretValue)",
-            ]
+            headers: ["Accept": "application/json"]
         )
         let response = try await transport.send(request)
         try validate(response, expectedStatus: 200, origin: binding.origin)
@@ -280,6 +407,154 @@ public struct MeshClient: Sendable {
         components.host = host.lowercased()
         components.port = url.port
         return components.string
+    }
+}
+
+@_spi(EnrollmentTesting)
+public struct ChallengeRequestBody: Codable, Sendable {
+    public let identityProfile: String
+    public let handle: String
+    public let workloadID: String
+    public let workloadPublicJWK: WorkloadPublicJWK
+
+    public enum CodingKeys: String, CodingKey {
+        case identityProfile = "identity_profile"
+        case handle
+        case workloadID = "workload_id"
+        case workloadPublicJWK = "workload_public_jwk"
+    }
+}
+
+public struct IdentityRegistrationChallenge: Decodable, Sendable {
+    public let challengeID: String
+    public let expiresAt: String
+    public let nonce: String
+    public let nonceSHA256: String
+    public let origin: String
+    public let proofProfile: String
+    public let workloadJKT: String
+    public let handle: String
+    public let identityProfile: String
+    public let workloadID: String
+    public let workloadPublicJWK: WorkloadPublicJWK
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case challengeID = "challenge_id"
+        case expiresAt = "expires_at"
+        case nonce
+        case nonceSHA256 = "nonce_sha256"
+        case origin
+        case proofProfile = "proof_profile"
+        case workloadJKT = "workload_jkt"
+        case handle
+        case identityProfile = "identity_profile"
+        case workloadID = "workload_id"
+        case workloadPublicJWK = "workload_public_jwk"
+    }
+
+    public init(from decoder: Decoder) throws {
+        try requireExactKeys(decoder, expected: CodingKeys.allCases.map(\.rawValue))
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        challengeID = try values.decode(String.self, forKey: .challengeID)
+        expiresAt = try values.decode(String.self, forKey: .expiresAt)
+        nonce = try values.decode(String.self, forKey: .nonce)
+        nonceSHA256 = try values.decode(String.self, forKey: .nonceSHA256)
+        origin = try values.decode(String.self, forKey: .origin)
+        proofProfile = try values.decode(String.self, forKey: .proofProfile)
+        workloadJKT = try values.decode(String.self, forKey: .workloadJKT)
+        handle = try values.decode(String.self, forKey: .handle)
+        identityProfile = try values.decode(String.self, forKey: .identityProfile)
+        workloadID = try values.decode(String.self, forKey: .workloadID)
+        workloadPublicJWK = try values.decode(WorkloadPublicJWK.self, forKey: .workloadPublicJWK)
+    }
+}
+
+struct ChallengeResponseEnvelope: Decodable {
+    let challenge: IdentityRegistrationChallenge
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case challenge
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireExactKeys(decoder, expected: CodingKeys.allCases.map(\.rawValue))
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        challenge = try values.decode(IdentityRegistrationChallenge.self, forKey: .challenge)
+    }
+}
+
+@_spi(EnrollmentTesting)
+public struct IdentityRegistrationSubmission: Codable, Sendable {
+    public let capabilities: [String]
+    public let challengeID: String
+    public let description: String
+    public let handle: String
+    public let identityProfile: String
+    public let name: String
+    public let proof: String
+    public let workloadID: String
+    public let workloadPublicJWK: WorkloadPublicJWK
+
+    public enum CodingKeys: String, CodingKey {
+        case capabilities
+        case challengeID = "challenge_id"
+        case description
+        case handle
+        case identityProfile = "identity_profile"
+        case name
+        case proof
+        case workloadID = "workload_id"
+        case workloadPublicJWK = "workload_public_jwk"
+    }
+}
+
+struct RegisteredIdentityPayload: Decodable, Sendable {
+    let agent: RegisteredAgent
+    let workload: RegisteredWorkload
+    let token: MeshToken?
+    let warning: String?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case agent, workload, token, warning
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        agent = try values.decode(RegisteredAgent.self, forKey: .agent)
+        workload = try values.decode(RegisteredWorkload.self, forKey: .workload)
+        token = try values.decodeIfPresent(MeshToken.self, forKey: .token)
+        warning = try values.decodeIfPresent(String.self, forKey: .warning)
+
+        let expectedKeys: [String] = {
+            var keys = ["agent", "workload"]
+            if token != nil { keys.append("token") }
+            if warning != nil { keys.append("warning") }
+            return keys
+        }()
+        try requireExactKeys(decoder, expected: expectedKeys)
+    }
+}
+
+struct RegisteredWorkload: Decodable, Sendable {
+    let workloadID: String
+    let publicJWK: WorkloadPublicJWK
+    let jkt: String
+    let state: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case workloadID = "workload_id"
+        case publicJWK = "public_jwk"
+        case jkt
+        case state
+        case scopes
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        workloadID = try values.decode(String.self, forKey: .workloadID)
+        publicJWK = try values.decode(WorkloadPublicJWK.self, forKey: .publicJWK)
+        jkt = try values.decode(String.self, forKey: .jkt)
+        state = try values.decode(String.self, forKey: .state)
     }
 }
 
@@ -324,10 +599,10 @@ struct RegisteredAgent: Decodable, Sendable {
         case id, handle, name, description, capabilities, protocolVersion, protocolBinding, conformanceStatus, registrationMode
         case endpointURL = "endpointUrl"
         case agentCardURL = "agentCardUrl"
+        case conformanceCheckedAt, conformanceReport, status, lastSeenAt, createdAt
     }
 
     init(from decoder: Decoder) throws {
-        try requireExactKeys(decoder, expected: CodingKeys.allCases.map(\.rawValue))
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(AgentID.self, forKey: .id)
         handle = try values.decode(MailboxHandle.self, forKey: .handle)
@@ -359,10 +634,10 @@ struct VerifiedMailboxIdentity: Decodable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case id, name, handle, registrationMode
         case endpointURL = "endpointUrl"
+        case description, capabilities, protocolVersion, protocolBinding, conformanceStatus, conformanceCheckedAt, conformanceReport, status, lastSeenAt, createdAt, agentCardUrl
     }
 
     init(from decoder: Decoder) throws {
-        try requireExactKeys(decoder, expected: CodingKeys.allCases.map(\.rawValue))
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(AgentID.self, forKey: .id)
         name = try values.decode(String.self, forKey: .name)

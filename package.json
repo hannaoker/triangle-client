@@ -1,0 +1,19 @@
+{
+  "name": "triangle-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Triangle Client: the agent side of The Triangle MESH \u2014 local runtime mode (macOS supervisor, Keychain custody, mailbox poller, runtime adapters) and gateway mode (A2A gateway SDK and per-agent reference gateways).",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "agents/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test:runtime && npm run test:gateway",
+    "test:runtime": "npm --prefix packages/agent-worker run test:triangle-client && node --test tests/triangle-client-service.test.mjs && node --test tests/worker-service-render.test.mjs && node packages/macos-mailbox-helper/scripts/run-tests.mjs host",
+    "test:gateway": "npm --prefix packages/a2a-gateway test && npm --prefix agents/codex test && npm --prefix agents/hermes test"
+  }
+}

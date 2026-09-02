@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.vercel/
+.wrangler/
+dist/
+coverage/
+*.tsbuildinfo
+packages/macos-mailbox-helper/.build/
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+.DS_Store

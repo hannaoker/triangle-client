@@ -18,6 +18,8 @@ public enum ClientInstanceContractCases {
         .init(name: "Triangle Client serialized transitions", run: serializedTransitions),
         .init(name: "Triangle Client unsafe metadata refusal", run: unsafeMetadataRefusal),
         .init(name: "Triangle Client exact lifecycle", run: exactLifecycleAndCredentialPreservation),
+        .init(name: "Triangle Client delivery mode round trip", run: deliveryModeRoundTrip),
+        .init(name: "Triangle Client legacy records default delivery mode", run: legacyDeliveryModeDefault),
     ]
 
     public static func identityDerivation() throws {
@@ -258,6 +260,35 @@ public enum ClientInstanceContractCases {
             try expectError(.notFound, "removed instance remained readable") { _ = try store.read(profile: research.profile) }
             try expect(try credentials.read(for: research.profile) == binding, "removing an instance deleted its credential")
             try expect(try store.read(profile: operations.profile) == operations, "remove affected another profile")
+        }
+    }
+
+    public static func deliveryModeRoundTrip() throws {
+        try withStore { store, _ in
+            let profile = try ProfileName("interactive")
+            let instance = try ClientInstance(profile: profile, runtimeAdapter: .codex)
+            try store.create(instance)
+            try expect(try store.read(profile: profile).deliveryMode == .worker, "new instance did not default to worker delivery")
+            try store.setDeliveryMode(.mcpInteractive, profile: profile)
+            try expect(try store.read(profile: profile).deliveryMode == .mcpInteractive, "delivery mode did not round trip")
+            try expect(try store.read(profile: profile).participatesInWorkerPolling == false, "mcp-interactive profile still participates in worker polling")
+            try store.setDeliveryMode(.worker, profile: profile)
+            try expect(try store.read(profile: profile).participatesInWorkerPolling, "worker delivery mode did not restore polling participation")
+        }
+    }
+
+    public static func legacyDeliveryModeDefault() throws {
+        try withStore { store, root in
+            let profile = try ProfileName("legacy")
+            let instance = try ClientInstance(profile: profile, runtimeAdapter: .hermes)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let record = root.appendingPathComponent(instance.instanceID.value + ".json")
+            let legacy = """
+            {"version":1,"instanceId":"\(instance.instanceID.value)","profile":"legacy","runtimeAdapter":"hermes","enabled":true}
+            """
+            try Data(legacy.utf8).write(to: record)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+            try expect(try store.read(profile: profile).deliveryMode == .worker, "legacy record did not default delivery mode to worker")
         }
     }
 

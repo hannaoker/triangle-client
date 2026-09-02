@@ -1,14 +1,40 @@
 # Triangle Client
 
-Triangle Client is The Triangle's MESH-native client-side installation. It
-runs one trusted service on a Mac and lets that one host operate many isolated
-agent profiles. Each profile has one MESH mailbox identity and one fixed
-runtime adapter. Codex and Hermes are the built-in adapters in this release.
+Triangle Client is the agent side of The Triangle: everything an agent needs to
+hold a MESH-native identity and exchange work over MESH, without any MESH server
+code. MESH remains the network and durable mailbox authority. Triangle Client is
+not a MESH server, not a MESH database, and not part of the MESH specification.
+This repository is the canonical source for all Triangle client implementation;
+it is maintained independently from the MESH server repository.
 
-The current release is macOS only and requires macOS 13 or newer. It is not a
-MESH server, a Vercel deployment, or a database. MESH remains the network and
-durable mailbox authority; Triangle Client is the local identity custodian,
-poller, and adapter supervisor.
+## Two client modes
+
+An operator can adopt either mode alone or both together. Both speak to the
+same MESH mailbox identity.
+
+| Mode | What runs | Where it lives in this repository |
+| --- | --- | --- |
+| **Local runtime mode** | One trusted macOS service that polls the agent's MESH mailbox and drives a reasoning CLI through a bounded runtime adapter. Thin, local, no public endpoint. | `packages/agent-worker/`, `packages/macos-mailbox-helper/`, `scripts/`, `deploy/launchd/`, `agents/*/worker/agent-worker.json`, the `mesh` operator CLI |
+| **Gateway mode** | The agent operates its own A2A 1.0 gateway server fronting MESH: Agent Card, peer-ticket validation, MESH-backed task projection, and private worker routes. Suitable when an agent is itself a service. | `packages/a2a-gateway/` (the SDK) and `agents/codex/`, `agents/hermes/` (reference gateways deployable as Vercel projects) |
+
+The `agents/*` directories are reference implementations of the agent side.
+They show how one agent wires the SDK and the local runtime together; they are
+examples, not protocol requirements. Copy one to build your own agent.
+
+The remainder of this guide documents local runtime mode. For gateway mode,
+start from `agents/hermes/` or `agents/codex/`, the SDK in
+`packages/a2a-gateway/`, and each agent's `.env.example`, which lists only the
+server-side gateway variables (no credentials are committed).
+
+## Local runtime mode
+
+Local runtime mode runs one trusted service on a Mac and lets that one host
+operate many isolated agent profiles. Each profile has one MESH mailbox identity
+and one fixed runtime adapter. Codex, Hermes, and Antigravity are the built-in
+adapters in this release.
+
+The current release is macOS only and requires macOS 13 or newer. It is the
+local identity custodian, poller, and adapter supervisor.
 
 ## How one host runs many profiles
 
@@ -53,7 +79,7 @@ The installer builds and atomically installs:
 ~/Library/LaunchAgents/dev.thetriangle.client.plist
 ```
 
-It prepares version-4 Codex and/or Hermes runtime bundles that are available on
+It prepares version-4 Codex, Hermes, and/or Antigravity runtime bundles that are available on
 the host. At least one supported runtime must pass the integrity gate. The
 enforced minimum is Node 22.0.0 with the `node:fs` `globSync` API; the release
 suite is tested on Node 22 and Node 24. Newer Node majors are admitted only when
@@ -145,6 +171,16 @@ For 10+ agents, size the host for the two concurrently active runtimes rather
 than multiplying peak model cost by agent count. Increase the global limit only
 after measuring memory, CPU, provider rate limits, and interactive latency. A
 single coordinator remains capped at 100 enabled bootstrap entries.
+
+## Upgrading an existing installation
+
+Runtime bundles are content-addressed over their artifact paths. This release
+moved the per-agent worker configuration from `<agent>/worker/agent-worker.json`
+to `agents/<agent>/worker/agent-worker.json`, so bundles prepared by an earlier
+release fail strict validation until they are re-prepared. Re-run
+`./scripts/install-macos-mailbox-helper.sh --install-client` from the new
+checkout; it stages fresh bundles and reloads the one service transactionally.
+Enrolled Keychain identities and profile records are unaffected.
 
 ## Migration from legacy workers
 

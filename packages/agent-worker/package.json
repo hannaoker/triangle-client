@@ -10,10 +10,11 @@
     ".": "./src/runtime.mjs",
     "./mailbox-client": "./src/mailbox-client.mjs",
     "./client-supervisor": "./src/client-supervisor.mjs",
-    "./concurrency-gate": "./src/concurrency-gate.mjs"
+    "./concurrency-gate": "./src/concurrency-gate.mjs",
+    "./outbound-client": "./src/outbound-client.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:triangle-client": "node --test test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs test/triangle-client-doc-contract.test.mjs"
+    "test:triangle-client": "node --test test/cli.test.mjs test/client-source-contract.test.mjs test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs"
   }
 }

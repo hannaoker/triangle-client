@@ -13,6 +13,7 @@ public protocol ClientInstanceStore: Sendable {
     func read(profile: ProfileName) throws -> ClientInstance
     func list() throws -> [ClientInstance]
     func setEnabled(_ enabled: Bool, profile: ProfileName) throws
+    func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws
     func remove(profile: ProfileName) throws
 }
 
@@ -55,6 +56,13 @@ public final class InMemoryClientInstanceStore: ClientInstanceStore, @unchecked 
         try lock.withLock {
             guard let record = records[profile] else { throw ClientInstanceStoreError.notFound }
             records[profile] = try record.settingEnabled(enabled)
+        }
+    }
+
+    public func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws {
+        try lock.withLock {
+            guard let record = records[profile] else { throw ClientInstanceStoreError.notFound }
+            records[profile] = try record.settingDeliveryMode(deliveryMode)
         }
     }
 
@@ -161,6 +169,16 @@ public final class FileClientInstanceStore: ClientInstanceStore, @unchecked Send
             guard current.profile == profile, current.instanceID == identifier else { throw ClientInstanceStoreError.invalidRecord }
             transitionHook?(.setEnabledAfterRead)
             try write(encode(try current.settingEnabled(enabled)), directory: directory, name: name, replace: true)
+        }
+    }
+
+    public func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws {
+        let identifier = ClientInstanceID.derive(profile: profile)
+        try withDirectoryLock(exclusive: true) { directory in
+            let name = filename(identifier)
+            let current = try read(directory: directory, name: name)
+            guard current.profile == profile, current.instanceID == identifier else { throw ClientInstanceStoreError.invalidRecord }
+            try write(encode(try current.settingDeliveryMode(deliveryMode)), directory: directory, name: name, replace: true)
         }
     }
 

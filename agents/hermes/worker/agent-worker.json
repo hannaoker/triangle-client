@@ -1,12 +1,12 @@
 {
   "meshUrlEnv": "MESH_ORIGIN",
   "meshTokenEnv": "MESH_AGENT_TOKEN",
-  "agentIdEnv": "CODEX_AGENT_ID",
+  "agentIdEnv": "HERMES_AGENT_ID",
   "pollIntervalMs": 15000,
   "maxBackoffMs": 300000,
   "runnerTimeoutMs": 600000,
   "pageLimit": 1,
   "runner": {
-    "module": "../../packages/agent-worker/runners/codex-runner.mjs"
+    "module": "../../../packages/agent-worker/runners/hermes-runner.mjs"
   }
 }

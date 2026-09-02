@@ -116,7 +116,7 @@ function legacy(f, agent, loaded = true) {
   return { label, plist };
 }
 
-function enabledProfile(f, digit = "a") {
+function enabledProfile(f, digit = "a", deliveryMode) {
   const instances = path.join(f.app, "client", "instances");
   fs.mkdirSync(instances, { recursive: true, mode: 0o700 });
   fs.chmodSync(path.join(f.app, "client"), 0o700);
@@ -126,7 +126,9 @@ function enabledProfile(f, digit = "a") {
     Buffer.from("triangle-client-instance-v1\0"), Buffer.from(profile),
   ])).digest("hex");
   const file = path.join(instances, `${id}.json`);
-  fs.writeFileSync(file, JSON.stringify({ version: 1, profile, instanceId: id, runtimeAdapter: "codex", enabled: true }), { mode: 0o600 });
+  const record = { version: 1, profile, instanceId: id, runtimeAdapter: "codex", enabled: true };
+  if (deliveryMode !== undefined) record.deliveryMode = deliveryMode;
+  fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
   fs.chmodSync(file, 0o600);
 }
 
@@ -178,6 +180,19 @@ test("clean-machine install stages the client stopped and leaves legacy consumer
   assert.equal(fs.existsSync(path.join(f.state, "dev.thetriangle.client")), false, "empty client must remain stopped");
   assert.equal(fs.existsSync(path.join(f.state, codex.label)), true, "legacy consumer retired before first profile became healthy");
   assert.doesNotMatch(fs.readFileSync(f.launchctlLog, "utf8"), /bootout[^\n]*dev\.thetriangle\.codex\.worker/);
+});
+
+test("install accepts legacy and delivery-mode registry records but rejects unknown modes", (t) => {
+  const f = fixture(t);
+  enabledProfile(f, "a");
+  enabledProfile(f, "b", "mcp-interactive");
+  let result = run("install", f.env);
+  assert.equal(result.status, 0, result.stderr);
+
+  enabledProfile(f, "c", "invalid-mode");
+  result = run("install", f.env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /registry|invalid/i);
 });
 
 test("manual start cannot launch an empty staged client", (t) => {

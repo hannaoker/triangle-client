@@ -107,7 +107,10 @@ public enum EnrollmentContractCases {
         configuration.protocolClasses = [FixtureURLProtocol.self]
         for (status, expected) in [(503, ProfileVerificationStatus.registrationOutcomeUnknown), (408, .registrationOutcomeUnknown), (201, .verificationFailed)] {
             for fixture in [FixtureURLProtocol.Fixture.declaredOversized(status: status), .streamedOversized(status: status)] {
-                FixtureURLProtocol.reset([fixture])
+                FixtureURLProtocol.reset([
+                    .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!, body: challengeJSON()),
+                    fixture
+                ])
                 let result = try await EnrollmentService(
                     store: InMemoryCredentialStore(), transport: URLSessionMeshTransport(configuration: configuration),
                     reservation: InMemoryEnrollmentReservation(), journal: InMemoryEnrollmentJournal()
@@ -316,17 +319,27 @@ public enum EnrollmentContractCases {
         )
 
         let requests = transport.requests
-        try expect(requests.count == 2, "enrollment did not make exactly two requests")
-        let registration = requests[0]
+        try expect(requests.count == 3, "enrollment did not make exactly three requests")
+
+        let challenge = requests[0]
+        try expect(challenge.method == "POST", "challenge method changed")
+        try expect(challenge.url.absoluteString == "https://thetriangle.dev/api/v1/identity/registration-challenges", "challenge path changed")
+        try expect(challenge.headers["X-Mesh-Admission-Token"] == canary, "admission header missing from challenge")
+        try expect(challenge.headers["Authorization"] == nil, "challenge sent bearer authorization")
+        let challengeBody = try JSONSerialization.jsonObject(with: challenge.body) as? [String: Any]
+        try expect(Set(challengeBody?.keys.map { $0 } ?? []) == ["handle", "identity_profile", "workload_id", "workload_public_jwk"], "challenge body schema changed")
+        try expect(!String(decoding: challenge.body, as: UTF8.self).contains(canary), "admission token entered challenge request body")
+
+        let registration = requests[1]
         try expect(registration.method == "POST", "registration method changed")
         try expect(registration.url.absoluteString == "https://thetriangle.dev/api/v1/agents/register-mailbox", "registration path changed")
-        try expect(registration.headers["X-Mesh-Admission-Token"] == canary, "admission header missing")
+        try expect(registration.headers["X-Mesh-Admission-Token"] == canary, "admission header missing from registration")
         try expect(registration.headers["Authorization"] == nil, "registration sent bearer authorization")
         let body = try JSONSerialization.jsonObject(with: registration.body) as? [String: Any]
-        try expect(Set(body?.keys.map { $0 } ?? []) == ["handle", "name", "description", "capabilities"], "registration body schema changed")
+        try expect(Set(body?.keys.map { $0 } ?? []) == ["capabilities", "challenge_id", "description", "handle", "identity_profile", "name", "proof", "workload_id", "workload_public_jwk"], "registration body schema changed")
         try expect(!String(decoding: registration.body, as: UTF8.self).contains(canary), "admission token entered request body")
 
-        let me = requests[1]
+        let me = requests[2]
         try expect(me.method == "GET", "identity method changed")
         try expect(me.url.absoluteString == "https://thetriangle.dev/api/v1/agents/me", "identity path changed")
         try expect(me.headers["Authorization"] == "Bearer \(canary)", "identity bearer missing")
@@ -336,7 +349,21 @@ public enum EnrollmentContractCases {
     public static func storeBeforeVerify() async throws {
         let store = RecordingStore()
         let transport = ClosureTransport { request in
+            if request.url.path.hasSuffix("/registration-challenges") {
+                if let body = try? JSONDecoder().decode(ChallengeRequestBody.self, from: request.body) {
+                    let challengeData = Data("""
+                    {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(body.workloadPublicJWK.jkt)","handle":"\(body.handle)","identity_profile":"mesh.identity/1","workload_id":"\(body.workloadID)","workload_public_jwk":\(body.workloadPublicJWK.canonicalJSONString)}}
+                    """.utf8)
+                    return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: challengeData, finalURL: request.url)
+                }
+            }
             if request.url.path.hasSuffix("/register-mailbox") {
+                if let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: request.body) {
+                    let text = """
+                    {"agent":{"id":"\(agentID)","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote test agent","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/\(agentID)"},"workload":{"workload_id":"\(submission.workloadID)","public_jwk":\(submission.workloadPublicJWK.canonicalJSONString),"jkt":"\(submission.workloadPublicJWK.jkt)","state":"active"},"token":"\(canary)","warning":"Save now."}
+                    """
+                    return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: Data(text.utf8), finalURL: request.url)
+                }
                 return response(201, registrationJSON())
             }
             guard store.didCreate else { throw ContractFailure("identity was checked before persistence") }
@@ -402,7 +429,7 @@ public enum EnrollmentContractCases {
         try expect(result.identityCreated == true, "registered result did not preserve server creation state")
         try expect(result.credentialInstalled == false, "failed persistence claimed an installed credential")
         try expect(result.mustNotReregister, "registered result allowed unsafe re-registration")
-        try expect(transport.requests.count == 1, "registration was retried after the token could not be stored")
+        try expect(transport.requests.count == 2, "registration was retried after the token could not be stored")
     }
 
     public static func registeredInstalledOffline() async throws {
@@ -415,7 +442,7 @@ public enum EnrollmentContractCases {
         )
         try expect(result.status == .offlineUnverified, "post-registration outage did not preserve an offline state")
         try expect(result.identityCreated == true && result.credentialInstalled == true && result.mustNotReregister, "post-registration outage lost irreversible state")
-        try expect(transport.requests.count == 2, "verification transport was retried")
+        try expect(transport.requests.count == 3, "verification transport was retried")
     }
 
     public static func ambiguousRegistration() async throws {
@@ -429,7 +456,7 @@ public enum EnrollmentContractCases {
         try expect(result.status == .registrationOutcomeUnknown, "ambiguous POST outcome was not distinguished")
         try expect(result.identityCreated == nil, "ambiguous POST outcome guessed identity creation")
         try expect(result.credentialInstalled == false && result.mustNotReregister, "ambiguous POST outcome allowed retry or guessed installation")
-        try expect(transport.requests.count == 1, "ambiguous registration was retried")
+        try expect(transport.requests.count == 2, "ambiguous registration was retried")
         let rendered = try CLIOutputRenderer.render(result)
         let stdout = String(decoding: rendered.stdout, as: UTF8.self)
         try expect(stdout.contains("\"identityCreated\":null"), "ambiguous CLI output did not encode identity creation as unknown")
@@ -444,7 +471,7 @@ public enum EnrollmentContractCases {
                 statusCode: status,
                 headers: ["Content-Type": "application/json"],
                 body: Data("{\"error\":\"temporary\"}".utf8),
-                finalURL: URL(string: "https://thetriangle.dev/api/v1/agents/register-mailbox")!
+                finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!
             )
             let result = try await EnrollmentService(store: InMemoryCredentialStore(), transport: ScriptedTransport([response])).enroll(
                 profile: ProfileName("codex-mailbox-live"), origin: MeshOrigin("https://thetriangle.dev"), inputData: inputJSON()
@@ -457,7 +484,7 @@ public enum EnrollmentContractCases {
                 statusCode: status,
                 headers: ["Content-Type": "application/json"],
                 body: Data("{\"error\":\"rejected\"}".utf8),
-                finalURL: URL(string: "https://thetriangle.dev/api/v1/agents/register-mailbox")!
+                finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!
             )
             let result = try await EnrollmentService(store: InMemoryCredentialStore(), transport: ScriptedTransport([response])).enroll(
                 profile: ProfileName("codex-mailbox-live"), origin: MeshOrigin("https://thetriangle.dev"), inputData: inputJSON()
@@ -485,7 +512,7 @@ public enum EnrollmentContractCases {
         try expect(result.status == .identityMismatch, "installed mismatch was not structured")
         try expect(result.credentialInstalled == true && result.mustNotReregister, "mismatch did not preserve installed state")
         try expect(try store.read(for: ProfileName("codex-mailbox-live")).agentID.value == agentID, "mismatch deleted or replaced installed profile")
-        try expect(transport.requests.count == 2, "mismatch triggered a retry")
+        try expect(transport.requests.count == 3, "mismatch triggered a retry")
     }
 
     public static func installedAuthenticationRejection() async throws {
@@ -607,6 +634,7 @@ public enum EnrollmentContractCases {
 
     public static func urlSessionTransportContract() async throws {
         FixtureURLProtocol.reset([
+            .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!, body: challengeJSON()),
             .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/agents/register-mailbox")!, body: registrationJSON()),
             .json(status: 200, url: URL(string: "https://thetriangle.dev/api/v1/agents/me")!, body: meJSON()),
         ])
@@ -620,11 +648,12 @@ public enum EnrollmentContractCases {
         )
         try expect(result.status == .verified, "URLSession fixture enrollment failed")
         let requests = FixtureURLProtocol.requests
-        try expect(requests.count == 2, "URLSession fixture request count changed")
-        try expect(requests[0].value(forHTTPHeaderField: "X-Mesh-Admission-Token") == canary, "URLSession dropped admission header")
-        try expect(requests[0].value(forHTTPHeaderField: "Authorization") == nil, "URLSession registration sent authorization")
-        try expect(!String(decoding: requests[0].httpBody ?? Data(), as: UTF8.self).contains(canary), "URLSession registration body exposed admission token")
-        try expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer \(canary)", "URLSession dropped bearer")
+        try expect(requests.count == 3, "URLSession fixture request count changed")
+        try expect(requests[0].value(forHTTPHeaderField: "X-Mesh-Admission-Token") == canary, "URLSession dropped challenge admission header")
+        try expect(requests[0].value(forHTTPHeaderField: "Authorization") == nil, "URLSession challenge sent authorization")
+        try expect(requests[1].value(forHTTPHeaderField: "X-Mesh-Admission-Token") == canary, "URLSession dropped registration admission header")
+        try expect(requests[1].value(forHTTPHeaderField: "Authorization") == nil, "URLSession registration sent authorization")
+        try expect(requests[2].value(forHTTPHeaderField: "Authorization") == "Bearer \(canary)", "URLSession dropped bearer")
 
         for location in ["https://evil.example/steal", "http://evil.example/steal"] {
             FixtureURLProtocol.reset([.redirect(location: location)])
@@ -654,7 +683,10 @@ public enum EnrollmentContractCases {
             )
         }
 
-        FixtureURLProtocol.reset([.plaintextJSON(status: 201, body: registrationJSON())])
+        FixtureURLProtocol.reset([
+            .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!, body: challengeJSON()),
+            .plaintextJSON(status: 201, body: registrationJSON())
+        ])
         let plaintextResult = try await EnrollmentService(
             store: InMemoryCredentialStore(),
             transport: URLSessionMeshTransport(configuration: configuration)
@@ -732,7 +764,7 @@ public enum EnrollmentContractCases {
             )
             try expect(result.status == .verificationFailed, "invalid \(name) contract was accepted")
             try expect(result.credentialInstalled == true && result.mustNotReregister, "invalid \(name) contract lost credential quarantine")
-            try expect(transport.requests.count == 1, "invalid \(name) contract reached /agents/me")
+            try expect(transport.requests.count == 2, "invalid \(name) contract reached /agents/me")
         }
     }
 
@@ -783,7 +815,17 @@ public enum EnrollmentContractCases {
         try expect(localFailureText.contains("local_validation_failed"), "local preflight failure was not distinct")
         try expect(localFailureText.contains("\"safeToRetry\":true"), "local preflight failure did not permit correction")
         try expect(localFailure.exitCode != 0, "local preflight failure exited successfully")
+    }
 
+    static func challengeJSON(
+        challengeID: String = "identity_challenge_" + String(repeating: "1", count: 32),
+        workloadID: String = "workload_00000000000000000000000000000000",
+        workloadPublicJWK: String = "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+        workloadJKT: String = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ) -> Data {
+        Data("""
+        {"challenge":{"challenge_id":"\(challengeID)","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(workloadJKT)","handle":"codex-mailbox-live","identity_profile":"mesh.identity/1","workload_id":"\(workloadID)","workload_public_jwk":\(workloadPublicJWK)}}
+        """.utf8)
     }
 
     private static func inputJSON() -> Data {
@@ -792,16 +834,22 @@ public enum EnrollmentContractCases {
         """.utf8)
     }
 
-    private static func registrationJSON(
+    static func registrationJSON(
         extra: String = "",
         protocolVersion: String = "mailbox-v1",
         protocolBinding: String = "TRIANGLE",
         endpointURL: String = "https://thetriangle.dev/api/v1/mailbox",
-        agentCardURL: String? = nil
+        agentCardURL: String? = nil,
+        workloadID: String? = nil,
+        workloadPublicJWK: String? = nil,
+        workloadJKT: String? = nil
     ) -> Data {
         let cardURL = agentCardURL ?? "https://thetriangle.dev/api/v1/agents/\(agentID)"
+        let wID = workloadID ?? "workload_00000000000000000000000000000000"
+        let jwk = workloadPublicJWK ?? "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}"
+        let jkt = workloadJKT ?? "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         return Data("""
-        {"agent":{"id":"\(agentID)","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote test agent","endpointUrl":"\(endpointURL)","capabilities":["direct-messages"],"protocolVersion":"\(protocolVersion)","protocolBinding":"\(protocolBinding)","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"\(cardURL)"},"token":"\(canary)","warning":"Save this token now."\(extra)}
+        {"agent":{"id":"\(agentID)","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote test agent","endpointUrl":"\(endpointURL)","capabilities":["direct-messages"],"protocolVersion":"\(protocolVersion)","protocolBinding":"\(protocolBinding)","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"\(cardURL)"},"workload":{"workload_id":"\(wID)","public_jwk":\(jwk),"jkt":"\(jkt)","state":"active"},"token":"\(canary)","warning":"Save this token now."\(extra)}
         """.utf8)
     }
 
@@ -920,8 +968,30 @@ private final class ScriptedTransport: MeshTransport, @unchecked Sendable {
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
         try lock.withLock {
             captured.append(request)
+            if request.url.path == "/api/v1/identity/registration-challenges" {
+                if !responses.isEmpty && responses.first!.statusCode != 201 {
+                    return responses.removeFirst()
+                }
+                if let body = try? JSONDecoder().decode(ChallengeRequestBody.self, from: request.body) {
+                    let challengeData = Data("""
+                    {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(body.workloadPublicJWK.jkt)","handle":"\(body.handle)","identity_profile":"mesh.identity/1","workload_id":"\(body.workloadID)","workload_public_jwk":\(body.workloadPublicJWK.canonicalJSONString)}}
+                    """.utf8)
+                    return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: challengeData, finalURL: request.url)
+                }
+            }
             guard !responses.isEmpty else { throw MeshClientError.transportUnavailable }
-            return responses.removeFirst()
+            let nextResponse = responses.removeFirst()
+            if request.url.path == "/api/v1/agents/register-mailbox",
+               let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: request.body),
+               nextResponse.statusCode == 201,
+               let text = String(data: nextResponse.body, encoding: .utf8) {
+                let patched = text
+                    .replacingOccurrences(of: "workload_00000000000000000000000000000000", with: submission.workloadID)
+                    .replacingOccurrences(of: "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}", with: submission.workloadPublicJWK.canonicalJSONString)
+                    .replacingOccurrences(of: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", with: submission.workloadPublicJWK.jkt)
+                return MeshHTTPResponse(statusCode: 201, headers: nextResponse.headers, body: Data(patched.utf8), finalURL: nextResponse.finalURL)
+            }
+            return nextResponse
         }
     }
 }
@@ -986,6 +1056,14 @@ private actor BlockingEnrollmentTransport: MeshTransport {
     }
 
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
+        if request.url.path.hasSuffix("/registration-challenges") {
+            if let body = try? JSONDecoder().decode(ChallengeRequestBody.self, from: request.body) {
+                let challengeData = Data("""
+                {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(body.workloadPublicJWK.jkt)","handle":"\(body.handle)","identity_profile":"mesh.identity/1","workload_id":"\(body.workloadID)","workload_public_jwk":\(body.workloadPublicJWK.canonicalJSONString)}}
+                """.utf8)
+                return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: challengeData, finalURL: request.url)
+            }
+        }
         if request.url.path.hasSuffix("/register-mailbox") {
             registrationCalls += 1
             started = true
@@ -993,12 +1071,16 @@ private actor BlockingEnrollmentTransport: MeshTransport {
             startWaiters.removeAll()
             for waiter in waiters { waiter.resume() }
             if !released { await withCheckedContinuation { releaseWaiters.append($0) } }
+            if let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: request.body) {
+                let text = """
+                {"agent":{"id":"agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote test agent","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"workload":{"workload_id":"\(submission.workloadID)","public_jwk":\(submission.workloadPublicJWK.canonicalJSONString),"jkt":"\(submission.workloadPublicJWK.jkt)","state":"active"},"token":"\(EnrollmentContractCases.canary)","warning":"Save now."}
+                """
+                return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: Data(text.utf8), finalURL: request.url)
+            }
             return MeshHTTPResponse(
                 statusCode: 201,
                 headers: ["Content-Type": "application/json"],
-                body: Data("""
-                {"agent":{"id":"agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote test agent","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"token":"\(EnrollmentContractCases.canary)","warning":"Save now."}
-                """.utf8),
+                body: EnrollmentContractCases.registrationJSON(),
                 finalURL: request.url
             )
         }
@@ -1041,6 +1123,21 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    private static func extractBodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read > 0 { data.append(buffer, count: read) }
+            else { break }
+        }
+        return data
+    }
+
     override func startLoading() {
         let fixture: Fixture? = Self.lock.withLock {
             Self.captured.append(request)
@@ -1052,7 +1149,26 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         }
         switch fixture {
         case let .json(status, url, body):
-            respond(status: status, url: url, headers: ["Content-Type": "application/json"], chunks: [body])
+            var responseBody = body
+            if request.url?.path == "/api/v1/identity/registration-challenges",
+               let reqBodyData = Self.extractBodyData(from: request),
+               let challengeReq = try? JSONDecoder().decode(ChallengeRequestBody.self, from: reqBodyData) {
+                let challengeData = Data("""
+                {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(challengeReq.workloadPublicJWK.jkt)","handle":"\(challengeReq.handle)","identity_profile":"mesh.identity/1","workload_id":"\(challengeReq.workloadID)","workload_public_jwk":\(challengeReq.workloadPublicJWK.canonicalJSONString)}}
+                """.utf8)
+                responseBody = challengeData
+            } else if request.url?.path == "/api/v1/agents/register-mailbox",
+                      let reqBodyData = Self.extractBodyData(from: request),
+                      let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: reqBodyData),
+                      status == 201,
+                      let text = String(data: body, encoding: .utf8) {
+                let patched = text
+                    .replacingOccurrences(of: "workload_00000000000000000000000000000000", with: submission.workloadID)
+                    .replacingOccurrences(of: "{\"crv\":\"Ed25519\",\"kty\":\"OKP\",\"x\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}", with: submission.workloadPublicJWK.canonicalJSONString)
+                    .replacingOccurrences(of: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", with: submission.workloadPublicJWK.jkt)
+                responseBody = Data(patched.utf8)
+            }
+            respond(status: status, url: url, headers: ["Content-Type": "application/json"], chunks: [responseBody])
         case let .plaintextJSON(status, body):
             respond(status: status, url: request.url!, headers: ["Content-Type": "text/plain"], chunks: [body])
         case let .redirect(location):

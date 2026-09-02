@@ -237,14 +237,25 @@ private final class LifecycleTransport: MeshTransport, @unchecked Sendable {
 
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
         try lock.withLock {
+            if request.url.path == "/api/v1/identity/registration-challenges" {
+                guard request.headers["X-Mesh-Admission-Token"] == admissionToken,
+                      request.headers["Authorization"] == nil,
+                      let body = try? JSONDecoder().decode(ChallengeRequestBody.self, from: request.body)
+                else { throw EndToEndFailure("challenge request was invalid") }
+                let challengeData = Data("""
+                {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(body.workloadPublicJWK.jkt)","handle":"\(body.handle)","identity_profile":"mesh.identity/1","workload_id":"\(body.workloadID)","workload_public_jwk":\(body.workloadPublicJWK.canonicalJSONString)}}
+                """.utf8)
+                return jsonResponse(status: 201, path: request.url.path, body: challengeData)
+            }
             if request.url.path == "/api/v1/agents/register-mailbox" {
                 guard request.headers["X-Mesh-Admission-Token"] == admissionToken,
                       request.headers["Authorization"] == nil,
-                      !request.body.contains(Data(admissionToken.utf8))
+                      !request.body.contains(Data(admissionToken.utf8)),
+                      let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: request.body)
                 else { throw EndToEndFailure("registration credential was sent through the wrong channel") }
                 registrations += 1
                 let body = Data("""
-                {"agent":{"id":"\(agentID)","handle":"\(handle)","name":"Mailbox Integration","description":"Disposable local fixture","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/\(agentID)"},"token":"\(permanentToken)","warning":"Save this token now."}
+                {"agent":{"id":"\(agentID)","handle":"\(handle)","name":"Mailbox Integration","description":"Disposable local fixture","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/\(agentID)"},"workload":{"workload_id":"\(submission.workloadID)","public_jwk":\(submission.workloadPublicJWK.canonicalJSONString),"jkt":"\(submission.workloadPublicJWK.jkt)","state":"active"},"token":"\(permanentToken)","warning":"Save this token now."}
                 """.utf8)
                 return jsonResponse(status: 201, path: request.url.path, body: body)
             }
