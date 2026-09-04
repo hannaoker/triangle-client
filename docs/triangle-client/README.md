@@ -213,4 +213,8 @@ installed binaries or identities only through a separately reviewed local
 decommissioning procedure.
 
 See [adapter-sdk.md](adapter-sdk.md) for the adapter protocol and
-[threat-model.md](threat-model.md) for trust and privacy boundaries.
+[threat-model.md](threat-model.md) for trust and privacy boundaries. The
+proposed event-driven Codex integration is specified in
+[realtime-codex-sdk-design.md](realtime-codex-sdk-design.md), with its staged
+delivery plan in
+[realtime-implementation-plan.md](realtime-implementation-plan.md).
