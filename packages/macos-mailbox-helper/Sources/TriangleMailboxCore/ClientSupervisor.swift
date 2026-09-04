@@ -103,8 +103,15 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidInstances
         }
         let deliveryOmissions = allInstances.compactMap { instance -> OmittedClientSupervisorInstance? in
-            guard instance.enabled, instance.deliveryMode == .mcpInteractive else { return nil }
-            return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_mcp_interactive")
+            guard instance.enabled else { return nil }
+            switch instance.deliveryMode {
+            case .mcpInteractive:
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_mcp_interactive")
+            case .eventDriven:
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_event_driven")
+            case .worker:
+                return nil
+            }
         }
         let enabled = allInstances.filter(\.participatesInWorkerPolling)
         guard !enabled.isEmpty,

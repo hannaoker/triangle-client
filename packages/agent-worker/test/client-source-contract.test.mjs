@@ -98,7 +98,13 @@ test("repository is the complete standalone client source and contains no MESH s
 
   const clientPackage = JSON.parse(readFileSync(path.join(root, "packages/agent-worker/package.json"), "utf8"));
   assert.deepEqual(Object.keys(clientPackage.exports).sort(), [
-    ".", "./client-supervisor", "./concurrency-gate", "./mailbox-client", "./outbound-client",
+    ".",
+    "./client-supervisor",
+    "./concurrency-gate",
+    "./mailbox-client",
+    "./outbound-client",
+    "./profile-scheduler",
+    "./wake-client",
   ]);
   assert.equal(clientPackage.engines?.node, ">=22.0.0");
 

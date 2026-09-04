@@ -27,6 +27,7 @@ public enum ClientSupervisorContractCases {
         .init(name: "signal dispositions are preserved and concurrent runs serialize", run: signalPreservationAndSerialization),
         .init(name: "coordinator readiness acknowledgement writes only a fresh private marker", run: readinessMarkerContract),
         .init(name: "mcp-interactive delivery mode is omitted from coordinator bootstrap", run: mcpInteractiveDeliveryOmitted),
+        .init(name: "event-driven delivery mode is omitted from coordinator bootstrap", run: eventDrivenDeliveryOmitted),
     ]
 
     fileprivate static let origin = "https://thetriangle.dev"
@@ -229,6 +230,23 @@ public enum ClientSupervisorContractCases {
         let bootstrap = try fixture.process.decodedBootstrap()
         try expect(bootstrap.instances.count == 1, "mcp-interactive profile reached coordinator bootstrap")
         try expect(!bootstrap.instances.contains { $0.instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value }, "interactive profile leaked into bootstrap")
+    }
+
+    public static func eventDrivenDeliveryOmitted() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "event-hermes", adapter: .hermes, digit: "2"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.eventDriven, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        try expect(launch.instances.count == 1, "event-driven profile was not omitted from bootstrap")
+        try expect(launch.instances[0].instanceID == ClientInstanceID.derive(profile: fixture.specifications[0].profile).value, "wrong profile remained in bootstrap")
+        try expect(launch.omitted.contains { $0.reasonCode == "delivery_mode_event_driven" }, "event-driven omission was not recorded")
+        try expect(try fixture.instanceStore.read(profile: fixture.specifications[1].profile).participatesInEventDrivenWake, "event-driven ownership flag was not set")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "event-driven profile reached worker coordinator bootstrap")
+        try expect(!bootstrap.instances.contains { $0.instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value }, "event-driven profile leaked into worker bootstrap")
     }
 
     public static func noEligibleProfile() async throws {

@@ -10,6 +10,7 @@ public enum RuntimeAdapter: String, Codable, CaseIterable, Sendable {
 public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
     case worker
     case mcpInteractive = "mcp-interactive"
+    case eventDriven = "event-driven"
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -53,6 +54,7 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public let deliveryMode: DeliveryMode
 
     public var participatesInWorkerPolling: Bool { enabled && deliveryMode == .worker }
+    public var participatesInEventDrivenWake: Bool { enabled && deliveryMode == .eventDriven }
 
     public init(
         profile: ProfileName,

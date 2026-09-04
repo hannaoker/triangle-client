@@ -272,8 +272,13 @@ public enum ClientInstanceContractCases {
             try store.setDeliveryMode(.mcpInteractive, profile: profile)
             try expect(try store.read(profile: profile).deliveryMode == .mcpInteractive, "delivery mode did not round trip")
             try expect(try store.read(profile: profile).participatesInWorkerPolling == false, "mcp-interactive profile still participates in worker polling")
+            try store.setDeliveryMode(.eventDriven, profile: profile)
+            try expect(try store.read(profile: profile).deliveryMode == .eventDriven, "event-driven delivery mode did not round trip")
+            try expect(try store.read(profile: profile).participatesInWorkerPolling == false, "event-driven profile still participates in worker polling")
+            try expect(try store.read(profile: profile).participatesInEventDrivenWake, "event-driven profile does not participate in wake ownership")
             try store.setDeliveryMode(.worker, profile: profile)
             try expect(try store.read(profile: profile).participatesInWorkerPolling, "worker delivery mode did not restore polling participation")
+            try expect(try store.read(profile: profile).participatesInEventDrivenWake == false, "worker profile incorrectly claims wake ownership")
         }
     }
 

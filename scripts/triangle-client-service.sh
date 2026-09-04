@@ -203,7 +203,7 @@ for name in os.listdir(instances):
     profile=value["profile"]
     if type(value["version"]) is not int or value["version"] != 1 or not isinstance(profile, str) or not profile or len(profile.encode()) > 64 or "/" in profile or "\\" in profile or any(unicodedata.category(c) == "Cc" for c in profile): raise SystemExit("invalid Triangle Client registry entry")
     expected=hashlib.sha256(b"triangle-client-instance-v1\0"+profile.encode()).hexdigest()
-    if value["instanceId"] != expected or name != expected+".json" or value["runtimeAdapter"] not in {"codex","hermes","antigravity"} or type(value["enabled"]) is not bool or value.get("deliveryMode", "worker") not in {"worker","mcp-interactive"}: raise SystemExit("invalid Triangle Client registry entry")
+    if value["instanceId"] != expected or name != expected+".json" or value["runtimeAdapter"] not in {"codex","hermes","antigravity"} or type(value["enabled"]) is not bool or value.get("deliveryMode", "worker") not in {"worker","mcp-interactive","event-driven"}: raise SystemExit("invalid Triangle Client registry entry")
     any_enabled = any_enabled or value["enabled"]
 print("enabled" if any_enabled else "empty")
 PY

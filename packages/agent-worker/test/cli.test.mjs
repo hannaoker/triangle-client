@@ -82,6 +82,8 @@ test("package and CLI source contain no deprecated gateway transport", async () 
     "./concurrency-gate",
     "./mailbox-client",
     "./outbound-client",
+    "./profile-scheduler",
+    "./wake-client",
   ]);
   const source = await readFile(new URL("../src/cli.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /gateway-client|createGatewayClient|gatewayUrlEnv|gatewayTokenEnv|\/inbox|internal\/tasks\/update/);
