@@ -325,6 +325,10 @@ public enum HelperCommand: String, CaseIterable, Equatable, Sendable {
     case runWorker = "run-worker"
     case runSupervisor = "run-supervisor"
     case preflightSupervisor = "preflight-supervisor"
+    case watchEnsure = "watch-ensure"
+    case watchStatus = "watch-status"
+    case watchRevoke = "watch-revoke"
+    case watchPoll = "watch-poll"
 }
 
 public enum WorkerKind: String, CaseIterable, Equatable, Sendable {
@@ -338,6 +342,24 @@ public struct ParsedCommand: Equatable, Sendable {
     public let profile: ProfileName?
     public let origin: MeshOrigin?
     public let worker: WorkerKind?
+    public let installationID: InstallationID?
+    public let cursor: Int?
+
+    public init(
+        command: HelperCommand,
+        profile: ProfileName? = nil,
+        origin: MeshOrigin? = nil,
+        worker: WorkerKind? = nil,
+        installationID: InstallationID? = nil,
+        cursor: Int? = nil
+    ) {
+        self.command = command
+        self.profile = profile
+        self.origin = origin
+        self.worker = worker
+        self.installationID = installationID
+        self.cursor = cursor
+    }
 }
 
 public enum CommandParseError: Error, Equatable, Sendable {
@@ -355,7 +377,11 @@ public enum CommandParser {
 
         if command == .runSupervisor || command == .preflightSupervisor {
             guard arguments.count == 1 else { throw CommandParseError.unknownOrDuplicateFlag }
-            return ParsedCommand(command: command, profile: nil, origin: nil, worker: nil)
+            return ParsedCommand(command: command)
+        }
+
+        if command == .watchEnsure || command == .watchStatus || command == .watchRevoke || command == .watchPoll {
+            return try parseWatchCommand(command, Array(arguments.dropFirst()))
         }
 
         var flagValues: [String: String] = [:]
@@ -381,7 +407,7 @@ public enum CommandParser {
             allowedFlags = ["--profile"]
         case .runWorker:
             allowedFlags = ["--profile", "--worker"]
-        case .runSupervisor, .preflightSupervisor:
+        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
             allowedFlags = []
         }
         guard Set(flagValues.keys).isSubset(of: allowedFlags) else {
@@ -407,19 +433,13 @@ public enum CommandParser {
                 return ParsedCommand(
                     command: command,
                     profile: profile,
-                    origin: try MeshOrigin(originValue),
-                    worker: nil
+                    origin: try MeshOrigin(originValue)
                 )
             } catch {
                 throw CommandParseError.invalidFlagValue
             }
         case .status, .mcp:
-            return ParsedCommand(
-                command: command,
-                profile: profile,
-                origin: nil,
-                worker: nil
-            )
+            return ParsedCommand(command: command, profile: profile)
         case .runWorker:
             guard let workerValue = flagValues["--worker"] else {
                 throw CommandParseError.missingRequiredFlag
@@ -427,13 +447,77 @@ public enum CommandParser {
             guard let worker = WorkerKind(rawValue: workerValue) else {
                 throw CommandParseError.invalidFlagValue
             }
-            return ParsedCommand(
-                command: command,
-                profile: profile,
-                origin: nil,
-                worker: worker
-            )
-        case .runSupervisor, .preflightSupervisor:
+            return ParsedCommand(command: command, profile: profile, worker: worker)
+        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
+            throw CommandParseError.invalidCommand
+        }
+    }
+
+    private static func parseWatchCommand(_ command: HelperCommand, _ flags: [String]) throws -> ParsedCommand {
+        var flagValues: [String: String] = [:]
+        var index = 0
+        while index < flags.count {
+            let argument = flags[index]
+            guard argument.hasPrefix("--"), index + 1 < flags.count else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
+            let value = flags[index + 1]
+            guard !value.hasPrefix("--"), flagValues[argument] == nil else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
+            flagValues[argument] = value
+            index += 2
+        }
+
+        let allowedFlags: Set<String>
+        switch command {
+        case .watchEnsure:
+            allowedFlags = ["--installation", "--actor-profile"]
+        case .watchStatus, .watchRevoke:
+            allowedFlags = ["--installation"]
+        case .watchPoll:
+            allowedFlags = ["--installation", "--cursor"]
+        default:
+            throw CommandParseError.invalidCommand
+        }
+        guard Set(flagValues.keys) == allowedFlags else {
+            throw CommandParseError.unknownOrDuplicateFlag
+        }
+
+        guard let installationValue = flagValues["--installation"] else {
+            throw CommandParseError.missingRequiredFlag
+        }
+        let installationID: InstallationID
+        do {
+            installationID = try InstallationID(installationValue)
+        } catch {
+            throw CommandParseError.invalidFlagValue
+        }
+
+        switch command {
+        case .watchEnsure:
+            guard let actorValue = flagValues["--actor-profile"] else {
+                throw CommandParseError.missingRequiredFlag
+            }
+            do {
+                return ParsedCommand(
+                    command: command,
+                    profile: try ProfileName(actorValue),
+                    installationID: installationID
+                )
+            } catch {
+                throw CommandParseError.invalidFlagValue
+            }
+        case .watchStatus, .watchRevoke:
+            return ParsedCommand(command: command, installationID: installationID)
+        case .watchPoll:
+            guard let cursorValue = flagValues["--cursor"], let cursor = Int(cursorValue), cursor >= 0,
+                  String(cursor) == cursorValue
+            else {
+                throw CommandParseError.invalidFlagValue
+            }
+            return ParsedCommand(command: command, installationID: installationID, cursor: cursor)
+        default:
             throw CommandParseError.invalidCommand
         }
     }
