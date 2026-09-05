@@ -1,10 +1,12 @@
 # macOS Keychain policy
 
 Mailbox credential items use the Data Protection Keychain and are explicitly
-non-synchronizable. The fixed generic-password service is
+non-synchronizable. The fixed generic-password service for mailbox credentials is
 `dev.thetriangle.mesh.mailbox`; the validated local profile name is the account.
-Create uses `AfterFirstUnlockThisDeviceOnly` so the signed helper can operate
-without a prompt after the user's login Keychain becomes available.
+Installation-scoped watch-grant credentials use a separate service,
+`dev.thetriangle.mesh.mailbox-watch`, with the installation id (`inst_…`) as the
+account. Create uses `AfterFirstUnlockThisDeviceOnly` so the signed helper can
+operate without a prompt after the user's login Keychain becomes available.
 
 Queries intentionally do not accept or set an arbitrary Keychain access group.
 They use the signed helper's default Data Protection Keychain application access

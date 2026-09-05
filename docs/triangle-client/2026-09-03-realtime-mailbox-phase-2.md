@@ -27,20 +27,31 @@ See the shared completion bar:
 - Registry allowlist accepts `event-driven`
 - Node `wake-client.mjs`: cursor store, coalesce, resync handling, startup reconcile
 - Node `profile-scheduler.mjs`: single-flight, dirty-after-turn, shared gate, fake harness
-- Atomic on-disk wake cursor store (`createAtomicFileCursorStore`) with restart recovery tests; supervisor wake launch and helper watch-grant transport remain open
-- Focused `wake-scheduler.test.mjs` coverage
+- Atomic on-disk wake cursor store (`createAtomicFileCursorStore`) with restart recovery tests
+- Signed MESH watch-grant transport through the macOS credential helper:
+  - Swift `MeshWatchClient` + `WatchGrantService` for create / join / finalize /
+    revoke / held poll against MESH Phase 1 routes
+  - Keychain store `dev.thetriangle.mesh.mailbox-watch` (installation-scoped;
+    fails closed when Keychain is unavailable)
+  - Secret-free `watch-status` / ensure / revoke operator JSON; credentials never
+    printed
+  - Helper CLI boundary: `triangle-mailbox watch-poll --installation … --cursor …`
+  - Node `helper-watch-transport.mjs` adapter for the injected wake-client transport
+- Focused Swift watch-grant contract cases and Node `helper-watch-transport.test.mjs`
 
 ## Not yet (blocks Status: Complete)
 
 Production wiring:
 
-- Signed MESH watch-grant transport through the macOS credential helper
-- Wire atomic wake cursor into supervisor/production launch (store landed; end-to-end restart recovery with helper grant still open)
+- Wire atomic wake cursor into supervisor/production launch (store landed; end-to-end
+  restart recovery with helper grant still open)
 - `event-driven` profiles in the private supervisor bootstrap
-- Wake listener launched alongside worker loops
+- Wake listener launched alongside worker loops (helper transport exists; supervisor
+  does not start it yet)
 - Scheduler preflight/drain connected to the real mailbox client and shared
   reasoning gate
-- Grant creation, renewal/replacement, revocation, and operator-visible status
+- Operator UX for grant lifecycle beyond the thin CLI hooks (ensure / status /
+  revoke / poll)
 - Grok/Cursor interactive profiles remain excluded
 
 Verification gates:

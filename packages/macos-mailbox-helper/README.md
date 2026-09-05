@@ -80,6 +80,32 @@ The durable selector is the non-secret profile name:
 "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" mcp --profile codex-mailbox-live
 ```
 
+## Installation-scoped watch grants (event-driven wake)
+
+Phase 2 wake transport keeps the opaque `mesh_watch_` credential inside the
+signed helper Keychain (`dev.thetriangle.mesh.mailbox-watch`). Operator and Node
+surfaces never receive the secret.
+
+```sh
+HELPER="$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox"
+INSTALLATION='inst_YOUR_INSTALLATION_ID'
+
+# Create/join/finalize for event-driven profiles, store the watch credential.
+"$HELPER" watch-ensure --installation "$INSTALLATION" --actor-profile codex-mailbox-live
+
+# Secret-free status JSON (grant id, agent ids, state only).
+"$HELPER" watch-status --installation "$INSTALLATION"
+
+# Held poll for the Node wake client (secret-free stdout JSON).
+"$HELPER" watch-poll --installation "$INSTALLATION" --cursor 0
+
+# Revoke remotely and delete the local Keychain item.
+"$HELPER" watch-revoke --installation "$INSTALLATION"
+```
+
+`mcp-interactive` profiles are rejected from watch membership. If Keychain is
+unavailable, watch commands fail closed.
+
 Use this MCP client configuration when the host accepts a stdio command:
 
 ```json

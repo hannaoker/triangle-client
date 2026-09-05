@@ -173,6 +173,15 @@ public enum ModelContractCases {
         let preflight = try CommandParser.parse(["preflight-supervisor"])
         try expect(preflight.command == .preflightSupervisor, "preflight-supervisor rejected")
         try expect(preflight.profile == nil && preflight.origin == nil && preflight.worker == nil, "preflight-supervisor accepted a selector")
+        let watchEnsure = try CommandParser.parse([
+            "watch-ensure", "--installation", "inst_N7VhDq3mQ2", "--actor-profile", "mailbox",
+        ])
+        try expect(watchEnsure.command == .watchEnsure, "watch-ensure rejected")
+        try expect(watchEnsure.installationID?.value == "inst_N7VhDq3mQ2", "watch-ensure installation missing")
+        let watchPoll = try CommandParser.parse([
+            "watch-poll", "--installation", "inst_N7VhDq3mQ2", "--cursor", "0",
+        ])
+        try expect(watchPoll.command == .watchPoll && watchPoll.cursor == 0, "watch-poll rejected")
 
         for invalid in [
             ["show-token", "--profile", "mailbox"],
@@ -189,6 +198,9 @@ public enum ModelContractCases {
             ["preflight-supervisor", "--profile", "mailbox"],
             ["preflight-supervisor", "--token", "secret"],
             ["preflight-supervisor", "anything"],
+            ["watch-ensure", "--installation", "inst_N7VhDq3mQ2", "--token", "secret"],
+            ["watch-poll", "--installation", "inst_N7VhDq3mQ2", "--cursor", "-1"],
+            ["watch-status", "--installation", "bad"],
         ] {
             try expectThrows(CommandParseError.self, "closed command surface accepted invalid input") {
                 try CommandParser.parse(invalid)
