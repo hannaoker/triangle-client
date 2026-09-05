@@ -4,20 +4,28 @@ import {
   createHelperWatchTransport,
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
-import { createMailboxClient } from "./mailbox-client.mjs";
-import { createFakeHarness, createWakeRuntime } from "./profile-scheduler.mjs";
+import { createMailboxClient, validateMailboxClientOptions } from "./mailbox-client.mjs";
+import { createMailboxHarness, createWakeRuntime } from "./profile-scheduler.mjs";
 import { createAgentWorker } from "./runtime.mjs";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const RUNNER_KEYS = new Set(["command", "args", "timeoutMs"]);
+const DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 
 function positiveInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError(`${name} must be a positive integer`);
   }
   return value;
+}
+
+function hasExactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 
 function validateRunner(instance) {
@@ -45,12 +53,45 @@ function validateRunner(instance) {
   return { ...instance.runner, environment };
 }
 
+function validateDrain(drain, profileAgentId) {
+  if (!hasExactKeys(drain, DRAIN_KEYS) || !INSTANCE_ID.test(drain.instanceId)) {
+    throw new TypeError("eventWake drain is invalid");
+  }
+  if (!drain.mailbox || typeof drain.mailbox !== "object" || Array.isArray(drain.mailbox)) {
+    throw new TypeError("mailbox must be an object");
+  }
+  const mailbox = validateMailboxClientOptions(drain.mailbox);
+  if (mailbox.recipientId !== profileAgentId) {
+    throw new TypeError("eventWake drain recipient does not match profile agentId");
+  }
+  const runner = validateRunner(drain);
+  return Object.freeze({
+    instanceId: drain.instanceId,
+    mailbox,
+    runner: Object.freeze({
+      command: drain.runner.command,
+      args: drain.runner.args,
+      timeoutMs: drain.runner.timeoutMs,
+    }),
+    runnerEnvironment: drain.runnerEnvironment,
+    runnerConfig: runner,
+  });
+}
+
 function validateEventWake(eventWake) {
   if (eventWake == null) return null;
   if (!eventWake || typeof eventWake !== "object" || Array.isArray(eventWake)) {
     throw new TypeError("eventWake must be an object");
   }
-  const expected = ["actorProfile", "cursorPath", "ensureBeforeWatch", "helperPath", "installationId", "profiles"];
+  const expected = [
+    "actorProfile",
+    "cursorPath",
+    "drains",
+    "ensureBeforeWatch",
+    "helperPath",
+    "installationId",
+    "profiles",
+  ];
   const actual = Object.keys(eventWake).sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new TypeError("eventWake schema is invalid");
@@ -73,6 +114,9 @@ function validateEventWake(eventWake) {
   if (!Array.isArray(eventWake.profiles) || eventWake.profiles.length < 1 || eventWake.profiles.length > 100) {
     throw new TypeError("eventWake.profiles must contain between 1 and 100 entries");
   }
+  if (!Array.isArray(eventWake.drains) || eventWake.drains.length !== eventWake.profiles.length) {
+    throw new TypeError("eventWake.drains must match profiles");
+  }
   const seenInstances = new Set();
   const seenAgents = new Set();
   const profiles = eventWake.profiles.map((profile) => {
@@ -94,6 +138,19 @@ function validateEventWake(eventWake) {
     seenAgents.add(profile.agentId);
     return Object.freeze({ instanceId: profile.instanceId, agentId: profile.agentId });
   });
+  const agentByInstance = new Map(profiles.map((profile) => [profile.instanceId, profile.agentId]));
+  const seenDrains = new Set();
+  const drains = eventWake.drains.map((drain) => {
+    const normalized = validateDrain(drain, agentByInstance.get(drain?.instanceId));
+    if (!agentByInstance.has(normalized.instanceId) || seenDrains.has(normalized.instanceId)) {
+      throw new TypeError("eventWake drains must match profiles");
+    }
+    seenDrains.add(normalized.instanceId);
+    return normalized;
+  });
+  if (seenDrains.size !== seenInstances.size) {
+    throw new TypeError("eventWake drains must match profiles");
+  }
   return Object.freeze({
     installationId: eventWake.installationId,
     helperPath: eventWake.helperPath,
@@ -101,6 +158,7 @@ function validateEventWake(eventWake) {
     actorProfile: eventWake.actorProfile,
     ensureBeforeWatch: eventWake.ensureBeforeWatch,
     profiles,
+    drains,
   });
 }
 
@@ -113,7 +171,7 @@ export function createClientSupervisor({
   createWake = createWakeRuntime,
   createWatchTransport = createHelperWatchTransport,
   ensureWatchGrant = ensureHelperWatchGrant,
-  createHarness = createFakeHarness,
+  createHarness = createMailboxHarness,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
   maxIdlePollIntervalMs = 300_000,
@@ -174,15 +232,28 @@ export function createClientSupervisor({
     return Object.freeze({ instanceId: instance.instanceId, worker });
   });
 
+  const clients = new Map();
+  const runners = new Map();
   if (wakeConfig) {
     for (const profile of wakeConfig.profiles) {
       if (seen.has(profile.instanceId)) {
         throw new TypeError("eventWake instanceId collides with a worker instance");
       }
     }
+    for (const drain of wakeConfig.drains) {
+      const context = Object.freeze({ instanceId: drain.instanceId });
+      const deliveryClient = createDeliveryClient({ ...drain.mailbox }, context);
+      // Ungated: profile-scheduler holds the shared gate around harness preflight/run.
+      const adapterRunner = createRunner(drain.runnerConfig, context);
+      if (!adapterRunner || typeof adapterRunner.run !== "function") {
+        throw new TypeError("createRunner must return a runner");
+      }
+      clients.set(drain.instanceId, deliveryClient);
+      runners.set(drain.instanceId, adapterRunner);
+    }
   }
 
-  const harness = wakeConfig ? createHarness() : null;
+  const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
     ? createWatchTransport({
       helperPath: wakeConfig.helperPath,

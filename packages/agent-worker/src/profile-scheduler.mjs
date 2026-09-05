@@ -35,6 +35,84 @@ export function createFakeHarness({
   });
 }
 
+/**
+ * Real mailbox drain harness for event-driven wakes.
+ * Reuses mailbox-client claim / reconcile / ack via listUnread +
+ * completeAndAcknowledge. Callers must pass ungated runners: the profile
+ * scheduler already holds the shared reasoning gate around preflight/run.
+ */
+export function createMailboxHarness({
+  clients,
+  runners,
+  logger = console,
+} = {}) {
+  if (!(clients instanceof Map) || !(runners instanceof Map)) {
+    throw new TypeError("clients and runners Maps are required");
+  }
+  if (clients.size === 0 || runners.size === 0 || clients.size !== runners.size) {
+    throw new TypeError("clients and runners must cover the same non-empty instance set");
+  }
+  for (const instanceId of clients.keys()) {
+    if (!runners.has(instanceId)) {
+      throw new TypeError("clients and runners instance sets must match");
+    }
+  }
+  for (const instanceId of runners.keys()) {
+    if (!clients.has(instanceId)) {
+      throw new TypeError("clients and runners instance sets must match");
+    }
+  }
+
+  function resolve(instanceId) {
+    if (typeof instanceId !== "string" || instanceId.length === 0) {
+      throw new TypeError("instanceId is required");
+    }
+    const client = clients.get(instanceId);
+    const runner = runners.get(instanceId);
+    if (!client || typeof client.listUnread !== "function" || typeof client.completeAndAcknowledge !== "function") {
+      throw new TypeError("mailbox harness has no delivery client for instance");
+    }
+    if (!runner || typeof runner.run !== "function") {
+      throw new TypeError("mailbox harness has no runner for instance");
+    }
+    return { client, runner };
+  }
+
+  return Object.freeze({
+    async preflight({ instanceId } = {}) {
+      const { client } = resolve(instanceId);
+      const messages = await client.listUnread();
+      if (!Array.isArray(messages)) {
+        throw new TypeError("deliveryClient.listUnread must return an array");
+      }
+      return messages.length > 0;
+    },
+
+    async run({ instanceId } = {}) {
+      const { client, runner } = resolve(instanceId);
+      let processed = 0;
+      while (true) {
+        const messages = await client.listUnread();
+        if (!Array.isArray(messages)) {
+          throw new TypeError("deliveryClient.listUnread must return an array");
+        }
+        if (messages.length === 0) {
+          return { status: "drained", processed };
+        }
+        const completion = await client.completeAndAcknowledge(
+          messages[0],
+          (request, options) => runner.run(request, options),
+        );
+        if (completion?.claimed === false) {
+          logger.error?.("triangle_mailbox_harness_claim_conflict", { instanceId });
+          return { status: "claim_conflict", processed };
+        }
+        processed += 1;
+      }
+    },
+  });
+}
+
 export function createProfileScheduler({
   gate,
   harness,

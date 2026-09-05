@@ -7,6 +7,35 @@ import { createAgentWorker } from "../src/runtime.mjs";
 
 const id = (index) => index.toString(16).padStart(64, "0");
 
+function wakeDrain(instanceIndex, digit = "e") {
+  const instanceId = id(instanceIndex);
+  const agentId = `agent_${digit.repeat(32)}`;
+  return {
+    instanceId,
+    mailbox: {
+      meshUrl: "https://mesh.example",
+      meshToken: `mesh_${digit.repeat(64)}`,
+      recipientId: agentId,
+      pageLimit: 1,
+    },
+    runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+    runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: instanceId },
+  };
+}
+
+function eventWakeFixture(profileIndex = 2, digit = "e") {
+  const drain = wakeDrain(profileIndex, digit);
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/wake-cursor.json",
+    actorProfile: "event-hermes",
+    ensureBeforeWatch: true,
+    profiles: [{ instanceId: drain.instanceId, agentId: drain.mailbox.recipientId }],
+    drains: [drain],
+  };
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -322,14 +351,7 @@ test("supervisor launches eventWake listener beside worker loops with shared gat
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
     }],
-    eventWake: {
-      installationId: "inst_N7VhDq3mQ2",
-      helperPath: "/trusted/triangle-mailbox",
-      cursorPath: "/private/wake-cursor.json",
-      actorProfile: "event-hermes",
-      ensureBeforeWatch: true,
-      profiles: [{ instanceId: id(2), agentId: "agent_event" }],
-    },
+    eventWake: eventWakeFixture(2),
     createDeliveryClient: () => ({}),
     createRunner: () => ({
       async run() {
@@ -360,14 +382,16 @@ test("supervisor launches eventWake listener beside worker loops with shared gat
       ensureCalls.push(options);
       return { ensured: true };
     },
-    createHarness() {
+    createHarness({ clients, runners }) {
+      assert.equal(clients.has(id(2)), true);
+      assert.equal(runners.has(id(2)), true);
       return {
         async preflight() { return false; },
         async run() { return { status: "drained" }; },
       };
     },
     createWake({ profiles, transport, gate: sharedGate, harness, cursorPath }) {
-      assert.deepEqual(profiles, [{ instanceId: id(2), agentId: "agent_event" }]);
+      assert.deepEqual(profiles, [{ instanceId: id(2), agentId: `agent_${"e".repeat(32)}` }]);
       assert.equal(cursorPath, "/private/wake-cursor.json");
       assert.equal(typeof transport.poll, "function");
       assert.equal(typeof harness.preflight, "function");
@@ -421,14 +445,7 @@ test("supervisor fails closed when watch-ensure preflight fails before worker lo
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
     }],
-    eventWake: {
-      installationId: "inst_N7VhDq3mQ2",
-      helperPath: "/trusted/triangle-mailbox",
-      cursorPath: "/private/wake-cursor.json",
-      actorProfile: "event-hermes",
-      ensureBeforeWatch: true,
-      profiles: [{ instanceId: id(2), agentId: "agent_event" }],
-    },
+    eventWake: eventWakeFixture(2),
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
     createWorker() {
@@ -446,6 +463,10 @@ test("supervisor fails closed when watch-ensure preflight fails before worker lo
       error.code = "helper_unavailable";
       throw error;
     },
+    createHarness: () => ({
+      async preflight() { return false; },
+      async run() { return { status: "drained" }; },
+    }),
     createWake: () => ({
       async start() { throw new Error("wake must not start"); },
     }),
@@ -467,19 +488,71 @@ test("supervisor rejects eventWake collision with worker instance ids", () => {
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
-    eventWake: {
-      installationId: "inst_N7VhDq3mQ2",
-      helperPath: "/trusted/triangle-mailbox",
-      cursorPath: "/private/wake-cursor.json",
-      actorProfile: "event-hermes",
-      ensureBeforeWatch: true,
-      profiles: [{ instanceId: id(1), agentId: "agent_event" }],
-    },
+    eventWake: eventWakeFixture(1, "1"),
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
     createWorker: () => ({ async watch() {}, async runOnce() {} }),
     createWake: () => ({ async start() {} }),
     createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
     ensureWatchGrant: async () => ({ ensured: true }),
+    createHarness: () => ({
+      async preflight() { return false; },
+      async run() {},
+    }),
   }), /collides/i);
+});
+
+test("supervisor builds real mailbox harness clients without double-gating drain runners", async () => {
+  const gateEntries = [];
+  let harnessRunnerCalls = 0;
+  const supervisor = createClientSupervisor({
+    instances: [],
+    eventWake: eventWakeFixture(2),
+    createDeliveryClient(options) {
+      assert.equal(options.meshToken, `mesh_${"e".repeat(64)}`);
+      let remaining = 1;
+      return {
+        async listUnread() {
+          if (remaining <= 0) return [];
+          return [{ messageId: "pending" }];
+        },
+        async completeAndAcknowledge(_message, generate) {
+          remaining -= 1;
+          await generate({ text: "hi" });
+          return { reconciled: false, acknowledged: true };
+        },
+      };
+    },
+    createRunner() {
+      return {
+        async run() {
+          harnessRunnerCalls += 1;
+          return { status: "completed", text: "ok" };
+        },
+      };
+    },
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createWake({ gate, harness }) {
+      return {
+        async start() {
+          await gate.run(async () => {
+            gateEntries.push("wake");
+            assert.equal(await harness.preflight({ instanceId: id(2) }), true);
+            const result = await harness.run({ instanceId: id(2) });
+            assert.deepEqual(result, { status: "drained", processed: 1 });
+          });
+          return { cycles: 1, cursor: 1 };
+        },
+      };
+    },
+    maxConcurrentReasoners: 1,
+    logger: { error() {} },
+  });
+
+  const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
+  assert.equal(result.eventWake?.cycles, 1);
+  assert.equal(harnessRunnerCalls, 1);
+  assert.deepEqual(gateEntries, ["wake"]);
 });

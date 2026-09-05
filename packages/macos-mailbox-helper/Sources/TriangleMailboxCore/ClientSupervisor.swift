@@ -217,6 +217,14 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.noEligibleInstances
         }
 
+        var allMailboxTokens = prepared.map(\.mailbox.meshToken)
+        if let eventWake {
+            allMailboxTokens.append(contentsOf: eventWake.drains.map(\.mailbox.meshToken))
+        }
+        guard Set(allMailboxTokens).count == allMailboxTokens.count else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
         let document = PreparedBootstrap(
             version: 1,
             maxConcurrentReasoners: 2,
@@ -259,7 +267,16 @@ public struct ClientSupervisor: Sendable {
         }
 
         var profiles: [PreparedEventWakeProfile] = []
+        var drains: [PreparedBootstrapInstance] = []
         for instance in wakeMembers.sorted(by: { $0.profile.value < $1.profile.value }) {
+            let command: WorkerCommand
+            do {
+                command = try resolver.resolveAdapter(for: instance)
+                try validateAdapterBeforeCredential(command, instance: instance)
+            } catch {
+                omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "runtime_ineligible"))
+                continue
+            }
             let credential: VerifiedCredential
             do {
                 credential = try await gate.credential(for: instance.profile)
@@ -267,12 +284,33 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
+            try validateAdapterSecretConfinement(command, credential: credential)
+            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             profiles.append(PreparedEventWakeProfile(
                 instanceId: instance.instanceID.value,
                 agentId: credential.agentID.value
             ))
+            drains.append(PreparedBootstrapInstance(
+                instanceId: instance.instanceID.value,
+                mailbox: PreparedBootstrapMailbox(
+                    meshUrl: credential.origin.value,
+                    meshToken: credential.binding.token.secretValue,
+                    recipientId: credential.agentID.value,
+                    pageLimit: 1,
+                    workloadId: workloadRecord?.workloadID?.value,
+                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
+                ),
+                runner: PreparedBootstrapRunner(
+                    command: command.executable.path,
+                    args: command.arguments,
+                    timeoutMs: Self.maximumRunnerTimeoutMilliseconds
+                ),
+                runnerEnvironment: command.environment
+            ))
         }
-        guard !profiles.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
+        guard !profiles.isEmpty, profiles.count == drains.count else {
+            throw ClientSupervisorError.noEligibleInstances
+        }
         let actorProfile = wakeMembers
             .filter { member in profiles.contains { $0.instanceId == member.instanceID.value } }
             .map(\.profile.value)
@@ -285,7 +323,8 @@ public struct ClientSupervisor: Sendable {
             cursorPath: wakeCursorURL.path,
             actorProfile: actorProfile,
             ensureBeforeWatch: true,
-            profiles: profiles
+            profiles: profiles,
+            drains: drains
         )
     }
 
@@ -386,6 +425,7 @@ private struct PreparedEventWakeBootstrap: Encodable {
     let actorProfile: String
     let ensureBeforeWatch: Bool
     let profiles: [PreparedEventWakeProfile]
+    let drains: [PreparedBootstrapInstance]
 }
 private struct PreparedEventWakeProfile: Encodable {
     let instanceId: String
