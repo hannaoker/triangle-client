@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
@@ -7,7 +10,11 @@ import {
   createProfileScheduler,
   createWakeRuntime,
 } from "../src/profile-scheduler.mjs";
-import { createMemoryCursorStore, createWakeClient } from "../src/wake-client.mjs";
+import {
+  createAtomicFileCursorStore,
+  createMemoryCursorStore,
+  createWakeClient,
+} from "../src/wake-client.mjs";
 
 const id = (index) => index.toString(16).padStart(64, "0");
 
@@ -16,6 +23,17 @@ function deferred() {
   let reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+
+function tempCursorPath() {
+  const root = mkdtempSync(path.join(tmpdir(), "triangle-wake-cursor-"));
+  return {
+    root,
+    filePath: path.join(root, "Library", "Application Support", "The Triangle", "client", "wake-cursor.json"),
+    cleanup() {
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
 }
 
 test("wake client coalesces bursts and persists the newest cursor per profile", async () => {
@@ -251,4 +269,138 @@ test("ten-profile wake runtime multiplexes one transport and runs startup reconc
   const drains = harness.calls.filter((call) => call.type === "drain");
   assert.equal(drains.length >= 10, true);
   assert.equal(new Set(drains.map((call) => call.instanceId)).size, 10);
+});
+
+test("atomic file cursor store survives reload after a durable write", async () => {
+  const fixture = tempCursorPath();
+  try {
+    const store = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    assert.equal(await store.read(), 0);
+    await store.write(17);
+    const reloaded = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    assert.equal(await reloaded.read(), 17);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("crash after cursor persist and before drain keeps the advanced cursor on restart", async () => {
+  // Expected: flush writes the cursor before onWake; a crash mid-drain must not
+  // roll the on-disk cursor backward, so restart resumes at the persisted watermark.
+  const fixture = tempCursorPath();
+  try {
+    const store = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    await store.write(2);
+    const enteredDrain = deferred();
+    const releaseDrain = deferred();
+    const client = createWakeClient({
+      profiles: [{ instanceId: id(1), agentId: "agent_a" }],
+      transport: {
+        async poll() {
+          return {
+            cursor: 9,
+            events: [{ agent_id: "agent_a", high_watermark: 9 }],
+          };
+        },
+      },
+      cursorStore: store,
+      coalesceMs: 1,
+      onWake: async () => {
+        enteredDrain.resolve();
+        await releaseDrain.promise;
+      },
+    });
+    await client.runOnce();
+    await enteredDrain.promise;
+    assert.equal(await store.read(), 9);
+
+    const reloaded = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    assert.equal(await reloaded.read(), 9);
+
+    releaseDrain.resolve();
+    await client.stop();
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("crash before cursor persist does not advance past the unpersisted cursor on restart", async () => {
+  // Expected: a process that advances only an in-memory cursor (crash before the
+  // atomic file write) leaves the on-disk value unchanged; restart resumes there.
+  const fixture = tempCursorPath();
+  try {
+    const durable = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    await durable.write(4);
+    const ephemeral = createMemoryCursorStore(4);
+    const client = createWakeClient({
+      profiles: [{ instanceId: id(1), agentId: "agent_a" }],
+      transport: {
+        async poll() {
+          return {
+            cursor: 12,
+            events: [{ agent_id: "agent_a", high_watermark: 12 }],
+          };
+        },
+      },
+      cursorStore: ephemeral,
+      coalesceMs: 1,
+      onWake: async () => {},
+    });
+    await client.runOnce();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(await ephemeral.read(), 12);
+    assert.equal(await durable.read(), 4);
+
+    const reloaded = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    assert.equal(await reloaded.read(), 4);
+    await client.stop();
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("createWakeRuntime accepts cursorPath and reloads the file store after restart", async () => {
+  const fixture = tempCursorPath();
+  try {
+    const profiles = [{ instanceId: id(1), agentId: "agent_a" }];
+    const harness = createFakeHarness();
+    const transport = {
+      async poll() {
+        return {
+          cursor: 6,
+          events: [{ agent_id: "agent_a", high_watermark: 6 }],
+        };
+      },
+    };
+    const first = createWakeRuntime({
+      profiles,
+      transport,
+      gate: createConcurrencyGate({ limit: 1 }),
+      harness,
+      cursorPath: fixture.filePath,
+      coalesceMs: 1,
+    });
+    await first.wake.runOnce();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await first.scheduler.idle();
+    assert.equal(await first.cursorStore.read(), 6);
+
+    const second = createWakeRuntime({
+      profiles,
+      transport: {
+        async poll({ cursor }) {
+          assert.equal(cursor, 6);
+          return { cursor: 6, events: [] };
+        },
+      },
+      gate: createConcurrencyGate({ limit: 1 }),
+      harness: createFakeHarness(),
+      cursorPath: fixture.filePath,
+      coalesceMs: 1,
+    });
+    assert.equal(await second.cursorStore.read(), 6);
+    await second.wake.runOnce();
+  } finally {
+    fixture.cleanup();
+  }
 });

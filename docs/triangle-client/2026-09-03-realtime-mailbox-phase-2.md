@@ -27,6 +27,7 @@ See the shared completion bar:
 - Registry allowlist accepts `event-driven`
 - Node `wake-client.mjs`: cursor store, coalesce, resync handling, startup reconcile
 - Node `profile-scheduler.mjs`: single-flight, dirty-after-turn, shared gate, fake harness
+- Atomic on-disk wake cursor store (`createAtomicFileCursorStore`) with restart recovery tests; supervisor wake launch and helper watch-grant transport remain open
 - Focused `wake-scheduler.test.mjs` coverage
 
 ## Not yet (blocks Status: Complete)
@@ -34,7 +35,7 @@ See the shared completion bar:
 Production wiring:
 
 - Signed MESH watch-grant transport through the macOS credential helper
-- Atomic on-disk wake cursor persistence and restart recovery
+- Wire atomic wake cursor into supervisor/production launch (store landed; end-to-end restart recovery with helper grant still open)
 - `event-driven` profiles in the private supervisor bootstrap
 - Wake listener launched alongside worker loops
 - Scheduler preflight/drain connected to the real mailbox client and shared

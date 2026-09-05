@@ -4,6 +4,10 @@
  * owns cursor persistence, coalescing, and fan-out to the profile scheduler.
  */
 
+import { randomUUID } from "node:crypto";
+import { open, mkdir, readFile, rename, unlink } from "node:fs/promises";
+import path from "node:path";
+
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 
@@ -26,6 +30,101 @@ export function createMemoryCursorStore(initial = 0) {
     },
     async write(next) {
       cursor = positiveInteger(next, "cursor", 0);
+      return cursor;
+    },
+  });
+}
+
+/**
+ * Durable wake cursor under a configurable path (Application Support–style or
+ * test temp). Mirrors helper semantics: write temp → fsync → rename → fsync
+ * parent directory where the platform allows.
+ */
+export function createAtomicFileCursorStore({ filePath, initial = 0 } = {}) {
+  if (typeof filePath !== "string" || filePath.length === 0) {
+    throw new TypeError("filePath is required");
+  }
+  const resolvedPath = path.resolve(filePath);
+  const directory = path.dirname(resolvedPath);
+  let cursor = null;
+  let loaded = false;
+
+  async function ensureLoaded() {
+    if (loaded) return;
+    try {
+      const raw = await readFile(resolvedPath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") {
+        throw new TypeError("wake cursor file is invalid");
+      }
+      cursor = positiveInteger(parsed.cursor, "cursor", 0);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        cursor = positiveInteger(initial, "initial", 0);
+      } else if (error instanceof SyntaxError) {
+        throw new TypeError("wake cursor file is invalid");
+      } else {
+        throw error;
+      }
+    }
+    loaded = true;
+  }
+
+  async function syncDirectory() {
+    try {
+      const handle = await open(directory, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      // Parent-dir fsync is best-effort where unsupported.
+      if (
+        error?.code === "EINVAL"
+        || error?.code === "ENOTSUP"
+        || error?.code === "EISDIR"
+        || error?.code === "EPERM"
+      ) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function atomicWrite(value) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = path.join(directory, `.tmp-wake-cursor-${randomUUID().toLowerCase()}`);
+    let installed = false;
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify({ cursor: value })}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, resolvedPath);
+      installed = true;
+      await syncDirectory();
+    } finally {
+      if (!installed) {
+        await unlink(temporary).catch(() => {});
+      }
+    }
+  }
+
+  return Object.freeze({
+    filePath: resolvedPath,
+    async read() {
+      await ensureLoaded();
+      return cursor;
+    },
+    async write(next) {
+      await ensureLoaded();
+      const value = positiveInteger(next, "cursor", 0);
+      await atomicWrite(value);
+      cursor = value;
       return cursor;
     },
   });
