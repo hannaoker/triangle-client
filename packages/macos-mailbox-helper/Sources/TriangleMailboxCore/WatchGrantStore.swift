@@ -171,7 +171,7 @@ public final class KeychainWatchGrantStore: WatchGrantStore, @unchecked Sendable
             throw WatchGrantStoreError.replacementNotConfirmed
         }
         let attributes: [CFString: Any] = [kSecValueData: try encode(binding)]
-        var query = WatchGrantKeychainQueryBuilder.updateQuery(for: binding.installationID)
+        let query = WatchGrantKeychainQueryBuilder.updateQuery(for: binding.installationID)
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound || status == -34018 {
             let fallbackStatus = SecItemUpdate(KeychainLegacyAccess.legacyQuery(from: query) as CFDictionary, attributes as CFDictionary)
@@ -185,7 +185,7 @@ public final class KeychainWatchGrantStore: WatchGrantStore, @unchecked Sendable
     }
 
     public func delete(for installationID: InstallationID) throws {
-        var query = WatchGrantKeychainQueryBuilder.deleteQuery(for: installationID)
+        let query = WatchGrantKeychainQueryBuilder.deleteQuery(for: installationID)
         var status = SecItemDelete(query as CFDictionary)
         if status == errSecItemNotFound || status == -34018 {
             let fallbackStatus = SecItemDelete(KeychainLegacyAccess.legacyQuery(from: query) as CFDictionary)

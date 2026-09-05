@@ -226,11 +226,15 @@ public struct MeshWatchClient: Sendable {
     }
 
     private func send(_ request: MeshHTTPRequest, origin: MeshOrigin) async throws -> MeshHTTPResponse {
-        guard request.url.scheme?.lowercased() == "https" || origin.value.hasPrefix("http://127.0.0.1") || origin.value.hasPrefix("http://localhost") || origin.value.hasPrefix("http://[::1]") else {
-            // Production MeshTransport still rejects plaintext; tests may use loopback HTTP origins.
-            if request.url.scheme?.lowercased() != "https" {
-                // Allow the injected transport to decide; URLSessionMeshTransport fails closed.
-            }
+        let scheme = request.url.scheme?.lowercased()
+        let isHTTPS = scheme == "https"
+        let isLoopbackHTTP = scheme == "http" && (
+            origin.value.hasPrefix("http://127.0.0.1")
+                || origin.value.hasPrefix("http://localhost")
+                || origin.value.hasPrefix("http://[::1]")
+        )
+        guard isHTTPS || isLoopbackHTTP else {
+            throw MeshWatchClientError.plaintextOrigin
         }
         do {
             return try await transport.send(request)
