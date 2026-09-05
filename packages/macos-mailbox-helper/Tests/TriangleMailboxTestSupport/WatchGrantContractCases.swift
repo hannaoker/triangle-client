@@ -407,76 +407,76 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     }
 
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        lock.lock()
-        defer { lock.unlock() }
-        paths.append(request.url.path)
-        if let body = String(data: request.body, encoding: .utf8) {
-            loggedBodies.append("<redacted:\(body.count)>")
-        }
-        let path = request.url.path
-        if path == "/api/v1/mailbox/watch/grants" && request.method == "POST" {
-            let requested: [String]
-            if let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
-               let agentIDs = object["agent_ids"] as? [String]
-            {
-                requested = agentIDs.sorted()
-            } else {
-                requested = [actorAgentID.value, memberAgentID.value].sorted()
+        try lock.withLock {
+            paths.append(request.url.path)
+            if let body = String(data: request.body, encoding: .utf8) {
+                loggedBodies.append("<redacted:\(body.count)>")
             }
-            let body = Data("""
-            {"grant_id":"\(grantID)","installation_id":"\(installationID.value)","agent_ids":\(jsonArray(requested)),"staging_credential":"\(stagedCredential)","expires_at":"2099-01-01T00:00:00.000Z","audience":"mesh-mailbox-watch","purpose":"notification-only"}
-            """.utf8)
-            return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        if path.hasSuffix("/join") {
-            let body = Data("""
-            {"grant_id":"\(grantID)","agent_id":"\(actorAgentID.value)","state":"proven"}
-            """.utf8)
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        if path.hasSuffix("/finalize") {
-            let body = Data("""
-            {"grant_id":"\(grantID)","watch_credential":"\(watchCredential)","audience":"mesh-mailbox-watch","purpose":"notification-only"}
-            """.utf8)
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        if path.hasSuffix("/revoke") {
-            let body = Data(#"{"state":"revoked"}"#.utf8)
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        if path == "/api/v1/mailbox/watch" {
-            switch nextPoll {
-            case .success(let response):
-                let events = response.events.map {
-                    "{\"agent_id\":\"\($0.agentID)\",\"high_watermark\":\($0.highWatermark)}"
-                }.joined(separator: ",")
-                let body = Data("{\"cursor\":\(response.cursor),\"events\":[\(events)]}".utf8)
+            let path = request.url.path
+            if path == "/api/v1/mailbox/watch/grants" && request.method == "POST" {
+                let requested: [String]
+                if let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                   let agentIDs = object["agent_ids"] as? [String]
+                {
+                    requested = agentIDs.sorted()
+                } else {
+                    requested = [actorAgentID.value, memberAgentID.value].sorted()
+                }
+                let body = Data("""
+                {"grant_id":"\(grantID)","installation_id":"\(installationID.value)","agent_ids":\(jsonArray(requested)),"staging_credential":"\(stagedCredential)","expires_at":"2099-01-01T00:00:00.000Z","audience":"mesh-mailbox-watch","purpose":"notification-only"}
+                """.utf8)
+                return MeshHTTPResponse(statusCode: 201, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+            }
+            if path.hasSuffix("/join") {
+                let body = Data("""
+                {"grant_id":"\(grantID)","agent_id":"\(actorAgentID.value)","state":"proven"}
+                """.utf8)
                 return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-            case .resync(let restart):
-                let body = Data("{\"error\":\"resync_required\",\"restart_cursor\":\(restart),\"message\":\"Watch cursor is below the retained floor.\"}".utf8)
-                return MeshHTTPResponse(statusCode: 409, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
             }
+            if path.hasSuffix("/finalize") {
+                let body = Data("""
+                {"grant_id":"\(grantID)","watch_credential":"\(watchCredential)","audience":"mesh-mailbox-watch","purpose":"notification-only"}
+                """.utf8)
+                return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+            }
+            if path.hasSuffix("/revoke") {
+                let body = Data(#"{"state":"revoked"}"#.utf8)
+                return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+            }
+            if path == "/api/v1/mailbox/watch" {
+                switch nextPoll {
+                case .success(let response):
+                    let events = response.events.map {
+                        "{\"agent_id\":\"\($0.agentID)\",\"high_watermark\":\($0.highWatermark)}"
+                    }.joined(separator: ",")
+                    let body = Data("{\"cursor\":\(response.cursor),\"events\":[\(events)]}".utf8)
+                    return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+                case .resync(let restart):
+                    let body = Data("{\"error\":\"resync_required\",\"restart_cursor\":\(restart),\"message\":\"Watch cursor is below the retained floor.\"}".utf8)
+                    return MeshHTTPResponse(statusCode: 409, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+                }
+            }
+            if path == "/api/v1/agents/me" {
+                let auth = request.headers["Authorization"] ?? ""
+                let isMember = auth.contains(String(repeating: "b", count: 64))
+                let agentID = isMember ? memberAgentID.value : actorAgentID.value
+                let handle = isMember ? "hermes-mailbox-live" : "codex-mailbox-live"
+                let name = isMember ? "Hermes" : "Codex"
+                let body = Data("""
+                {"agent":{"id":"\(agentID)","name":"\(name)","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
+                """.utf8)
+                return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+            }
+            if path.hasPrefix("/api/v1/agents/") {
+                let agentID = path.split(separator: "/").last.map(String.init) ?? actorAgentID.value
+                let handle = agentID == memberAgentID.value ? "hermes-mailbox-live" : "codex-mailbox-live"
+                let body = Data("""
+                {"agent":{"id":"\(agentID)","name":"Agent","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
+                """.utf8)
+                return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
+            }
+            throw MeshClientError.transportUnavailable
         }
-        if path == "/api/v1/agents/me" {
-            let auth = request.headers["Authorization"] ?? ""
-            let isMember = auth.contains(String(repeating: "b", count: 64))
-            let agentID = isMember ? memberAgentID.value : actorAgentID.value
-            let handle = isMember ? "hermes-mailbox-live" : "codex-mailbox-live"
-            let name = isMember ? "Hermes" : "Codex"
-            let body = Data("""
-            {"agent":{"id":"\(agentID)","name":"\(name)","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
-            """.utf8)
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        if path.hasPrefix("/api/v1/agents/") {
-            let agentID = path.split(separator: "/").last.map(String.init) ?? actorAgentID.value
-            let handle = agentID == memberAgentID.value ? "hermes-mailbox-live" : "codex-mailbox-live"
-            let body = Data("""
-            {"agent":{"id":"\(agentID)","name":"Agent","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
-            """.utf8)
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
-        throw MeshClientError.transportUnavailable
     }
 
     private func jsonArray(_ values: [String]) -> String {
