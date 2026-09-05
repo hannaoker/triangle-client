@@ -20,12 +20,14 @@ const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
   "actorProfile",
   "cursorPath",
+  "drains",
   "ensureBeforeWatch",
   "helperPath",
   "installationId",
   "profiles",
 ];
 const EXACT_EVENT_WAKE_PROFILE_KEYS = ["agentId", "instanceId"];
+const EXACT_EVENT_WAKE_DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const ACTIVATION_TIMEOUT_MS = 30_000;
 
 function invalidBootstrap() {
@@ -203,30 +205,39 @@ function validateInstance(instance, seen) {
   }
 }
 
+function mailboxOwnerOutsideValues(owner, includeSecrets) {
+  const values = [
+    owner.instanceId,
+    owner.mailbox.meshUrl,
+    owner.mailbox.recipientId,
+    owner.mailbox.workloadId,
+    owner.runner.command,
+    ...owner.runner.args,
+    ...Object.keys(owner.runnerEnvironment),
+    ...Object.values(owner.runnerEnvironment),
+  ].filter(Boolean);
+  if (includeSecrets) {
+    values.push(owner.mailbox.meshToken);
+    if (owner.mailbox.workloadPrivateKey) {
+      values.push(owner.mailbox.workloadPrivateKey);
+    }
+  }
+  return values;
+}
+
 function assertMailboxTokensAreConfined(instances, eventWake) {
-  for (const [ownerIndex, owner] of instances.entries()) {
+  const owners = [
+    ...instances,
+    ...(eventWake?.drains ?? []),
+  ];
+  for (const [ownerIndex, owner] of owners.entries()) {
     const secrets = [owner.mailbox.meshToken];
     if (owner.mailbox.workloadPrivateKey) {
       secrets.push(owner.mailbox.workloadPrivateKey);
     }
     for (const secret of secrets) {
-      for (const [instanceIndex, instance] of instances.entries()) {
-        const outsideValues = [
-          instance.instanceId,
-          instance.mailbox.meshUrl,
-          instance.mailbox.recipientId,
-          instance.mailbox.workloadId,
-          instance.runner.command,
-          ...instance.runner.args,
-          ...Object.keys(instance.runnerEnvironment),
-          ...Object.values(instance.runnerEnvironment),
-        ].filter(Boolean);
-        if (ownerIndex !== instanceIndex) {
-          outsideValues.push(instance.mailbox.meshToken);
-          if (instance.mailbox.workloadPrivateKey) {
-            outsideValues.push(instance.mailbox.workloadPrivateKey);
-          }
-        }
+      for (const [instanceIndex, instance] of owners.entries()) {
+        const outsideValues = mailboxOwnerOutsideValues(instance, ownerIndex !== instanceIndex);
         for (const candidate of outsideValues) {
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
@@ -265,11 +276,14 @@ function validateEventWake(eventWake, seenWorkerIds) {
     || !Array.isArray(eventWake.profiles)
     || eventWake.profiles.length < 1
     || eventWake.profiles.length > 100
+    || !Array.isArray(eventWake.drains)
+    || eventWake.drains.length !== eventWake.profiles.length
   ) {
     throw invalidBootstrap();
   }
   const seenInstances = new Set();
   const seenAgents = new Set();
+  const agentByInstance = new Map();
   for (const profile of eventWake.profiles) {
     if (!hasExactKeys(profile, EXACT_EVENT_WAKE_PROFILE_KEYS)) throw invalidBootstrap();
     if (!INSTANCE_ID.test(profile.instanceId) || typeof profile.agentId !== "string" || !AGENT_ID.test(profile.agentId)) {
@@ -284,7 +298,17 @@ function validateEventWake(eventWake, seenWorkerIds) {
     }
     seenInstances.add(profile.instanceId);
     seenAgents.add(profile.agentId);
+    agentByInstance.set(profile.instanceId, profile.agentId);
   }
+  const seenDrains = new Set();
+  for (const drain of eventWake.drains) {
+    if (!hasExactKeys(drain, EXACT_EVENT_WAKE_DRAIN_KEYS)) throw invalidBootstrap();
+    validateInstance(drain, seenDrains);
+    if (!agentByInstance.has(drain.instanceId) || drain.mailbox.recipientId !== agentByInstance.get(drain.instanceId)) {
+      throw invalidBootstrap();
+    }
+  }
+  if (seenDrains.size !== seenInstances.size) throw invalidBootstrap();
 }
 
 export function parseClientSupervisorBootstrap(text) {

@@ -59,13 +59,35 @@ function capture() {
 }
 
 function eventWake(overrides = {}) {
+  const wakeId = instanceId("e");
+  const agentId = `agent_${"e".repeat(32)}`;
   return {
     installationId: "inst_N7VhDq3mQ2",
     helperPath: "/trusted/triangle-mailbox",
     cursorPath: "/private/client/wake-cursor.json",
     actorProfile: "event-hermes",
     ensureBeforeWatch: true,
-    profiles: [{ instanceId: instanceId("e"), agentId: "agent_event_hermes" }],
+    profiles: [{ instanceId: wakeId, agentId }],
+    drains: [{
+      instanceId: wakeId,
+      mailbox: {
+        meshUrl: "https://mesh.example",
+        meshToken: `mesh_${"e".repeat(64)}`,
+        recipientId: agentId,
+        pageLimit: 1,
+      },
+      runner: {
+        command: "/trusted/bin/node",
+        args: ["/trusted/hermes-runner.mjs"],
+        timeoutMs: 600_000,
+      },
+      runnerEnvironment: {
+        TRIANGLE_INSTANCE_ID: wakeId,
+        TRIANGLE_PROJECT_ROOT: "/trusted/release",
+        HERMES_CLI: "/trusted/bin/hermes",
+        HERMES_HOME: `/private/model-state/${wakeId}`,
+      },
+    }],
     ...overrides,
   };
 }
@@ -128,7 +150,27 @@ test("bootstrap accepts eventWake beside worker instances and rejects unsafe wak
     bootstrap({
       eventWake: {
         ...eventWake(),
-        profiles: [{ instanceId: instanceId("e"), agentId: "agent_event_hermes", mailboxToken: "mesh_x" }],
+        profiles: [{ instanceId: instanceId("e"), agentId: `agent_${"e".repeat(32)}`, mailboxToken: "mesh_x" }],
+      },
+    }),
+    bootstrap({
+      eventWake: {
+        ...eventWake(),
+        drains: [],
+      },
+    }),
+    bootstrap({
+      eventWake: {
+        ...(() => {
+          const wake = eventWake();
+          return {
+            ...wake,
+            drains: [{
+              ...wake.drains[0],
+              mailbox: { ...wake.drains[0].mailbox, recipientId: `agent_${"f".repeat(32)}` },
+            }],
+          };
+        })(),
       },
     }),
   ]) {

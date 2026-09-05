@@ -259,10 +259,16 @@ public enum ClientSupervisorContractCases {
         try expect(eventWake.helperPath.hasSuffix("/triangle-mailbox"), "helper path missing from eventWake")
         try expect(eventWake.cursorPath.hasSuffix("/wake-cursor.json"), "cursor path missing from eventWake")
         try expect(eventWake.installationId.hasPrefix("inst_"), "installation id missing from eventWake")
+        try expect(eventWake.drains.count == 1, "eventWake drain count changed")
+        try expect(eventWake.drains[0].instanceId == eventWake.profiles[0].instanceId, "drain instance crossed profiles")
+        try expect(eventWake.drains[0].mailbox.recipientId == fixture.specifications[1].agentID.value, "drain recipient crossed profiles")
+        try expect(eventWake.drains[0].mailbox.meshToken == fixture.specifications[1].token, "drain mailbox token missing")
+        try expect(eventWake.drains[0].runner.args[0].hasSuffix("/hermes-runner.mjs"), "drain runner adapter crossed profiles")
+        try expect(!bootstrap.instances.contains { $0.mailbox.meshToken == fixture.specifications[1].token }, "event-driven token leaked into worker instances")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
         try expect(!raw.contains("mesh_watch_"), "watch credential leaked into bootstrap")
-        try expect(!raw.contains(fixture.specifications[1].token), "event-driven mailbox token reached wake bootstrap")
+        try expect(raw.contains(fixture.specifications[1].token), "event-driven mailbox token missing from drain bootstrap")
     }
 
     public static func mcpInteractiveExcludedFromEventWake() async throws {
@@ -281,6 +287,7 @@ public enum ClientSupervisorContractCases {
         let eventWake = try require(bootstrap.eventWake, "eventWake missing")
         let interactiveID = ClientInstanceID.derive(profile: fixture.specifications[2].profile).value
         try expect(!eventWake.profiles.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into eventWake profiles")
+        try expect(!eventWake.drains.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into eventWake drains")
         try expect(!bootstrap.instances.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into worker instances")
     }
 
@@ -704,6 +711,7 @@ private struct TestEventWake: Decodable {
     let actorProfile: String
     let ensureBeforeWatch: Bool
     let profiles: [TestEventWakeProfile]
+    let drains: [TestBootstrapInstance]
 }
 private struct TestEventWakeProfile: Decodable {
     let instanceId: String
