@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createFakeWatchTransport,
   createHelperWatchTransport,
+  ensureHelperWatchGrant,
 } from "../src/helper-watch-transport.mjs";
 import { createMemoryCursorStore, createWakeClient } from "../src/wake-client.mjs";
 
@@ -130,4 +131,30 @@ test("fake watch transport supports injected resync for unit tests", async () =>
     (error) => error.code === "resync_required" && error.restartCursor === 9,
   );
   assert.deepEqual(await transport.poll({ cursor: 9 }), { cursor: 9, events: [] });
+});
+
+test("ensureHelperWatchGrant invokes watch-ensure and fails closed on non-zero exit", async () => {
+  const calls = [];
+  await ensureHelperWatchGrant({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    actorProfile: "event-hermes",
+    async run(file, args) {
+      calls.push({ file, args });
+      return { code: 0, stdout: "{\"state\":\"finalized\"}\n", stderr: "" };
+    },
+  });
+  assert.deepEqual(calls[0], {
+    file: "/trusted/triangle-mailbox",
+    args: ["watch-ensure", "--installation", "inst_N7VhDq3mQ2", "--actor-profile", "event-hermes"],
+  });
+  await assert.rejects(
+    () => ensureHelperWatchGrant({
+      helperPath: "/trusted/triangle-mailbox",
+      installationId: "inst_N7VhDq3mQ2",
+      actorProfile: "event-hermes",
+      async run() { return { code: 1, stdout: "", stderr: "" }; },
+    }),
+    (error) => error.code === "helper_unavailable",
+  );
 });

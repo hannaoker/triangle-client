@@ -381,7 +381,9 @@ test("createWakeRuntime accepts cursorPath and reloads the file store after rest
       coalesceMs: 1,
     });
     await first.wake.runOnce();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // runOnce only schedules the coalesce flush; stop awaits that flush so the
+    // cursor is durable before we assert or tear down the temp directory.
+    await first.wake.stop();
     await first.scheduler.idle();
     assert.equal(await first.cursorStore.read(), 6);
 
@@ -400,6 +402,7 @@ test("createWakeRuntime accepts cursorPath and reloads the file store after rest
     });
     assert.equal(await second.cursorStore.read(), 6);
     await second.wake.runOnce();
+    await second.wake.stop();
   } finally {
     fixture.cleanup();
   }

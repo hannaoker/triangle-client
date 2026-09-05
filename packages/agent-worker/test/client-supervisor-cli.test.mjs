@@ -58,6 +58,18 @@ function capture() {
   };
 }
 
+function eventWake(overrides = {}) {
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/client/wake-cursor.json",
+    actorProfile: "event-hermes",
+    ensureBeforeWatch: true,
+    profiles: [{ instanceId: instanceId("e"), agentId: "agent_event_hermes" }],
+    ...overrides,
+  };
+}
+
 test("version-1 bootstrap accepts only the bounded exact schema", () => {
   const parsed = parseClientSupervisorBootstrap(JSON.stringify(bootstrap()));
   assert.equal(parsed.version, 1);
@@ -82,6 +94,67 @@ test("version-1 bootstrap accepts only the bounded exact schema", () => {
       /Invalid Triangle Client bootstrap/,
     );
   }
+});
+
+test("bootstrap accepts eventWake beside worker instances and rejects unsafe wake payloads", () => {
+  const withWake = bootstrap({ eventWake: eventWake() });
+  const parsed = parseClientSupervisorBootstrap(JSON.stringify(withWake));
+  assert.deepEqual(parsed.eventWake, eventWake());
+  assert.equal(parsed.instances.length, 1);
+
+  const wakeOnly = {
+    version: 1,
+    maxConcurrentReasoners: 2,
+    instances: [],
+    eventWake: eventWake(),
+  };
+  assert.deepEqual(
+    parseClientSupervisorBootstrap(JSON.stringify(wakeOnly)).eventWake.profiles[0].instanceId,
+    instanceId("e"),
+  );
+
+  for (const candidate of [
+    bootstrap({ eventWake: { ...eventWake(), extra: true } }),
+    bootstrap({ eventWake: { ...eventWake(), installationId: "inst_short" } }),
+    bootstrap({ eventWake: { ...eventWake(), helperPath: "relative/triangle-mailbox" } }),
+    bootstrap({ eventWake: { ...eventWake(), ensureBeforeWatch: "yes" } }),
+    bootstrap({ eventWake: { ...eventWake(), profiles: [] } }),
+    bootstrap({
+      eventWake: {
+        ...eventWake(),
+        profiles: [{ instanceId: instance().instanceId, agentId: "agent_collision" }],
+      },
+    }),
+    bootstrap({
+      eventWake: {
+        ...eventWake(),
+        profiles: [{ instanceId: instanceId("e"), agentId: "agent_event_hermes", mailboxToken: "mesh_x" }],
+      },
+    }),
+  ]) {
+    assert.throws(
+      () => parseClientSupervisorBootstrap(JSON.stringify(candidate)),
+      /Invalid Triangle Client bootstrap/,
+    );
+  }
+});
+
+test("CLI forwards eventWake into supervisor creation", async () => {
+  let received;
+  const stderr = capture();
+  const result = await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify(bootstrap({ eventWake: eventWake() }))]),
+    stderr: stderr.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], eventWake: null }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.deepEqual(received.eventWake, eventWake());
+  assert.equal(stderr.value(), "");
 });
 
 test("bootstrap applies canonical mailbox semantics and bounded Node timer values before supervisor creation", async () => {

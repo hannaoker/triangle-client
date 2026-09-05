@@ -53,16 +53,26 @@ public struct OmittedClientSupervisorInstance: Equatable, Sendable, CustomString
 
 public struct PreparedClientSupervisorLaunch: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let instances: [PreparedClientSupervisorInstance]
+    public let eventWakeProfileCount: Int
     public let omitted: [OmittedClientSupervisorInstance]
     let command: WorkerCommand
     let bootstrap: Data
 
     public var description: String {
-        "PreparedClientSupervisorLaunch(instances: \(instances.count), omitted: \(omitted.count), bootstrap: <redacted>)"
+        "PreparedClientSupervisorLaunch(instances: \(instances.count), eventWakeProfiles: \(eventWakeProfileCount), omitted: \(omitted.count), bootstrap: <redacted>)"
     }
     public var debugDescription: String { description }
     public var customMirror: Mirror {
-        Mirror(self, children: ["instances": instances.count, "omitted": omitted.count, "bootstrap": "<redacted>"], displayStyle: .struct)
+        Mirror(
+            self,
+            children: [
+                "instances": instances.count,
+                "eventWakeProfiles": eventWakeProfileCount,
+                "omitted": omitted.count,
+                "bootstrap": "<redacted>",
+            ],
+            displayStyle: .struct
+        )
     }
 }
 
@@ -76,13 +86,19 @@ public struct ClientSupervisor: Sendable {
     private let workloadKeyStore: any WorkloadKeyStore
     private let resolver: any ClientSupervisorCommandResolving
     private let processRunner: any ClientSupervisorProcessRunning
+    private let installationIdentity: any ClientInstallationIdentityStore
+    private let helperExecutableURL: URL
+    private let wakeCursorURL: URL
 
     public init(
         instanceStore: any ClientInstanceStore,
         gate: VerifiedCredentialGate,
         workloadKeyStore: (any WorkloadKeyStore)? = nil,
         resolver: any ClientSupervisorCommandResolving,
-        processRunner: any ClientSupervisorProcessRunning
+        processRunner: any ClientSupervisorProcessRunning,
+        installationIdentity: (any ClientInstallationIdentityStore)? = nil,
+        helperExecutableURL: URL? = nil,
+        wakeCursorURL: URL? = nil
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
@@ -93,6 +109,12 @@ public struct ClientSupervisor: Sendable {
         #endif
         self.resolver = resolver
         self.processRunner = processRunner
+        self.installationIdentity = installationIdentity ?? FileClientInstallationIdentityStore()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.helperExecutableURL = helperExecutableURL
+            ?? home.appendingPathComponent("Library/Application Support/The Triangle/bin/triangle-mailbox")
+        self.wakeCursorURL = wakeCursorURL
+            ?? home.appendingPathComponent("Library/Application Support/The Triangle/client/wake-cursor.json")
     }
 
     public func prepareEnabledInstances() async throws -> PreparedClientSupervisorLaunch {
@@ -107,16 +129,17 @@ public struct ClientSupervisor: Sendable {
             switch instance.deliveryMode {
             case .mcpInteractive:
                 return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_mcp_interactive")
-            case .eventDriven:
-                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_event_driven")
-            case .worker:
+            case .eventDriven, .worker:
                 return nil
             }
         }
-        let enabled = allInstances.filter(\.participatesInWorkerPolling)
-        guard !enabled.isEmpty,
-              Set(enabled.map(\.profile)).count == enabled.count,
-              enabled.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
+        let workers = allInstances.filter(\.participatesInWorkerPolling)
+        let wakeMembers = allInstances.filter(\.participatesInEventDrivenWake)
+        guard (!workers.isEmpty || !wakeMembers.isEmpty),
+              Set(workers.map(\.profile)).count == workers.count,
+              Set(wakeMembers.map(\.profile)).count == wakeMembers.count,
+              workers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
+              wakeMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
         else { throw ClientSupervisorError.noEligibleInstances }
 
         // This entire resolution phase deliberately precedes the first
@@ -124,7 +147,7 @@ public struct ClientSupervisor: Sendable {
         // Keychain material to be released.
         var runtimeOmissions: [OmittedClientSupervisorInstance] = []
         var resolved: [(instance: ClientInstance, command: WorkerCommand)] = []
-        for instance in enabled {
+        for instance in workers {
             do {
                 let command = try resolver.resolveAdapter(for: instance)
                 try validateAdapterBeforeCredential(command, instance: instance)
@@ -133,11 +156,12 @@ public struct ClientSupervisor: Sendable {
                 runtimeOmissions.append(.init(instanceID: instance.instanceID.value, reasonCode: "runtime_ineligible"))
             }
         }
-        guard !resolved.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
 
+        let coordinatorSources = !resolved.isEmpty ? resolved.map(\.instance) : wakeMembers
+        guard !coordinatorSources.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
         let coordinator: WorkerCommand
         do {
-            coordinator = try resolver.resolveCoordinator(for: resolved.map(\.instance))
+            coordinator = try resolver.resolveCoordinator(for: coordinatorSources)
             try validateCoordinator(coordinator)
         } catch {
             throw ClientSupervisorError.runtimeUnavailable
@@ -175,12 +199,30 @@ public struct ClientSupervisor: Sendable {
             ))
             publicInstances.append(.init(instanceID: instance.instanceID.value, runtimeAdapter: instance.runtimeAdapter))
         }
-        guard !prepared.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
-        guard Set(prepared.map(\.mailbox.meshToken)).count == prepared.count else {
-            throw ClientSupervisorError.invalidBootstrap
+        if !prepared.isEmpty {
+            guard Set(prepared.map(\.mailbox.meshToken)).count == prepared.count else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
         }
 
-        let document = PreparedBootstrap(version: 1, maxConcurrentReasoners: 2, instances: prepared)
+        let eventWake: PreparedEventWakeBootstrap?
+        do {
+            eventWake = try await prepareEventWake(wakeMembers: wakeMembers, omitted: &omitted)
+        } catch let error as ClientSupervisorError {
+            throw error
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        guard !prepared.isEmpty || eventWake != nil else {
+            throw ClientSupervisorError.noEligibleInstances
+        }
+
+        let document = PreparedBootstrap(
+            version: 1,
+            maxConcurrentReasoners: 2,
+            instances: prepared,
+            eventWake: eventWake
+        )
         let data: Data
         do {
             let encoder = JSONEncoder()
@@ -192,9 +234,58 @@ public struct ClientSupervisor: Sendable {
         guard data.count <= Self.maximumBootstrapBytes else { throw ClientSupervisorError.invalidBootstrap }
         return PreparedClientSupervisorLaunch(
             instances: publicInstances,
+            eventWakeProfileCount: eventWake?.profiles.count ?? 0,
             omitted: omitted,
             command: coordinator,
             bootstrap: data
+        )
+    }
+
+    private func prepareEventWake(
+        wakeMembers: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> PreparedEventWakeBootstrap? {
+        guard !wakeMembers.isEmpty else { return nil }
+        guard helperExecutableURL.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+        else { throw ClientSupervisorError.runtimeUnavailable }
+        guard wakeCursorURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
+
+        let installationID: InstallationID
+        do {
+            installationID = try installationIdentity.resolve()
+        } catch {
+            throw ClientSupervisorError.runtimeUnavailable
+        }
+
+        var profiles: [PreparedEventWakeProfile] = []
+        for instance in wakeMembers.sorted(by: { $0.profile.value < $1.profile.value }) {
+            let credential: VerifiedCredential
+            do {
+                credential = try await gate.credential(for: instance.profile)
+            } catch {
+                omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
+                continue
+            }
+            profiles.append(PreparedEventWakeProfile(
+                instanceId: instance.instanceID.value,
+                agentId: credential.agentID.value
+            ))
+        }
+        guard !profiles.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
+        let actorProfile = wakeMembers
+            .filter { member in profiles.contains { $0.instanceId == member.instanceID.value } }
+            .map(\.profile.value)
+            .sorted()
+            .first
+        guard let actorProfile else { throw ClientSupervisorError.noEligibleInstances }
+        return PreparedEventWakeBootstrap(
+            installationId: installationID.value,
+            helperPath: helperExecutableURL.path,
+            cursorPath: wakeCursorURL.path,
+            actorProfile: actorProfile,
+            ensureBeforeWatch: true,
+            profiles: profiles
         )
     }
 
@@ -255,6 +346,19 @@ private struct PreparedBootstrap: Encodable {
     let version: Int
     let maxConcurrentReasoners: Int
     let instances: [PreparedBootstrapInstance]
+    let eventWake: PreparedEventWakeBootstrap?
+
+    private enum CodingKeys: String, CodingKey {
+        case version, maxConcurrentReasoners, instances, eventWake
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(maxConcurrentReasoners, forKey: .maxConcurrentReasoners)
+        try container.encode(instances, forKey: .instances)
+        try container.encodeIfPresent(eventWake, forKey: .eventWake)
+    }
 }
 private struct PreparedBootstrapInstance: Encodable {
     let instanceId: String
@@ -274,6 +378,18 @@ private struct PreparedBootstrapRunner: Encodable {
     let command: String
     let args: [String]
     let timeoutMs: Int
+}
+private struct PreparedEventWakeBootstrap: Encodable {
+    let installationId: String
+    let helperPath: String
+    let cursorPath: String
+    let actorProfile: String
+    let ensureBeforeWatch: Bool
+    let profiles: [PreparedEventWakeProfile]
+}
+private struct PreparedEventWakeProfile: Encodable {
+    let instanceId: String
+    let agentId: String
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {
