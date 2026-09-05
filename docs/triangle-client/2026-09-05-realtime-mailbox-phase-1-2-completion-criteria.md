@@ -3,8 +3,9 @@
 Updated: 2026-09-05 (America/Los_Angeles)
 
 This note records the agreed bar for renaming Phase 1 and Phase 2 from
-prototype / implementation-in-progress to **Complete**. Do not flip those
-status lines until the evidence below exists.
+prototype / implementation-in-progress to **Complete**. Phase 1 now meets that
+bar with recorded suite evidence below. Do not flip Phase 2 to Complete until
+its production-wiring and verification gates pass.
 
 ## Product priority (binding)
 
@@ -24,12 +25,39 @@ status lines until the evidence below exists.
 
 | Phase | Current status | Why |
 | --- | --- | --- |
-| Phase 1 (MESH watch grants, held poll, claim leases) | Implementation may be largely present in source | Missing adversarial regression tests and a recorded full-suite pass |
+| Phase 1 (MESH watch grants, held poll, claim leases) | **Complete** | Adversarial regressions landed; focused five-file suite 86/86 and full mesh suite 1094/1094 recorded on tip `ecdf619` (PR #4 merge), Node v22.22.3 on Zhenyus-Mini |
 | Phase 2 (listener + scheduler + production wiring) | Implemented in source (**prototype**) | Runtime is not production-wired through the signed helper / supervisor |
+
+### Phase 1 evidence (2026-09-05)
+
+Recorded on **Zhenyus-Mini**, **Node v22.22.3**, tip **`ecdf619`** on
+`codex/the-triangle` (PR #4 merge). Adversarial coverage lives in
+`mesh/tests/mailbox-watch.test.mjs` and
+`mesh/tests/mailbox-d1.test.mjs`.
+
+Focused five-file mailbox bundle (from `mesh/`):
+
+```bash
+node --test tests/mailbox-watch.test.mjs tests/mailbox-d1.test.mjs \
+  tests/mailbox-api.test.mjs tests/mailbox-mcp.test.mjs tests/mailbox-e2e.test.mjs
+```
+
+Result: **86/86 pass** (fail 0 / todo 0).
+
+Full mesh suite (build + `tests/*.test.*`):
+
+```bash
+npm test
+```
+
+Result: **1094/1094 pass**, exit 0, ~22s wall.
+
+External deployment, production migration, and canary activation remain
+separately authorized and are **not** implied by Phase 1 Complete.
 
 ## Close Phase 1 verification gaps
 
-Before marking Phase 1 complete:
+**Done** (recorded in Phase 1 evidence above):
 
 1. Concurrent `globalLimit` + N held-poll admission test.
 2. Mixed-validity batch acknowledgement test proving zero partial updates.
@@ -74,18 +102,35 @@ use them as evidence that Phase 2 is complete.
 
 ## Update status only after evidence exists
 
-When the gates pass:
+Phase 1 status is already **Complete** with the recorded suite evidence above.
+
+When Phase 2 gates pass:
 
 1. Change Phase 2 `Status: Implemented in source (prototype)` to
-   `Status: Complete` (and the matching Phase 1 status line).
+   `Status: Complete`.
 2. Move every applicable "Not yet" item into "Delivered."
 3. Record exact passing commands, test counts, soak duration, tested
    configuration, and remaining exclusions.
-4. State explicitly that "complete" covers **durable wake and scheduling** -
-   not the trusted transaction proxy, optional autonomous Codex SDK adapter, or
-   wakeable Grok/Cursor UI sessions.
+4. State explicitly that combined "complete" covers **durable wake and
+   scheduling** - not the trusted transaction proxy, optional autonomous Codex
+   SDK adapter, or wakeable Grok/Cursor UI sessions.
 
-## Defensible completion statement (use only after evidence)
+## Defensible completion statements
+
+### Phase 1 only (in force)
+
+> Phase 1 is complete: installation-scoped watch grants, resumable held
+> polling, claim leases with atomic reclaim and claim-bound acknowledgement,
+> and adversarial admission / batch-ack / ack-vs-reclaim regressions have
+> passed the focused five-file suite (86/86) and full mesh `npm test`
+> (1094/1094) on tip `ecdf619` (Node v22.22.3, Zhenyus-Mini). "Complete"
+> means MESH server contracts and verification evidence only. External
+> deploy/canary, Phase 2 production wiring, Interactive Codex App Server
+> harness wiring, Hermes / other harness adapters, trusted transaction-proxy
+> work, and optional autonomous Codex SDK subprocess work remain out of scope
+> for this claim.
+
+### Phase 1 + Phase 2 (use only after Phase 2 evidence)
 
 > Phase 1 and Phase 2 are complete: claim leases, resumable held polling,
 > atomic admission and acknowledgement, persisted cursor recovery, production
