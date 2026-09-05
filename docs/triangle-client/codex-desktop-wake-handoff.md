@@ -168,8 +168,10 @@ Do not assume turn/start has MESH-style idempotency.
 
 Retain the trusted transaction proxy and room contract from the accepted design:
 claim/read/reply/ack are durable operations; wake receipt and turn completion are
-not acknowledgements. Keep protocol ownership in open.json (`self-serve-drain`
-versus `coordinator-delivery-v1`). Reply key reuse with different payload remains
+not acknowledgements. Slice 6 (trusted transaction proxy) is a **hard gate**
+before production Hermes / coordinator-delivery claim/reply/ack paths; it is
+out of Phase 1/2 Complete but required for harness production. Keep protocol
+ownership in open.json (`self-serve-drain` versus `coordinator-delivery-v1`). Reply key reuse with different payload remains
 a server conflict; map only the proxy's verified derived-key conflict to replied,
 record it, then ack under the established contract. Never swallow generic conflicts.
 After five consecutive failed turns on one transaction, surface transaction_stuck
