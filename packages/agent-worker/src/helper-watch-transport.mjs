@@ -4,6 +4,10 @@
  * Production wake clients must not hold `mesh_watch_` secrets. They invoke:
  *   triangle-mailbox watch-poll --installation <id> --cursor <n>
  * which reads the Keychain-backed grant and returns secret-free JSON.
+ *
+ * Before long-poll, production paths call:
+ *   triangle-mailbox watch-ensure --installation <id> --actor-profile <profile>
+ * so the held poll has a Keychain credential (fail closed otherwise).
  */
 
 import { spawn } from "node:child_process";
@@ -28,6 +32,53 @@ function createHelperUnavailableError(message = "watch helper is unavailable") {
   return error;
 }
 
+function assertInstallationId(installationId) {
+  if (typeof installationId !== "string" || !/^inst_[A-Za-z0-9_-]{10,75}$/.test(installationId)) {
+    throw new TypeError("installationId is invalid");
+  }
+  return installationId;
+}
+
+/**
+ * @param {object} options
+ * @param {string} options.helperPath Absolute path to triangle-mailbox
+ * @param {string} options.installationId Installation-scoped grant id (`inst_…`)
+ * @param {string} options.actorProfile Event-driven actor profile for ensure
+ * @param {(file: string, args: string[], options: object) => Promise<{stdout: string, stderr: string, code: number|null}>} [options.run]
+ * @param {number} [options.timeoutMs]
+ */
+export async function ensureHelperWatchGrant({
+  helperPath,
+  installationId,
+  actorProfile,
+  run = runHelper,
+  timeoutMs = 60_000,
+  signal,
+} = {}) {
+  if (typeof helperPath !== "string" || helperPath.length === 0) {
+    throw new TypeError("helperPath is required");
+  }
+  assertInstallationId(installationId);
+  if (typeof actorProfile !== "string" || actorProfile.length === 0 || actorProfile.includes("\0")) {
+    throw new TypeError("actorProfile is invalid");
+  }
+  positiveInteger(timeoutMs, "timeoutMs", 1);
+  if (signal?.aborted) {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    throw error;
+  }
+  const result = await run(
+    helperPath,
+    ["watch-ensure", "--installation", installationId, "--actor-profile", actorProfile],
+    { timeoutMs, signal },
+  );
+  if (result.code !== 0) {
+    throw createHelperUnavailableError("watch helper ensure failed");
+  }
+  return { ensured: true };
+}
+
 /**
  * @param {object} options
  * @param {string} options.helperPath Absolute path to triangle-mailbox
@@ -44,9 +95,7 @@ export function createHelperWatchTransport({
   if (typeof helperPath !== "string" || helperPath.length === 0) {
     throw new TypeError("helperPath is required");
   }
-  if (typeof installationId !== "string" || !/^inst_[A-Za-z0-9_-]{10,75}$/.test(installationId)) {
-    throw new TypeError("installationId is invalid");
-  }
+  assertInstallationId(installationId);
   positiveInteger(timeoutMs, "timeoutMs", 1);
 
   return Object.freeze({

@@ -17,13 +17,14 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 - Trusted transaction proxy (Slice 6) is **not** part of Phase 2 Complete, but
   remains a hard gate before production harness claim/reply/ack paths.
 
+
 See the shared completion bar:
 [2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
 
 ## Delivered (prototype)
 
 - `event-driven` delivery mode in Swift `DeliveryMode`
-- Omitted from worker coordinator bootstrap with `delivery_mode_event_driven`
+- Event-driven profiles stay out of worker `instances` (wake ownership is separate)
 - Registry allowlist accepts `event-driven`
 - Node `wake-client.mjs`: cursor store, coalesce, resync handling, startup reconcile
 - Node `profile-scheduler.mjs`: single-flight, dirty-after-turn, shared gate, fake harness
@@ -37,22 +38,26 @@ See the shared completion bar:
     printed
   - Helper CLI boundary: `triangle-mailbox watch-poll --installation … --cursor …`
   - Node `helper-watch-transport.mjs` adapter for the injected wake-client transport
-- Focused Swift watch-grant contract cases and Node `helper-watch-transport.test.mjs`
+- Supervisor event-driven wake launch (prototype):
+  - Swift `ClientSupervisor` enumerates `participatesInEventDrivenWake` profiles
+  - Durable installation id under Application Support (`client/installation.json`)
+  - Bootstrap `eventWake` section: installation id, helper path, atomic cursor path,
+    actor profile, ensure-before-watch, secret-free `{ instanceId, agentId }` profiles
+  - Node coordinator launches one multiplexed wake runtime beside worker loops
+  - Shared reasoning gate with worker loops; helper `watch-ensure` preflight before
+    held poll (fail closed if helper / Keychain / grant missing)
+  - `mcp-interactive` remains omitted from worker instances and eventWake membership
+- Focused Swift ClientSupervisor contract cases and Node supervisor / helper-transport tests
 
 ## Not yet (blocks Status: Complete)
 
 Production wiring:
 
-- Wire atomic wake cursor into supervisor/production launch (store landed; end-to-end
-  restart recovery with helper grant still open)
-- `event-driven` profiles in the private supervisor bootstrap
-- Wake listener launched alongside worker loops (helper transport exists; supervisor
-  does not start it yet)
-- Scheduler preflight/drain connected to the real mailbox client and shared
-  reasoning gate
-- Operator UX for grant lifecycle beyond the thin CLI hooks (ensure / status /
-  revoke / poll)
-- Grok/Cursor interactive profiles remain excluded
+- Scheduler preflight/drain connected to the **real** mailbox client (prototype still
+  uses the fake harness; shared gate is wired)
+- Richer grant lifecycle operator UX beyond thin CLI ensure / status / revoke / poll
+- End-to-end restart recovery evidence with helper grant + durable cursor together
+- Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
 
 Verification gates:
 

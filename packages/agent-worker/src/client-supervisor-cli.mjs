@@ -11,10 +11,21 @@ import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
-const EXACT_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
+const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
+const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
+const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
-const EXACT_MAILBOX_KEYS = ["meshUrl", "meshToken", "recipientId", "pageLimit"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
+const EXACT_EVENT_WAKE_KEYS = [
+  "actorProfile",
+  "cursorPath",
+  "ensureBeforeWatch",
+  "helperPath",
+  "installationId",
+  "profiles",
+];
+const EXACT_EVENT_WAKE_PROFILE_KEYS = ["agentId", "instanceId"];
 const ACTIVATION_TIMEOUT_MS = 30_000;
 
 function invalidBootstrap() {
@@ -30,6 +41,13 @@ function hasExactKeys(value, expected) {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function hasValidTopLevelKeys(bootstrap) {
+  if (!isObject(bootstrap)) return false;
+  const actual = Object.keys(bootstrap);
+  if (!REQUIRED_TOP_LEVEL_KEYS.every((key) => Object.hasOwn(bootstrap, key))) return false;
+  return actual.every((key) => REQUIRED_TOP_LEVEL_KEYS.includes(key) || OPTIONAL_TOP_LEVEL_KEYS.has(key));
 }
 
 function positiveInteger(value, minimum, maximum) {
@@ -185,7 +203,7 @@ function validateInstance(instance, seen) {
   }
 }
 
-function assertMailboxTokensAreConfined(instances) {
+function assertMailboxTokensAreConfined(instances, eventWake) {
   for (const [ownerIndex, owner] of instances.entries()) {
     const secrets = [owner.mailbox.meshToken];
     if (owner.mailbox.workloadPrivateKey) {
@@ -213,7 +231,59 @@ function assertMailboxTokensAreConfined(instances) {
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
       }
+      if (eventWake) {
+        const wakeValues = [
+          eventWake.installationId,
+          eventWake.helperPath,
+          eventWake.cursorPath,
+          eventWake.actorProfile,
+          ...eventWake.profiles.flatMap((profile) => [profile.instanceId, profile.agentId]),
+        ];
+        for (const candidate of wakeValues) {
+          if (candidate.includes(secret)) throw invalidBootstrap();
+        }
+      }
     }
+  }
+}
+
+function validateEventWake(eventWake, seenWorkerIds) {
+  if (!hasExactKeys(eventWake, EXACT_EVENT_WAKE_KEYS)) throw invalidBootstrap();
+  if (
+    typeof eventWake.installationId !== "string"
+    || !INSTALLATION_ID.test(eventWake.installationId)
+    || typeof eventWake.helperPath !== "string"
+    || !eventWake.helperPath.startsWith("/")
+    || eventWake.helperPath.includes("\0")
+    || typeof eventWake.cursorPath !== "string"
+    || !eventWake.cursorPath.startsWith("/")
+    || eventWake.cursorPath.includes("\0")
+    || typeof eventWake.actorProfile !== "string"
+    || eventWake.actorProfile.length === 0
+    || eventWake.actorProfile.includes("\0")
+    || typeof eventWake.ensureBeforeWatch !== "boolean"
+    || !Array.isArray(eventWake.profiles)
+    || eventWake.profiles.length < 1
+    || eventWake.profiles.length > 100
+  ) {
+    throw invalidBootstrap();
+  }
+  const seenInstances = new Set();
+  const seenAgents = new Set();
+  for (const profile of eventWake.profiles) {
+    if (!hasExactKeys(profile, EXACT_EVENT_WAKE_PROFILE_KEYS)) throw invalidBootstrap();
+    if (!INSTANCE_ID.test(profile.instanceId) || typeof profile.agentId !== "string" || !AGENT_ID.test(profile.agentId)) {
+      throw invalidBootstrap();
+    }
+    if (
+      seenWorkerIds.has(profile.instanceId)
+      || seenInstances.has(profile.instanceId)
+      || seenAgents.has(profile.agentId)
+    ) {
+      throw invalidBootstrap();
+    }
+    seenInstances.add(profile.instanceId);
+    seenAgents.add(profile.agentId);
   }
 }
 
@@ -225,18 +295,23 @@ export function parseClientSupervisorBootstrap(text) {
     assertNoDuplicateJSONKeys(text);
     const bootstrap = JSON.parse(text);
     if (
-      !hasExactKeys(bootstrap, EXACT_TOP_LEVEL_KEYS) ||
-      bootstrap.version !== 1 ||
-      !positiveInteger(bootstrap.maxConcurrentReasoners, 1, 16) ||
-      !Array.isArray(bootstrap.instances) ||
-      bootstrap.instances.length < 1 ||
-      bootstrap.instances.length > 100
+      !hasValidTopLevelKeys(bootstrap)
+      || bootstrap.version !== 1
+      || !positiveInteger(bootstrap.maxConcurrentReasoners, 1, 16)
+      || !Array.isArray(bootstrap.instances)
+      || bootstrap.instances.length > 100
     ) {
       throw invalidBootstrap();
     }
     const seen = new Set();
     for (const instance of bootstrap.instances) validateInstance(instance, seen);
-    assertMailboxTokensAreConfined(bootstrap.instances);
+    if (Object.hasOwn(bootstrap, "eventWake")) {
+      validateEventWake(bootstrap.eventWake, seen);
+    }
+    if (bootstrap.instances.length < 1 && !Object.hasOwn(bootstrap, "eventWake")) {
+      throw invalidBootstrap();
+    }
+    assertMailboxTokensAreConfined(bootstrap.instances, bootstrap.eventWake);
     return bootstrap;
   } catch {
     throw invalidBootstrap();
@@ -332,6 +407,7 @@ export async function runClientSupervisorCLI({
     try {
       const supervisor = createSupervisor({
         instances: bootstrap.instances,
+        eventWake: bootstrap.eventWake ?? null,
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
       });

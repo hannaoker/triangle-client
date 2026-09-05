@@ -306,3 +306,180 @@ test("supervisor rejects duplicate instances and unsafe or credential-bearing ru
     ...dependencies,
   }), /runner environment/i);
 });
+
+test("supervisor launches eventWake listener beside worker loops with shared gate and helper ensure", async () => {
+  const ensureCalls = [];
+  const transportCalls = [];
+  let capturedGate = null;
+  let wakeStarted = false;
+  let workerStarted = false;
+  let workerEnteredGate = false;
+
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "worker-secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    eventWake: {
+      installationId: "inst_N7VhDq3mQ2",
+      helperPath: "/trusted/triangle-mailbox",
+      cursorPath: "/private/wake-cursor.json",
+      actorProfile: "event-hermes",
+      ensureBeforeWatch: true,
+      profiles: [{ instanceId: id(2), agentId: "agent_event" }],
+    },
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({
+      async run() {
+        workerEnteredGate = true;
+        return { status: "completed", text: "ok" };
+      },
+    }),
+    createWorker({ runner }) {
+      return {
+        async runOnce() { return { found: 0, processed: 0 }; },
+        async watch({ signal }) {
+          workerStarted = true;
+          await runner.run({});
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          return { processed: 0, stopped: true };
+        },
+      };
+    },
+    createWatchTransport({ helperPath, installationId }) {
+      transportCalls.push({ helperPath, installationId });
+      return {
+        async poll() {
+          return { cursor: 0, events: [] };
+        },
+      };
+    },
+    async ensureWatchGrant(options) {
+      ensureCalls.push(options);
+      return { ensured: true };
+    },
+    createHarness() {
+      return {
+        async preflight() { return false; },
+        async run() { return { status: "drained" }; },
+      };
+    },
+    createWake({ profiles, transport, gate: sharedGate, harness, cursorPath }) {
+      assert.deepEqual(profiles, [{ instanceId: id(2), agentId: "agent_event" }]);
+      assert.equal(cursorPath, "/private/wake-cursor.json");
+      assert.equal(typeof transport.poll, "function");
+      assert.equal(typeof harness.preflight, "function");
+      assert.equal(typeof sharedGate.run, "function");
+      capturedGate = sharedGate;
+      return {
+        async start({ signal }) {
+          wakeStarted = true;
+          assert.equal(ensureCalls.length, 1);
+          await sharedGate.run(async () => "wake-turn");
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          return { cycles: 0, cursor: 0 };
+        },
+      };
+    },
+    maxConcurrentReasoners: 2,
+  });
+
+  assert.deepEqual(supervisor.eventWakeProfileIds, [id(2)]);
+  assert.deepEqual(supervisor.instanceIds, [id(1)]);
+  assert.deepEqual(transportCalls, [{
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+  }]);
+  assert.equal(typeof capturedGate?.run, "function");
+
+  const controller = new AbortController();
+  const watching = supervisor.watch({ signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(workerStarted, true);
+  assert.equal(wakeStarted, true);
+  assert.equal(workerEnteredGate, true);
+  assert.deepEqual(ensureCalls[0], {
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    actorProfile: "event-hermes",
+    signal: controller.signal,
+  });
+  controller.abort();
+  const result = await watching;
+  assert.equal(result.instances.length, 1);
+  assert.equal(result.eventWake?.cursor, 0);
+});
+
+test("supervisor fails closed when watch-ensure preflight fails before worker loops", async () => {
+  let workerStarted = false;
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "worker-secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    eventWake: {
+      installationId: "inst_N7VhDq3mQ2",
+      helperPath: "/trusted/triangle-mailbox",
+      cursorPath: "/private/wake-cursor.json",
+      actorProfile: "event-hermes",
+      ensureBeforeWatch: true,
+      profiles: [{ instanceId: id(2), agentId: "agent_event" }],
+    },
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
+    createWorker() {
+      return {
+        async runOnce() { return { found: 0, processed: 0 }; },
+        async watch() {
+          workerStarted = true;
+          return { processed: 0, stopped: true };
+        },
+      };
+    },
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    async ensureWatchGrant() {
+      const error = new Error("watch helper ensure failed");
+      error.code = "helper_unavailable";
+      throw error;
+    },
+    createWake: () => ({
+      async start() { throw new Error("wake must not start"); },
+    }),
+    logger: { error() {} },
+  });
+
+  await assert.rejects(
+    () => supervisor.watch({ signal: new AbortController().signal }),
+    (error) => error.code === "helper_unavailable",
+  );
+  assert.equal(workerStarted, false);
+});
+
+test("supervisor rejects eventWake collision with worker instance ids", () => {
+  assert.throws(() => createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    eventWake: {
+      installationId: "inst_N7VhDq3mQ2",
+      helperPath: "/trusted/triangle-mailbox",
+      cursorPath: "/private/wake-cursor.json",
+      actorProfile: "event-hermes",
+      ensureBeforeWatch: true,
+      profiles: [{ instanceId: id(1), agentId: "agent_event" }],
+    },
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWake: () => ({ async start() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+  }), /collides/i);
+});

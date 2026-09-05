@@ -27,7 +27,8 @@ public enum ClientSupervisorContractCases {
         .init(name: "signal dispositions are preserved and concurrent runs serialize", run: signalPreservationAndSerialization),
         .init(name: "coordinator readiness acknowledgement writes only a fresh private marker", run: readinessMarkerContract),
         .init(name: "mcp-interactive delivery mode is omitted from coordinator bootstrap", run: mcpInteractiveDeliveryOmitted),
-        .init(name: "event-driven delivery mode is omitted from coordinator bootstrap", run: eventDrivenDeliveryOmitted),
+        .init(name: "event-driven profiles launch via eventWake bootstrap not worker instances", run: eventDrivenWakeBootstrap),
+        .init(name: "mcp-interactive stays excluded from eventWake membership", run: mcpInteractiveExcludedFromEventWake),
     ]
 
     fileprivate static let origin = "https://thetriangle.dev"
@@ -232,22 +233,55 @@ public enum ClientSupervisorContractCases {
         try expect(!bootstrap.instances.contains { $0.instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value }, "interactive profile leaked into bootstrap")
     }
 
-    public static func eventDrivenDeliveryOmitted() async throws {
+    public static func eventDrivenWakeBootstrap() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "worker-codex", adapter: .codex, digit: "1"),
             .init(profile: "event-hermes", adapter: .hermes, digit: "2"),
         ])
         try fixture.instanceStore.setDeliveryMode(.eventDriven, profile: fixture.specifications[1].profile)
         let launch = try await fixture.supervisor.prepareEnabledInstances()
-        try expect(launch.instances.count == 1, "event-driven profile was not omitted from bootstrap")
-        try expect(launch.instances[0].instanceID == ClientInstanceID.derive(profile: fixture.specifications[0].profile).value, "wrong profile remained in bootstrap")
-        try expect(launch.omitted.contains { $0.reasonCode == "delivery_mode_event_driven" }, "event-driven omission was not recorded")
+        try expect(launch.instances.count == 1, "event-driven profile was not kept out of worker instances")
+        try expect(launch.instances[0].instanceID == ClientInstanceID.derive(profile: fixture.specifications[0].profile).value, "wrong profile remained in worker instances")
+        try expect(launch.eventWakeProfileCount == 1, "event-driven wake profile was not prepared")
+        try expect(!launch.omitted.contains { $0.reasonCode == "delivery_mode_event_driven" }, "event-driven profile was treated as omitted instead of wake-owned")
         let eventDrivenInstance = try fixture.instanceStore.read(profile: fixture.specifications[1].profile)
         try expect(eventDrivenInstance.participatesInEventDrivenWake, "event-driven ownership flag was not set")
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
-        try expect(bootstrap.instances.count == 1, "event-driven profile reached worker coordinator bootstrap")
+        try expect(bootstrap.instances.count == 1, "event-driven profile leaked into worker bootstrap instances")
         try expect(!bootstrap.instances.contains { $0.instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value }, "event-driven profile leaked into worker bootstrap")
+        let eventWake = try require(bootstrap.eventWake, "eventWake bootstrap section missing")
+        try expect(eventWake.profiles.count == 1, "eventWake profile count changed")
+        try expect(eventWake.profiles[0].instanceId == ClientInstanceID.derive(profile: fixture.specifications[1].profile).value, "wrong wake profile selected")
+        try expect(eventWake.profiles[0].agentId == fixture.specifications[1].agentID.value, "wake agent id crossed profiles")
+        try expect(eventWake.actorProfile == fixture.specifications[1].profile.value, "wake actor profile incorrect")
+        try expect(eventWake.ensureBeforeWatch == true, "watch-ensure preflight was not requested")
+        try expect(eventWake.helperPath.hasSuffix("/triangle-mailbox"), "helper path missing from eventWake")
+        try expect(eventWake.cursorPath.hasSuffix("/wake-cursor.json"), "cursor path missing from eventWake")
+        try expect(eventWake.installationId.hasPrefix("inst_"), "installation id missing from eventWake")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let raw = String(decoding: encoded, as: UTF8.self)
+        try expect(!raw.contains("mesh_watch_"), "watch credential leaked into bootstrap")
+        try expect(!raw.contains(fixture.specifications[1].token), "event-driven mailbox token reached wake bootstrap")
+    }
+
+    public static func mcpInteractiveExcludedFromEventWake() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "event-hermes", adapter: .hermes, digit: "2"),
+            .init(profile: "interactive-codex", adapter: .codex, digit: "3"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.eventDriven, profile: fixture.specifications[1].profile)
+        try fixture.instanceStore.setDeliveryMode(.mcpInteractive, profile: fixture.specifications[2].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        try expect(launch.eventWakeProfileCount == 1, "interactive profile entered eventWake")
+        try expect(launch.omitted.contains { $0.reasonCode == "delivery_mode_mcp_interactive" }, "mcp-interactive omission was not recorded")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        let eventWake = try require(bootstrap.eventWake, "eventWake missing")
+        let interactiveID = ClientInstanceID.derive(profile: fixture.specifications[2].profile).value
+        try expect(!eventWake.profiles.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into eventWake profiles")
+        try expect(!bootstrap.instances.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into worker instances")
     }
 
     public static func noEligibleProfile() async throws {
@@ -466,6 +500,7 @@ private final class SupervisorFixture: @unchecked Sendable {
     let journal: InMemoryEnrollmentJournal
     let process = RecordingSupervisorProcess()
     let supervisor: ClientSupervisor
+    let helperRoot: URL
 
     init(
         specifications: [InstanceSpecification],
@@ -477,6 +512,14 @@ private final class SupervisorFixture: @unchecked Sendable {
         let instances = InMemoryClientInstanceStore()
         instanceStore = instances
         journal = InMemoryEnrollmentJournal()
+        helperRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("triangle-supervisor-wake-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: helperRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let helperBinary = helperRoot.appendingPathComponent("triangle-mailbox")
+        FileManager.default.createFile(atPath: helperBinary.path, contents: Data("#!/bin/sh\nexit 0\n".utf8), attributes: [.posixPermissions: 0o700])
+        let cursorURL = helperRoot.appendingPathComponent("wake-cursor.json")
+        let installationID = try InstallationID("inst_N7VhDq3mQ2")
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
         for specification in specifications {
@@ -512,8 +555,15 @@ private final class SupervisorFixture: @unchecked Sendable {
             instanceStore: instances,
             gate: gate,
             resolver: RecordingSupervisorResolver(events: events, failureAt: resolverFailureAt, coordinatorFails: coordinatorFails),
-            processRunner: process
+            processRunner: process,
+            installationIdentity: InMemoryClientInstallationIdentityStore(installationID: installationID),
+            helperExecutableURL: helperBinary,
+            wakeCursorURL: cursorURL
         )
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: helperRoot)
     }
 }
 
@@ -637,6 +687,7 @@ private struct TestBootstrap: Decodable {
     let version: Int
     let maxConcurrentReasoners: Int
     let instances: [TestBootstrapInstance]
+    let eventWake: TestEventWake?
 }
 private struct TestBootstrapInstance: Decodable {
     let instanceId: String
@@ -646,6 +697,18 @@ private struct TestBootstrapInstance: Decodable {
 }
 private struct TestMailbox: Decodable { let meshUrl: String; let meshToken: String; let recipientId: String; let pageLimit: Int }
 private struct TestRunner: Decodable { let command: String; let args: [String]; let timeoutMs: Int }
+private struct TestEventWake: Decodable {
+    let installationId: String
+    let helperPath: String
+    let cursorPath: String
+    let actorProfile: String
+    let ensureBeforeWatch: Bool
+    let profiles: [TestEventWakeProfile]
+}
+private struct TestEventWakeProfile: Decodable {
+    let instanceId: String
+    let agentId: String
+}
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw SupervisorContractFailure(message) } }
