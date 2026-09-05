@@ -4,7 +4,7 @@
  * FIFO fairness across profiles, and the shared global reasoning gate.
  */
 
-import { createWakeClient } from "./wake-client.mjs";
+import { createAtomicFileCursorStore, createMemoryCursorStore, createWakeClient } from "./wake-client.mjs";
 
 function positiveInteger(value, name, minimum = 1) {
   if (!Number.isSafeInteger(value) || value < minimum) {
@@ -198,14 +198,22 @@ export function createWakeRuntime({
   gate,
   harness,
   cursorStore,
+  cursorPath,
   coalesceMs = 300,
   logger = console,
 } = {}) {
+  if (cursorStore && cursorPath) {
+    throw new TypeError("provide cursorStore or cursorPath, not both");
+  }
+  const resolvedStore = cursorStore
+    ?? (cursorPath
+      ? createAtomicFileCursorStore({ filePath: cursorPath })
+      : createMemoryCursorStore(0));
   const scheduler = createProfileScheduler({ gate, harness, logger });
   const wake = createWakeClient({
     profiles,
     transport,
-    cursorStore,
+    cursorStore: resolvedStore,
     coalesceMs,
     logger,
     onWake: (entry) => scheduler.submitWake(entry),
@@ -213,6 +221,7 @@ export function createWakeRuntime({
   return Object.freeze({
     scheduler,
     wake,
+    cursorStore: resolvedStore,
     async start({ signal, reconcile = true } = {}) {
       if (reconcile) await wake.reconcileStartup({ signal });
       await scheduler.idle();
