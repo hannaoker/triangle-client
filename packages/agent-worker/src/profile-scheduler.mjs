@@ -110,7 +110,6 @@ export function createProfileScheduler({
             });
             if (!actionable) {
               state.lastReconciled = highWatermark;
-              state.dirty = false;
               return;
             }
             await harness.run({
@@ -135,6 +134,7 @@ export function createProfileScheduler({
             failureCount: state.failureCount,
           });
           if (error?.name === "AbortError") throw error;
+          state.dirty = true;
         } finally {
           state.active = false;
           if (state.dirty) {

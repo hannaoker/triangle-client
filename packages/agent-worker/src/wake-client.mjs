@@ -117,6 +117,13 @@ export function createWakeClient({
       } catch (error) {
         if (signal?.aborted || error?.name === "AbortError") throw error;
         if (error?.code === "resync_required" && Number.isSafeInteger(error.restartCursor)) {
+          for (const instanceId of byAgent.values()) {
+            await onWake({
+              instanceId,
+              highWatermark: error.restartCursor,
+              reason: "resync_reconcile",
+            });
+          }
           await cursorStore.write(error.restartCursor);
           logger.error?.("triangle_wake_resync", { restartCursor: error.restartCursor });
           return { resync: true, restartCursor: error.restartCursor, events: 0 };

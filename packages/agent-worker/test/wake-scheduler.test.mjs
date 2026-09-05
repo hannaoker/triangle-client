@@ -60,7 +60,7 @@ test("wake client coalesces bursts and persists the newest cursor per profile", 
   );
 });
 
-test("wake client resync advances restart cursor without draining foreign agents", async () => {
+test("wake client resync reconciles every local profile before advancing the restart cursor", async () => {
   const store = createMemoryCursorStore(2);
   const wakes = [];
   const client = createWakeClient({
@@ -80,7 +80,58 @@ test("wake client resync advances restart cursor without draining foreign agents
   const result = await client.runOnce();
   assert.equal(result.resync, true);
   assert.equal(await store.read(), 40);
-  assert.deepEqual(wakes, []);
+  assert.deepEqual(wakes, [{
+    instanceId: id(1),
+    highWatermark: 40,
+    reason: "resync_reconcile",
+  }]);
+});
+
+test("scheduler retries a failed drain without requiring another wake", async () => {
+  let attempts = 0;
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 1 }),
+    harness: createFakeHarness({
+      drain: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient");
+      },
+    }),
+    initialBackoffMs: 1,
+    maxBackoffMs: 1,
+    idleJitterRatio: 0,
+    logger: { error() {} },
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  await scheduler.idle();
+  assert.equal(attempts, 2);
+});
+
+test("scheduler preserves a newer wake that arrives during a negative preflight", async () => {
+  const entered = deferred();
+  const release = deferred();
+  let preflights = 0;
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 1 }),
+    harness: createFakeHarness({
+      actionable: async () => {
+        preflights += 1;
+        if (preflights === 1) {
+          entered.resolve();
+          await release.promise;
+          return false;
+        }
+        return true;
+      },
+    }),
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  await entered.promise;
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 2 });
+  release.resolve();
+  await scheduler.idle();
+  assert.equal(preflights, 2);
+  assert.equal(scheduler.snapshot()[0].lastReconciled, 2);
 });
 
 test("scheduler drains at most once per wake burst and reconciles dirty wakes after the turn", async () => {
