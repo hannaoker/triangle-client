@@ -2,7 +2,7 @@
 
 Status: Implemented in source (prototype)
 
-Updated: 2026-09-05
+Updated: 2026-09-11
 
 Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 
@@ -56,25 +56,52 @@ See the shared completion bar:
   - `mcp-interactive` remains omitted from worker instances and eventWake membership
 - Focused Swift ClientSupervisor contract cases and Node supervisor / helper-transport /
   mailbox-harness tests
+- Richer grant lifecycle operator UX: secret-free `watch-status` now includes
+  `memberCount`, `listenerReady`, and bounded `operatorAction` next step
+  (ensure / replace / unlock Keychain); contracts cover finalized + missing
+- Linux verification suite `packages/agent-worker/test/phase2-verification.test.mjs`:
+  helper ensure + durable cursor restart resume; reconnect-storm admission limit;
+  crash after claim before ack; crash after generation before ack (same-claim
+  reclaim, no regenerate when reply is durable); short fake-harness soak slice
+- Accelerated soak harness `scripts/soak-fake-wake.mjs` (`--cycles` / `--hours 24`)
+  plus `npm run soak:fake-wake` in `packages/agent-worker`
+
+### Verification evidence recorded (2026-09-11, Linux Node v22.14.0)
+
+Still **prototype** — wall-clock 24h soak and Darwin helper suite not claimed.
+
+```sh
+cd packages/agent-worker && npm test
+# 153 tests, 145 pass, 8 skip (Darwin-only), 0 fail
+
+cd packages/agent-worker && npm run test:triangle-client
+# 139 tests, 131 pass, 8 skip, 0 fail
+
+node --test packages/agent-worker/test/phase2-verification.test.mjs
+# 5/5 pass
+
+node scripts/soak-fake-wake.mjs --cycles 2000
+# submitted 2000, drainCount 240, peakConcurrentReasoners 1,
+# maxConcurrentReasoners 2, duplicateDrains 0
+```
+
+Swift helper WatchGrant / ClientSupervisor contracts still require macOS:
+
+```sh
+cd packages/macos-mailbox-helper && bash scripts/test-host.sh
+```
 
 ## Not yet (blocks Status: Complete)
 
-Production wiring:
+Production / evidence gaps:
 
-- Richer grant lifecycle operator UX beyond thin CLI ensure / status / revoke / poll
-- End-to-end restart recovery evidence with helper grant + durable cursor together
-- Reconnect-storm / crash-boundary / 24-hour fake-harness soak evidence (below)
+- Wall-clock **24-hour** fake-harness soak evidence
+  (`node scripts/soak-fake-wake.mjs --hours 24`) with recorded report
+- Darwin Swift toolchain run: helper suite green (Apple's Testing module)
 - Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
 
-Verification gates:
-
-- Swift toolchain with Apple's Testing module; helper suite green
-- Node suite fully green (including unrelated README/contract fixes)
-- Reconnect-storm tests at the configured global connection limit
-- Crash/restart tests: before cursor persistence; after persistence before
-  drain; after claim before ack; after generation before ack
-- 24-hour fake-harness soak with no lost wakes, duplicate reasoning turns, or
-  cap violations
+Accelerated soak and Linux Node gates above are necessary but **not** sufficient
+to flip Status to Complete.
 
 ## Explicitly out of Phase 2 Complete
 

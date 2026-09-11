@@ -1,6 +1,6 @@
 # Realtime mailbox Phase 1 / Phase 2 completion criteria
 
-Updated: 2026-09-05 (America/Los_Angeles)
+Updated: 2026-09-11 (America/Los_Angeles)
 
 This note records the agreed bar for renaming Phase 1 and Phase 2 from
 prototype / implementation-in-progress to **Complete**. Phase 1 now meets that
@@ -26,7 +26,7 @@ its production-wiring and verification gates pass.
 | Phase | Current status | Why |
 | --- | --- | --- |
 | Phase 1 (MESH watch grants, held poll, claim leases) | **Complete** | Adversarial regressions landed; focused five-file suite 86/86 and full mesh suite 1094/1094 recorded on tip `ecdf619` (PR #4 merge), Node v22.22.3 on Zhenyus-Mini |
-| Phase 2 (listener + scheduler + production wiring) | Implemented in source (**prototype**) | Runtime is not production-wired through the signed helper / supervisor |
+| Phase 2 (listener + scheduler + production wiring) | Implemented in source (**prototype**) | Linux Node gates + accelerated soak recorded; wall 24h soak and Darwin helper suite still required before Complete |
 
 ### Phase 1 evidence (2026-09-05)
 
@@ -85,16 +85,23 @@ Before marking Phase 2 complete:
 ## Clear verification gates
 
 1. Install/use a Swift toolchain containing Apple's Testing module and pass the
-   helper suite.
+   helper suite. (**Still open** on Darwin host.)
 2. Fix any unrelated README / contract failures so the Node suite is fully green.
+   (**Done** on tip of this PR: `packages/agent-worker` `npm test` 153/145 pass /
+   8 Darwin skips / 0 fail, Node v22.14.0.)
 3. Run reconnect-storm tests at the configured global connection limit.
+   (**Done** in `phase2-verification.test.mjs`.)
 4. Run crash/restart tests at these boundaries:
    - before cursor persistence,
    - after cursor persistence but before drain,
    - after claim but before acknowledgement,
    - after generation but before acknowledgement.
+   (**Done** across `wake-scheduler.test.mjs` + `phase2-verification.test.mjs`;
+   claim/generation reclaim is same-process durable-claim ownership.)
 5. Complete the planned 24-hour fake-harness soak with no lost wakes, duplicate
    reasoning turns, or cap violations.
+   (**Harness ready:** `scripts/soak-fake-wake.mjs`; accelerated `--cycles 2000`
+   recorded green. **Wall `--hours 24` still required** before Complete.)
 
 Opt-in App Server / Bob canary experiments may continue while labeled as
 **not Phase 2 complete**; do not block those experiments on soak, and do not

@@ -116,15 +116,20 @@ test("runner common strips controller credentials before invoking a reasoning CL
     assert.match(homeNames, /Library/);
     const acceptedNames = JSON.parse(await invoke(process.execPath, ["-e", `const f=require('node:fs'),p=${JSON.stringify(joinPath(projectRoot, ".."))},n=f.readdirSync(p);process.stdout.write(JSON.stringify([n.includes(${JSON.stringify(projectRoot.split("/").at(-1))}),n.includes(${JSON.stringify(credentialRoot.split("/").at(-1))})]))`]));
     assert.deepEqual(acceptedNames, [true, true]);
-    await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, "source.txt"))},'no')`]), /Agent CLI exited/);
-    await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, ".git/config"))},'no')`]), /Agent CLI exited/);
-    assert.equal(await invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(modelRoot, "state"))},'ok');process.stdout.write('model-written')`]), "model-written");
-    await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(credentialFile)},'utf8'))`]), /Agent CLI exited/);
-    await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(projectEnv)},'utf8'))`]), /Agent CLI exited/);
-    for (const denied of [joinPath(envDirectory, "secret"), joinPath(envLocalDirectory, "secret"), joinPath(envMetaDirectory, "secret"), joinPath(projectRoot, "env-alias")]) {
-      await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(denied)},'utf8'))`]), /Agent CLI exited/);
+    // Deny-default filesystem policy is enforced by sandbox-exec on Darwin only.
+    if (process.platform === "darwin") {
+      await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, "source.txt"))},'no')`]), /Agent CLI exited/);
+      await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, ".git/config"))},'no')`]), /Agent CLI exited/);
+      assert.equal(await invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(modelRoot, "state"))},'ok');process.stdout.write('model-written')`]), "model-written");
+      await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(credentialFile)},'utf8'))`]), /Agent CLI exited/);
+      await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(projectEnv)},'utf8'))`]), /Agent CLI exited/);
+      for (const denied of [joinPath(envDirectory, "secret"), joinPath(envLocalDirectory, "secret"), joinPath(envMetaDirectory, "secret"), joinPath(projectRoot, "env-alias")]) {
+        await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(denied)},'utf8'))`]), /Agent CLI exited/);
+      }
+      await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(outsideSecret)},'utf8'))`]), /Agent CLI exited/);
+    } else {
+      assert.equal(await invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(modelRoot, "state"))},'ok');process.stdout.write('model-written')`]), "model-written");
     }
-    await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(outsideSecret)},'utf8'))`]), /Agent CLI exited/);
     assert.match(await invoke(process.execPath, ["-e", "const s=require('node:net').connect(9,'127.0.0.1');s.on('error',e=>process.stdout.write(e.code||'error'))"]), /ECONNREFUSED|ECONNRESET/);
   } finally {
     for (const [name, value] of Object.entries(previous)) {
@@ -320,15 +325,25 @@ test("installed Hermes CLI documents the stdin query-file transport without cont
   const result = spawn("hermes", ["chat", "--help"], { stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   result.stdout.on("data", (chunk) => { output += chunk; });
-  return new Promise((resolve, reject) => result.on("close", (code) => {
-    if (code === 127) { t.skip("Hermes CLI not installed"); resolve(); return; }
-    try {
-      assert.equal(code, 0);
-      assert.match(output, /--query-file PATH/);
-      assert.match(output, /'-' reads stdin/);
-      resolve();
-    } catch (error) { reject(error); }
-  }));
+  return new Promise((resolve, reject) => {
+    result.on("error", (error) => {
+      if (error?.code === "ENOENT") {
+        t.skip("Hermes CLI not installed");
+        resolve();
+        return;
+      }
+      reject(error);
+    });
+    result.on("close", (code) => {
+      if (code === 127) { t.skip("Hermes CLI not installed"); resolve(); return; }
+      try {
+        assert.equal(code, 0);
+        assert.match(output, /--query-file PATH/);
+        assert.match(output, /'-' reads stdin/);
+        resolve();
+      } catch (error) { reject(error); }
+    });
+  });
 });
 
 test("installed Hermes and Codex help run under Keychain-launched deny-default sandboxes without provider calls", async (t) => {

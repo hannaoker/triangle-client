@@ -155,6 +155,17 @@ public enum WatchGrantContractCases {
         let text = String(decoding: rendered.stdout, as: UTF8.self)
         try expect(!text.contains("mesh_"), "rendered status exposed secret")
         try expect(text.contains("\"state\":\"finalized\""), "rendered status missing state")
+        try expect(text.contains("\"operatorAction\":\"none\""), "rendered status missing operatorAction")
+        try expect(text.contains("\"listenerReady\":true"), "rendered status missing listenerReady")
+        try expect(text.contains("\"memberCount\":"), "rendered status missing memberCount")
+        try expect(status.operatorAction == .none, "finalized grant should need no operator action")
+        try expect(status.listenerReady, "finalized grant should be listener-ready")
+        try expect(status.memberCount == status.agentIDs.count, "memberCount should match agent ids")
+
+        let missing = try fixture.service.status(installationID: try InstallationID("inst_MissingGrant01"))
+        try expect(missing.state == "missing", "missing grant state mismatch")
+        try expect(missing.operatorAction == .ensureWatchGrant, "missing grant should ask ensure")
+        try expect(!missing.listenerReady, "missing grant must not be listener-ready")
     }
 
     public static func pollAndResync() async throws {
