@@ -7,7 +7,9 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -345,4 +347,20 @@ test("shared gate + fake harness soak slice preserves single-flight and cap", as
   await scheduler.idle();
   assert.ok(peak <= 2);
   assert.ok(harness.calls.filter((call) => call.type === "drain").length >= 5);
+});
+
+test("standalone soak report proves every submitted profile watermark reconciled", () => {
+  const script = fileURLToPath(new URL("../../../scripts/soak-fake-wake.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [script, "--cycles", "500"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.lostWakeProfiles, 0);
+  assert.equal(report.finalWatermarks.length, 5);
+  assert.equal(
+    report.finalWatermarks.every(({ expected, reconciled }) => expected === reconciled),
+    true,
+  );
 });

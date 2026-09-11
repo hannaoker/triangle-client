@@ -125,6 +125,106 @@ test("scheduler retries a failed drain without requiring another wake", async ()
   assert.equal(attempts, 2);
 });
 
+test("scheduler retries a claim conflict without requiring another wake", async () => {
+  let attempts = 0;
+  const error = new Error("claim conflict");
+  error.code = "claim_conflict";
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 1 }),
+    harness: createFakeHarness({
+      drain: async () => {
+        attempts += 1;
+        if (attempts === 1) throw error;
+        return { status: "drained" };
+      },
+    }),
+    initialBackoffMs: 1,
+    maxBackoffMs: 1,
+    idleJitterRatio: 0,
+    logger: { error() {} },
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  await scheduler.idle();
+  assert.equal(attempts, 2);
+  assert.equal(scheduler.snapshot()[0].lastReconciled, 1);
+});
+
+test("scheduler runs distinct profiles concurrently up to the shared gate", async () => {
+  const entered = [deferred(), deferred()];
+  const release = deferred();
+  let active = 0;
+  let peak = 0;
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 2 }),
+    harness: createFakeHarness({
+      drain: async ({ instanceId }) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        entered[Number.parseInt(instanceId.slice(-1), 16) - 1].resolve();
+        await release.promise;
+        active -= 1;
+        return { status: "drained" };
+      },
+    }),
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  scheduler.submitWake({ instanceId: id(2), highWatermark: 2 });
+  await Promise.all(entered.map((item) => item.promise));
+  assert.equal(peak, 2);
+  release.resolve();
+  await scheduler.idle();
+});
+
+test("scheduler abort stops queued work and propagates to an active harness", async () => {
+  const controller = new AbortController();
+  const entered = deferred();
+  let secondStarted = false;
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 1 }),
+    signal: controller.signal,
+    logger: { error() {} },
+    harness: createFakeHarness({
+      drain: async ({ instanceId, signal }) => {
+        if (instanceId === id(2)) secondStarted = true;
+        entered.resolve(signal);
+        await new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      },
+    }),
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  scheduler.submitWake({ instanceId: id(2), highWatermark: 2 });
+  assert.equal(await entered.promise, controller.signal);
+  controller.abort();
+  await scheduler.idle();
+  assert.equal(secondStarted, false);
+});
+
+test("scheduler abort interrupts retry backoff", async () => {
+  const controller = new AbortController();
+  const failed = deferred();
+  const scheduler = createProfileScheduler({
+    gate: createConcurrencyGate({ limit: 1 }),
+    signal: controller.signal,
+    initialBackoffMs: 60_000,
+    maxBackoffMs: 60_000,
+    logger: { error() { failed.resolve(); } },
+    harness: createFakeHarness({ drain: async () => { throw new Error("retry"); } }),
+  });
+  scheduler.submitWake({ instanceId: id(1), highWatermark: 1 });
+  await failed.promise;
+  controller.abort();
+  await Promise.race([
+    scheduler.idle(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("abort did not interrupt backoff")), 100)),
+  ]);
+});
+
 test("scheduler preserves a newer wake that arrives during a negative preflight", async () => {
   const entered = deferred();
   const release = deferred();

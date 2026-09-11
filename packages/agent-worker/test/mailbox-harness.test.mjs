@@ -182,7 +182,8 @@ test("mailbox harness preflight is negative for an empty mailbox and never gener
 test("mailbox harness drains through claim, generate, and ack", async () => {
   const { harness, transport, generates } = createHarnessFixture();
   assert.equal(await harness.preflight({ instanceId: id(1) }), true);
-  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "drained", processed: 1 });
+  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "more", processed: 1 });
+  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "drained", processed: 0 });
   assert.equal(generates(), 1);
   assert.equal(transport.state.claims.size, 1);
   assert.equal(transport.state.acknowledgeCount, 1);
@@ -193,13 +194,40 @@ test("mailbox harness drains through claim, generate, and ack", async () => {
   );
 });
 
-test("mailbox harness stops without generating on claim conflict", async () => {
+test("mailbox harness surfaces claim conflict as retryable failure", async () => {
   const { harness, generates } = createHarnessFixture({
     claim: async () => json({ error: "delivery_claim_conflict" }, 409),
   });
   assert.equal(await harness.preflight({ instanceId: id(1) }), true);
-  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "claim_conflict", processed: 0 });
+  await assert.rejects(
+    () => harness.run({ instanceId: id(1) }),
+    (error) => error?.code === "claim_conflict",
+  );
   assert.equal(generates(), 0);
+});
+
+test("mailbox harness yields the shared gate after one completed delivery", async () => {
+  let remaining = 2;
+  const harness = createMailboxHarness({
+    clients: new Map([[id(1), {
+      async listUnread() {
+        return remaining > 0 ? [{ messageId: `m${remaining}` }] : [];
+      },
+      async completeAndAcknowledge(_message, generate) {
+        await generate({ text: "hi" });
+        remaining -= 1;
+        return { claimed: true, acknowledged: true };
+      },
+    }]]),
+    runners: new Map([[id(1), {
+      async run() { return { status: "completed", text: "ok" }; },
+    }]]),
+  });
+
+  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "more", processed: 1 });
+  assert.equal(remaining, 1);
+  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "more", processed: 1 });
+  assert.deepEqual(await harness.run({ instanceId: id(1) }), { status: "drained", processed: 0 });
 });
 
 test("scheduler + mailbox harness share one gate without double-wrapping runners", async () => {

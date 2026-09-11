@@ -71,6 +71,7 @@ async function main() {
   const deadline = options.hours != null ? started + options.hours * 3_600_000 : null;
   let submitted = 0;
   let watermark = 0;
+  const expectedByInstance = new Map();
 
   while (true) {
     if (deadline != null && Date.now() >= deadline) break;
@@ -78,6 +79,7 @@ async function main() {
     watermark += 1;
     submitted += 1;
     const instanceId = id(((submitted - 1) % options.profiles) + 1);
+    expectedByInstance.set(instanceId, watermark);
     scheduler.submitWake({ instanceId, highWatermark: watermark });
     if (submitted % 50 === 0) await scheduler.idle();
   }
@@ -85,17 +87,29 @@ async function main() {
 
   const duplicates = [...drained.values()].filter((count) => count > 1);
   const drainCount = harness.calls.filter((call) => call.type === "drain").length;
+  const reconciledByInstance = new Map(
+    scheduler.snapshot().map((state) => [state.instanceId, state.lastReconciled]),
+  );
+  const lostWakeProfiles = [...expectedByInstance].filter(
+    ([instanceId, expected]) => reconciledByInstance.get(instanceId) !== expected,
+  );
   const report = {
     submitted,
     drainCount,
     peakConcurrentReasoners: peak,
     maxConcurrentReasoners: options.limit,
     duplicateDrains: duplicates.length,
+    lostWakeProfiles: lostWakeProfiles.length,
+    finalWatermarks: [...expectedByInstance].map(([instanceId, expected]) => ({
+      instanceId,
+      expected,
+      reconciled: reconciledByInstance.get(instanceId) ?? null,
+    })),
     elapsedMs: Date.now() - started,
     mode: options.hours != null ? `wall-hours:${options.hours}` : `cycles:${options.cycles}`,
   };
   process.stdout.write(`${JSON.stringify(report)}\n`);
-  if (peak > options.limit || duplicates.length > 0 || drainCount < 1) {
+  if (peak > options.limit || duplicates.length > 0 || lostWakeProfiles.length > 0 || drainCount < 1) {
     process.exitCode = 1;
   }
 }
