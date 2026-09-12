@@ -11,7 +11,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 - Agent harness integration (Codex, Hermes, ...) is crucial.
 - Interactive Codex uses the shared App Server track
   ([handoff](codex-desktop-wake-handoff.md)); that track is **separate** from
-  Phase 2 completion.
+  Phase 2 completion and is now the post–Phase 2 priority #1.
 - Autonomous Codex SDK subprocess (design Phase 3 / Slice 8) is **optional**
   and is not required to close Phase 2.
 - Trusted transaction proxy (Slice 6) is **not** part of Phase 2 Complete, but
@@ -109,6 +109,10 @@ Swift helper WatchGrant / ClientSupervisor contracts still require macOS:
 ```sh
 cd packages/macos-mailbox-helper && bash scripts/test-host.sh
 ```
+## Post–Phase 2: Shared Codex App Server (started)
+`packages/agent-worker/src/shared-codex-app-server.mjs` with unit tests. See
+[codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) for landed vs
+remaining App Server gates. This does not reopen Phase 2.
 
 ## Remaining exclusions (not blockers for Complete)
 

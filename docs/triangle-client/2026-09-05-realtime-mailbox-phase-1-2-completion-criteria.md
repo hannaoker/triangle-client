@@ -6,6 +6,13 @@ This note records the agreed bar for renaming Phase 1 and Phase 2 from
 prototype / implementation-in-progress to **Complete**. Phase 1 now meets that
 bar with recorded suite evidence below. Phase 2 Complete evidence is recorded below. Historical note — previously do not flip Phase 2 to Complete until
 its production-wiring and verification gates pass.
+Updated: 2026-09-12 (America/Los_Angeles)
+
+This note records the agreed bar for renaming Phase 1 and Phase 2 from
+prototype / implementation-in-progress to **Complete**. Phase 1 and Phase 2
+now meet that bar for durable wake and scheduling only. Post–Phase 2 priority
+#1 is Shared Codex App Server integration
+([handoff](codex-desktop-wake-handoff.md)).
 
 ## Product priority (binding)
 
@@ -26,7 +33,7 @@ its production-wiring and verification gates pass.
 | Phase | Current status | Why |
 | --- | --- | --- |
 | Phase 1 (MESH watch grants, held poll, claim leases) | **Complete** | Adversarial regressions landed; focused five-file suite 86/86 and full mesh suite 1094/1094 recorded on tip `ecdf619` (PR #4 merge), Node v22.22.3 on Zhenyus-Mini |
-| Phase 2 (listener + scheduler + production wiring) | **Complete** | Implementation, recovery, bounded-memory stress, Node/Darwin gates, and operator-reported wall 24h soak green (2026-09-12) |
+| Phase 2 (listener + scheduler + production wiring) | **Complete** | Implementation, recovery, Node/Darwin gates, operator-reported wall 24h soak green (2026-09-12); App Server / Slice 6 / Bob / SDK remain separate |
 
 ### Phase 1 evidence (2026-09-05)
 
@@ -79,18 +86,17 @@ not Slice 6 proxy, App Server harness, Bob canary, or optional SDK.
 
 ## Finish Phase 2 production wiring
 
-Before marking Phase 2 complete:
+**Done** for Phase 2 Complete (durable wake/scheduling):
 
-1. Implement the signed MESH watch-grant transport through the macOS credential
-   helper.
-2. Persist the wake cursor atomically on disk and verify restart recovery.
-3. Include `event-driven` profiles in the private supervisor bootstrap.
-4. Launch the wake listener alongside worker loops.
-5. Connect scheduler preflight/drain operations to the real mailbox client and
-   shared reasoning gate.
-6. Implement grant creation, renewal/replacement, revocation, and
-   operator-visible status.
-7. Keep Grok/Cursor interactive profiles excluded.
+1. Signed MESH watch-grant transport through the macOS credential helper.
+2. Atomic on-disk wake cursor with restart recovery tests.
+3. `event-driven` profiles in the private supervisor bootstrap.
+4. Wake listener launched alongside worker loops.
+5. Scheduler preflight/drain connected to the real mailbox client and shared
+   reasoning gate.
+6. Grant creation, renewal/replacement, revocation, and operator-visible
+   status (`watch-status` / ensure / revoke).
+7. Grok/Cursor interactive profiles kept excluded.
 
 ## Clear verification gates
 
@@ -114,15 +120,22 @@ Before marking Phase 2 complete:
    (**Harness ready:** `scripts/soak-fake-wake.mjs`; accelerated `--cycles 2000`
    recorded green. **Wall `--hours 24` still required** before Complete.)
 
-Opt-in App Server / Bob canary experiments may continue while labeled as
-**not Phase 2 complete**; do not block those experiments on soak, and do not
-use them as evidence that Phase 2 is complete.
+1. Helper suite on Darwin (Apple's Testing module) — required on Mac hosts.
+2. Node suite green on Linux for triangle-client focused paths.
+3. Reconnect-storm / crash-boundary coverage on the Phase 2 Complete gates
+   branch (PR #5) where applicable.
+4. Operator-reported wall-clock 24-hour fake-harness soak green (2026-09-12).
 
-## Update status only after evidence exists
+Post–Phase 2 App Server scaffold and Bob canary work are **separate** from
+Phase 2 Complete. Do not use App Server unit tests as Phase 2 evidence, and do
+not reopen Phase 2 when App Server gaps remain.
 
-Phase 1 status is already **Complete** with the recorded suite evidence above.
+## Status after evidence
 
-When Phase 2 gates pass:
+Phase 1 and Phase 2 statuses are **Complete** for durable wake and scheduling.
+Combined "complete" does **not** cover the trusted transaction proxy (Slice 6),
+optional autonomous Codex SDK adapter, wakeable Grok/Cursor UI sessions, or
+Bob canary / full App Server production attachment.
 
 1. Phase 2 status is already `Status: Complete` (2026-09-12).
 2. Move every applicable "Not yet" item into "Delivered."
@@ -131,6 +144,7 @@ When Phase 2 gates pass:
 4. State explicitly that combined "complete" covers **durable wake and
    scheduling** - not the trusted transaction proxy, optional autonomous Codex
    SDK adapter, or wakeable Grok/Cursor UI sessions.
+App Server first increment: see `codex-desktop-wake-handoff.md`.
 
 ## Defensible completion statements
 
@@ -142,22 +156,20 @@ When Phase 2 gates pass:
 > passed the focused five-file suite (86/86) and full mesh `npm test`
 > (1094/1094) on tip `ecdf619` (Node v22.22.3, Zhenyus-Mini). "Complete"
 > means MESH server contracts and verification evidence only. External
-> deploy/canary, Phase 2 production wiring, Interactive Codex App Server
-> harness wiring, Hermes / other harness adapters, trusted transaction-proxy
-> work, and optional autonomous Codex SDK subprocess work remain out of scope
-> for this claim.
+> deploy/canary, Interactive Codex App Server harness wiring, Hermes / other
+> harness adapters, trusted transaction-proxy work, and optional autonomous
+> Codex SDK subprocess work remain out of scope for this claim.
 
-### Phase 1 + Phase 2 (use only after Phase 2 evidence)
+### Phase 1 + Phase 2 (in force as of 2026-09-12)
 
 > Phase 1 and Phase 2 are complete: claim leases, resumable held polling,
 > atomic admission and acknowledgement, persisted cursor recovery, production
-> watch transport, supervisor integration, and event-driven profile scheduling
-> have passed focused, integration, crash-recovery, reconnect-storm, and
-> 24-hour soak tests. "Complete" means durable wake and scheduling only.
-> Interactive Codex App Server harness wiring and Hermes / other harness
-> adapters are tracked separately. Trusted transaction-proxy work remains a
-> harness production gate. Autonomous Codex SDK subprocess work is optional and
-> out of scope for this claim.
+> watch transport, supervisor integration, event-driven profile scheduling,
+> and wall-clock 24-hour fake-harness soak evidence. "Complete" means durable
+> wake and scheduling only. Interactive Codex App Server harness wiring and
+> Hermes / other harness adapters are tracked separately. Trusted
+> transaction-proxy work remains a harness production gate. Autonomous Codex
+> SDK subprocess work is optional and out of scope for this claim.
 
 ## Related docs
 

@@ -83,6 +83,7 @@ test("package and CLI source contain no deprecated gateway transport", async () 
     "./mailbox-client",
     "./outbound-client",
     "./profile-scheduler",
+    "./shared-codex-app-server",
     "./wake-client",
   ]);
   const source = await readFile(new URL("../src/cli.mjs", import.meta.url), "utf8");

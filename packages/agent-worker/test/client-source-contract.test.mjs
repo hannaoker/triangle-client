@@ -104,6 +104,7 @@ test("repository is the complete standalone client source and contains no MESH s
     "./mailbox-client",
     "./outbound-client",
     "./profile-scheduler",
+    "./shared-codex-app-server",
     "./wake-client",
   ]);
   assert.equal(clientPackage.engines?.node, ">=22.0.0");
