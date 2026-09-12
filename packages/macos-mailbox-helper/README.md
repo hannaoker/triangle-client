@@ -93,7 +93,8 @@ INSTALLATION='inst_YOUR_INSTALLATION_ID'
 # Create/join/finalize for event-driven profiles, store the watch credential.
 "$HELPER" watch-ensure --installation "$INSTALLATION" --actor-profile codex-mailbox-live
 
-# Secret-free status JSON (grant id, agent ids, state only).
+# Secret-free status JSON (grant id, agent ids, state, memberCount,
+# listenerReady, and operatorAction next step). Never prints mesh_watch_ secrets.
 "$HELPER" watch-status --installation "$INSTALLATION"
 
 # Held poll for the Node wake client (secret-free stdout JSON).

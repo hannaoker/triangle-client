@@ -11,6 +11,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const template = fs.readFileSync(path.join(root, "deploy/launchd/dev.thetriangle.agent-worker.plist.template"), "utf8");
 const service = fs.readFileSync(path.join(root, "scripts/triangle-worker-service.sh"), "utf8");
 const servicePath = path.join(root, "scripts/triangle-worker-service.sh");
+const darwinOnly = process.platform !== "darwin" ? "LaunchAgent install integration requires macOS" : false;
 
 function mode(file) { return fs.statSync(file).mode & 0o777; }
 
@@ -43,8 +44,9 @@ function makeInstallFixture(t) {
   fs.writeFileSync(hermesCLI, `#!/bin/bash\nexec "${hermesEntry}" "$@"\n`, { mode: 0o700 }); fs.chmodSync(hermesCLI, 0o700);
   const launchctlLog = path.join(home, "launchctl.log");
   const launchctl = path.join(home, "launchctl-stub");
-  fs.writeFileSync(launchctl, `#!/bin/bash\nset -eu\necho "$*" >> "$LAUNCHCTL_LOG"\ncase "$1" in\n print) [[ -f "$LAUNCHCTL_PRIOR_LOADED" ]];;\n bootstrap) if [[ -f "$LAUNCHCTL_FAIL_ONCE" ]]; then rm -f "$LAUNCHCTL_FAIL_ONCE"; exit 71; fi;;\nesac\n`, { mode: 0o700 });
+  fs.writeFileSync(launchctl, `#!/bin/bash\nset -eu\n: >> "$LAUNCHCTL_LOG"\necho "$*" >> "$LAUNCHCTL_LOG"\ncase "$1" in\n print) [[ -f "$LAUNCHCTL_PRIOR_LOADED" ]];;\n bootstrap) if [[ -f "$LAUNCHCTL_FAIL_ONCE" ]]; then rm -f "$LAUNCHCTL_FAIL_ONCE"; exit 71; fi;;\nesac\n`, { mode: 0o700 });
   fs.chmodSync(launchctl, 0o700);
+  fs.writeFileSync(launchctlLog, "", { mode: 0o600 });
   const env = {
     ...process.env, HOME: home, PATH: `${nodeSourceDirectory}:${process.env.PATH}`,
     TRIANGLE_MAILBOX_HELPER: helper,
@@ -69,7 +71,7 @@ test("service validates helper and profile and documents explicit legacy rollbac
   assert.doesNotMatch(service, /--env-file=.*CREDENTIAL/);
 });
 
-test("service renders secret-free valid Codex and Hermes Keychain LaunchAgents", (t) => {
+test("service renders secret-free valid Codex and Hermes Keychain LaunchAgents", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   for (const agent of ["codex", "hermes"]) {
     const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", agent], { encoding: "utf8", env: fixture.env });
@@ -79,8 +81,15 @@ test("service renders secret-free valid Codex and Hermes Keychain LaunchAgents",
       env: fixture.env,
     });
     assert.equal(rendered.status, 0, rendered.stderr);
-    const linted = spawnSync("/usr/bin/plutil", ["-lint", "-"], { input: rendered.stdout, encoding: "utf8" });
-    assert.equal(linted.status, 0, linted.stderr);
+    const plutil = "/usr/bin/plutil";
+    if (fs.existsSync(plutil)) {
+      const linted = spawnSync(plutil, ["-lint", "-"], { input: rendered.stdout, encoding: "utf8" });
+      assert.equal(linted.status, 0, linted.stderr);
+    } else {
+      // Linux CI hosts lack Apple's plutil; still assert secret-free plist shape.
+      assert.match(rendered.stdout, /<\?xml version="1\.0"/);
+      assert.match(rendered.stdout, /<key>Label<\/key>/);
+    }
     assert.match(rendered.stdout, new RegExp(`<string>${fixture.helper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
     assert.match(rendered.stdout, new RegExp(`<string>${agent}</string>`));
     assert.doesNotMatch(rendered.stdout, /MESH_|mesh_|credential|--env-file|\.env/);
@@ -97,7 +106,7 @@ test("service renders secret-free valid Codex and Hermes Keychain LaunchAgents",
   assert.notEqual(symlinked.status, 0);
 });
 
-test("clean runtime preparation installs a complete strict application-owned bundle", (t) => {
+test("clean runtime preparation installs a complete strict application-owned bundle", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], { encoding: "utf8", env: fixture.env });
   assert.equal(prepared.status, 0, prepared.stderr);
@@ -143,7 +152,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   assert.doesNotMatch(`${prepared.stdout}${prepared.stderr}${smoke.stdout}${smoke.stderr}`, /mesh_[a-f0-9]{64}|MESH_AGENT_TOKEN=/);
 });
 
-test("helper-only upgrade validates and renders an exact legacy version-3 runtime", (t) => {
+test("helper-only upgrade validates and renders an exact legacy version-3 runtime", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], { encoding: "utf8", env: fixture.env });
   assert.equal(prepared.status, 0, prepared.stderr);
@@ -175,7 +184,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
   assert.match(rendered.stdout, /dev\.thetriangle\.codex\.worker/);
 });
 
-test("LaunchAgent install is atomic and restores runtime and loaded prior service on bootstrap failure", (t) => {
+test("LaunchAgent install is atomic and restores runtime and loaded prior service on bootstrap failure", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const launchAgents = path.join(fixture.home, "Library", "LaunchAgents");
   fs.mkdirSync(launchAgents, { recursive: true, mode: 0o700 }); fs.chmodSync(launchAgents, 0o700);
@@ -209,10 +218,14 @@ test("LaunchAgent install is atomic and restores runtime and loaded prior servic
   assert.equal(result.status, 0, result.stderr);
   assert.notDeepEqual(fs.readFileSync(target), oldBytes);
   assert.equal(mode(target), 0o600);
-  assert.equal(spawnSync("/usr/bin/plutil", ["-lint", target]).status, 0);
+  if (fs.existsSync("/usr/bin/plutil")) {
+    assert.equal(spawnSync("/usr/bin/plutil", ["-lint", target]).status, 0);
+  } else {
+    assert.match(fs.readFileSync(target, "utf8"), /<\?xml version="1\.0"/);
+  }
 });
 
-test("LaunchAgent install rejects an existing symlink target without touching its destination", (t) => {
+test("LaunchAgent install rejects an existing symlink target without touching its destination", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const launchAgents = path.join(fixture.home, "Library", "LaunchAgents");
   fs.mkdirSync(launchAgents, { recursive: true, mode: 0o700 }); fs.chmodSync(launchAgents, 0o700);

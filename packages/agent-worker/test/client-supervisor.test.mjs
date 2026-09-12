@@ -541,7 +541,8 @@ test("supervisor builds real mailbox harness clients without double-gating drain
             gateEntries.push("wake");
             assert.equal(await harness.preflight({ instanceId: id(2) }), true);
             const result = await harness.run({ instanceId: id(2) });
-            assert.deepEqual(result, { status: "drained", processed: 1 });
+            assert.deepEqual(result, { status: "more", processed: 1 });
+            assert.deepEqual(await harness.run({ instanceId: id(2) }), { status: "drained", processed: 0 });
           });
           return { cycles: 1, cursor: 1 };
         },

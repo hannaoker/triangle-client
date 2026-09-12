@@ -18,6 +18,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:triangle-client": "node --test test/cli.test.mjs test/client-source-contract.test.mjs test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/helper-watch-transport.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/mailbox-harness.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs test/shared-codex-app-server.test.mjs test/wake-scheduler.test.mjs"
+    "test:triangle-client": "node --test test/cli.test.mjs test/client-source-contract.test.mjs test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/helper-watch-transport.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/mailbox-harness.test.mjs test/phase2-verification.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs test/shared-codex-app-server.test.mjs test/wake-scheduler.test.mjs",
+    "soak:fake-wake": "node ../../scripts/soak-fake-wake.mjs"
   }
 }

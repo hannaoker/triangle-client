@@ -1,5 +1,11 @@
 # Realtime mailbox Phase 1 / Phase 2 completion criteria
 
+Updated: 2026-09-11 (America/Los_Angeles)
+
+This note records the agreed bar for renaming Phase 1 and Phase 2 from
+prototype / implementation-in-progress to **Complete**. Phase 1 now meets that
+bar with recorded suite evidence below. Phase 2 Complete evidence is recorded below. Historical note — previously do not flip Phase 2 to Complete until
+its production-wiring and verification gates pass.
 Updated: 2026-09-12 (America/Los_Angeles)
 
 This note records the agreed bar for renaming Phase 1 and Phase 2 from
@@ -27,7 +33,7 @@ now meet that bar for durable wake and scheduling only. Post–Phase 2 priority
 | Phase | Current status | Why |
 | --- | --- | --- |
 | Phase 1 (MESH watch grants, held poll, claim leases) | **Complete** | Adversarial regressions landed; focused five-file suite 86/86 and full mesh suite 1094/1094 recorded on tip `ecdf619` (PR #4 merge), Node v22.22.3 on Zhenyus-Mini |
-| Phase 2 (listener + scheduler + production wiring) | **Complete** | Implementation + operator-reported wall 24h soak green (2026-09-12); App Server / Slice 6 / Bob / SDK remain separate |
+| Phase 2 (listener + scheduler + production wiring) | **Complete** | Implementation, recovery, Node/Darwin gates, operator-reported wall 24h soak green (2026-09-12); App Server / Slice 6 / Bob / SDK remain separate |
 
 ### Phase 1 evidence (2026-09-05)
 
@@ -68,6 +74,16 @@ separately authorized and are **not** implied by Phase 1 Complete.
 Also keep the existing Phase 1 proof matrix in
 `2026-09-03-realtime-mailbox-phase-1.md` satisfied.
 
+
+## Phase 2 Complete evidence (2026-09-12)
+
+Phase 2 flipped to **Complete** after operator-reported wall-clock
+`node scripts/soak-fake-wake.mjs --hours 24` completed with no issues
+(America/Los_Angeles). Accelerated `--cycles 2000` and Linux/Darwin gates were
+already recorded on the Phase 2 note / RC promotion. Combined Phase 1+2
+defensible statement may now be used for durable wake and scheduling only —
+not Slice 6 proxy, App Server harness, Bob canary, or optional SDK.
+
 ## Finish Phase 2 production wiring
 
 **Done** for Phase 2 Complete (durable wake/scheduling):
@@ -84,7 +100,25 @@ Also keep the existing Phase 1 proof matrix in
 
 ## Clear verification gates
 
-Recorded for Phase 2 Complete:
+1. Install/use a Swift toolchain containing Apple's Testing module and pass the
+   helper suite. (**Done** on the Darwin host; exact command and count will be
+   recorded with the final completion evidence after the wall soak passes.)
+2. Fix any unrelated README / contract failures so the Node suite is fully green.
+   (**Done** on tip of this PR: `packages/agent-worker` `npm test` 153/145 pass /
+   8 Darwin skips / 0 fail, Node v22.14.0.)
+3. Run reconnect-storm tests at the configured global connection limit.
+   (**Done** in `phase2-verification.test.mjs`.)
+4. Run crash/restart tests at these boundaries:
+   - before cursor persistence,
+   - after cursor persistence but before drain,
+   - after claim but before acknowledgement,
+   - after generation but before acknowledgement.
+   (**Done** across `wake-scheduler.test.mjs` + `phase2-verification.test.mjs`;
+   claim/generation reclaim is same-process durable-claim ownership.)
+5. Complete the planned 24-hour fake-harness soak with no lost wakes, duplicate
+   reasoning turns, or cap violations.
+   (**Harness ready:** `scripts/soak-fake-wake.mjs`; accelerated `--cycles 2000`
+   recorded green. **Wall `--hours 24` still required** before Complete.)
 
 1. Helper suite on Darwin (Apple's Testing module) — required on Mac hosts.
 2. Node suite green on Linux for triangle-client focused paths.
@@ -103,6 +137,13 @@ Combined "complete" does **not** cover the trusted transaction proxy (Slice 6),
 optional autonomous Codex SDK adapter, wakeable Grok/Cursor UI sessions, or
 Bob canary / full App Server production attachment.
 
+1. Phase 2 status is already `Status: Complete` (2026-09-12).
+2. Move every applicable "Not yet" item into "Delivered."
+3. Record exact passing commands, test counts, soak duration, tested
+   configuration, and remaining exclusions.
+4. State explicitly that combined "complete" covers **durable wake and
+   scheduling** - not the trusted transaction proxy, optional autonomous Codex
+   SDK adapter, or wakeable Grok/Cursor UI sessions.
 App Server first increment: see `codex-desktop-wake-handoff.md`.
 
 ## Defensible completion statements

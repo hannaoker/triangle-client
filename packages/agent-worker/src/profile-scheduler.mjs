@@ -13,8 +13,18 @@ function positiveInteger(value, name, minimum = 1) {
   return value;
 }
 
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleepMs(ms, signal) {
+  return new Promise((resolve) => {
+    let timer;
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, ms);
+    signal?.addEventListener?.("abort", finish, { once: true });
+    if (signal?.aborted) finish();
+  });
 }
 
 export function createFakeHarness({
@@ -79,36 +89,34 @@ export function createMailboxHarness({
   }
 
   return Object.freeze({
-    async preflight({ instanceId } = {}) {
+    async preflight({ instanceId, signal } = {}) {
       const { client } = resolve(instanceId);
-      const messages = await client.listUnread();
+      const messages = await client.listUnread({ signal });
       if (!Array.isArray(messages)) {
         throw new TypeError("deliveryClient.listUnread must return an array");
       }
       return messages.length > 0;
     },
 
-    async run({ instanceId } = {}) {
+    async run({ instanceId, signal } = {}) {
       const { client, runner } = resolve(instanceId);
-      let processed = 0;
-      while (true) {
-        const messages = await client.listUnread();
-        if (!Array.isArray(messages)) {
-          throw new TypeError("deliveryClient.listUnread must return an array");
-        }
-        if (messages.length === 0) {
-          return { status: "drained", processed };
-        }
-        const completion = await client.completeAndAcknowledge(
-          messages[0],
-          (request, options) => runner.run(request, options),
-        );
-        if (completion?.claimed === false) {
-          logger.error?.("triangle_mailbox_harness_claim_conflict", { instanceId });
-          return { status: "claim_conflict", processed };
-        }
-        processed += 1;
+      const messages = await client.listUnread({ signal });
+      if (!Array.isArray(messages)) {
+        throw new TypeError("deliveryClient.listUnread must return an array");
       }
+      if (messages.length === 0) return { status: "drained", processed: 0 };
+      const completion = await client.completeAndAcknowledge(
+        messages[0],
+        (request, options) => runner.run(request, { ...options, signal: options?.signal ?? signal }),
+        { signal },
+      );
+      if (completion?.claimed === false) {
+        logger.error?.("triangle_mailbox_harness_claim_conflict", { instanceId });
+        const error = new Error("Mailbox claim conflict requires reconciliation");
+        error.code = "claim_conflict";
+        throw error;
+      }
+      return { status: "more", processed: 1 };
     },
   });
 }
@@ -123,6 +131,7 @@ export function createProfileScheduler({
   sleep = sleepMs,
   now = () => Date.now(),
   logger = console,
+  signal,
 } = {}) {
   if (!gate || typeof gate.run !== "function") {
     throw new TypeError("gate.run is required");
@@ -136,6 +145,12 @@ export function createProfileScheduler({
   const states = new Map();
   const queue = [];
   let pumping = false;
+  let inFlight = 0;
+  let stopped = Boolean(signal?.aborted);
+  signal?.addEventListener?.("abort", () => {
+    stopped = true;
+    queue.length = 0;
+  }, { once: true });
 
   function stateFor(instanceId) {
     let state = states.get(instanceId);
@@ -159,75 +174,87 @@ export function createProfileScheduler({
     if (!queue.includes(instanceId)) queue.push(instanceId);
   }
 
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
+  async function waitForBackoff(ms) {
+    if (!signal) return sleep(ms);
+    if (signal.aborted) return;
+    let onAbort;
+    const aborted = new Promise((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
     try {
-      while (queue.length > 0) {
-        const instanceId = queue.shift();
-        const state = stateFor(instanceId);
-        if (state.active) continue;
-        const waitMs = Math.max(0, state.nextEligibleAt - now());
-        if (waitMs > 0) {
-          await sleep(waitMs);
-        }
-        if (state.active) {
-          enqueue(instanceId);
-          continue;
-        }
-        state.active = true;
-        const highWatermark = state.highWatermark;
-        try {
-          await gate.run(async () => {
-            if (highWatermark <= state.lastReconciled) {
-              return;
-            }
-            const actionable = await harness.preflight({
-              instanceId,
-              highWatermark,
-            });
-            if (!actionable) {
-              state.lastReconciled = highWatermark;
-              return;
-            }
-            await harness.run({
-              instanceId,
-              highWatermark,
-            });
-            state.lastReconciled = highWatermark;
-            state.backoffMs = initialBackoffMs;
-            state.failureCount = 0;
-            state.nextEligibleAt = 0;
+      await Promise.race([sleep(ms, signal), aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async function runState(state) {
+    try {
+      const waitMs = Math.max(0, state.nextEligibleAt - now());
+      if (waitMs > 0) await waitForBackoff(waitMs);
+      if (stopped || signal?.aborted) return;
+      const highWatermark = state.highWatermark;
+      try {
+        await gate.run(async () => {
+          if (highWatermark <= state.lastReconciled) return;
+          const actionable = await harness.preflight({
+            instanceId: state.instanceId,
+            highWatermark,
+            signal,
           });
-        } catch (error) {
+          if (!actionable) {
+            state.lastReconciled = highWatermark;
+            return;
+          }
+          const result = await harness.run({
+            instanceId: state.instanceId,
+            highWatermark,
+            signal,
+          });
+          if (result?.status === "more") {
+            state.dirty = true;
+          } else {
+            state.lastReconciled = highWatermark;
+          }
+          state.backoffMs = initialBackoffMs;
+          state.failureCount = 0;
+          state.nextEligibleAt = 0;
+        }, { signal });
+      } catch (error) {
+        if (error?.name !== "AbortError" && !stopped) {
           state.failureCount += 1;
           const jitter = 1 + (random() * 2 - 1) * idleJitterRatio;
-          state.backoffMs = Math.min(
-            maxBackoffMs,
-            Math.max(initialBackoffMs, Math.floor(state.backoffMs * 2 * jitter)),
-          );
+          state.backoffMs = Math.min(maxBackoffMs, Math.max(initialBackoffMs, Math.floor(state.backoffMs * 2 * jitter)));
           state.nextEligibleAt = now() + state.backoffMs;
-          logger.error?.("triangle_scheduler_drain_failed", {
-            instanceId,
-            failureCount: state.failureCount,
-          });
-          if (error?.name === "AbortError") throw error;
+          logger.error?.("triangle_scheduler_drain_failed", { instanceId: state.instanceId, failureCount: state.failureCount });
           state.dirty = true;
-        } finally {
-          state.active = false;
-          if (state.dirty) {
-            state.dirty = false;
-            enqueue(instanceId);
-          }
         }
       }
     } finally {
-      pumping = false;
-      if (queue.length > 0) {
-        queueMicrotask(() => {
-          pump().catch(() => {});
-        });
+      state.active = false;
+      inFlight -= 1;
+      if (state.dirty && !stopped) {
+        state.dirty = false;
+        enqueue(state.instanceId);
       }
+      queueMicrotask(pump);
+    }
+  }
+
+  function pump() {
+    if (pumping || stopped) return;
+    pumping = true;
+    try {
+      while (queue.length > 0 && !stopped) {
+        const state = stateFor(queue.shift());
+        if (state.active) continue;
+        state.active = true;
+        inFlight += 1;
+        runState(state).catch(() => {});
+      }
+    } finally {
+      pumping = false;
     }
   }
 
@@ -238,6 +265,7 @@ export function createProfileScheduler({
       }
       const watermark = Number.isSafeInteger(highWatermark) ? highWatermark : 0;
       const state = stateFor(instanceId);
+      if (stopped) return { queued: false, dirty: false, stopped: true };
       if (watermark > state.highWatermark) state.highWatermark = watermark;
       if (reason === "startup_reconcile" && watermark === 0) {
         state.highWatermark = Math.max(state.highWatermark, state.lastReconciled + 1);
@@ -247,7 +275,7 @@ export function createProfileScheduler({
         return { queued: false, dirty: true };
       }
       enqueue(instanceId);
-      pump().catch(() => {});
+      pump();
       return { queued: true, dirty: false };
     },
 
@@ -263,7 +291,7 @@ export function createProfileScheduler({
     },
 
     async idle() {
-      while (pumping || queue.length > 0 || [...states.values()].some((state) => state.active)) {
+      while (pumping || queue.length > 0 || inFlight > 0 || [...states.values()].some((state) => state.active)) {
         await sleep(1);
       }
     },
@@ -287,7 +315,8 @@ export function createWakeRuntime({
     ?? (cursorPath
       ? createAtomicFileCursorStore({ filePath: cursorPath })
       : createMemoryCursorStore(0));
-  const scheduler = createProfileScheduler({ gate, harness, logger });
+  const schedulerAbort = new AbortController();
+  const scheduler = createProfileScheduler({ gate, harness, logger, signal: schedulerAbort.signal });
   const wake = createWakeClient({
     profiles,
     transport,
@@ -301,9 +330,18 @@ export function createWakeRuntime({
     wake,
     cursorStore: resolvedStore,
     async start({ signal, reconcile = true } = {}) {
-      if (reconcile) await wake.reconcileStartup({ signal });
-      await scheduler.idle();
-      return wake.watch({ signal });
+      const abortScheduler = () => schedulerAbort.abort();
+      signal?.addEventListener?.("abort", abortScheduler, { once: true });
+      if (signal?.aborted) abortScheduler();
+      try {
+        if (reconcile) await wake.reconcileStartup({ signal });
+        await scheduler.idle();
+        return await wake.watch({ signal });
+      } finally {
+        schedulerAbort.abort();
+        await scheduler.idle();
+        signal?.removeEventListener?.("abort", abortScheduler);
+      }
     },
   });
 }

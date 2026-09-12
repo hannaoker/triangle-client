@@ -198,7 +198,8 @@ public struct WatchGrantService: Sendable {
             agentIDs: binding.agentIDs.map(\.value),
             state: "revoked",
             audience: binding.audience,
-            purpose: binding.purpose
+            purpose: binding.purpose,
+            operatorAction: .ensureWatchGrant
         )
     }
 
