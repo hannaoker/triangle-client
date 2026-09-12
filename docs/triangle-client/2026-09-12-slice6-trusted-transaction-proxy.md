@@ -51,7 +51,10 @@ Out of Phase 1/2 Complete. Not Bob canary. Not optional Codex SDK.
 
 ```sh
 cd packages/agent-worker && node --test test/helper-transaction-proxy.test.mjs test/shared-codex-app-server.test.mjs
+# 18/18 pass
+
 cd packages/agent-worker && npm test
+# 177 tests, 169 pass, 8 skip (Darwin-only), 0 fail
 ```
 
 Darwin (required before production):
