@@ -26,7 +26,7 @@ its production-wiring and verification gates pass.
 | Phase | Current status | Why |
 | --- | --- | --- |
 | Phase 1 (MESH watch grants, held poll, claim leases) | **Complete** | Adversarial regressions landed; focused five-file suite 86/86 and full mesh suite 1094/1094 recorded on tip `ecdf619` (PR #4 merge), Node v22.22.3 on Zhenyus-Mini |
-| Phase 2 (listener + scheduler + production wiring) | Implemented in source (**prototype**) | Linux Node gates + accelerated soak recorded; wall 24h soak and Darwin helper suite still required before Complete |
+| Phase 2 (listener + scheduler + production wiring) | **Release Candidate** (24-hour soak pending) | Implementation, recovery, bounded-memory stress, Node, and Darwin helper gates pass; wall 24h report is still required before Complete |
 
 ### Phase 1 evidence (2026-09-05)
 
@@ -85,7 +85,8 @@ Before marking Phase 2 complete:
 ## Clear verification gates
 
 1. Install/use a Swift toolchain containing Apple's Testing module and pass the
-   helper suite. (**Still open** on Darwin host.)
+   helper suite. (**Done** on the Darwin host; exact command and count will be
+   recorded with the final completion evidence after the wall soak passes.)
 2. Fix any unrelated README / contract failures so the Node suite is fully green.
    (**Done** on tip of this PR: `packages/agent-worker` `npm test` 153/145 pass /
    8 Darwin skips / 0 fail, Node v22.14.0.)
@@ -113,7 +114,7 @@ Phase 1 status is already **Complete** with the recorded suite evidence above.
 
 When Phase 2 gates pass:
 
-1. Change Phase 2 `Status: Implemented in source (prototype)` to
+1. Change Phase 2 `Status: Release Candidate (24-hour soak pending)` to
    `Status: Complete`.
 2. Move every applicable "Not yet" item into "Delivered."
 3. Record exact passing commands, test counts, soak duration, tested

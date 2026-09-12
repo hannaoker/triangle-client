@@ -1,6 +1,6 @@
 # Realtime mailbox Phase 2 - listener and scheduler
 
-Status: Implemented in source (prototype)
+Status: Release Candidate (24-hour soak pending)
 
 Updated: 2026-09-11
 
@@ -21,7 +21,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 See the shared completion bar:
 [2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
 
-## Delivered (prototype)
+## Delivered (release candidate)
 
 - `event-driven` delivery mode in Swift `DeliveryMode`
 - Event-driven profiles stay out of worker `instances` (wake ownership is separate)
@@ -68,7 +68,10 @@ See the shared completion bar:
 
 ### Verification evidence recorded (2026-09-11, Linux Node v22.14.0)
 
-Still **prototype** — wall-clock 24h soak and Darwin helper suite not claimed.
+Promoted to **Release Candidate** after the implementation, focused recovery
+checks, full Node suite, bounded-memory stress run, and Darwin helper suite
+passed. Complete remains gated on the in-progress wall-clock 24-hour soak and
+its recorded final report.
 
 ```sh
 cd packages/agent-worker && npm test
@@ -97,7 +100,6 @@ Production / evidence gaps:
 
 - Wall-clock **24-hour** fake-harness soak evidence
   (`node scripts/soak-fake-wake.mjs --hours 24`) with recorded report
-- Darwin Swift toolchain run: helper suite green (Apple's Testing module)
 - Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
 
 Accelerated soak and Linux Node gates above are necessary but **not** sufficient
