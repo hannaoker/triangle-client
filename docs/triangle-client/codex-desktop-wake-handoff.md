@@ -59,7 +59,7 @@ This is not a claim that every remaining task is mechanical or release-safe.
 - Session: connect / resume / read / turn/start / wait / admit / reconnect / shutdown
 - Wake bridge: helper-shaped watch transport → `resolveDelivery` → admit (empty mailbox → zero turns)
 - **Supervisor / CLI opt-in `appServerWake`** for bound-thread bootstrap (secret-free MESH watch; App Server WS token via absolute file or env *name*)
-- **Production-shaped native-desktop nonce experiment** (`native-desktop-wake-experiment.mjs` + thin runner): after `readyz`, mints a disposable thread on the ephemeral app-server (optional same-server thread override), then runs a unique nonce turn via authenticated transport + shared session; Mac runbook in this handoff; Linux `--check-guards-only` + unit tests
+- **Production-shaped native-desktop nonce experiment** (`native-desktop-wake-experiment.mjs` + thin runner): after `readyz`, mints+seeds a disposable resumeable thread on the app-server (optional same-server override; optional `MESH_DESKTOP_CODEX_HOME`), then runs a unique nonce turn via authenticated transport + shared session; Mac runbook in this handoff; Linux `--check-guards-only` + unit tests
 - Slice 6 helper proxy on main (not claimed as Mac-reviewed production)
 
 ```sh
@@ -190,8 +190,8 @@ Client source to inspect first:
 - `scripts/prototypes/shared-codex-server.mjs`: runnable two-client protocol proof;
   not the native-desktop test. Three real model turns, persisted test history.
 - `scripts/prototypes/native-desktop-wake-experiment.mjs`: **production-shaped**
-  Mac entrypoint. After app-server `readyz`, authenticates and **mints a disposable
-  thread on that ephemeral server** (default), then drives
+  Mac entrypoint. After app-server `readyz`, authenticates, **mints+seeds**, and **verifies resume** for a disposable
+  thread on that server (default; optional `MESH_DESKTOP_CODEX_HOME`), then drives
   `createAuthenticatedAppServerTransport` + `createSharedCodexSession` with a
   unique nonce. Same opt-in guards: `MESH_ALLOW_DESKTOP_EXPERIMENT=1`, fresh
   private `MESH_DESKTOP_TEST_ROOT` under `/private/tmp/`, free debug port **63999**.
@@ -241,16 +241,20 @@ Still requires a human on Mac:
 4. Provide an App Server capability token via **file or env name** (same custody
    model as supervisor `appServerWake`). Prefer a disposable absolute token file
    under the private root — **never** put `mesh_` / `mesh_watch_` into Node.
-5. Run the script. After app-server `readyz`, it authenticates and **mints a
-   disposable thread on that ephemeral server**, then launches ChatGPT to
-   `codex://threads/<minted-id>`. Do **not** paste a thread id from your normal
-   Codex home as the primary path (that id does not exist on the empty
-   `MESH_DESKTOP_TEST_ROOT` CODEX_HOME).
-6. Leave the minted chat idle and subscribed after desktop attaches.
-7. After the script logs `listener_turn_completed`, **visually** confirm the
+5. Optionally set `MESH_DESKTOP_CODEX_HOME` to your real Codex home (for API
+   auth). UI data still stays under `MESH_DESKTOP_TEST_ROOT/ui`. Default
+   `CODEX_HOME` remains `${MESH_DESKTOP_TEST_ROOT}/codex`.
+6. Run the script. After app-server `readyz`, it authenticates, **mints** a
+   disposable thread on that server, runs a **seed turn** on the same connection,
+   and **verifies `thread/resume` + `thread/read`** before launching ChatGPT to
+   `codex://threads/<minted-id>`. It fails closed if the minted id is not
+   resumeable (no “rollout found” surprises after desktop launch). Do **not**
+   paste a thread id from a different Codex home as the primary path.
+7. Leave the minted chat idle and subscribed after desktop attaches.
+8. After the script logs `listener_turn_completed`, **visually** confirm the
    renderer shows the synthetic prompt and assistant reply
    `DESKTOP_SHARED_WAKE_OK <nonce>` (script exit code alone is insufficient).
-8. Tear down: script attempts SIGTERM/SIGKILL cleanup; verify no stray ChatGPT /
+9. Tear down: script attempts SIGTERM/SIGKILL cleanup; verify no stray ChatGPT /
    app-server / crash-handler processes; compare config snapshot.
 
 Optional: `MESH_DESKTOP_TEST_THREAD_ID` overrides only if that thread **already
@@ -286,7 +290,8 @@ node scripts/prototypes/native-desktop-wake-experiment.mjs
 
 Pass Gate A only when:
 
-- Script logs `thread_resolved` with `source=minted` (or a valid same-server override).
+- Script logs `thread_resolved` with `source=minted`, `resumeVerified=true` (or a valid same-server override).
+- Script logs `desktop_resume_observed` only after successful resume/active stream (not a bare `thread/resume` with -32600).
 - Desktop resumes that minted thread on the shared App Server.
 - Listener (production-shaped session) starts a turn whose text embeds the unique nonce.
 - Server `turn/started` / `turn/completed` agree on the turn id.

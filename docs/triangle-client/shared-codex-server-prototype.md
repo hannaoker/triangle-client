@@ -4,9 +4,9 @@ Status: protocol proof and native desktop idle-chat wake-up passed; production-s
 adapter under `packages/agent-worker/src/shared-codex-app-server.mjs` with
 authenticated WebSocket transport
 (`authenticated-app-server-transport.mjs`) and supervisor `appServerWake`
-wiring. Production-shaped native-desktop nonce experiment script mints a
-disposable thread on the ephemeral app-server after `readyz` (no foreign
-normal-Codex thread id); Mac Gate A execution and Bob canary remain.
+wiring. Production-shaped native-desktop nonce experiment script mints+seeds a
+resumeable disposable thread after `readyz` (optional `MESH_DESKTOP_CODEX_HOME`;
+no foreign thread id); Mac Gate A execution and Bob canary remain.
 
 Next agent: continue from [the concrete implementation handoff](codex-desktop-wake-handoff.md)
 (Gate A Mac runbook, then Bob canary checklist).
