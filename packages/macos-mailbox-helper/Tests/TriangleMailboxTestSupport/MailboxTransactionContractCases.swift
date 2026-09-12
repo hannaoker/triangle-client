@@ -69,7 +69,7 @@ public enum MailboxTransactionContractCases {
             let data = try Data(contentsOf: path)
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             try expect(object?["protocol"] as? String == "coordinator-delivery-v1", "protocol missing")
-            try expect(Set((object ?? [:]).keys.map(String.init)) == Set([
+            try expect(Set(Array((object ?? [:]).keys)) == Set([
                 "version", "instanceId", "protocol", "deliveryId", "roomId", "claimId",
                 "replyIdempotencyKey", "state", "replyEventId", "replyResolution",
                 "failureCount", "lastFailureReason", "createdAt",
