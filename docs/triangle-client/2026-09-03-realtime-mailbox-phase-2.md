@@ -1,8 +1,8 @@
 # Realtime mailbox Phase 2 - listener and scheduler
 
-Status: Release Candidate (24-hour soak pending)
+Status: Complete
 
-Updated: 2026-09-11
+Updated: 2026-09-12
 
 Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 
@@ -21,7 +21,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 See the shared completion bar:
 [2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
 
-## Delivered (release candidate)
+## Delivered
 
 - `event-driven` delivery mode in Swift `DeliveryMode`
 - Event-driven profiles stay out of worker `instances` (wake ownership is separate)
@@ -68,10 +68,10 @@ See the shared completion bar:
 
 ### Verification evidence recorded (2026-09-11, Linux Node v22.14.0)
 
-Promoted to **Release Candidate** after the implementation, focused recovery
-checks, full Node suite, bounded-memory stress run, and Darwin helper suite
-passed. Complete remains gated on the in-progress wall-clock 24-hour soak and
-its recorded final report.
+Previously promoted to **Release Candidate** after implementation, focused
+recovery checks, full Node suite, bounded-memory stress, and Darwin helper
+suite. Wall-clock 24-hour soak was later reported green (2026-09-12); status
+is now **Complete**.
 
 ```sh
 cd packages/agent-worker && npm test
@@ -88,22 +88,33 @@ node scripts/soak-fake-wake.mjs --cycles 2000
 # maxConcurrentReasoners 2, duplicateDrains 0
 ```
 
+
+
+### Wall-clock soak evidence (2026-09-12, America/Los_Angeles)
+
+Operator-reported wall-clock 24-hour fake-harness soak completed with **no
+issues found** (no lost wakes, duplicate drains, or shared-gate violations
+reported). Command used for the wall soak:
+
+```sh
+node scripts/soak-fake-wake.mjs --hours 24
+```
+
+Phase 2 is therefore **Complete** for durable wake and scheduling only.
+Trusted transaction proxy (Slice 6), interactive App Server harness wiring,
+Bob canary, and optional autonomous Codex SDK remain out of this claim.
+
 Swift helper WatchGrant / ClientSupervisor contracts still require macOS:
 
 ```sh
 cd packages/macos-mailbox-helper && bash scripts/test-host.sh
 ```
 
-## Not yet (blocks Status: Complete)
+## Remaining exclusions (not blockers for Complete)
 
-Production / evidence gaps:
-
-- Wall-clock **24-hour** fake-harness soak evidence
-  (`node scripts/soak-fake-wake.mjs --hours 24`) with recorded report
 - Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
 
-Accelerated soak and Linux Node gates above are necessary but **not** sufficient
-to flip Status to Complete.
+Wall-clock 24-hour soak evidence is recorded below under Verification evidence.
 
 ## Explicitly out of Phase 2 Complete
 
@@ -113,8 +124,12 @@ to flip Status to Complete.
 - Wakeable Grok/Cursor UI sessions
 - Claiming interactive App Server / Bob canary work as Phase 2 evidence
 
-## When Complete
+## Completion statement (2026-09-12)
 
-Only after the completion-criteria evidence is recorded, change this file's
-status to `Status: Complete`, move applicable "Not yet" items into Delivered,
-and use the defensible completion statement from the criteria note.
+> Phase 2 is complete: event-driven ownership, signed watch-grant transport,
+> durable wake cursor recovery, supervisor wake launch, real mailbox harness
+> with shared reasoning gate, reconnect/crash gates, and wall-clock 24-hour
+> fake-harness soak evidence are recorded. "Complete" means durable wake and
+> scheduling only. Interactive Codex App Server harness wiring, Hermes / other
+> harness adapters, trusted transaction-proxy work, Bob canary, and optional
+> autonomous Codex SDK remain out of scope for this claim.
