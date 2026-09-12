@@ -36,6 +36,69 @@ function sampleBinding(overrides = {}) {
   };
 }
 
+function matchingTransport(binding, overrides = {}) {
+  return createFakeAppServerTransport({
+    threadId: binding.threadId,
+    serverIdentity: binding.serverIdentity,
+    ...overrides,
+  });
+}
+
+/**
+ * Non-retaining transport: emits events to listeners but does not keep an
+ * events[] buffer. Completions can fire immediately during turn/start.
+ */
+function createNonRetainingImmediateTransport({ threadId, serverIdentity }) {
+  let connected = false;
+  let turnCounter = 0;
+  const listeners = new Set();
+  const calls = [];
+
+  function emit(method, params) {
+    const event = { method, params };
+    for (const listener of listeners) listener(event);
+  }
+
+  return Object.freeze({
+    serverIdentity,
+    // Intentionally no retained events array — waiters must not rely on it.
+    calls,
+    onEvent(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    async connect() {
+      connected = true;
+      return { connected: true, serverIdentity };
+    },
+    async call(method, params = {}) {
+      if (!connected) throw new Error("not connected");
+      calls.push({ method, params });
+      switch (method) {
+        case "initialize":
+          return { serverInfo: { name: serverIdentity, version: "0.0.0-fake" } };
+        case "thread/resume":
+        case "thread/read":
+          return { thread: { id: threadId, status: { type: "idle" }, turns: [] } };
+        case "turn/start": {
+          turnCounter += 1;
+          const turnId = `turn_imm_${String(turnCounter).padStart(4, "0")}`;
+          emit("turn/started", { threadId, turn: { id: turnId, status: "in_progress" } });
+          // Complete synchronously before turn/start returns — classic race vs
+          // waitForTurn registering after the response.
+          emit("turn/completed", { threadId, turn: { id: turnId, status: "completed" } });
+          return { turn: { id: turnId, status: "in_progress" } };
+        }
+        default:
+          throw new Error(`unknown method ${method}`);
+      }
+    },
+    async close() {
+      connected = false;
+    },
+  });
+}
+
 test("validateBinding accepts a complete opt-in binding and rejects secrets", () => {
   const binding = validateBinding(sampleBinding());
   assert.equal(binding.adapterVersion, "1");
@@ -98,7 +161,7 @@ test("memory and atomic binding stores persist validated bindings", async () => 
 
 test("fake transport session connects, resumes, and completes an idle turn", async () => {
   const binding = validateBinding(sampleBinding());
-  const transport = createFakeAppServerTransport({ threadId: binding.threadId });
+  const transport = matchingTransport(binding);
   const session = createSharedCodexSession({ binding, transport });
   const status = await session.connect();
   assert.equal(status.status, "subscribed");
@@ -114,14 +177,36 @@ test("fake transport session connects, resumes, and completes an idle turn", asy
   assert.equal(await session.correlationStore.get("delivery_idle_1").then((e) => e.turnId), started.turn.id);
 });
 
+test("connect fails closed when authenticated server identity mismatches binding", async () => {
+  const binding = validateBinding(sampleBinding({ serverIdentity: "expected-server" }));
+  const transport = createFakeAppServerTransport({
+    threadId: binding.threadId,
+    serverIdentity: "different-server",
+  });
+  const session = createSharedCodexSession({ binding, transport });
+  await assert.rejects(
+    () => session.connect(),
+    (error) =>
+      error.code === "server_identity_mismatch"
+      && error.expected === "expected-server"
+      && error.actual === "different-server",
+  );
+  assert.equal(session.status().status, "disconnected");
+  assert.equal(session.status().lastError?.code, "server_identity_mismatch");
+  assert.equal(
+    transport.calls.some((call) => call.method === "thread/resume"),
+    false,
+    "must not resume thread after identity mismatch",
+  );
+});
+
 test("admission queues while busy and drains after completion", async () => {
   const binding = validateBinding(sampleBinding());
   let releaseFirst;
   const firstDone = new Promise((resolve) => {
     releaseFirst = resolve;
   });
-  const transport = createFakeAppServerTransport({
-    threadId: binding.threadId,
+  const transport = matchingTransport(binding, {
     async onCall(method, params, { emit, setStatus }) {
       if (method !== "turn/start") return undefined;
       const turnId = `turn_manual_${params.input[0].text}`;
@@ -165,9 +250,34 @@ test("admission queues while busy and drains after completion", async () => {
   assert.ok(session.status().lastSuccessfulWakeAt);
 });
 
+test("waitForTurn observes immediate completion on a non-retaining transport", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = createNonRetainingImmediateTransport({
+    threadId: binding.threadId,
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    requestTimeoutMs: 50,
+  });
+  await session.connect();
+  const started = await session.startTurn({
+    deliveryId: "delivery_race_1",
+    input: [{ type: "text", text: "fast" }],
+  });
+  assert.equal(transport.events, undefined);
+  const turn = await session.waitForTurn(started.turn.id, { timeoutMs: 50 });
+  assert.equal(turn.status, "completed");
+  assert.equal(turn.id, started.turn.id);
+  assert.notEqual(session.status().status, "submission_unknown");
+  const admitted = await session.admit({ deliveryId: "delivery_race_2", text: "queued-after" });
+  assert.equal(admitted.status, "completed");
+});
+
 test("empty mailbox resolveDelivery causes zero model turns", async () => {
   const binding = validateBinding(sampleBinding());
-  const transport = createFakeAppServerTransport({ threadId: binding.threadId });
+  const transport = matchingTransport(binding);
   const session = createSharedCodexSession({ binding, transport });
   const watchTransport = createFakeWatchTransport({
     polls: [
@@ -197,7 +307,7 @@ test("empty mailbox resolveDelivery causes zero model turns", async () => {
 
 test("wake bridge admits a delivery through helper-shaped fake watch transport", async () => {
   const binding = validateBinding(sampleBinding());
-  const transport = createFakeAppServerTransport({ threadId: binding.threadId });
+  const transport = matchingTransport(binding);
   const session = createSharedCodexSession({ binding, transport });
   const watchTransport = createFakeWatchTransport({
     polls: [
@@ -235,8 +345,7 @@ test("wake bridge admits a delivery through helper-shaped fake watch transport",
 
 test("submission timeout becomes submission_unknown and stops auto-resubmit", async () => {
   const binding = validateBinding(sampleBinding());
-  const transport = createFakeAppServerTransport({
-    threadId: binding.threadId,
+  const transport = matchingTransport(binding, {
     async onCall(method) {
       if (method === "turn/start") {
         await new Promise(() => {});
@@ -248,7 +357,6 @@ test("submission timeout becomes submission_unknown and stops auto-resubmit", as
     binding,
     transport,
     requestTimeoutMs: 20,
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   });
   await session.connect();
   await assert.rejects(
@@ -258,6 +366,30 @@ test("submission timeout becomes submission_unknown and stops auto-resubmit", as
   assert.equal(session.status().status, "submission_unknown");
   const skipped = await session.admit({ deliveryId: "next", text: "should not run" });
   assert.equal(skipped.status, "submission_unknown");
+});
+
+test("successful App Server calls clear timeout timers promptly", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = matchingTransport(binding);
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    // A retained losing timer at this deadline would dominate wall clock.
+    requestTimeoutMs: 30_000,
+  });
+  const startedAt = Date.now();
+  await session.connect();
+  const started = await session.startTurn({
+    deliveryId: "delivery_timer_1",
+    input: [{ type: "text", text: "timer-clear" }],
+  });
+  await session.waitForTurn(started.turn.id);
+  await session.shutdown();
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(
+    elapsedMs < 5_000,
+    `focused calls should finish without waiting out requestTimeoutMs (elapsed ${elapsedMs}ms)`,
+  );
 });
 
 test("trusted transaction proxy stub fails closed until Slice 6 lands", async () => {
