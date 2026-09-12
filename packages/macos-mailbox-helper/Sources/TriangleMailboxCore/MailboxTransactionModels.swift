@@ -267,7 +267,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         switch (state, replyResolution, replyEventID) {
         case (.prepared, .none, nil), (.claimed, .none, nil):
             break
-        case (.replied, .created, .some), (.replied, .idempotencyConflict, _):
+        case (.replied, .created, .some), (.replied, .idempotencyConflict, .some):
             break
         default:
             throw MailboxTransactionStoreError.invalidRecord
@@ -312,9 +312,9 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         guard resolution == .created || resolution == .idempotencyConflict else {
             throw MailboxTransactionStoreError.invalidRecord
         }
-        if resolution == .created {
-            guard eventID != nil else { throw MailboxTransactionStoreError.invalidRecord }
-        }
+        // Both created and verified idempotency-conflict replies require an event ID.
+        // An unverified HTTP 409 must not enter .replied.
+        guard let eventID else { throw MailboxTransactionStoreError.invalidRecord }
         return try MailboxOpenTransaction(
             instanceID: instanceID,
             protocolOwnership: protocolOwnership,

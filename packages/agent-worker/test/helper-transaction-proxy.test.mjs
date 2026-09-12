@@ -117,6 +117,21 @@ test("helper proxy maps transaction_stuck exit code", async () => {
   );
 });
 
+test("helper proxy maps unverified_reply_conflict exit code", async () => {
+  const proxy = createHelperTrustedTransactionProxy({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "hermes-bot",
+    protocol: "coordinator-delivery-v1",
+    async run() {
+      return { code: 5, stdout: JSON.stringify({ error: "unverified_reply_conflict" }), stderr: "" };
+    },
+  });
+  await assert.rejects(
+    () => proxy.reply({ roomId, text: "unverified" }),
+    (error) => error.code === "unverified_reply_conflict",
+  );
+});
+
 test("resolveTrustedTransactionProxy prefers helper when available", () => {
   const proxy = resolveTrustedTransactionProxy({
     helperPath: "/trusted/triangle-mailbox",

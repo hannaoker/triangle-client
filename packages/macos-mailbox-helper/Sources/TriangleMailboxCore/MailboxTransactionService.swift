@@ -12,6 +12,7 @@ public enum MailboxTransactionServiceError: Error, Equatable, Sendable {
     case claimConflict
     case upstreamUnavailable
     case invalidUpstreamResponse
+    case unverifiedReplyConflict
     case secretInvariant
 }
 
@@ -209,11 +210,21 @@ public struct MailboxTransactionService: Sendable {
             }
             next = try open.markingReplied(eventID: eventID, resolution: .created)
         case .idempotencyConflict:
-            let recovered = try? await transport.lookupReplyEventID(
-                roomID: roomID.value,
-                idempotencyKey: open.replyIdempotencyKey.value
-            )
-            let eventID = recovered.flatMap(MailboxEventID.init(rawValue:))
+            // A bare HTTP 409 is not proof the intended reply committed. Only mark
+            // replied after a successful history lookup recovers the event for the
+            // deterministic reply key in this room.
+            let recovered: String?
+            do {
+                recovered = try await transport.lookupReplyEventID(
+                    roomID: roomID.value,
+                    idempotencyKey: open.replyIdempotencyKey.value
+                )
+            } catch {
+                throw MailboxTransactionServiceError.unverifiedReplyConflict
+            }
+            guard let recovered, let eventID = MailboxEventID(rawValue: recovered) else {
+                throw MailboxTransactionServiceError.unverifiedReplyConflict
+            }
             next = try open.markingReplied(eventID: eventID, resolution: .idempotencyConflict)
         }
 
@@ -240,7 +251,11 @@ public struct MailboxTransactionService: Sendable {
         if let deliveryID, deliveryID != open.deliveryID {
             throw MailboxTransactionServiceError.unrelatedAcknowledgement
         }
-        guard open.state == .replied else { throw MailboxTransactionServiceError.invalidState }
+        // Ack requires a verified reply (created or verified idempotency conflict)
+        // with a recovered reply event ID. Unverified 409s never reach .replied.
+        guard open.state == .replied, open.replyEventID != nil else {
+            throw MailboxTransactionServiceError.invalidState
+        }
 
         if simulatedCrashAt == .beforeAck {
             throw MailboxTransactionServiceError.upstreamUnavailable

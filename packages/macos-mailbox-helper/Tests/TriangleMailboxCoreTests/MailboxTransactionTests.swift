@@ -21,6 +21,12 @@ struct MailboxTransactionTests {
     @Test("retry with different reply text yields one room event")
     func differentText() async throws { try await MailboxTransactionContractCases.differentTextOneEvent() }
 
+    @Test("unverified 409 without matching event refuses replied and ack")
+    func unverifiedMissingEvent() async throws { try await MailboxTransactionContractCases.unverifiedConflictMissingEvent() }
+
+    @Test("unverified 409 when history lookup fails refuses replied and ack")
+    func unverifiedLookupFailure() async throws { try await MailboxTransactionContractCases.unverifiedConflictLookupFailure() }
+
     @Test("five failures return transaction_stuck")
     func stuck() async throws { try await MailboxTransactionContractCases.fiveFailuresStuck() }
 

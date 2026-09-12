@@ -145,6 +145,9 @@ function parseJsonStdout(result, fallbackCode = "helper_unavailable") {
   if (result.code === 4) {
     throw createCodedError("transaction_stuck", "transaction is stuck");
   }
+  if (result.code === 5) {
+    throw createCodedError("unverified_reply_conflict", "reply conflict was not verified");
+  }
   if (result.code !== 0) {
     throw createCodedError(fallbackCode, "transaction helper failed");
   }

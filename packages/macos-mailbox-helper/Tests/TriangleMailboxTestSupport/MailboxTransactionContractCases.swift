@@ -15,6 +15,8 @@ public enum MailboxTransactionContractCases {
         .init(name: "room mismatch and unrelated ack refusal", run: roomAndAckGuards),
         .init(name: "reply idempotency conflict converges to replied", run: replyIdempotencyConflict),
         .init(name: "retry with different reply text yields one room event", run: differentTextOneEvent),
+        .init(name: "unverified 409 without matching event refuses replied and ack", run: unverifiedConflictMissingEvent),
+        .init(name: "unverified 409 when history lookup fails refuses replied and ack", run: unverifiedConflictLookupFailure),
         .init(name: "five failures return transaction_stuck", run: fiveFailuresStuck),
         .init(name: "quarantine abandons without releasing server claim", run: quarantineWithoutRelease),
         .init(name: "wrong protocol owner is rejected", run: wrongProtocolOwner),
@@ -160,6 +162,7 @@ public enum MailboxTransactionContractCases {
         )
         try expect(replied.state == .replied, "conflict did not mark replied")
         try expect(replied.replyResolution == .idempotencyConflict, "resolution not recorded")
+        try expect(replied.replyEventID?.value == "event_" + String(repeating: "d", count: 32), "verified conflict missing event ID")
         try await service.acknowledge(
             instanceID: instanceID,
             protocolOwnership: .coordinatorDeliveryV1,
@@ -205,16 +208,98 @@ public enum MailboxTransactionContractCases {
             roomID: room,
             text: "beta-different"
         )
+        // Different text under the same key yields 409; history must recover the original event.
         try expect(second.replyResolution == .idempotencyConflict, "different text did not conflict on same key")
+        try expect(second.replyEventID == first.replyEventID, "verified conflict did not recover original event")
         try expect(
             transport.replies.filter { $0.key == claimed.replyIdempotencyKey.value }.count >= 2,
             "retry did not reuse key"
         )
-        // One room event identity: conflict path must not create a second event ID under a new key.
         try expect(
             Set(transport.replies.map(\.key)).count == 1,
             "retry introduced a second reply idempotency key"
         )
+        // Verified conflict may ack; the delivery is proven committed under the deterministic key.
+        try await service2.acknowledge(
+            instanceID: instanceID,
+            protocolOwnership: .coordinatorDeliveryV1,
+            deliveryID: 5
+        )
+        try expect(try store2.readOpen(instanceID: instanceID) == nil, "verified conflict ack did not clear")
+    }
+
+    public static func unverifiedConflictMissingEvent() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.replyHandler = { _, _, _, _ in .idempotencyConflict }
+        transport.lookupHandler = { _, _ in nil }
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        _ = try await service.claim(
+            instanceID: instanceID,
+            protocolOwnership: .coordinatorDeliveryV1,
+            deliveryID: 51,
+            roomID: room
+        )
+        do {
+            _ = try await service.reply(
+                instanceID: instanceID,
+                protocolOwnership: .coordinatorDeliveryV1,
+                roomID: room,
+                text: "unverified"
+            )
+            throw ContractFailure("missing history match was treated as replied")
+        } catch MailboxTransactionServiceError.unverifiedReplyConflict {}
+
+        let open = try store.readOpen(instanceID: instanceID)
+        try expect(open?.state == .claimed, "unverified conflict advanced past claimed")
+        try expect(open?.replyEventID == nil, "unverified conflict recorded a reply event")
+        do {
+            try await service.acknowledge(
+                instanceID: instanceID,
+                protocolOwnership: .coordinatorDeliveryV1,
+                deliveryID: 51
+            )
+            throw ContractFailure("ack was allowed after unverified conflict")
+        } catch MailboxTransactionServiceError.invalidState {}
+        try expect(try store.readOpen(instanceID: instanceID)?.state == .claimed, "ack cleared unverified open txn")
+        try expect(transport.acks.isEmpty, "server ack issued after unverified conflict")
+    }
+
+    public static func unverifiedConflictLookupFailure() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.replyHandler = { _, _, _, _ in .idempotencyConflict }
+        transport.lookupHandler = { _, _ in throw MailboxTransactionServiceError.upstreamUnavailable }
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        _ = try await service.claim(
+            instanceID: instanceID,
+            protocolOwnership: .coordinatorDeliveryV1,
+            deliveryID: 52,
+            roomID: room
+        )
+        do {
+            _ = try await service.reply(
+                instanceID: instanceID,
+                protocolOwnership: .coordinatorDeliveryV1,
+                roomID: room,
+                text: "lookup-failed"
+            )
+            throw ContractFailure("failed history lookup was treated as replied")
+        } catch MailboxTransactionServiceError.unverifiedReplyConflict {}
+
+        let open = try store.readOpen(instanceID: instanceID)
+        try expect(open?.state == .claimed, "lookup failure advanced past claimed")
+        do {
+            try await service.acknowledge(
+                instanceID: instanceID,
+                protocolOwnership: .coordinatorDeliveryV1,
+                deliveryID: 52
+            )
+            throw ContractFailure("ack was allowed after lookup failure")
+        } catch MailboxTransactionServiceError.invalidState {}
+        try expect(transport.acks.isEmpty, "server ack issued after lookup failure")
     }
 
     public static func fiveFailuresStuck() async throws {

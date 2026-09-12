@@ -122,6 +122,9 @@ enum TriangleMailboxCLI {
         } catch MailboxTransactionServiceError.transactionStuck {
             writeJSON(["error": "transaction_stuck"])
             exit(4)
+        } catch MailboxTransactionServiceError.unverifiedReplyConflict {
+            writeJSON(["error": "unverified_reply_conflict"])
+            exit(5)
         } catch {
             let rendered = CLIOutputRenderer.operationFailure
             FileHandle.standardOutput.write(rendered.stdout)

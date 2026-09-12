@@ -189,6 +189,8 @@ public struct MCPTransactionRewriter: Sendable {
             return .reject(code: -32000, message: "transaction_stuck")
         } catch MailboxTransactionServiceError.protocolMismatch {
             return .reject(code: -32000, message: "protocol_mismatch")
+        } catch MailboxTransactionServiceError.unverifiedReplyConflict {
+            return .reject(code: -32000, message: "unverified_reply_conflict")
         } catch {
             return .reject(code: -32603, message: "reply_failed")
         }
@@ -318,7 +320,11 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         guard response.statusCode == 200,
               let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
               let items = object["items"] as? [[String: Any]]
-        else { return nil }
+        else {
+            // Transport/parse failure is not "no match" — callers must not treat
+            // this as a verified idempotency conflict.
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
         for item in items {
             let key = item["idempotency_key"] as? String ?? item["idempotencyKey"] as? String
             if key == idempotencyKey, let id = item["id"] as? String {
