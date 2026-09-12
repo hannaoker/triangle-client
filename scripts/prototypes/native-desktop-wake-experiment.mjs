@@ -23,6 +23,7 @@ import {
   assertDesktopExperimentGuards,
   buildDesktopExperimentBinding,
   createDesktopExperimentNonce,
+  resolveDesktopExperimentThread,
   runNativeDesktopWakeListener,
 } from "../../packages/agent-worker/src/native-desktop-wake-experiment.mjs";
 
@@ -77,12 +78,13 @@ if (checkGuardsOnly) {
   log("guards_ok", {
     root: guards.root,
     threadId: guards.threadId,
+    threadMode: guards.threadId ? "override_if_present_on_server" : "mint_after_readyz",
     serverIdentity: guards.serverIdentity,
     debugPort: guards.debugPort,
     authVia: guards.authTokenFile ? "file" : "env",
     nonce,
     platform: process.platform,
-    note: "Linux-safe guard check only; native desktop not launched",
+    note: "Linux-safe guard check only; native desktop not launched. Default Mac path mints a thread on the ephemeral app-server after readyz.",
   });
   process.exit(0);
 }
@@ -165,6 +167,27 @@ try {
     nonce,
   });
 
+  // Mint (default) or resume override on *this* ephemeral app-server before desktop.
+  // A normal-Codex thread id from the operator's home does not exist here.
+  const workspaceCwd = path.join(root, "workspace");
+  mkdirSync(workspaceCwd, { mode: 0o700, recursive: true });
+  const resolvedThread = await resolveDesktopExperimentThread({
+    endpoint: listenerEndpoint,
+    serverIdentity: guards.serverIdentity,
+    tokenFile: guards.authTokenFile,
+    tokenEnv: guards.authTokenEnv,
+    preferredThreadId: guards.threadId,
+    cwd: workspaceCwd,
+    awaitAuthenticatedHello: process.env.MESH_DESKTOP_AWAIT_AUTH_HELLO === "1",
+    requestTimeoutMs: Number(process.env.MESH_DESKTOP_RPC_TIMEOUT_MS || 45_000),
+  });
+  const threadId = resolvedThread.threadId;
+  log("thread_resolved", {
+    threadId,
+    source: resolvedThread.source,
+    preferredThreadId: guards.threadId,
+  });
+
   const desktopEnv = {
     ...process.env,
     CODEX_APP_SERVER_WS_URL: desktopRpcEndpoint,
@@ -177,7 +200,7 @@ try {
     [
       `--user-data-dir=${path.join(root, "ui")}`,
       `--remote-debugging-port=${DESKTOP_EXPERIMENT_DEBUG_PORT}`,
-      `codex://threads/${guards.threadId}`,
+      `codex://threads/${threadId}`,
     ],
     {
       cwd: root,
@@ -187,12 +210,12 @@ try {
   );
   desktop.stdout.on("data", (chunk) => {
     const text = chunk.toString();
-    if (text.includes(guards.threadId)) {
+    if (text.includes(threadId)) {
       if (text.includes("thread_stream_view_activity_changed active=true")) {
         attached = true;
       }
       log("target_desktop_log", {
-        text: text.split("\n").filter((line) => line.includes(guards.threadId)).join("\n").slice(0, 1800),
+        text: text.split("\n").filter((line) => line.includes(threadId)).join("\n").slice(0, 1800),
       });
     }
     for (const method of ["initialize", "thread/list", "thread/resume"]) {
@@ -201,12 +224,16 @@ try {
   });
   desktop.stderr.resume();
   desktop.on("error", (error) => log("desktop_error", { message: error.message }));
-  log("desktop_launched", { pid: desktop.pid, debugPort: DESKTOP_EXPERIMENT_DEBUG_PORT });
+  log("desktop_launched", {
+    pid: desktop.pid,
+    debugPort: DESKTOP_EXPERIMENT_DEBUG_PORT,
+    threadId,
+  });
 
   await sleep(30_000);
   opener = spawn(
     CHATGPT_APP,
-    [`--user-data-dir=${path.join(root, "ui")}`, `codex://threads/${guards.threadId}`],
+    [`--user-data-dir=${path.join(root, "ui")}`, `codex://threads/${threadId}`],
     { cwd: root, env: desktopEnv, stdio: "ignore" },
   );
   opener.on("error", (error) => log("opener_error", { message: error.message }));
@@ -219,19 +246,19 @@ try {
     }
     if (attached || desktopMethods.includes("thread/resume")) {
       attached = true;
-      log("desktop_resume_observed");
+      log("desktop_resume_observed", { threadId });
       break;
     }
   }
 
   if (!attached) {
     throw new Error(
-      "Desktop did not observe thread attachment/resume; verify disposable thread and visual subscription before trusting exit code",
+      "Desktop did not observe thread attachment/resume; verify minted thread exists on this app-server and visual subscription before trusting exit code",
     );
   }
 
   const binding = buildDesktopExperimentBinding({
-    threadId: guards.threadId,
+    threadId,
     endpoint: listenerEndpoint,
     serverIdentity: guards.serverIdentity,
     installationId: process.env.MESH_DESKTOP_INSTALLATION_ID || "inst_desktopexp01",

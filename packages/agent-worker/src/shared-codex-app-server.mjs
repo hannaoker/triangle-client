@@ -410,6 +410,9 @@ export function createFakeAppServerTransport({
       switch (method) {
         case "initialize":
           return { serverInfo: { name: serverIdentity, version: "0.0.0-fake" } };
+        case "thread/start":
+          // Mint path for desktop experiments: reuse the fake's bound thread id.
+          return { thread: { id: threadId, status } };
         case "thread/resume": {
           if (params.threadId !== threadId) {
             throw createCodedError("thread_not_found", "threadId does not match binding");
