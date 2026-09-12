@@ -194,8 +194,9 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         replyResolution: MailboxReplyResolution = .none,
         failureCount: Int = 0,
         lastFailureReason: String? = nil,
-        createdAt: String = MailboxTransactionTimestamp.now()
+        createdAt: String? = nil
     ) throws {
+        let resolvedCreatedAt = createdAt ?? MailboxTransactionTimestamp.now()
         guard deliveryID > 0 else { throw MailboxTransactionStoreError.invalidRecord }
         guard failureCount >= 0, failureCount <= 10_000 else { throw MailboxTransactionStoreError.invalidRecord }
         if let lastFailureReason {
@@ -203,7 +204,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
                 throw MailboxTransactionStoreError.invalidRecord
             }
         }
-        guard createdAt.wholeMatch(of: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/) != nil else {
+        guard resolvedCreatedAt.wholeMatch(of: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/) != nil else {
             throw MailboxTransactionStoreError.invalidRecord
         }
         let claim = MailboxTransactionIdentifier.claimId(instanceID: instanceID, deliveryID: deliveryID)
@@ -224,7 +225,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         self.replyResolution = replyResolution
         self.failureCount = failureCount
         self.lastFailureReason = lastFailureReason
-        self.createdAt = createdAt
+        self.createdAt = resolvedCreatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -369,15 +370,6 @@ public struct MailboxQuarantinedTransaction: Equatable, Sendable {
     public let protocolOwnership: MailboxTransactionProtocol
     public let correlationID: String
     public let quarantinedAt: String
-}
-
-extension ISO8601DateFormatter {
-    static let mailboxTransaction: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter
-    }()
 }
 
 enum MailboxTransactionTimestamp {

@@ -558,10 +558,10 @@ private struct StrictMailboxTransactionJSONScanner {
                 case 0x75:
                     var hex = ""
                     for _ in 0..<4 {
-                        guard let h = current, let scalar = UnicodeScalar(h), CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(scalar) else {
+                        guard let h = current, CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(UnicodeScalar(h)) else {
                             throw StrictMailboxTransactionJSONError.malformed
                         }
-                        hex.append(Character(scalar))
+                        hex.append(Character(UnicodeScalar(h)))
                         index += 1
                     }
                     guard let value = UInt32(hex, radix: 16), let scalar = UnicodeScalar(value) else {
