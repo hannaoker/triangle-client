@@ -482,3 +482,97 @@ test("mailbox polling remains gated until the matching private activation arrive
   assert.equal(events[1], events[0].replace("ready:", "activate:"));
   assert.equal(events[2], "watch");
 });
+
+function appServerWake(overrides = {}) {
+  const wakeId = instanceId("c");
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/client/app-server-wake-cursor.json",
+    bindingPath: "/private/client/app-server-binding.json",
+    actorProfile: "event-codex",
+    ensureBeforeWatch: true,
+    authTokenFile: "/private/client/codex-ws.token",
+    authTokenEnv: null,
+    binding: {
+      adapterVersion: "1",
+      enabled: true,
+      installationId: "inst_N7VhDq3mQ2",
+      instanceId: wakeId,
+      agentId: "agent_codex_desktop_001",
+      roomScope: "room_test_scope",
+      serverIdentity: "codex-app-server/test",
+      endpoint: "ws://127.0.0.1:9999/rpc",
+      threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7999",
+    },
+    ...overrides,
+  };
+}
+
+test("bootstrap accepts appServerWake opt-in bound profile and rejects unsafe payloads", () => {
+  const withApp = bootstrap({ appServerWake: appServerWake() });
+  const parsed = parseClientSupervisorBootstrap(JSON.stringify(withApp));
+  assert.deepEqual(parsed.appServerWake, appServerWake());
+
+  const appOnly = {
+    version: 1,
+    maxConcurrentReasoners: 2,
+    instances: [],
+    appServerWake: appServerWake(),
+  };
+  assert.equal(
+    parseClientSupervisorBootstrap(JSON.stringify(appOnly)).appServerWake.binding.threadId,
+    "01a06f9f-2db1-7143-b8b9-08c634cc7999",
+  );
+
+  for (const candidate of [
+    bootstrap({ appServerWake: { ...appServerWake(), extra: true } }),
+    bootstrap({ appServerWake: { ...appServerWake(), authTokenFile: null, authTokenEnv: null } }),
+    bootstrap({
+      appServerWake: {
+        ...appServerWake(),
+        authTokenFile: null,
+        authTokenEnv: "CODEX_APP_SERVER_WS_TOKEN",
+        binding: {
+          ...appServerWake().binding,
+          serverIdentity: "mesh_watch_ABCDEFGHijklmnop",
+        },
+      },
+    }),
+    bootstrap({
+      appServerWake: {
+        ...appServerWake(),
+        binding: { ...appServerWake().binding, instanceId: instance().instanceId },
+      },
+    }),
+    bootstrap({
+      appServerWake: {
+        ...appServerWake(),
+        binding: { ...appServerWake().binding, enabled: false },
+      },
+    }),
+  ]) {
+    assert.throws(
+      () => parseClientSupervisorBootstrap(JSON.stringify(candidate)),
+      /Invalid Triangle Client bootstrap/,
+    );
+  }
+});
+
+test("CLI forwards appServerWake into supervisor creation", async () => {
+  let received;
+  const stderr = capture();
+  const result = await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify(bootstrap({ appServerWake: appServerWake() }))]),
+    stderr: stderr.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], appServerWake: null }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.deepEqual(received.appServerWake, appServerWake());
+  assert.equal(stderr.value(), "");
+});

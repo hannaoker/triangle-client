@@ -1,8 +1,10 @@
 # Shared Codex App Server protocol prototype
 
 Status: protocol proof and native desktop idle-chat wake-up passed; production-shaped
-adapter scaffold started under `packages/agent-worker/src/shared-codex-app-server.mjs`
-(fake-transport unit tests). Not yet a live WebSocket / Bob-integrated daemon.
+adapter under `packages/agent-worker/src/shared-codex-app-server.mjs` with
+authenticated WebSocket transport
+(`authenticated-app-server-transport.mjs`) and supervisor `appServerWake`
+wiring. Native-desktop nonce repeat and Bob canary remain.
 
 Next agent: continue from [the concrete implementation handoff](codex-desktop-wake-handoff.md).
 The guarded native experiment is preserved at

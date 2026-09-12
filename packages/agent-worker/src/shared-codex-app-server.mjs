@@ -18,6 +18,12 @@ import { open, mkdir, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  createAuthenticatedAppServerTransport,
+  createCapabilityTokenAuthResolver,
+  createScriptedAuthHandshakeSocket,
+  openNodeWebSocket,
+} from "./authenticated-app-server-transport.mjs";
+import {
   createFakeWatchTransport,
   createHelperWatchTransport,
   ensureHelperWatchGrant,
@@ -995,6 +1001,10 @@ export function createAppServerWakeBridge({
 }
 
 export {
+  createAuthenticatedAppServerTransport,
+  createCapabilityTokenAuthResolver,
+  createScriptedAuthHandshakeSocket,
+  openNodeWebSocket,
   createFakeWatchTransport,
   createHelperWatchTransport,
   createMemoryCursorStore,

@@ -557,3 +557,110 @@ test("supervisor builds real mailbox harness clients without double-gating drain
   assert.equal(harnessRunnerCalls, 1);
   assert.deepEqual(gateEntries, ["wake"]);
 });
+
+function appServerWakeFixture(instanceIndex = 3) {
+  const instanceId = id(instanceIndex);
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/app-server-wake-cursor.json",
+    bindingPath: "/private/app-server-binding.json",
+    actorProfile: "event-codex",
+    ensureBeforeWatch: true,
+    authTokenFile: "/private/codex-ws.token",
+    authTokenEnv: null,
+    binding: {
+      adapterVersion: "1",
+      enabled: true,
+      installationId: "inst_N7VhDq3mQ2",
+      instanceId,
+      agentId: "agent_codex_desktop_001",
+      roomScope: "room_test_scope",
+      serverIdentity: "codex-app-server/test",
+      endpoint: "ws://127.0.0.1:9999/rpc",
+      threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7999",
+    },
+  };
+}
+
+test("supervisor bootstraps opt-in appServerWake beside workers", async () => {
+  const ensured = [];
+  let bridgeStarted = false;
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    appServerWake: appServerWakeFixture(3),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({
+      async watch() { return { processed: 0, stopped: true }; },
+      async runOnce() { return { found: null, processed: 0 }; },
+    }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async (options) => {
+      ensured.push(options.actorProfile);
+      return { ensured: true };
+    },
+    createAuthResolver: ({ serverIdentity, tokenFile }) => {
+      assert.equal(serverIdentity, "codex-app-server/test");
+      assert.equal(tokenFile, "/private/codex-ws.token");
+      return { async resolveAuth() { return { authorization: "Bearer test", serverIdentity }; } };
+    },
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge: () => ({
+      async start() {
+        bridgeStarted = true;
+        return { status: "stopped", cycles: 1 };
+      },
+      async stop() {},
+    }),
+    logger: { error() {} },
+  });
+
+  assert.equal(supervisor.appServerInstanceId, id(3));
+  assert.equal(supervisor.appServerWake.binding.threadId, "01a06f9f-2db1-7143-b8b9-08c634cc7999");
+  const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
+  assert.equal(bridgeStarted, true);
+  assert.deepEqual(ensured, ["event-codex"]);
+  assert.equal(result.appServerWake?.cycles, 1);
+});
+
+test("supervisor rejects appServerWake collision with worker instance ids", () => {
+  assert.throws(() => createClientSupervisor({
+    instances: [{
+      instanceId: id(3),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(3) },
+    }],
+    appServerWake: appServerWakeFixture(3),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createAuthResolver: () => ({ async resolveAuth() { return { authorization: "Bearer x", serverIdentity: "s" }; } }),
+    createAppServerTransport: () => ({ async connect() {}, async call() {}, onEvent() { return () => {}; }, async close() {} }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({ async connect() {}, async shutdown() {}, admit: async () => ({}), status: () => ({}) }),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+  }), /collides/i);
+});

@@ -7,12 +7,43 @@ import {
 import { createMailboxClient, validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createMailboxHarness, createWakeRuntime } from "./profile-scheduler.mjs";
 import { createAgentWorker } from "./runtime.mjs";
+import {
+  createAppServerWakeBridge,
+  createAtomicFileBindingStore,
+  createAtomicFileCursorStore,
+  createAuthenticatedAppServerTransport,
+  createCapabilityTokenAuthResolver,
+  createSharedCodexSession,
+  validateBinding,
+} from "./shared-codex-app-server.mjs";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const RUNNER_KEYS = new Set(["command", "args", "timeoutMs"]);
 const DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
+const APP_SERVER_WAKE_KEYS = [
+  "actorProfile",
+  "authTokenEnv",
+  "authTokenFile",
+  "binding",
+  "bindingPath",
+  "cursorPath",
+  "ensureBeforeWatch",
+  "helperPath",
+  "installationId",
+];
+const APP_SERVER_BINDING_KEYS = [
+  "adapterVersion",
+  "agentId",
+  "enabled",
+  "endpoint",
+  "installationId",
+  "instanceId",
+  "roomScope",
+  "serverIdentity",
+  "threadId",
+];
 
 function positiveInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 1) {
@@ -162,9 +193,73 @@ function validateEventWake(eventWake) {
   });
 }
 
+function validateAppServerWake(appServerWake) {
+  if (appServerWake == null) return null;
+  if (!hasExactKeys(appServerWake, APP_SERVER_WAKE_KEYS)) {
+    throw new TypeError("appServerWake schema is invalid");
+  }
+  if (typeof appServerWake.installationId !== "string" || !INSTALLATION_ID.test(appServerWake.installationId)) {
+    throw new TypeError("appServerWake.installationId is invalid");
+  }
+  if (typeof appServerWake.helperPath !== "string" || !appServerWake.helperPath.startsWith("/") || appServerWake.helperPath.includes("\0")) {
+    throw new TypeError("appServerWake.helperPath is invalid");
+  }
+  if (typeof appServerWake.cursorPath !== "string" || !appServerWake.cursorPath.startsWith("/") || appServerWake.cursorPath.includes("\0")) {
+    throw new TypeError("appServerWake.cursorPath is invalid");
+  }
+  if (typeof appServerWake.bindingPath !== "string" || !appServerWake.bindingPath.startsWith("/") || appServerWake.bindingPath.includes("\0")) {
+    throw new TypeError("appServerWake.bindingPath is invalid");
+  }
+  if (typeof appServerWake.actorProfile !== "string" || appServerWake.actorProfile.length === 0 || appServerWake.actorProfile.includes("\0")) {
+    throw new TypeError("appServerWake.actorProfile is invalid");
+  }
+  if (typeof appServerWake.ensureBeforeWatch !== "boolean") {
+    throw new TypeError("appServerWake.ensureBeforeWatch must be a boolean");
+  }
+  if (!hasExactKeys(appServerWake.binding, APP_SERVER_BINDING_KEYS)) {
+    throw new TypeError("appServerWake.binding schema is invalid");
+  }
+  const binding = validateBinding(appServerWake.binding);
+  if (!binding.enabled) {
+    throw new TypeError("appServerWake.binding.enabled must be true");
+  }
+  if (binding.installationId !== appServerWake.installationId) {
+    throw new TypeError("appServerWake binding installationId mismatch");
+  }
+  const hasFile = typeof appServerWake.authTokenFile === "string";
+  const hasEnv = typeof appServerWake.authTokenEnv === "string";
+  if (hasFile === hasEnv) {
+    throw new TypeError("appServerWake requires exactly one of authTokenFile or authTokenEnv");
+  }
+  if (hasFile) {
+    if (!appServerWake.authTokenFile.startsWith("/") || appServerWake.authTokenFile.includes("\0")) {
+      throw new TypeError("appServerWake.authTokenFile is invalid");
+    }
+    if (appServerWake.authTokenEnv !== null) {
+      throw new TypeError("appServerWake.authTokenEnv must be null when authTokenFile is set");
+    }
+  } else if (appServerWake.authTokenFile !== null) {
+    throw new TypeError("appServerWake.authTokenFile must be null when authTokenEnv is set");
+  } else if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(appServerWake.authTokenEnv)) {
+    throw new TypeError("appServerWake.authTokenEnv is invalid");
+  }
+  return Object.freeze({
+    installationId: appServerWake.installationId,
+    helperPath: appServerWake.helperPath,
+    cursorPath: appServerWake.cursorPath,
+    bindingPath: appServerWake.bindingPath,
+    actorProfile: appServerWake.actorProfile,
+    ensureBeforeWatch: appServerWake.ensureBeforeWatch,
+    authTokenFile: appServerWake.authTokenFile,
+    authTokenEnv: appServerWake.authTokenEnv,
+    binding,
+  });
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
+  appServerWake = null,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
   createWorker = createAgentWorker,
@@ -172,6 +267,13 @@ export function createClientSupervisor({
   createWatchTransport = createHelperWatchTransport,
   ensureWatchGrant = ensureHelperWatchGrant,
   createHarness = createMailboxHarness,
+  createAppServerTransport = createAuthenticatedAppServerTransport,
+  createAuthResolver = createCapabilityTokenAuthResolver,
+  createBindingStore = createAtomicFileBindingStore,
+  createCursorStore = createAtomicFileCursorStore,
+  createSession = createSharedCodexSession,
+  createWakeBridge = createAppServerWakeBridge,
+  resolveDelivery = async () => null,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
   maxIdlePollIntervalMs = 300_000,
@@ -184,7 +286,8 @@ export function createClientSupervisor({
     throw new TypeError("instances must contain between 0 and 100 entries");
   }
   const wakeConfig = validateEventWake(eventWake);
-  if (instances.length < 1 && !wakeConfig) {
+  const appServerConfig = validateAppServerWake(appServerWake);
+  if (instances.length < 1 && !wakeConfig && !appServerConfig) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
@@ -253,6 +356,15 @@ export function createClientSupervisor({
     }
   }
 
+  if (appServerConfig) {
+    if (seen.has(appServerConfig.binding.instanceId)) {
+      throw new TypeError("appServerWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === appServerConfig.binding.instanceId)) {
+      throw new TypeError("appServerWake instanceId collides with an eventWake profile");
+    }
+  }
+
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
     ? createWatchTransport({
@@ -274,10 +386,52 @@ export function createClientSupervisor({
     throw new TypeError("createWake must return a wake runtime");
   }
 
+  let appServerBridge = null;
+  if (appServerConfig) {
+    const authResolver = createAuthResolver({
+      serverIdentity: appServerConfig.binding.serverIdentity,
+      tokenFile: appServerConfig.authTokenFile,
+      tokenEnv: appServerConfig.authTokenEnv,
+    });
+    const appTransport = createAppServerTransport({
+      endpoint: appServerConfig.binding.endpoint,
+      resolveAuth: () => authResolver.resolveAuth(),
+    });
+    const bindingStore = createBindingStore({ filePath: appServerConfig.bindingPath });
+    const session = createSession({
+      binding: appServerConfig.binding,
+      transport: appTransport,
+      bindingStore,
+      logger,
+    });
+    const watchTransport = createWatchTransport({
+      helperPath: appServerConfig.helperPath,
+      installationId: appServerConfig.installationId,
+    });
+    const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
+    appServerBridge = createWakeBridge({
+      binding: appServerConfig.binding,
+      session,
+      watchTransport,
+      cursorStore,
+      helperPath: appServerConfig.helperPath,
+      installationId: appServerConfig.installationId,
+      actorProfile: appServerConfig.actorProfile,
+      ensureBeforeWatch: false,
+      resolveDelivery,
+      logger,
+    });
+    if (!appServerBridge || typeof appServerBridge.start !== "function") {
+      throw new TypeError("createWakeBridge must return an App Server wake bridge");
+    }
+  }
+
   return Object.freeze({
     instanceIds: Object.freeze(entries.map(({ instanceId }) => instanceId)),
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
+    appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
     eventWake: wakeConfig,
+    appServerWake: appServerConfig,
 
     async runOnce({ signal } = {}) {
       const results = await Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -304,6 +458,14 @@ export function createClientSupervisor({
           signal,
         });
       }
+      if (appServerBridge && appServerConfig.ensureBeforeWatch) {
+        await ensureWatchGrant({
+          helperPath: appServerConfig.helperPath,
+          installationId: appServerConfig.installationId,
+          actorProfile: appServerConfig.actorProfile,
+          signal,
+        });
+      }
 
       const workerLoop = Promise.all(entries.map(async ({ instanceId, worker }) => {
         try {
@@ -327,8 +489,22 @@ export function createClientSupervisor({
         })
         : Promise.resolve(null);
 
-      const [instances, wakeResult] = await Promise.all([workerLoop, wakeLoop]);
-      return { instances, eventWake: wakeResult };
+      const appServerLoop = appServerBridge
+        ? appServerBridge.start({ signal }).catch((error) => {
+          if (signal?.aborted || error?.name === "AbortError") return null;
+          logger.error?.("triangle_client_app_server_wake_failed", {
+            error: "App Server bound wake listener failed",
+          });
+          throw error;
+        })
+        : Promise.resolve(null);
+
+      const [instances, wakeResult, appServerResult] = await Promise.all([
+        workerLoop,
+        wakeLoop,
+        appServerLoop,
+      ]);
+      return { instances, eventWake: wakeResult, appServerWake: appServerResult };
     },
   });
 }

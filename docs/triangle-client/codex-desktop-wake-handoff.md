@@ -6,7 +6,7 @@ Updated: 2026-09-12.
 Status:
 - Native desktop idle-chat wake-up proved (2026-09-05).
 - Phase 2 durable wake/scheduling is **Complete** (2026-09-12 wall soak).
-- Shared Codex App Server track: **scaffold in progress** (first increment).
+- Shared Codex App Server track: **authenticated WS transport + supervisor wiring landed**; native-desktop nonce repeat and Bob canary remain.
 
 ## Decision and scope
 
@@ -38,25 +38,31 @@ This is not a claim that every remaining task is mechanical or release-safe.
 
 | Gate | Status |
 | --- | --- |
-| A. Shared-server attachment scaffold | **Landed (unit/fake transport)** — `packages/agent-worker/src/shared-codex-app-server.mjs` |
-| B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — reuses helper watch transport / fake transport; `createAppServerWakeBridge` |
+| A. Shared-server attachment scaffold | **Landed (authenticated WS + fake)** — `shared-codex-app-server.mjs` + `authenticated-app-server-transport.mjs`. Live Codex `initialize` may omit `serverInfo.name`; identity comes from authenticated `transport.connect()`. Native-desktop nonce repeat still open. |
+| B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — helper watch transport; `createAppServerWakeBridge`; supervisor/CLI opt-in `appServerWake` bootstrap |
 | C. Admission / busy queue / correlation | **Partial** — in-memory queue + correlation; durable production persistence and race matrix still open |
 | D. Lifecycle / doctor status surface | **Partial** — `session.status()` distinguishes doctor phases; public `mesh` flags not designed yet |
 | E. Real Bob canary | **Not started** |
-| Slice 6 trusted transaction proxy | **Not in this track** — stub only (`createTrustedTransactionProxyStub`); hard gate before production Hermes claim/reply/ack |
+| Slice 6 trusted transaction proxy | **Landed on main (PR #7)** — use `createTrustedTransactionProxy` / helper CLI; Mac security review still required before production Hermes claim/reply/ack |
 | Optional Codex SDK subprocess | **Out of scope** |
 
-### What landed in the first increment
+### What landed (scaffold → authenticated transport)
 
 - Opt-in binding validation and fail-closed identity/endpoint checks
 - Memory + atomic file binding stores
 - Fake App Server JSON-RPC transport for Linux unit tests
+- **Authenticated WebSocket transport** (`createAuthenticatedAppServerTransport`):
+  Bearer capability-token auth on connect, `serverIdentity` from connect / scripted
+  `triangle/authenticated` hello (not from missing initialize `serverInfo.name`)
 - Session: connect / resume / read / turn/start / wait / admit / reconnect / shutdown
 - Wake bridge: helper-shaped watch transport → `resolveDelivery` → admit (empty mailbox → zero turns)
-- Tiny Slice 6 stub that fails closed (not a proxy implementation)
+- **Supervisor / CLI opt-in `appServerWake`** for bound-thread bootstrap (secret-free MESH watch; App Server WS token via absolute file or env *name*)
+- Slice 6 helper proxy on main (not claimed as Mac-reviewed production)
 
 ```sh
-cd packages/agent-worker && node --test test/shared-codex-app-server.test.mjs
+cd packages/agent-worker && node --test \
+  test/shared-codex-app-server.test.mjs \
+  test/authenticated-app-server-transport.test.mjs
 ```
 
 ### How MESH wake reaches the App Server session (no Node secrets)
@@ -80,10 +86,10 @@ Production Hermes / coordinator-delivery claim/reply/ack still requires
 
 ### Explicit remaining gaps before production claim
 
-1. **Real WebSocket App Server transport** (authenticated) + native desktop
-   repeat of the 2026-09-05 nonce wake against the production-shaped adapter.
+1. **Native desktop nonce repeat** of the 2026-09-05 wake against this production-shaped
+   authenticated WS adapter (Mac). Authenticated WS transport itself has landed.
 2. **Durable correlation / crash recovery** and human-vs-listener race proofs.
-3. **Slice 6 trusted transaction proxy** before Hermes production claim/reply/ack.
+3. **Slice 6 Mac security review** before Hermes production claim/reply/ack (implementation on main).
 4. **Bob canary** (unique nonce, correlated durable reply → same desktop chat).
 5. **Public lifecycle flags** under `mesh` (binding subcommands still undesigned).
 6. **Optional SDK subprocess** remains optional and must not gate this track.
@@ -153,9 +159,14 @@ before running commands. Check AGENTS.md and git status; preserve existing edits
 
 Client source to inspect first:
 
-- `packages/agent-worker/src/shared-codex-app-server.mjs`: **App Server adapter
-  scaffold** (binding, session, admission, wake bridge, Slice 6 stub).
-- `packages/agent-worker/test/shared-codex-app-server.test.mjs`: focused unit tests.
+- `packages/agent-worker/src/shared-codex-app-server.mjs`: App Server adapter
+  (binding, session, admission, wake bridge, Slice 6 proxy entry).
+- `packages/agent-worker/src/authenticated-app-server-transport.mjs`: authenticated
+  WebSocket JSON-RPC transport + scripted auth handshake for Linux tests.
+- `packages/agent-worker/src/client-supervisor.mjs` / `client-supervisor-cli.mjs`:
+  opt-in `appServerWake` bootstrap beside workers / eventWake.
+- `packages/agent-worker/test/shared-codex-app-server.test.mjs` and
+  `authenticated-app-server-transport.test.mjs`: focused unit tests.
 - `packages/agent-worker/src/wake-client.mjs`: injected wake transport, coalescing,
   reconciliation; default cursor store is in-memory, not durable production state.
 - `packages/agent-worker/src/helper-watch-transport.mjs`: secret-free helper poll.
@@ -198,8 +209,11 @@ ordinary desktop tools. Pin versions and detect incompatible upgrades in doctor.
 Authenticated/private transport and lifecycle ownership are mandatory before
 leaving the server running; the unauthenticated loopback proof is not a daemon.
 
-**Increment status:** scaffold + fake-transport tests landed. Real WebSocket
-transport and native desktop nonce repeat remain.
+**Increment status:** scaffold + authenticated WebSocket transport + fake-transport
+tests landed. `serverIdentity` is supplied by authenticated `connect()` (capability
+token auth metadata and/or scripted `triangle/authenticated` hello). Live Codex
+`initialize` without `serverInfo.name` is accepted. **Native desktop nonce repeat
+remains.**
 
 ### B. Wire real MESH wake transport (server + client)
 
@@ -217,8 +231,10 @@ not activate the bound chat; dropped/duplicate hints still reconcile correctly.
 Credentials remain inside the signed helper; logs contain IDs/status, not secrets.
 
 **Increment status:** wake bridge reuses helper/fake watch transport patterns;
-empty-mailbox → zero turns covered in unit tests. Supervisor bootstrap of an
-App Server-bound profile and live helper integration remain.
+empty-mailbox → zero turns covered in unit tests. Supervisor/CLI opt-in
+`appServerWake` bootstrap for a bound thread is wired (capability-token file or
+env name; no Node `mesh_` / `mesh_watch_`). Live helper + desktop integration
+and Bob canary remain.
 
 ### C. Durable admission, transactions, and busy-chat behavior (client)
 
@@ -256,7 +272,8 @@ after turn submission, reply commit/local-write loss, ack failure, permanent mod
 failure, reconnect during streaming, and two profiles cannot lose or duplicate work.
 
 **Increment status:** in-memory admission queue + correlation + submission_unknown
-/ transaction_stuck phases landed. Slice 6 stub only — not production proxy.
+/ transaction_stuck phases landed. Slice 6 helper proxy landed on main (PR #7) —
+Mac review still required before production Hermes claim/reply/ack.
 
 ### D. Public lifecycle and operator visibility (client)
 
@@ -289,11 +306,11 @@ Do not call one successful local turn a latency distribution or production soak.
 
 ## First next-agent task
 
-Continue the App Server track from `shared-codex-app-server.mjs`: add a real
-WebSocket transport (still secret-free on the MESH side), wire supervisor
-opt-in bootstrap for a bound thread, and repeat the native desktop nonce wake.
-Do **not** implement full Slice 6 in the same change set unless a tiny interface
-extension is required. Do not claim Bob canary or reopen Phase 2.
+Repeat the **native desktop nonce wake** against the authenticated WebSocket
+adapter (`createAuthenticatedAppServerTransport` + bound session), then run the
+**Bob canary**. Do not reopen Phase 2 Complete. Prefer leaving Mac-only desktop
+experiment execution and Bob canary as follow-ups if this environment cannot run
+them. Durable correlation / race matrix remains after that.
 
 ## Not proved / do not infer
 
