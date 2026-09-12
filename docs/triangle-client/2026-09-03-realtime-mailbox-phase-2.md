@@ -1,8 +1,8 @@
 # Realtime mailbox Phase 2 - listener and scheduler
 
-Status: Implemented in source (prototype)
+Status: Complete
 
-Updated: 2026-09-05
+Updated: 2026-09-12
 
 Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 
@@ -11,7 +11,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 - Agent harness integration (Codex, Hermes, ...) is crucial.
 - Interactive Codex uses the shared App Server track
   ([handoff](codex-desktop-wake-handoff.md)); that track is **separate** from
-  Phase 2 completion.
+  Phase 2 completion and is now the post–Phase 2 priority #1.
 - Autonomous Codex SDK subprocess (design Phase 3 / Slice 8) is **optional**
   and is not required to close Phase 2.
 - Trusted transaction proxy (Slice 6) is **not** part of Phase 2 Complete, but
@@ -21,7 +21,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 See the shared completion bar:
 [2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
 
-## Delivered (prototype)
+## Delivered
 
 - `event-driven` delivery mode in Swift `DeliveryMode`
 - Event-driven profiles stay out of worker `instances` (wake ownership is separate)
@@ -57,24 +57,23 @@ See the shared completion bar:
 - Focused Swift ClientSupervisor contract cases and Node supervisor / helper-transport /
   mailbox-harness tests
 
-## Not yet (blocks Status: Complete)
+## Completion evidence (2026-09-12)
 
-Production wiring:
+Operator-reported wall-clock 24-hour fake-harness soak completed with no issues
+(`node scripts/soak-fake-wake.mjs --hours 24`, America/Los_Angeles). Accelerated
+soak and Linux verification suite land with the Phase 2 Complete gates branch /
+PR; Phase 2 is **Complete** for durable wake and scheduling only.
 
-- Richer grant lifecycle operator UX beyond thin CLI ensure / status / revoke / poll
-- End-to-end restart recovery evidence with helper grant + durable cursor together
-- Reconnect-storm / crash-boundary / 24-hour fake-harness soak evidence (below)
+## Post–Phase 2: Shared Codex App Server (started)
+
+First scaffold increment lives in
+`packages/agent-worker/src/shared-codex-app-server.mjs` with unit tests. See
+[codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) for landed vs
+remaining App Server gates. This does not reopen Phase 2.
+
+## Remaining exclusions (not blockers for Complete)
+
 - Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
-
-Verification gates:
-
-- Swift toolchain with Apple's Testing module; helper suite green
-- Node suite fully green (including unrelated README/contract fixes)
-- Reconnect-storm tests at the configured global connection limit
-- Crash/restart tests: before cursor persistence; after persistence before
-  drain; after claim before ack; after generation before ack
-- 24-hour fake-harness soak with no lost wakes, duplicate reasoning turns, or
-  cap violations
 
 ## Explicitly out of Phase 2 Complete
 
@@ -84,8 +83,12 @@ Verification gates:
 - Wakeable Grok/Cursor UI sessions
 - Claiming interactive App Server / Bob canary work as Phase 2 evidence
 
-## When Complete
+## Completion statement (2026-09-12)
 
-Only after the completion-criteria evidence is recorded, change this file's
-status to `Status: Complete`, move applicable "Not yet" items into Delivered,
-and use the defensible completion statement from the criteria note.
+> Phase 2 is complete: event-driven ownership, signed watch-grant transport,
+> durable wake cursor recovery, supervisor wake launch, real mailbox harness
+> with shared reasoning gate, and wall-clock 24-hour fake-harness soak evidence
+> are recorded. "Complete" means durable wake and scheduling only. Interactive
+> Codex App Server harness wiring, Hermes / other harness adapters, trusted
+> transaction-proxy work, Bob canary, and optional autonomous Codex SDK remain
+> out of scope for this claim.

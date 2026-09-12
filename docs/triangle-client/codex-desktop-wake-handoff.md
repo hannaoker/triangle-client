@@ -1,7 +1,12 @@
 # Codex desktop wake-up: implementation handoff
 
 Verified: 2026-09-05 UTC (2026-09-04 America/Los_Angeles).
-Status: native desktop idle-chat wake-up proved; MESH integration not implemented.
+Updated: 2026-09-12.
+
+Status:
+- Native desktop idle-chat wake-up proved (2026-09-05).
+- Phase 2 durable wake/scheduling is **Complete** (2026-09-12 wall soak).
+- Shared Codex App Server track: **scaffold in progress** (first increment).
 
 ## Decision and scope
 
@@ -17,16 +22,71 @@ The user accepted the desktop proof as sufficient to proceed with integration.
 This is not a claim that every remaining task is mechanical or release-safe.
 
 
-## Product priority (2026-09-05)
+## Product priority (2026-09-12)
 
 - **Harness integration is crucial** (Codex shared App Server path first, then
   Hermes and other reviewed harnesses via coordinator-delivery / trusted proxy).
+- **Post–Phase 2 priority #1** is Shared Codex App Server integration (this
+  track), before Slice 6 proxy, Bob canary, and optional SDK.
 - **Autonomous Codex SDK subprocess is optional** and must not gate Phase 1/2
   completion or harness work.
-- Closing design Phase 1/2 still requires the production wiring and verification
-  bar in
+- Phase 1/2 Complete means durable wake and scheduling only. App Server proofs
+  do not reopen Phase 2. See
   [phase 1/2 completion criteria](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
-  App Server proofs do not by themselves mark Phase 2 Complete.
+
+## App Server track status (2026-09-12)
+
+| Gate | Status |
+| --- | --- |
+| A. Shared-server attachment scaffold | **Landed (unit/fake transport)** — `packages/agent-worker/src/shared-codex-app-server.mjs` |
+| B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — reuses helper watch transport / fake transport; `createAppServerWakeBridge` |
+| C. Admission / busy queue / correlation | **Partial** — in-memory queue + correlation; durable production persistence and race matrix still open |
+| D. Lifecycle / doctor status surface | **Partial** — `session.status()` distinguishes doctor phases; public `mesh` flags not designed yet |
+| E. Real Bob canary | **Not started** |
+| Slice 6 trusted transaction proxy | **Not in this track** — stub only (`createTrustedTransactionProxyStub`); hard gate before production Hermes claim/reply/ack |
+| Optional Codex SDK subprocess | **Out of scope** |
+
+### What landed in the first increment
+
+- Opt-in binding validation and fail-closed identity/endpoint checks
+- Memory + atomic file binding stores
+- Fake App Server JSON-RPC transport for Linux unit tests
+- Session: connect / resume / read / turn/start / wait / admit / reconnect / shutdown
+- Wake bridge: helper-shaped watch transport → `resolveDelivery` → admit (empty mailbox → zero turns)
+- Tiny Slice 6 stub that fails closed (not a proxy implementation)
+
+```sh
+cd packages/agent-worker && node --test test/shared-codex-app-server.test.mjs
+```
+
+### How MESH wake reaches the App Server session (no Node secrets)
+
+Production path (same custody model as Phase 2 wake):
+
+1. Supervisor / operator ensures a Keychain watch grant via
+   `triangle-mailbox watch-ensure --installation … --actor-profile …`.
+2. Node builds `createHelperWatchTransport({ helperPath, installationId })`.
+   The helper CLI runs `watch-poll`; **`mesh_watch_` never enters the Node
+   process**.
+3. `createWakeClient` coalesces secret-free `{ agent_id, high_watermark }` hints.
+4. `createAppServerWakeBridge` calls injectable `resolveDelivery` to reconcile
+   durable mailbox state (empty → skip; delivery → `{ deliveryId, text }`).
+5. `session.admit` queues or starts `turn/start` on the bound shared App Server
+   thread while the desktop remains attached to the same server.
+
+Self-serve mailbox drain can feed `resolveDelivery` for Codex experiments.
+Production Hermes / coordinator-delivery claim/reply/ack still requires
+**Slice 6**. Do not treat wake receipt or turn completion as MESH ack.
+
+### Explicit remaining gaps before production claim
+
+1. **Real WebSocket App Server transport** (authenticated) + native desktop
+   repeat of the 2026-09-05 nonce wake against the production-shaped adapter.
+2. **Durable correlation / crash recovery** and human-vs-listener race proofs.
+3. **Slice 6 trusted transaction proxy** before Hermes production claim/reply/ack.
+4. **Bob canary** (unique nonce, correlated durable reply → same desktop chat).
+5. **Public lifecycle flags** under `mesh` (binding subcommands still undesigned).
+6. **Optional SDK subprocess** remains optional and must not gate this track.
 
 ## Proven evidence
 
@@ -93,8 +153,12 @@ before running commands. Check AGENTS.md and git status; preserve existing edits
 
 Client source to inspect first:
 
+- `packages/agent-worker/src/shared-codex-app-server.mjs`: **App Server adapter
+  scaffold** (binding, session, admission, wake bridge, Slice 6 stub).
+- `packages/agent-worker/test/shared-codex-app-server.test.mjs`: focused unit tests.
 - `packages/agent-worker/src/wake-client.mjs`: injected wake transport, coalescing,
   reconciliation; default cursor store is in-memory, not durable production state.
+- `packages/agent-worker/src/helper-watch-transport.mjs`: secret-free helper poll.
 - `packages/agent-worker/src/profile-scheduler.mjs`: per-profile scheduling and
   shared gate; not an atomic lock against independent desktop submissions.
 - `packages/agent-worker/src/concurrency-gate.mjs`, `client-supervisor.mjs`.
@@ -115,9 +179,6 @@ Client source to inspect first:
   terminated. The archived wrapper closes its socket and exits after cleanup, but
   process-tree cleanup and signal handling still need hardening before reuse.
 
-At handoff, scheduler, wake-client, wake-scheduler tests, and Swift supervisor
-contract tests already had uncommitted changes. Do not revert or overwrite them.
-
 ## Implementation sequence and acceptance gates
 
 ### A. Package shared-server attachment (client)
@@ -137,6 +198,9 @@ ordinary desktop tools. Pin versions and detect incompatible upgrades in doctor.
 Authenticated/private transport and lifecycle ownership are mandatory before
 leaving the server running; the unauthenticated loopback proof is not a daemon.
 
+**Increment status:** scaffold + fake-transport tests landed. Real WebSocket
+transport and native desktop nonce repeat remain.
+
 ### B. Wire real MESH wake transport (server + client)
 
 Reuse existing server wake authorization, cursor, long-poll, and lease work after
@@ -151,6 +215,10 @@ Do not add a second delivery owner beside mcp-interactive for the same profile.
 Acceptance: empty mailbox causes zero model turns; unrelated room/sender does
 not activate the bound chat; dropped/duplicate hints still reconcile correctly.
 Credentials remain inside the signed helper; logs contain IDs/status, not secrets.
+
+**Increment status:** wake bridge reuses helper/fake watch transport patterns;
+empty-mailbox → zero turns covered in unit tests. Supervisor bootstrap of an
+App Server-bound profile and live helper integration remain.
 
 ### C. Durable admission, transactions, and busy-chat behavior (client)
 
@@ -181,6 +249,9 @@ Acceptance: competing human/message submissions, duplicate wakes, crash before/
 after turn submission, reply commit/local-write loss, ack failure, permanent model
 failure, reconnect during streaming, and two profiles cannot lose or duplicate work.
 
+**Increment status:** in-memory admission queue + correlation + submission_unknown
+/ transaction_stuck phases landed. Slice 6 stub only — not production proxy.
+
 ### D. Public lifecycle and operator visibility (client)
 
 Keep `mesh enroll`, `mesh agent add bob --runtime hermes`, `mesh start`,
@@ -191,6 +262,9 @@ Status must distinguish connected, subscribed, pending, busy, running, reconnect
 submission_unknown, transaction_stuck, and disabled. Show last successful wake,
 bound thread, queue depth, retry count, and actionable errors. Stop must release
 owned connections/processes without stopping the user's ordinary desktop.
+
+**Increment status:** doctor-facing `session.status()` fields landed; public CLI
+binding flags not designed.
 
 ### E. Real Bob canary, then release hardening
 
@@ -205,17 +279,20 @@ Then test background/unsubscribed chats, approvals, cancellation, multiple rooms
 server restart, transport authentication, resource bounds, and a fake-harness soak.
 Do not call one successful local turn a latency distribution or production soak.
 
+**Increment status:** not started.
+
 ## First next-agent task
 
-Read this note and the prototype report; inspect dirty source changes. Implement
-A with focused adapter tests, then B and the Bob canary behind opt-in flags.
-Do not redeploy MESH merely for the desktop configuration fix; deploy only actual
-required server changes after verifying what is already live. Do not commit,
-push, permanently migrate desktop, or enable a production daemon without authority.
+Continue the App Server track from `shared-codex-app-server.mjs`: add a real
+WebSocket transport (still secret-free on the MESH side), wire supervisor
+opt-in bootstrap for a bound thread, and repeat the native desktop nonce wake.
+Do **not** implement full Slice 6 in the same change set unless a tiny interface
+extension is required. Do not claim Bob canary or reopen Phase 2.
 
 ## Not proved / do not infer
 
 Closed-app startup; background/unsubscribed task wake; attachment to the ordinary
 desktop's private server; full desktop tools/approval compatibility; durable MESH
-delivery; exactly-once turn submission; user/listener race safety. These remain
-explicit tests, not reasons to repeat the already-passed basic feasibility study.
+delivery; exactly-once turn submission; user/listener race safety; Bob canary;
+Slice 6 production proxy. These remain explicit tests, not reasons to repeat the
+already-passed basic feasibility study.
