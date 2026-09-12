@@ -117,7 +117,15 @@ function sandboxRegex(value) {
 }
 
 export function sandboxCommand(command, args, env = process.env) {
-  if (process.platform !== "darwin") return { command, args };
+  if (process.platform !== "darwin") {
+    // Linux/Windows keep the command unsandboxed, but still pin TMPDIR to the
+    // instance temp root so child CLIs cannot inherit an operator-nominated temp.
+    const temporary = env.TRIANGLE_INSTANCE_TEMP_ROOT;
+    if (typeof temporary === "string" && path.isAbsolute(temporary) && !/[\r\n\0]/.test(temporary)) {
+      return { command, args, env: { TMPDIR: temporary } };
+    }
+    return { command, args };
+  }
   const project = canonicalRoot(env.TRIANGLE_PROJECT_ROOT, "TRIANGLE_PROJECT_ROOT");
   const credentials = canonicalRoot(env.TRIANGLE_CREDENTIAL_ROOT, "TRIANGLE_CREDENTIAL_ROOT");
   if (!env.HOME) throw new Error("HOME is required for application-owned sandbox state");

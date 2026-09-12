@@ -29,7 +29,44 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive delivery mode is omitted from coordinator bootstrap", run: mcpInteractiveDeliveryOmitted),
         .init(name: "event-driven profiles launch via eventWake bootstrap not worker instances", run: eventDrivenWakeBootstrap),
         .init(name: "mcp-interactive stays excluded from eventWake membership", run: mcpInteractiveExcludedFromEventWake),
+        .init(name: "invalid durable installation identity fails closed", run: invalidInstallationIdentityFailsClosed),
+        .init(name: "concurrent durable installation identity resolution is stable", run: concurrentInstallationIdentityResolutionIsStable),
     ]
+
+    public static func invalidInstallationIdentityFailsClosed() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("triangle-installation-identity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let record = root.appendingPathComponent("installation.json")
+        try Data("{\"version\":1,\"installationId\":\"invalid\"}".utf8).write(to: record)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+        let store = FileClientInstallationIdentityStore(testRoot: root)
+        var rejected = false
+        do {
+            _ = try store.resolve()
+        } catch ClientInstallationIdentityError.invalidRecord {
+            rejected = true
+        }
+        try expect(rejected, "invalid installation identity was silently replaced")
+    }
+
+    public static func concurrentInstallationIdentityResolutionIsStable() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .appendingPathComponent("triangle-installation-concurrent-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let first = FileClientInstallationIdentityStore(testRoot: root)
+        let second = FileClientInstallationIdentityStore(testRoot: root)
+        async let firstID = Task.detached { try first.resolve() }.value
+        async let secondID = Task.detached { try second.resolve() }.value
+        let resolved = try await [firstID, secondID]
+        try expect(Set(resolved).count == 1, "concurrent installation identity resolution split the durable id")
+        let reread = try first.resolve()
+        try expect(reread == resolved[0], "durable installation identity changed after concurrent resolution")
+    }
 
     fileprivate static let origin = "https://thetriangle.dev"
 

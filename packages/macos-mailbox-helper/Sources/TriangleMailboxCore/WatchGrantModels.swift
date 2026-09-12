@@ -355,6 +355,14 @@ public struct WatchPollResponse: Codable, Equatable, Sendable {
 }
 
 /// Secret-free operator surface for installation-scoped watch grants.
+public enum WatchGrantOperatorAction: String, Codable, Equatable, Sendable {
+    case none
+    case ensureWatchGrant = "ensure_watch_grant"
+    case replaceWatchGrant = "replace_watch_grant"
+    case revokeWatchGrant = "revoke_watch_grant"
+    case unlockLoginKeychain = "unlock_login_keychain"
+}
+
 public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
     public let installationID: String
     public let origin: String?
@@ -363,13 +371,16 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
     public let state: String
     public let audience: String?
     public let purpose: String?
+    public let memberCount: Int
+    public let listenerReady: Bool
+    public let operatorAction: WatchGrantOperatorAction
 
     private enum CodingKeys: String, CodingKey {
         case installationID = "installationId"
         case origin
         case grantID = "grantId"
         case agentIDs = "agentIds"
-        case state, audience, purpose
+        case state, audience, purpose, memberCount, listenerReady, operatorAction
     }
 
     public init(
@@ -379,7 +390,10 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
         agentIDs: [String],
         state: String,
         audience: String?,
-        purpose: String?
+        purpose: String?,
+        memberCount: Int? = nil,
+        listenerReady: Bool? = nil,
+        operatorAction: WatchGrantOperatorAction? = nil
     ) {
         self.installationID = installationID
         self.origin = origin
@@ -388,6 +402,20 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
         self.state = state
         self.audience = audience
         self.purpose = purpose
+        self.memberCount = memberCount ?? agentIDs.count
+        self.listenerReady = listenerReady ?? (state == "finalized" && !agentIDs.isEmpty)
+        self.operatorAction = operatorAction ?? Self.action(for: state)
+    }
+
+    public static func action(for state: String) -> WatchGrantOperatorAction {
+        switch state {
+        case "finalized": .none
+        case "missing": .ensureWatchGrant
+        case "revoked": .ensureWatchGrant
+        case "keychain_locked": .unlockLoginKeychain
+        case "stale": .replaceWatchGrant
+        default: .replaceWatchGrant
+        }
     }
 }
 
@@ -397,7 +425,7 @@ public enum WatchGrantOperatorStatusRenderer {
         encoder.outputFormatting = [.sortedKeys]
         var stdout = try encoder.encode(status)
         stdout.append(0x0a)
-        let exitCode: Int32 = status.state == "finalized" ? 0 : 1
+        let exitCode: Int32 = status.state == "finalized" && status.listenerReady ? 0 : 1
         return RenderedCLIOutput(stdout: stdout, stderr: Data(), exitCode: exitCode)
     }
 }

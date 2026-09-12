@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 public enum ClientInstallationIdentityError: Error, Equatable, Sendable {
+    case notFound
     case unsafeStorage
     case invalidRecord
 }
@@ -57,12 +58,23 @@ public final class FileClientInstallationIdentityStore: ClientInstallationIdenti
 
     public func resolve() throws -> InstallationID {
         try ensureManagedDirectories()
-        if let existing = try? read() {
-            return existing
+        let parent = fileURL.deletingLastPathComponent()
+        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0, flock(directory, LOCK_EX) == 0 else {
+            if directory >= 0 { close(directory) }
+            throw ClientInstallationIdentityError.unsafeStorage
         }
-        let generated = try InstallationID.generate()
-        try write(generated)
-        return generated
+        defer {
+            flock(directory, LOCK_UN)
+            close(directory)
+        }
+        do {
+            return try read()
+        } catch ClientInstallationIdentityError.notFound {
+            let generated = try InstallationID.generate()
+            try write(generated)
+            return generated
+        }
     }
 
     private struct Record: Codable {
@@ -72,8 +84,11 @@ public final class FileClientInstallationIdentityStore: ClientInstallationIdenti
 
     private func read() throws -> InstallationID {
         var metadata = stat()
-        guard lstat(fileURL.path, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
+        guard lstat(fileURL.path, &metadata) == 0 else {
+            if errno == ENOENT { throw ClientInstallationIdentityError.notFound }
+            throw ClientInstallationIdentityError.unsafeStorage
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFREG,
               metadata.st_uid == getuid(),
               metadata.st_mode & 0o777 == 0o600,
               metadata.st_nlink == 1,

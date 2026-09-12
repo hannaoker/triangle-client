@@ -1,8 +1,8 @@
 # Realtime mailbox Phase 2 - listener and scheduler
 
-Status: Implemented in source (prototype)
+Status: Complete
 
-Updated: 2026-09-05
+Updated: 2026-09-12
 
 Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 
@@ -21,7 +21,7 @@ Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 See the shared completion bar:
 [2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md).
 
-## Delivered (prototype)
+## Delivered
 
 - `event-driven` delivery mode in Swift `DeliveryMode`
 - Event-driven profiles stay out of worker `instances` (wake ownership is separate)
@@ -56,25 +56,65 @@ See the shared completion bar:
   - `mcp-interactive` remains omitted from worker instances and eventWake membership
 - Focused Swift ClientSupervisor contract cases and Node supervisor / helper-transport /
   mailbox-harness tests
+- Richer grant lifecycle operator UX: secret-free `watch-status` now includes
+  `memberCount`, `listenerReady`, and bounded `operatorAction` next step
+  (ensure / replace / unlock Keychain); contracts cover finalized + missing
+- Linux verification suite `packages/agent-worker/test/phase2-verification.test.mjs`:
+  helper ensure + durable cursor restart resume; reconnect-storm admission limit;
+  crash after claim before ack; crash after generation before ack (same-claim
+  reclaim, no regenerate when reply is durable); short fake-harness soak slice
+- Accelerated soak harness `scripts/soak-fake-wake.mjs` (`--cycles` / `--hours 24`)
+  plus `npm run soak:fake-wake` in `packages/agent-worker`
 
-## Not yet (blocks Status: Complete)
+### Verification evidence recorded (2026-09-11, Linux Node v22.14.0)
 
-Production wiring:
+Previously promoted to **Release Candidate** after implementation, focused
+recovery checks, full Node suite, bounded-memory stress, and Darwin helper
+suite. Wall-clock 24-hour soak was later reported green (2026-09-12); status
+is now **Complete**.
 
-- Richer grant lifecycle operator UX beyond thin CLI ensure / status / revoke / poll
-- End-to-end restart recovery evidence with helper grant + durable cursor together
-- Reconnect-storm / crash-boundary / 24-hour fake-harness soak evidence (below)
+```sh
+cd packages/agent-worker && npm test
+# 153 tests, 145 pass, 8 skip (Darwin-only), 0 fail
+
+cd packages/agent-worker && npm run test:triangle-client
+# 139 tests, 131 pass, 8 skip, 0 fail
+
+node --test packages/agent-worker/test/phase2-verification.test.mjs
+# 5/5 pass
+
+node scripts/soak-fake-wake.mjs --cycles 2000
+# submitted 2000, drainCount 240, peakConcurrentReasoners 1,
+# maxConcurrentReasoners 2, duplicateDrains 0
+```
+
+
+
+### Wall-clock soak evidence (2026-09-12, America/Los_Angeles)
+
+Operator-reported wall-clock 24-hour fake-harness soak completed with **no
+issues found** (no lost wakes, duplicate drains, or shared-gate violations
+reported). Command used for the wall soak:
+
+```sh
+node scripts/soak-fake-wake.mjs --hours 24
+```
+
+Phase 2 is therefore **Complete** for durable wake and scheduling only.
+Trusted transaction proxy (Slice 6), interactive App Server harness wiring,
+Bob canary, and optional autonomous Codex SDK remain out of this claim.
+
+Swift helper WatchGrant / ClientSupervisor contracts still require macOS:
+
+```sh
+cd packages/macos-mailbox-helper && bash scripts/test-host.sh
+```
+
+## Remaining exclusions (not blockers for Complete)
+
 - Grok/Cursor interactive profiles remain excluded (enforced; keep excluded)
 
-Verification gates:
-
-- Swift toolchain with Apple's Testing module; helper suite green
-- Node suite fully green (including unrelated README/contract fixes)
-- Reconnect-storm tests at the configured global connection limit
-- Crash/restart tests: before cursor persistence; after persistence before
-  drain; after claim before ack; after generation before ack
-- 24-hour fake-harness soak with no lost wakes, duplicate reasoning turns, or
-  cap violations
+Wall-clock 24-hour soak evidence is recorded below under Verification evidence.
 
 ## Explicitly out of Phase 2 Complete
 
@@ -84,8 +124,12 @@ Verification gates:
 - Wakeable Grok/Cursor UI sessions
 - Claiming interactive App Server / Bob canary work as Phase 2 evidence
 
-## When Complete
+## Completion statement (2026-09-12)
 
-Only after the completion-criteria evidence is recorded, change this file's
-status to `Status: Complete`, move applicable "Not yet" items into Delivered,
-and use the defensible completion statement from the criteria note.
+> Phase 2 is complete: event-driven ownership, signed watch-grant transport,
+> durable wake cursor recovery, supervisor wake launch, real mailbox harness
+> with shared reasoning gate, reconnect/crash gates, and wall-clock 24-hour
+> fake-harness soak evidence are recorded. "Complete" means durable wake and
+> scheduling only. Interactive Codex App Server harness wiring, Hermes / other
+> harness adapters, trusted transaction-proxy work, Bob canary, and optional
+> autonomous Codex SDK remain out of scope for this claim.
