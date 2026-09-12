@@ -19,6 +19,8 @@ import {
   createDesktopExperimentNonce,
   resolveDesktopExperimentThread,
   runNativeDesktopWakeListener,
+  createDesktopResumeProbe,
+  DESKTOP_EXPERIMENT_SEED_REPLY_MARKER,
 } from "../src/native-desktop-wake-experiment.mjs";
 
 const serverIdentity = "codex-app-server/desktop-experiment";
@@ -267,4 +269,118 @@ test("runNativeDesktopWakeListener uses authenticated transport + shared session
   assert.match(evidence.turnId, /^turn_/);
   assert.match(evidence.turnText, new RegExp(nonce));
   assert.equal(evidence.sessionStatus, "subscribed");
+});
+
+
+test("desktop experiment guards accept MESH_DESKTOP_CODEX_HOME override and reject missing paths", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-codex-home-"));
+  const ok = assertDesktopExperimentGuards(sampleEnv({
+    MESH_DESKTOP_CODEX_HOME: root,
+  }));
+  assert.equal(ok.codexHome, root);
+  assert.equal(ok.codexHomeSource, "override");
+
+  const fallback = assertDesktopExperimentGuards(sampleEnv());
+  assert.equal(fallback.codexHome, "/private/tmp/mesh-desktop-nonce-test/codex");
+  assert.equal(fallback.codexHomeSource, "test_root");
+
+  assert.throws(
+    () => assertDesktopExperimentGuards(sampleEnv({
+      MESH_DESKTOP_CODEX_HOME: "/private/tmp/does-not-exist-codex-home",
+    })),
+    (error) => error.code === "desktop_experiment_codex_home_missing",
+  );
+  assert.throws(
+    () => assertDesktopExperimentGuards(sampleEnv({
+      MESH_DESKTOP_CODEX_HOME: "relative/codex",
+    })),
+    (error) => error.code === "desktop_experiment_codex_home_invalid",
+  );
+});
+
+test("resolveDesktopExperimentThread seeds a turn and requires resumeability before return", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-desktop-seed-"));
+  const tokenFile = path.join(root, "ws.token");
+  await writeFile(tokenFile, "capability-token-for-desktop-tests\n", "utf8");
+
+  const calls = [];
+  const openSocket = createScriptedAuthHandshakeSocket({
+    expectedAuthorization: authorization,
+    serverIdentity,
+    initializeResult: {},
+    emitServerHello: true,
+    onCall: async (method, params) => {
+      calls.push(method);
+      return undefined;
+    },
+  });
+
+  const minted = await resolveDesktopExperimentThread({
+    endpoint,
+    serverIdentity,
+    tokenFile,
+    cwd: root,
+    awaitAuthenticatedHello: true,
+    openSocket,
+    requestTimeoutMs: 5_000,
+  });
+  assert.equal(minted.source, "minted");
+  assert.equal(minted.resumeVerified, true);
+  assert.match(minted.seedTurnId, /^turn_/);
+  assert.ok(calls.includes("thread/start"));
+  assert.ok(calls.includes("turn/start"));
+  assert.ok(calls.includes("thread/resume"));
+  assert.ok(calls.includes("thread/read"));
+});
+
+test("resolveDesktopExperimentThread fails closed when minted thread is not resumeable after seed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-desktop-bad-mint-"));
+  const tokenFile = path.join(root, "ws.token");
+  await writeFile(tokenFile, "capability-token-for-desktop-tests\n", "utf8");
+
+  const openSocket = createScriptedAuthHandshakeSocket({
+    expectedAuthorization: authorization,
+    serverIdentity,
+    initializeResult: {},
+    emitServerHello: true,
+    onCall: async (method) => {
+      if (method === "thread/resume" || method === "thread/read") {
+        throw Object.assign(new Error("no rollout found for thread id"), {
+          code: "rpc_error",
+        });
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    () => resolveDesktopExperimentThread({
+      endpoint,
+      serverIdentity,
+      tokenFile,
+      cwd: root,
+      awaitAuthenticatedHello: true,
+      openSocket,
+      requestTimeoutMs: 5_000,
+    }),
+    (error) => error.code === "desktop_experiment_thread_not_resumeable",
+  );
+});
+
+test("createDesktopResumeProbe ignores bare thread/resume and failed -32600 resumes", () => {
+  const id = "01a09804-bbb8-75a3-8836-214f04e15758";
+  const probe = createDesktopResumeProbe({ threadId: id });
+  probe.onLog("thread/resume");
+  assert.equal(probe.attached, false);
+  assert.equal(probe.resumeSeen, true);
+
+  probe.onLog(`thread/resume errorCode=-32600 no rollout found for thread id ${id}`);
+  assert.equal(probe.resumeFailed, true);
+  assert.equal(probe.attached, false);
+
+  const ok = createDesktopResumeProbe({ threadId: id });
+  ok.onLog("thread/resume");
+  ok.onLog(`${id} thread_stream_view_activity_changed active=true`);
+  assert.equal(ok.attached, true);
+  assert.equal(ok.resumeFailed, false);
 });

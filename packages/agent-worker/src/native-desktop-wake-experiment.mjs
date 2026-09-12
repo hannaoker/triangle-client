@@ -11,7 +11,9 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { createServer } from "node:net";
+import path from "node:path";
 
 import {
   SHARED_CODEX_ADAPTER_VERSION,
@@ -24,6 +26,7 @@ import {
 export const DESKTOP_EXPERIMENT_DEBUG_PORT = 63999;
 export const DESKTOP_EXPERIMENT_PRIVATE_ROOT_PREFIX = "/private/tmp/";
 export const DESKTOP_EXPERIMENT_REPLY_MARKER = "DESKTOP_SHARED_WAKE_OK";
+export const DESKTOP_EXPERIMENT_SEED_REPLY_MARKER = "DESKTOP_THREAD_SEED_OK";
 
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -109,6 +112,29 @@ export function assertDesktopExperimentGuards(env = process.env) {
     );
   }
 
+  // Optional: operator's real Codex home for API auth. Default remains
+  // `${MESH_DESKTOP_TEST_ROOT}/codex`. UI data stays under the private root.
+  let codexHome = path.join(root, "codex");
+  let codexHomeSource = "test_root";
+  if (env.MESH_DESKTOP_CODEX_HOME != null && env.MESH_DESKTOP_CODEX_HOME !== "") {
+    const override = env.MESH_DESKTOP_CODEX_HOME;
+    if (typeof override !== "string" || !override.startsWith("/") || override.includes("\0")) {
+      throw createCodedError(
+        "desktop_experiment_codex_home_invalid",
+        "MESH_DESKTOP_CODEX_HOME must be an absolute path",
+      );
+    }
+    if (!existsSync(override)) {
+      throw createCodedError(
+        "desktop_experiment_codex_home_missing",
+        "MESH_DESKTOP_CODEX_HOME does not exist",
+        { codexHome: override },
+      );
+    }
+    codexHome = override;
+    codexHomeSource = "override";
+  }
+
   return Object.freeze({
     allow: true,
     root,
@@ -117,6 +143,8 @@ export function assertDesktopExperimentGuards(env = process.env) {
     authTokenFile: hasFile ? env.MESH_DESKTOP_AUTH_TOKEN_FILE : null,
     authTokenEnv: hasEnv ? env.MESH_DESKTOP_AUTH_TOKEN_ENV : null,
     debugPort: DESKTOP_EXPERIMENT_DEBUG_PORT,
+    codexHome,
+    codexHomeSource,
   });
 }
 
@@ -214,6 +242,153 @@ export async function assertDebugPortFree(port = DESKTOP_EXPERIMENT_DEBUG_PORT) 
  * Never assumes a thread from the operator's ordinary Codex home exists on an
  * ephemeral MESH_DESKTOP_TEST_ROOT CODEX_HOME.
  */
+
+/**
+ * Confirm a thread is resumeable/readable on the current authenticated connection.
+ * Live App Server fails closed with "no rollout found" when the thread is not durable yet.
+ */
+export async function assertThreadResumeable(transport, threadId) {
+  if (!transport || typeof transport.call !== "function") {
+    throw new TypeError("transport.call is required");
+  }
+  if (typeof threadId !== "string" || !THREAD_ID.test(threadId)) {
+    throw createCodedError("desktop_experiment_thread_invalid", "threadId is invalid");
+  }
+  const resumed = await transport.call("thread/resume", { threadId });
+  const resumedId = resumed?.thread?.id;
+  if (resumedId !== threadId) {
+    throw createCodedError(
+      "desktop_experiment_thread_not_resumeable",
+      "thread/resume did not return the expected thread id",
+      { threadId, resumedId: resumedId ?? null },
+    );
+  }
+  const read = await transport.call("thread/read", { threadId, includeTurns: true });
+  const readId = read?.thread?.id;
+  if (readId !== threadId) {
+    throw createCodedError(
+      "desktop_experiment_thread_not_resumeable",
+      "thread/read did not return the expected thread id",
+      { threadId, readId: readId ?? null },
+    );
+  }
+  return Object.freeze({ resumed, read });
+}
+
+/**
+ * Wait for turn/completed on the same transport (used to persist rollout after mint).
+ */
+export async function waitForTurnCompleted(transport, turnId, { timeoutMs = 45_000 } = {}) {
+  if (typeof turnId !== "string" || turnId.length === 0) {
+    throw new TypeError("turnId is required");
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("timeoutMs is invalid");
+  }
+  const existing = [...(transport.events ?? [])].find(
+    (event) => event?.method === "turn/completed" && event?.params?.turn?.id === turnId,
+  );
+  if (existing) return existing.params.turn;
+
+  if (typeof transport.onEvent !== "function") {
+    throw createCodedError(
+      "desktop_experiment_seed_timeout",
+      "transport.onEvent is required to wait for seed turn completion",
+      { turnId },
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { unsubscribe?.(); } catch { /* ignore */ }
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      settle(reject, createCodedError(
+        "desktop_experiment_seed_timeout",
+        "seed turn completion timed out",
+        { turnId, outcome: "unknown" },
+      ));
+    }, timeoutMs);
+    unsubscribe = transport.onEvent((event) => {
+      if (event?.method !== "turn/completed") return;
+      if (event?.params?.turn?.id !== turnId) return;
+      settle(resolve, event.params.turn);
+    });
+  });
+}
+
+/**
+ * Parse desktop logs for a successful resume/active stream — never treat a bare
+ * `thread/resume` method name (including -32600 failures) as attachment.
+ */
+export function createDesktopResumeProbe({ threadId }) {
+  if (typeof threadId !== "string" || !THREAD_ID.test(threadId)) {
+    throw createCodedError("desktop_experiment_thread_invalid", "threadId is invalid");
+  }
+  let resumeSeen = false;
+  let resumeFailed = false;
+  let attached = false;
+  let failReason = null;
+  const failurePattern = /errorCode\s*[:=]\s*-32600|-32600|no rollout found|failed to (?:load|resume)|thread_not_found/i;
+  const successPattern = /thread_stream_view_activity_changed\s+active=true|thread\/resume[^\n]*(?:ok|success|status["']?\s*:\s*["']?ok)/i;
+
+  function onLog(text) {
+    if (typeof text !== "string" || text.length === 0) return;
+    for (const line of text.split(/\r?\n/)) {
+      if (line.includes("thread/resume")) {
+        resumeSeen = true;
+        if (failurePattern.test(line) || (line.includes(threadId) && failurePattern.test(line))) {
+          resumeFailed = true;
+          attached = false;
+          failReason = line.slice(0, 500);
+        }
+      }
+      if (line.includes(threadId) && failurePattern.test(line)) {
+        resumeFailed = true;
+        attached = false;
+        failReason = line.slice(0, 500);
+      }
+      if (line.includes(threadId) && /active\s*=\s*true/i.test(line) && !failurePattern.test(line) && !resumeFailed) {
+        attached = true;
+      }
+      if (line.includes(threadId) && successPattern.test(line) && !resumeFailed) {
+        attached = true;
+      }
+    }
+  }
+
+  return Object.freeze({
+    onLog,
+    get attached() {
+      return attached && !resumeFailed;
+    },
+    get resumeSeen() {
+      return resumeSeen;
+    },
+    get resumeFailed() {
+      return resumeFailed;
+    },
+    get failReason() {
+      return failReason;
+    },
+    status() {
+      return Object.freeze({
+        attached: attached && !resumeFailed,
+        resumeSeen,
+        resumeFailed,
+        failReason,
+        threadId,
+      });
+    },
+  });
+}
+
 export async function resolveDesktopExperimentThread({
   endpoint,
   serverIdentity,
@@ -284,18 +459,12 @@ export async function resolveDesktopExperimentThread({
 
     if (preferredThreadId != null) {
       try {
-        const resumed = await transport.call("thread/resume", { threadId: preferredThreadId });
-        const resumedId = resumed?.thread?.id;
-        if (resumedId !== preferredThreadId) {
-          throw createCodedError(
-            "desktop_experiment_thread_missing",
-            "thread/resume override did not return the requested thread id",
-            { preferredThreadId, resumedId: resumedId ?? null },
-          );
-        }
+        await assertThreadResumeable(transport, preferredThreadId);
         return Object.freeze({
           threadId: preferredThreadId,
           source: "override",
+          seedTurnId: null,
+          resumeVerified: true,
           serverIdentity: transport.serverIdentity ?? serverIdentity,
         });
       } catch (error) {
@@ -327,9 +496,59 @@ export async function resolveDesktopExperimentThread({
         { resultType: typeof mintedId },
       );
     }
+
+    // Live App Server often has no durable rollout until a seed turn completes.
+    // Persist on this same connection, then prove resume/read before desktop launch.
+    const seedStarted = await transport.call("turn/start", {
+      threadId: mintedId,
+      input: [{
+        type: "text",
+        text: [
+          "Desktop experiment seed turn to persist rollout.",
+          "Do not use tools.",
+          `Reply exactly ${DESKTOP_EXPERIMENT_SEED_REPLY_MARKER}.`,
+        ].join(" "),
+      }],
+    });
+    const seedTurnId = seedStarted?.turn?.id;
+    if (typeof seedTurnId !== "string" || seedTurnId.length === 0) {
+      throw createCodedError(
+        "desktop_experiment_thread_mint_failed",
+        "seed turn/start did not return a turn id",
+        { threadId: mintedId },
+      );
+    }
+    const seedTurn = await waitForTurnCompleted(transport, seedTurnId, {
+      timeoutMs: requestTimeoutMs,
+    });
+    if (seedTurn?.status && seedTurn.status !== "completed") {
+      throw createCodedError(
+        "desktop_experiment_thread_mint_failed",
+        "seed turn did not complete successfully",
+        { threadId: mintedId, seedTurnId, status: seedTurn.status },
+      );
+    }
+
+    try {
+      await assertThreadResumeable(transport, mintedId);
+    } catch (error) {
+      throw createCodedError(
+        "desktop_experiment_thread_not_resumeable",
+        "minted thread is not resumeable after seed turn; refusing to launch desktop",
+        {
+          threadId: mintedId,
+          seedTurnId,
+          causeCode: error?.code ?? null,
+          causeMessage: typeof error?.message === "string" ? error.message : null,
+        },
+      );
+    }
+
     return Object.freeze({
       threadId: mintedId,
       source: "minted",
+      seedTurnId,
+      resumeVerified: true,
       serverIdentity: transport.serverIdentity ?? serverIdentity,
     });
   } finally {

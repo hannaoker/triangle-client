@@ -23,6 +23,7 @@ import {
   assertDesktopExperimentGuards,
   buildDesktopExperimentBinding,
   createDesktopExperimentNonce,
+  createDesktopResumeProbe,
   resolveDesktopExperimentThread,
   runNativeDesktopWakeListener,
 } from "../../packages/agent-worker/src/native-desktop-wake-experiment.mjs";
@@ -71,6 +72,17 @@ async function forceKill(child, label) {
   }
 }
 
+
+function createDesktopResumeFailure(probe, threadId) {
+  const error = new Error(
+    `Desktop thread/resume failed for ${threadId}; refusing to treat failed resume as attached`,
+  );
+  error.code = "desktop_experiment_desktop_resume_failed";
+  error.threadId = threadId;
+  error.resumeStatus = probe.status();
+  return error;
+}
+
 const guards = assertDesktopExperimentGuards(process.env);
 const nonce = process.env.MESH_DESKTOP_NONCE?.trim() || createDesktopExperimentNonce();
 
@@ -82,9 +94,11 @@ if (checkGuardsOnly) {
     serverIdentity: guards.serverIdentity,
     debugPort: guards.debugPort,
     authVia: guards.authTokenFile ? "file" : "env",
+    codexHome: guards.codexHome,
+    codexHomeSource: guards.codexHomeSource,
     nonce,
     platform: process.platform,
-    note: "Linux-safe guard check only; native desktop not launched. Default Mac path mints a thread on the ephemeral app-server after readyz.",
+    note: "Linux-safe guard check only; native desktop not launched. Default Mac path mints+seeds a resumeable thread on the app-server after readyz. Set MESH_DESKTOP_CODEX_HOME to the operator Codex home for API auth; UI stays under MESH_DESKTOP_TEST_ROOT/ui.",
   });
   process.exit(0);
 }
@@ -107,8 +121,11 @@ for (const binary of [CHATGPT_APP, CODEX_BIN]) {
 await assertDebugPortFree(DESKTOP_EXPERIMENT_DEBUG_PORT);
 
 const root = guards.root;
+const codexHome = guards.codexHome;
 mkdirSync(path.join(root, "ui"), { mode: 0o700, recursive: true });
-mkdirSync(path.join(root, "codex"), { mode: 0o700, recursive: true });
+if (guards.codexHomeSource === "test_root") {
+  mkdirSync(codexHome, { mode: 0o700, recursive: true });
+}
 
 if (guards.authTokenFile && !existsSync(guards.authTokenFile)) {
   // Disposable local capability token for the experiment path (not a MESH secret).
@@ -129,7 +146,7 @@ let desktop;
 let opener;
 let serverErrors = "";
 const desktopMethods = [];
-let attached = false;
+let resumeProbe = null;
 
 try {
   server = spawn(
@@ -139,7 +156,7 @@ try {
       cwd: root,
       env: {
         ...process.env,
-        CODEX_HOME: path.join(root, "codex"),
+        CODEX_HOME: codexHome,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -185,14 +202,20 @@ try {
   log("thread_resolved", {
     threadId,
     source: resolvedThread.source,
+    seedTurnId: resolvedThread.seedTurnId ?? null,
+    resumeVerified: resolvedThread.resumeVerified === true,
     preferredThreadId: guards.threadId,
+    codexHome,
+    codexHomeSource: guards.codexHomeSource,
   });
+
+  resumeProbe = createDesktopResumeProbe({ threadId });
 
   const desktopEnv = {
     ...process.env,
     CODEX_APP_SERVER_WS_URL: desktopRpcEndpoint,
     CODEX_ELECTRON_USER_DATA_PATH: path.join(root, "ui"),
-    CODEX_HOME: path.join(root, "codex"),
+    CODEX_HOME: codexHome,
   };
 
   desktop = spawn(
@@ -210,12 +233,13 @@ try {
   );
   desktop.stdout.on("data", (chunk) => {
     const text = chunk.toString();
-    if (text.includes(threadId)) {
-      if (text.includes("thread_stream_view_activity_changed active=true")) {
-        attached = true;
-      }
+    resumeProbe.onLog(text);
+    if (text.includes(threadId) || text.includes("thread/resume")) {
       log("target_desktop_log", {
-        text: text.split("\n").filter((line) => line.includes(threadId)).join("\n").slice(0, 1800),
+        text: text.split("\n").filter((line) =>
+          line.includes(threadId) || line.includes("thread/resume") || /errorCode|-32600|rollout/i.test(line)
+        ).join("\n").slice(0, 1800),
+        resumeStatus: resumeProbe.status(),
       });
     }
     for (const method of ["initialize", "thread/list", "thread/resume"]) {
@@ -244,16 +268,21 @@ try {
       log("desktop_exited", { code: desktop.exitCode });
       break;
     }
-    if (attached || desktopMethods.includes("thread/resume")) {
-      attached = true;
-      log("desktop_resume_observed", { threadId });
+    if (resumeProbe.resumeFailed) {
+      throw createDesktopResumeFailure(resumeProbe, threadId);
+    }
+    if (resumeProbe.attached) {
+      log("desktop_resume_observed", resumeProbe.status());
       break;
     }
   }
 
-  if (!attached) {
+  if (resumeProbe.resumeFailed) {
+    throw createDesktopResumeFailure(resumeProbe, threadId);
+  }
+  if (!resumeProbe.attached) {
     throw new Error(
-      "Desktop did not observe thread attachment/resume; verify minted thread exists on this app-server and visual subscription before trusting exit code",
+      "Desktop did not confirm successful thread resume/active stream; bare thread/resume log lines (including -32600) are not success",
     );
   }
 
@@ -286,7 +315,8 @@ try {
 
   log("result", {
     connected: true,
-    attached,
+    attached: resumeProbe.attached,
+    resumeStatus: resumeProbe.status(),
     nonce: evidence.nonce,
     turnId: evidence.turnId,
     turnStatus: evidence.turnStatus,
