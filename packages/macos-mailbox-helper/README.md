@@ -179,13 +179,18 @@ for credential custody during mode changes.
 
 ### Receiver prompt pattern
 
-List does not include message text. Pull history, then claim/reply/ack:
+List does not include message text. Pull history, then claim/reply/ack through
+the trusted transaction proxy (Slice 6):
 
-1. `mesh.mailbox.list` — unread queue metadata
+1. `mesh.mailbox.list` — unread queue metadata (MCP list filtered by policy)
 2. `mesh.rooms.history` — thread text
-3. `mesh.mailbox.claim` — lease one delivery (`claim_<32 hex>`)
-4. `mesh.messages.send` — reply with `inReplyToEventId` / `replyRequired` as needed
-5. `mesh.mailbox.ack` — finalize the delivery
+3. `mesh.mailbox.claim` — lease one delivery (`claim_<32 hex>`; model IDs ignored)
+4. `mesh.messages.send` — reply with deterministic `reply_<32 hex>` key
+5. `mesh.mailbox.ack` — finalize the open delivery only
+
+Coordinator-delivery (Hermes) uses helper CLI
+`transaction-claim` / `transaction-reply` / `transaction-ack` instead of
+harness-held MESH credentials.
 
 ### Sender prompt pattern
 

@@ -182,6 +182,15 @@ public enum ModelContractCases {
             "watch-poll", "--installation", "inst_N7VhDq3mQ2", "--cursor", "0",
         ])
         try expect(watchPoll.command == .watchPoll && watchPoll.cursor == 0, "watch-poll rejected")
+        let txnClaim = try CommandParser.parse([
+            "transaction-claim",
+            "--profile", "mailbox",
+            "--protocol", "coordinator-delivery-v1",
+            "--delivery-id", "12",
+            "--room-id", "room_" + String(repeating: "a", count: 32),
+            "--event-id", "event_" + String(repeating: "b", count: 32),
+        ])
+        try expect(txnClaim.command == .transactionClaim && txnClaim.deliveryID == 12, "transaction-claim rejected")
 
         for invalid in [
             ["show-token", "--profile", "mailbox"],

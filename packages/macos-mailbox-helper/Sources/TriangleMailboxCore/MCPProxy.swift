@@ -104,6 +104,7 @@ public enum MCPProxyRunResult: Equatable, Sendable {
 private struct MCPProxySession {
     let credential: VerifiedCredential
     let workloadAuth: WorkloadTokenManager?
+    let transactionRewriter: MCPTransactionRewriter?
 
     func authorizationHeaders(method: String, url: URL) async throws -> [String: String] {
         if let workloadAuth {
@@ -129,14 +130,17 @@ public struct MCPProxy: Sendable {
     private let gate: VerifiedCredentialGate
     private let workloadKeyStore: any WorkloadKeyStore
     private let transport: any MeshTransport
+    private let transactionRewriterFactory: (@Sendable (VerifiedCredential, ClientInstanceID) -> MCPTransactionRewriter?)?
 
     public init(
         gate: VerifiedCredentialGate,
         transport: any MeshTransport,
-        workloadKeyStore: (any WorkloadKeyStore)? = nil
+        workloadKeyStore: (any WorkloadKeyStore)? = nil,
+        transactionRewriterFactory: (@Sendable (VerifiedCredential, ClientInstanceID) -> MCPTransactionRewriter?)? = nil
     ) {
         self.gate = gate
         self.transport = transport
+        self.transactionRewriterFactory = transactionRewriterFactory
         #if canImport(Security)
         self.workloadKeyStore = workloadKeyStore ?? KeychainWorkloadKeyStore()
         #else
@@ -199,7 +203,9 @@ public struct MCPProxy: Sendable {
                 } else {
                     workloadAuth = nil
                 }
-                session = MCPProxySession(credential: credential, workloadAuth: workloadAuth)
+                let instanceID = ClientInstanceID.derive(profile: profile)
+                let rewriter = transactionRewriterFactory?(credential, instanceID)
+                session = MCPProxySession(credential: credential, workloadAuth: workloadAuth, transactionRewriter: rewriter)
             }
             guard let session else { return .failed }
 
@@ -209,6 +215,72 @@ public struct MCPProxy: Sendable {
             if dataContainsSecret(line, session: session) {
                 if !request.isNotification { writeInvariantFailure(output: output) }
                 return .terminatedForSecretInvariant
+            }
+
+            if !request.isNotification, let rewriter = session.transactionRewriter {
+                if let outcome = await rewriter.rewriteOutgoing(
+                    requestMethod: request.method,
+                    params: request.params,
+                    raw: line
+                ) {
+                    switch outcome {
+                    case .forward(let rewritten):
+                        // Fall through to remote forward with rewritten bytes.
+                        let endpoint = URL(string: session.credential.origin.value + "/api/mcp")!
+                        let response: MeshHTTPResponse
+                        do {
+                            var headers = [
+                                "Accept": "application/json",
+                                "Content-Type": "application/json",
+                            ]
+                            headers.merge(try await session.authorizationHeaders(method: "POST", url: endpoint)) { _, new in new }
+                            response = try await transport.send(MeshHTTPRequest(
+                                method: "POST",
+                                url: endpoint,
+                                headers: headers,
+                                body: rewritten
+                            ))
+                        } catch {
+                            let diagnostic = errorResponse(id: request.id, code: -32603, message: "upstream unavailable")
+                            guard writeAuthenticated(diagnostic, session: session, output: output) else {
+                                return .terminatedForSecretInvariant
+                            }
+                            continue
+                        }
+                        if containsSecret(response, session: session) {
+                            writeInvariantFailure(output: output)
+                            return .terminatedForSecretInvariant
+                        }
+                        guard validRemoteEnvelope(response, endpoint: endpoint, requestID: request.id) else {
+                            let diagnostic = errorResponse(id: request.id, code: -32603, message: "invalid upstream response")
+                            guard writeAuthenticated(diagnostic, session: session, output: output) else {
+                                return .terminatedForSecretInvariant
+                            }
+                            continue
+                        }
+                        var forwarded = response.body
+                        forwarded.append(0x0a)
+                        if dataContainsSecret(forwarded, session: session) {
+                            write(Data("{\"error\":\"credential_invariant_failed\"}\n".utf8), toStdout: false, output: output)
+                            return .terminatedForSecretInvariant
+                        }
+                        output.writeStdout(forwarded)
+                        continue
+                    case .respond(let body):
+                        var forwarded = body
+                        if forwarded.last != 0x0a { forwarded.append(0x0a) }
+                        guard writeAuthenticated(forwarded, session: session, output: output) else {
+                            return .terminatedForSecretInvariant
+                        }
+                        continue
+                    case .reject(let code, let message):
+                        let diagnostic = errorResponse(id: request.safeResponseID, code: code, message: message)
+                        guard writeAuthenticated(diagnostic, session: session, output: output) else {
+                            return .terminatedForSecretInvariant
+                        }
+                        continue
+                    }
+                }
             }
 
             let endpoint = URL(string: session.credential.origin.value + "/api/mcp")!
@@ -252,6 +324,14 @@ public struct MCPProxy: Sendable {
                 continue
             }
             var forwarded = response.body
+            if let rewriter = session.transactionRewriter,
+               let filtered = try? rewriter.filterIncoming(
+                   requestMethod: request.method,
+                   params: request.params,
+                   responseBody: response.body
+               ) {
+                forwarded = filtered
+            }
             forwarded.append(0x0a)
             if dataContainsSecret(forwarded, session: session) {
                 write(Data("{\"error\":\"credential_invariant_failed\"}\n".utf8), toStdout: false, output: output)
@@ -259,6 +339,29 @@ public struct MCPProxy: Sendable {
             }
             output.writeStdout(forwarded)
         }
+    }
+
+    public static func productionTransactionRewriter(
+        credential: VerifiedCredential,
+        instanceID: ClientInstanceID,
+        transport: any MeshTransport,
+        workloadAuth: WorkloadTokenManager?
+    ) -> MCPTransactionRewriter {
+        let mailboxTransport = AuthenticatedMailboxTransactionTransport(
+            origin: credential.origin,
+            transport: transport
+        ) { method, url in
+            if let workloadAuth {
+                return try await workloadAuth.authorizationHeaders(method: method, url: url)
+            }
+            return ["Authorization": credential.authorizationValue]
+        }
+        return MCPTransactionRewriter(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            store: FileMailboxTransactionStore(instanceID: instanceID),
+            transport: mailboxTransport
+        )
     }
 
     private func validNotificationAcknowledgement(_ response: MeshHTTPResponse, endpoint: URL) -> Bool {

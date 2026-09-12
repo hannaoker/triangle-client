@@ -24,7 +24,10 @@ now meet that bar for durable wake and scheduling only. Post–Phase 2 priority
   integration work.
 - **Trusted Swift transaction proxy (Slice 6)** is out of Phase 1/2 scope, but
   it remains a hard gate before production Hermes / coordinator-delivery harness
-  paths - do not bury it under optional Phase 3 SDK language.
+  paths - do not bury it under optional Phase 3 SDK language. Implementation
+  landing notes:
+  [2026-09-12-slice6-trusted-transaction-proxy.md](2026-09-12-slice6-trusted-transaction-proxy.md)
+  (Mac security review still open).
 - Keep Grok / Cursor interactive UI sessions excluded unless an official
   wakeable automation API exists.
 
