@@ -14,7 +14,7 @@ const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -28,7 +28,33 @@ const EXACT_EVENT_WAKE_KEYS = [
 ];
 const EXACT_EVENT_WAKE_PROFILE_KEYS = ["agentId", "instanceId"];
 const EXACT_EVENT_WAKE_DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
+const EXACT_APP_SERVER_WAKE_KEYS = [
+  "actorProfile",
+  "authTokenEnv",
+  "authTokenFile",
+  "binding",
+  "bindingPath",
+  "cursorPath",
+  "ensureBeforeWatch",
+  "helperPath",
+  "installationId",
+];
+const EXACT_APP_SERVER_BINDING_KEYS = [
+  "adapterVersion",
+  "agentId",
+  "enabled",
+  "endpoint",
+  "installationId",
+  "instanceId",
+  "roomScope",
+  "serverIdentity",
+  "threadId",
+];
 const ACTIVATION_TIMEOUT_MS = 30_000;
+const BINDING_ENDPOINT = /^wss?:\/\/[^\s\0]{1,500}$/i;
+const BINDING_SERVER_IDENTITY = /^[A-Za-z0-9._:/+=-]{1,200}$/;
+const BINDING_THREAD_ID = /^[A-Za-z0-9._:-]{8,120}$/;
+const BINDING_ROOM_SCOPE = /^[A-Za-z0-9._:-]{1,120}$/;
 
 function invalidBootstrap() {
   return new TypeError("Invalid Triangle Client bootstrap");
@@ -225,7 +251,28 @@ function mailboxOwnerOutsideValues(owner, includeSecrets) {
   return values;
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake) {
+function appServerWakeOutsideValues(appServerWake) {
+  if (!appServerWake) return [];
+  return [
+    appServerWake.installationId,
+    appServerWake.helperPath,
+    appServerWake.cursorPath,
+    appServerWake.bindingPath,
+    appServerWake.actorProfile,
+    appServerWake.authTokenFile,
+    appServerWake.authTokenEnv,
+    appServerWake.binding?.adapterVersion,
+    appServerWake.binding?.installationId,
+    appServerWake.binding?.instanceId,
+    appServerWake.binding?.agentId,
+    appServerWake.binding?.roomScope,
+    appServerWake.binding?.serverIdentity,
+    appServerWake.binding?.endpoint,
+    appServerWake.binding?.threadId,
+  ].filter((value) => typeof value === "string");
+}
+
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -253,6 +300,9 @@ function assertMailboxTokensAreConfined(instances, eventWake) {
         for (const candidate of wakeValues) {
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
+      }
+      for (const candidate of appServerWakeOutsideValues(appServerWake)) {
+        if (candidate.includes(secret)) throw invalidBootstrap();
       }
     }
   }
@@ -311,6 +361,66 @@ function validateEventWake(eventWake, seenWorkerIds) {
   if (seenDrains.size !== seenInstances.size) throw invalidBootstrap();
 }
 
+function validateAppServerWake(appServerWake, seenWorkerIds, eventWake) {
+  if (!hasExactKeys(appServerWake, EXACT_APP_SERVER_WAKE_KEYS)) throw invalidBootstrap();
+  if (
+    typeof appServerWake.installationId !== "string"
+    || !INSTALLATION_ID.test(appServerWake.installationId)
+    || typeof appServerWake.helperPath !== "string"
+    || !appServerWake.helperPath.startsWith("/")
+    || appServerWake.helperPath.includes("\0")
+    || typeof appServerWake.cursorPath !== "string"
+    || !appServerWake.cursorPath.startsWith("/")
+    || appServerWake.cursorPath.includes("\0")
+    || typeof appServerWake.bindingPath !== "string"
+    || !appServerWake.bindingPath.startsWith("/")
+    || appServerWake.bindingPath.includes("\0")
+    || typeof appServerWake.actorProfile !== "string"
+    || appServerWake.actorProfile.length === 0
+    || appServerWake.actorProfile.includes("\0")
+    || typeof appServerWake.ensureBeforeWatch !== "boolean"
+    || !hasExactKeys(appServerWake.binding, EXACT_APP_SERVER_BINDING_KEYS)
+  ) {
+    throw invalidBootstrap();
+  }
+  const binding = appServerWake.binding;
+  if (
+    binding.adapterVersion !== "1"
+    || binding.enabled !== true
+    || typeof binding.installationId !== "string"
+    || !INSTALLATION_ID.test(binding.installationId)
+    || binding.installationId !== appServerWake.installationId
+    || typeof binding.instanceId !== "string"
+    || !INSTANCE_ID.test(binding.instanceId)
+    || seenWorkerIds.has(binding.instanceId)
+    || (eventWake?.profiles ?? []).some((profile) => profile.instanceId === binding.instanceId)
+    || typeof binding.agentId !== "string"
+    || !AGENT_ID.test(binding.agentId)
+    || (binding.roomScope !== null && (typeof binding.roomScope !== "string" || !BINDING_ROOM_SCOPE.test(binding.roomScope)))
+    || typeof binding.serverIdentity !== "string"
+    || !BINDING_SERVER_IDENTITY.test(binding.serverIdentity)
+    || typeof binding.endpoint !== "string"
+    || !BINDING_ENDPOINT.test(binding.endpoint)
+    || typeof binding.threadId !== "string"
+    || !BINDING_THREAD_ID.test(binding.threadId)
+    || /mesh_(?:watch_)?[A-Za-z0-9_-]{8,}/.test(JSON.stringify(binding))
+  ) {
+    throw invalidBootstrap();
+  }
+  const hasFile = typeof appServerWake.authTokenFile === "string";
+  const hasEnv = typeof appServerWake.authTokenEnv === "string";
+  if (hasFile === hasEnv) throw invalidBootstrap();
+  if (hasFile) {
+    if (!appServerWake.authTokenFile.startsWith("/") || appServerWake.authTokenFile.includes("\0")) {
+      throw invalidBootstrap();
+    }
+    if (appServerWake.authTokenEnv !== null) throw invalidBootstrap();
+  } else {
+    if (appServerWake.authTokenFile !== null) throw invalidBootstrap();
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(appServerWake.authTokenEnv)) throw invalidBootstrap();
+  }
+}
+
 export function parseClientSupervisorBootstrap(text) {
   try {
     if (typeof text !== "string" || Buffer.byteLength(text) > MAX_BOOTSTRAP_BYTES) {
@@ -332,10 +442,17 @@ export function parseClientSupervisorBootstrap(text) {
     if (Object.hasOwn(bootstrap, "eventWake")) {
       validateEventWake(bootstrap.eventWake, seen);
     }
-    if (bootstrap.instances.length < 1 && !Object.hasOwn(bootstrap, "eventWake")) {
+    if (Object.hasOwn(bootstrap, "appServerWake")) {
+      validateAppServerWake(bootstrap.appServerWake, seen, bootstrap.eventWake);
+    }
+    if (
+      bootstrap.instances.length < 1
+      && !Object.hasOwn(bootstrap, "eventWake")
+      && !Object.hasOwn(bootstrap, "appServerWake")
+    ) {
       throw invalidBootstrap();
     }
-    assertMailboxTokensAreConfined(bootstrap.instances, bootstrap.eventWake);
+    assertMailboxTokensAreConfined(bootstrap.instances, bootstrap.eventWake, bootstrap.appServerWake);
     return bootstrap;
   } catch {
     throw invalidBootstrap();
@@ -432,6 +549,7 @@ export async function runClientSupervisorCLI({
       const supervisor = createSupervisor({
         instances: bootstrap.instances,
         eventWake: bootstrap.eventWake ?? null,
+        appServerWake: bootstrap.appServerWake ?? null,
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
       });
