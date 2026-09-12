@@ -370,10 +370,22 @@ public struct MailboxQuarantinedTransaction: Equatable, Sendable {
     public let protocolOwnership: MailboxTransactionProtocol
     public let correlationID: String
     public let quarantinedAt: String
+
+    public init(
+        deliveryID: Int,
+        protocolOwnership: MailboxTransactionProtocol,
+        correlationID: String,
+        quarantinedAt: String
+    ) {
+        self.deliveryID = deliveryID
+        self.protocolOwnership = protocolOwnership
+        self.correlationID = correlationID
+        self.quarantinedAt = quarantinedAt
+    }
 }
 
-enum MailboxTransactionTimestamp {
-    static func now() -> String {
+public enum MailboxTransactionTimestamp {
+    public static func now() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)

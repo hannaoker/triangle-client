@@ -69,7 +69,7 @@ public enum MailboxTransactionContractCases {
             let data = try Data(contentsOf: path)
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             try expect(object?["protocol"] as? String == "coordinator-delivery-v1", "protocol missing")
-            try expect(Set(object?.keys ?? []) == Set([
+            try expect(Set((object ?? [:]).keys.map(String.init)) == Set([
                 "version", "instanceId", "protocol", "deliveryId", "roomId", "claimId",
                 "replyIdempotencyKey", "state", "replyEventId", "replyResolution",
                 "failureCount", "lastFailureReason", "createdAt",
@@ -634,7 +634,7 @@ public enum MailboxTransactionContractCases {
                 ),
             ]
         )
-        try expect(evaluation.actionable.map(\.deliveryID) == [2], "quarantined item remained actionable")
+        try expect(evaluation.actionable.map { $0.deliveryID } == [2], "quarantined item remained actionable")
         let filtered = MailboxPolicyEvaluator.filterListItems(
             [
                 ["deliveryId": 1, "roomId": room.value],
