@@ -6,7 +6,9 @@ Updated: 2026-09-12.
 Status:
 - Native desktop idle-chat wake-up proved (2026-09-05).
 - Phase 2 durable wake/scheduling is **Complete** (2026-09-12 wall soak).
-- Shared Codex App Server track: **authenticated WS transport + supervisor wiring landed**; native-desktop nonce repeat and Bob canary remain.
+- Shared Codex App Server track: **authenticated WS transport + supervisor wiring landed** (PR #9);
+  **production-shaped native-desktop nonce experiment script + Mac runbook landed**;
+  Mac operator Gate A execution and Bob canary remain (not claimed from Linux).
 
 ## Decision and scope
 
@@ -38,7 +40,7 @@ This is not a claim that every remaining task is mechanical or release-safe.
 
 | Gate | Status |
 | --- | --- |
-| A. Shared-server attachment scaffold | **Landed (authenticated WS + fake)** — `shared-codex-app-server.mjs` + `authenticated-app-server-transport.mjs`. Live Codex `initialize` may omit `serverInfo.name`; identity comes from authenticated `transport.connect()`. Native-desktop nonce repeat still open. |
+| A. Shared-server attachment scaffold | **Landed (authenticated WS + fake + experiment script)** — adapter + transport on main; `native-desktop-wake-experiment.mjs` now drives `createAuthenticatedAppServerTransport` + `createSharedCodexSession` with a unique nonce. **Mac operator still must run Gate A** (ChatGPT.app + visual confirmation). |
 | B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — helper watch transport; `createAppServerWakeBridge`; supervisor/CLI opt-in `appServerWake` bootstrap |
 | C. Admission / busy queue / correlation | **Partial** — in-memory queue + correlation; durable production persistence and race matrix still open |
 | D. Lifecycle / doctor status surface | **Partial** — `session.status()` distinguishes doctor phases; public `mesh` flags not designed yet |
@@ -57,6 +59,7 @@ This is not a claim that every remaining task is mechanical or release-safe.
 - Session: connect / resume / read / turn/start / wait / admit / reconnect / shutdown
 - Wake bridge: helper-shaped watch transport → `resolveDelivery` → admit (empty mailbox → zero turns)
 - **Supervisor / CLI opt-in `appServerWake`** for bound-thread bootstrap (secret-free MESH watch; App Server WS token via absolute file or env *name*)
+- **Production-shaped native-desktop nonce experiment** (`native-desktop-wake-experiment.mjs` + thin runner): unique nonce turn via authenticated transport + shared session; Mac runbook in this handoff; Linux `--check-guards-only` + unit tests
 - Slice 6 helper proxy on main (not claimed as Mac-reviewed production)
 
 ```sh
@@ -86,8 +89,10 @@ Production Hermes / coordinator-delivery claim/reply/ack still requires
 
 ### Explicit remaining gaps before production claim
 
-1. **Native desktop nonce repeat** of the 2026-09-05 wake against this production-shaped
-   authenticated WS adapter (Mac). Authenticated WS transport itself has landed.
+1. **Mac Gate A execution** — run the production-shaped native-desktop nonce experiment
+   (script + runbook below) and record matching server events **plus** visible renderer
+   reply. Authenticated WS transport and the experiment driver have landed; desktop proof
+   is still human-on-Mac.
 2. **Durable correlation / crash recovery** and human-vs-listener race proofs.
 3. **Slice 6 Mac security review** before Hermes production claim/reply/ack (implementation on main).
 4. **Bob canary** (unique nonce, correlated durable reply → same desktop chat).
@@ -167,6 +172,10 @@ Client source to inspect first:
   opt-in `appServerWake` bootstrap beside workers / eventWake.
 - `packages/agent-worker/test/shared-codex-app-server.test.mjs` and
   `authenticated-app-server-transport.test.mjs`: focused unit tests.
+- `packages/agent-worker/src/native-desktop-wake-experiment.mjs`: Linux-testable
+  guards, nonce turn text, debug-port check, and thin listener runner.
+- `packages/agent-worker/test/native-desktop-wake-experiment.test.mjs`: non-desktop
+  glue tests (scripted auth socket; no ChatGPT.app).
 - `packages/agent-worker/src/wake-client.mjs`: injected wake transport, coalescing,
   reconciliation; default cursor store is in-memory, not durable production state.
 - `packages/agent-worker/src/helper-watch-transport.mjs`: secret-free helper poll.
@@ -179,16 +188,16 @@ Client source to inspect first:
   `docs/triangle-client/2026-09-03-realtime-mailbox-phase-2.md`.
 - `scripts/prototypes/shared-codex-server.mjs`: runnable two-client protocol proof;
   not the native-desktop test. Three real model turns, persisted test history.
-- `scripts/prototypes/native-desktop-wake-experiment.mjs`: archived native test,
-  parameterized and opt-in guarded; syntax checked but revised wrapper not rerun.
-  Requires MESH_ALLOW_DESKTOP_EXPERIMENT=1, a fresh private temporary
-  MESH_DESKTOP_TEST_ROOT, and a disposable MESH_DESKTOP_TEST_THREAD_ID. Uses fixed
-  debug port 63999; verify it is free. It reads existing login/configuration and
-  can trigger startup mutations; review before execution. It only logs evidence;
-  manually verify successful resume and renderer output, not its exit code alone.
-  The original driver left idle Node/crash-handler processes that were explicitly
-  terminated. The archived wrapper closes its socket and exits after cleanup, but
-  process-tree cleanup and signal handling still need hardening before reuse.
+- `scripts/prototypes/native-desktop-wake-experiment.mjs`: **production-shaped**
+  Mac entrypoint (replaces the archived raw-WS probe). Drives
+  `createAuthenticatedAppServerTransport` + `createSharedCodexSession` with a
+  unique nonce. Same opt-in guards: `MESH_ALLOW_DESKTOP_EXPERIMENT=1`, fresh
+  private `MESH_DESKTOP_TEST_ROOT` under `/private/tmp/`, disposable
+  `MESH_DESKTOP_TEST_THREAD_ID`, free debug port **63999**. App Server capability
+  token via absolute `MESH_DESKTOP_AUTH_TOKEN_FILE` or env *name*
+  `MESH_DESKTOP_AUTH_TOKEN_ENV` (no Node `mesh_` secrets). Logs evidence only —
+  Mac operator must verify resume + renderer nonce reply. Linux may run
+  `--check-guards-only`; do not claim desktop results from Linux.
 
 ## Implementation sequence and acceptance gates
 
@@ -212,8 +221,66 @@ leaving the server running; the unauthenticated loopback proof is not a daemon.
 **Increment status:** scaffold + authenticated WebSocket transport + fake-transport
 tests landed. `serverIdentity` is supplied by authenticated `connect()` (capability
 token auth metadata and/or scripted `triangle/authenticated` hello). Live Codex
-`initialize` without `serverInfo.name` is accepted. **Native desktop nonce repeat
-remains.**
+`initialize` without `serverInfo.name` is accepted. Production-shaped nonce
+experiment script + Mac runbook landed. **Mac Gate A visual/desktop proof remains.**
+
+### Gate A — Mac operator runbook (native-desktop nonce wake)
+
+Environment: **macOS with ChatGPT.app** (bundled Codex; pin/detect version; do not
+silently substitute an older PATH `codex`). This Cloud/Linux agent does **not** run
+ChatGPT.app and must not claim Gate A complete.
+
+Still requires a human on Mac:
+
+1. Create/open a **disposable** persisted Codex thread; copy its thread id.
+2. Snapshot backend configuration you care about (isolated Electron UI data does
+   **not** isolate backend startup mutations).
+3. Confirm nothing listens on `127.0.0.1:63999`.
+4. Prepare a fresh private root, e.g. `mkdir -p /private/tmp/mesh-desktop-nonce-$$`.
+5. Provide an App Server capability token via **file or env name** (same custody
+   model as supervisor `appServerWake`). Prefer a disposable absolute token file
+   under the private root — **never** put `mesh_` / `mesh_watch_` into Node.
+6. Leave the disposable chat idle and subscribed after the script launches desktop.
+7. After the script logs `listener_turn_completed`, **visually** confirm the
+   renderer shows the synthetic prompt and assistant reply
+   `DESKTOP_SHARED_WAKE_OK <nonce>` (script exit code alone is insufficient).
+8. Tear down: script attempts SIGTERM/SIGKILL cleanup; verify no stray ChatGPT /
+   app-server / crash-handler processes; compare config snapshot.
+
+```sh
+# From triangle-client checkout on Mac (Node 22+)
+ROOT=/private/tmp/mesh-desktop-nonce-$(date +%s)
+mkdir -p "$ROOT"
+# Optional: pre-write a disposable capability token (script can also create one)
+# printf 'desktop-experiment-local\n' > "$ROOT/ws.token" && chmod 600 "$ROOT/ws.token"
+
+export MESH_ALLOW_DESKTOP_EXPERIMENT=1
+export MESH_DESKTOP_TEST_ROOT="$ROOT"
+export MESH_DESKTOP_TEST_THREAD_ID='<disposable-thread-id>'
+export MESH_DESKTOP_SERVER_IDENTITY='codex-app-server/desktop-experiment'
+export MESH_DESKTOP_AUTH_TOKEN_FILE="$ROOT/ws.token"
+# Exactly one of AUTH_TOKEN_FILE or AUTH_TOKEN_ENV — not both.
+# export MESH_DESKTOP_AUTH_TOKEN_ENV='CODEX_APP_SERVER_WS_TOKEN'
+
+# Optional overrides:
+# export MESH_DESKTOP_NONCE='NDW_manual_...'
+# export MESH_DESKTOP_LISTENER_ENDPOINT='ws://127.0.0.1:PORT'  # default: script listen URL
+# export MESH_DESKTOP_AWAIT_AUTH_HELLO=1  # only if helper emits triangle/authenticated
+
+# Linux-safe sanity (no desktop):
+# node scripts/prototypes/native-desktop-wake-experiment.mjs --check-guards-only
+
+node scripts/prototypes/native-desktop-wake-experiment.mjs
+```
+
+Pass Gate A only when:
+
+- Desktop resumes the disposable thread on the shared App Server.
+- Listener (production-shaped session) starts a turn whose text embeds the unique nonce.
+- Server `turn/started` / `turn/completed` agree on the turn id.
+- Renderer shows `DESKTOP_SHARED_WAKE_OK <nonce>` without user chat input.
+
+Record: nonce, thread id, turn id, timestamps, Codex version, config before/after.
 
 ### B. Wire real MESH wake transport (server + client)
 
@@ -302,15 +369,33 @@ Then test background/unsubscribed chats, approvals, cancellation, multiple rooms
 server restart, transport authentication, resource bounds, and a fake-harness soak.
 Do not call one successful local turn a latency distribution or production soak.
 
-**Increment status:** not started.
+**Increment status:** not started (separate from Gate A script landing).
+
+#### Bob canary checklist (operator; not implemented in this increment)
+
+Do **not** run full Bob end-to-end from this Linux follow-up. When a Mac operator
+runs the canary after Gate A:
+
+1. Confirm Bob handle/`agent_id` against a live `mesh.agents.find` (or enrollment)
+   — skill table reference only (verify before use): handle `bob` →
+   `agent_582567705a9348c38f18c91d2bac9dd8`.
+2. Mint a **unique nonce** distinct from the Gate A desktop nonce; record it.
+3. Send durable outbound mail that requires Bob's correlated reply (room/event ids
+   recorded); do not impersonate Bob.
+4. Leave the bound desktop chat idle/subscribed; let wake → admit → turn path run.
+5. Pass only when the same desktop chat shows Bob's correlated reply content/nonce
+   without a new user message or manual poll.
+6. Capture: Bob agent id, nonce, outbound event/room, hint receipt, admission,
+   desktop turn id, completion, reply, ack (Slice 6 Mac-reviewed path when used).
 
 ## First next-agent task
 
-Repeat the **native desktop nonce wake** against the authenticated WebSocket
-adapter (`createAuthenticatedAppServerTransport` + bound session), then run the
-**Bob canary**. Do not reopen Phase 2 Complete. Prefer leaving Mac-only desktop
-experiment execution and Bob canary as follow-ups if this environment cannot run
-them. Durable correlation / race matrix remains after that.
+**Gate A on Mac:** execute
+`scripts/prototypes/native-desktop-wake-experiment.mjs` per the runbook above;
+record nonce + turn id + visual confirmation. Then run the **Bob canary** checklist
+(separate human/Mac pass). Do not reopen Phase 2 Complete. Durable correlation /
+race matrix remains after that. Linux agents may only extend glue/tests/docs —
+never claim ChatGPT.app results.
 
 ## Not proved / do not infer
 

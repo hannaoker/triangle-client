@@ -4,11 +4,14 @@ Status: protocol proof and native desktop idle-chat wake-up passed; production-s
 adapter under `packages/agent-worker/src/shared-codex-app-server.mjs` with
 authenticated WebSocket transport
 (`authenticated-app-server-transport.mjs`) and supervisor `appServerWake`
-wiring. Native-desktop nonce repeat and Bob canary remain.
+wiring. Production-shaped native-desktop nonce experiment script + Mac runbook
+landed; **Mac Gate A execution** and Bob canary remain.
 
-Next agent: continue from [the concrete implementation handoff](codex-desktop-wake-handoff.md).
-The guarded native experiment is preserved at
-`scripts/prototypes/native-desktop-wake-experiment.mjs`; it is not a service launcher.
+Next agent: continue from [the concrete implementation handoff](codex-desktop-wake-handoff.md)
+(Gate A Mac runbook, then Bob canary checklist).
+The guarded native experiment is at
+`scripts/prototypes/native-desktop-wake-experiment.mjs` (production-shaped listener
+path); it is not a service launcher.
 
 ## Native desktop wake-up proved, 2026-09-05 04:05 UTC
 
