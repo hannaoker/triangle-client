@@ -59,13 +59,14 @@ This is not a claim that every remaining task is mechanical or release-safe.
 - Session: connect / resume / read / turn/start / wait / admit / reconnect / shutdown
 - Wake bridge: helper-shaped watch transport → `resolveDelivery` → admit (empty mailbox → zero turns)
 - **Supervisor / CLI opt-in `appServerWake`** for bound-thread bootstrap (secret-free MESH watch; App Server WS token via absolute file or env *name*)
-- **Production-shaped native-desktop nonce experiment** (`native-desktop-wake-experiment.mjs` + thin runner): unique nonce turn via authenticated transport + shared session; Mac runbook in this handoff; Linux `--check-guards-only` + unit tests
+- **Production-shaped native-desktop nonce experiment** (`native-desktop-wake-experiment.mjs` + thin runner): after `readyz`, mints a disposable thread on the ephemeral app-server (optional same-server thread override), then runs a unique nonce turn via authenticated transport + shared session; Mac runbook in this handoff; Linux `--check-guards-only` + unit tests
 - Slice 6 helper proxy on main (not claimed as Mac-reviewed production)
 
 ```sh
 cd packages/agent-worker && node --test \
   test/shared-codex-app-server.test.mjs \
-  test/authenticated-app-server-transport.test.mjs
+  test/authenticated-app-server-transport.test.mjs \
+  test/native-desktop-wake-experiment.test.mjs
 ```
 
 ### How MESH wake reaches the App Server session (no Node secrets)
@@ -189,14 +190,15 @@ Client source to inspect first:
 - `scripts/prototypes/shared-codex-server.mjs`: runnable two-client protocol proof;
   not the native-desktop test. Three real model turns, persisted test history.
 - `scripts/prototypes/native-desktop-wake-experiment.mjs`: **production-shaped**
-  Mac entrypoint (replaces the archived raw-WS probe). Drives
+  Mac entrypoint. After app-server `readyz`, authenticates and **mints a disposable
+  thread on that ephemeral server** (default), then drives
   `createAuthenticatedAppServerTransport` + `createSharedCodexSession` with a
   unique nonce. Same opt-in guards: `MESH_ALLOW_DESKTOP_EXPERIMENT=1`, fresh
-  private `MESH_DESKTOP_TEST_ROOT` under `/private/tmp/`, disposable
-  `MESH_DESKTOP_TEST_THREAD_ID`, free debug port **63999**. App Server capability
-  token via absolute `MESH_DESKTOP_AUTH_TOKEN_FILE` or env *name*
-  `MESH_DESKTOP_AUTH_TOKEN_ENV` (no Node `mesh_` secrets). Logs evidence only —
-  Mac operator must verify resume + renderer nonce reply. Linux may run
+  private `MESH_DESKTOP_TEST_ROOT` under `/private/tmp/`, free debug port **63999**.
+  `MESH_DESKTOP_TEST_THREAD_ID` is an **optional same-server override** only.
+  App Server capability token via absolute `MESH_DESKTOP_AUTH_TOKEN_FILE` or env
+  *name* `MESH_DESKTOP_AUTH_TOKEN_ENV` (no Node `mesh_` secrets). Logs evidence
+  only — Mac operator must verify resume + renderer nonce reply. Linux may run
   `--check-guards-only`; do not claim desktop results from Linux.
 
 ## Implementation sequence and acceptance gates
@@ -232,20 +234,28 @@ ChatGPT.app and must not claim Gate A complete.
 
 Still requires a human on Mac:
 
-1. Create/open a **disposable** persisted Codex thread; copy its thread id.
-2. Snapshot backend configuration you care about (isolated Electron UI data does
+1. Snapshot backend configuration you care about (isolated Electron UI data does
    **not** isolate backend startup mutations).
-3. Confirm nothing listens on `127.0.0.1:63999`.
-4. Prepare a fresh private root, e.g. `mkdir -p /private/tmp/mesh-desktop-nonce-$$`.
-5. Provide an App Server capability token via **file or env name** (same custody
+2. Confirm nothing listens on `127.0.0.1:63999`.
+3. Prepare a fresh private root, e.g. `mkdir -p /private/tmp/mesh-desktop-nonce-$$`.
+4. Provide an App Server capability token via **file or env name** (same custody
    model as supervisor `appServerWake`). Prefer a disposable absolute token file
    under the private root — **never** put `mesh_` / `mesh_watch_` into Node.
-6. Leave the disposable chat idle and subscribed after the script launches desktop.
+5. Run the script. After app-server `readyz`, it authenticates and **mints a
+   disposable thread on that ephemeral server**, then launches ChatGPT to
+   `codex://threads/<minted-id>`. Do **not** paste a thread id from your normal
+   Codex home as the primary path (that id does not exist on the empty
+   `MESH_DESKTOP_TEST_ROOT` CODEX_HOME).
+6. Leave the minted chat idle and subscribed after desktop attaches.
 7. After the script logs `listener_turn_completed`, **visually** confirm the
    renderer shows the synthetic prompt and assistant reply
    `DESKTOP_SHARED_WAKE_OK <nonce>` (script exit code alone is insufficient).
 8. Tear down: script attempts SIGTERM/SIGKILL cleanup; verify no stray ChatGPT /
    app-server / crash-handler processes; compare config snapshot.
+
+Optional: `MESH_DESKTOP_TEST_THREAD_ID` overrides only if that thread **already
+exists on this ephemeral app-server**. If resume fails, the script fails closed
+(it will not silently fall back to a foreign normal-Codex id). Prefer minting.
 
 ```sh
 # From triangle-client checkout on Mac (Node 22+)
@@ -256,11 +266,12 @@ mkdir -p "$ROOT"
 
 export MESH_ALLOW_DESKTOP_EXPERIMENT=1
 export MESH_DESKTOP_TEST_ROOT="$ROOT"
-export MESH_DESKTOP_TEST_THREAD_ID='<disposable-thread-id>'
 export MESH_DESKTOP_SERVER_IDENTITY='codex-app-server/desktop-experiment'
 export MESH_DESKTOP_AUTH_TOKEN_FILE="$ROOT/ws.token"
 # Exactly one of AUTH_TOKEN_FILE or AUTH_TOKEN_ENV — not both.
 # export MESH_DESKTOP_AUTH_TOKEN_ENV='CODEX_APP_SERVER_WS_TOKEN'
+# Optional override only if the thread already exists on THIS ephemeral server:
+# export MESH_DESKTOP_TEST_THREAD_ID='<thread-id-on-this-server>'
 
 # Optional overrides:
 # export MESH_DESKTOP_NONCE='NDW_manual_...'
@@ -275,12 +286,13 @@ node scripts/prototypes/native-desktop-wake-experiment.mjs
 
 Pass Gate A only when:
 
-- Desktop resumes the disposable thread on the shared App Server.
+- Script logs `thread_resolved` with `source=minted` (or a valid same-server override).
+- Desktop resumes that minted thread on the shared App Server.
 - Listener (production-shaped session) starts a turn whose text embeds the unique nonce.
 - Server `turn/started` / `turn/completed` agree on the turn id.
 - Renderer shows `DESKTOP_SHARED_WAKE_OK <nonce>` without user chat input.
 
-Record: nonce, thread id, turn id, timestamps, Codex version, config before/after.
+Record: nonce, minted thread id, turn id, timestamps, Codex version, config before/after.
 
 ### B. Wire real MESH wake transport (server + client)
 

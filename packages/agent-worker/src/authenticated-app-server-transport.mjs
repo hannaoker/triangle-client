@@ -223,6 +223,17 @@ export function createScriptedAuthHandshakeSocket({
                 data: JSON.stringify({ id: message.id, result: initializeResult }),
               });
               return;
+            case "thread/start": {
+              const mintedId = `thread_scripted_${String(nextId).padStart(4, "0")}`;
+              nextId += 1;
+              emit("message", {
+                data: JSON.stringify({
+                  id: message.id,
+                  result: { thread: { id: mintedId, status: { type: "idle" } } },
+                }),
+              });
+              return;
+            }
             case "thread/resume":
             case "thread/read":
               emit("message", {

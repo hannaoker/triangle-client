@@ -63,12 +63,17 @@ export function assertDesktopExperimentGuards(env = process.env) {
     throw createCodedError("desktop_experiment_root_invalid", "MESH_DESKTOP_TEST_ROOT is invalid");
   }
 
-  const threadId = env.MESH_DESKTOP_TEST_THREAD_ID;
-  if (typeof threadId !== "string" || !THREAD_ID.test(threadId)) {
-    throw createCodedError(
-      "desktop_experiment_thread_invalid",
-      "Set MESH_DESKTOP_TEST_THREAD_ID to a disposable persisted thread id",
-    );
+  // Optional override only. Default Mac path mints a thread on the ephemeral
+  // app-server after readyz — do not paste a normal-Codex thread id.
+  let threadId = null;
+  if (env.MESH_DESKTOP_TEST_THREAD_ID != null && env.MESH_DESKTOP_TEST_THREAD_ID !== "") {
+    if (typeof env.MESH_DESKTOP_TEST_THREAD_ID !== "string" || !THREAD_ID.test(env.MESH_DESKTOP_TEST_THREAD_ID)) {
+      throw createCodedError(
+        "desktop_experiment_thread_invalid",
+        "MESH_DESKTOP_TEST_THREAD_ID override must be a disposable thread id that already exists on this app-server",
+      );
+    }
+    threadId = env.MESH_DESKTOP_TEST_THREAD_ID;
   }
 
   const hasFile = typeof env.MESH_DESKTOP_AUTH_TOKEN_FILE === "string"
@@ -200,6 +205,140 @@ export async function assertDebugPortFree(port = DESKTOP_EXPERIMENT_DEBUG_PORT) 
     await new Promise((resolve) => server.close(() => resolve()));
   }
   return true;
+}
+
+/**
+ * After app-server readyz: authenticate, then mint a disposable thread on *this*
+ * server (default) or resume an override id that already exists here.
+ *
+ * Never assumes a thread from the operator's ordinary Codex home exists on an
+ * ephemeral MESH_DESKTOP_TEST_ROOT CODEX_HOME.
+ */
+export async function resolveDesktopExperimentThread({
+  endpoint,
+  serverIdentity,
+  tokenFile = null,
+  tokenEnv = null,
+  resolveAuth = null,
+  preferredThreadId = null,
+  cwd,
+  awaitAuthenticatedHello = false,
+  openSocket,
+  requestTimeoutMs = 45_000,
+  createTransport = createAuthenticatedAppServerTransport,
+  createAuthResolver = createCapabilityTokenAuthResolver,
+  threadStartParams = null,
+} = {}) {
+  if (typeof endpoint !== "string" || !ENDPOINT.test(endpoint)) {
+    throw new TypeError("endpoint is invalid");
+  }
+  if (typeof serverIdentity !== "string" || !SERVER_IDENTITY.test(serverIdentity)) {
+    throw new TypeError("serverIdentity is invalid");
+  }
+  if (typeof cwd !== "string" || cwd.length === 0 || cwd.includes("\0")) {
+    throw new TypeError("cwd is required");
+  }
+  if (preferredThreadId != null) {
+    if (typeof preferredThreadId !== "string" || !THREAD_ID.test(preferredThreadId)) {
+      throw createCodedError(
+        "desktop_experiment_thread_invalid",
+        "preferredThreadId is invalid",
+      );
+    }
+  }
+
+  let authResolve = resolveAuth;
+  if (authResolve == null) {
+    const resolver = createAuthResolver({
+      serverIdentity,
+      tokenFile,
+      tokenEnv,
+    });
+    authResolve = () => resolver.resolveAuth();
+  }
+  if (typeof authResolve !== "function") {
+    throw new TypeError("resolveAuth is required");
+  }
+
+  const transportOptions = {
+    endpoint,
+    resolveAuth: authResolve,
+    awaitAuthenticatedHello,
+    requestTimeoutMs,
+  };
+  if (openSocket != null) transportOptions.openSocket = openSocket;
+
+  const transport = createTransport(transportOptions);
+  try {
+    await transport.connect();
+    await transport.call("initialize", {
+      clientInfo: {
+        name: "triangle-desktop-experiment-mint",
+        title: "Triangle desktop experiment thread mint",
+        version: SHARED_CODEX_ADAPTER_VERSION,
+      },
+    });
+    if (typeof transport.notify === "function") {
+      await transport.notify("initialized", {});
+    }
+
+    if (preferredThreadId != null) {
+      try {
+        const resumed = await transport.call("thread/resume", { threadId: preferredThreadId });
+        const resumedId = resumed?.thread?.id;
+        if (resumedId !== preferredThreadId) {
+          throw createCodedError(
+            "desktop_experiment_thread_missing",
+            "thread/resume override did not return the requested thread id",
+            { preferredThreadId, resumedId: resumedId ?? null },
+          );
+        }
+        return Object.freeze({
+          threadId: preferredThreadId,
+          source: "override",
+          serverIdentity: transport.serverIdentity ?? serverIdentity,
+        });
+      } catch (error) {
+        if (error?.code === "desktop_experiment_thread_missing") throw error;
+        throw createCodedError(
+          "desktop_experiment_thread_missing",
+          "MESH_DESKTOP_TEST_THREAD_ID override was not found on this app-server; omit it to mint a disposable thread",
+          {
+            preferredThreadId,
+            causeCode: error?.code ?? null,
+            causeMessage: typeof error?.message === "string" ? error.message : null,
+          },
+        );
+      }
+    }
+
+    const startParams = threadStartParams ?? {
+      cwd,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      ephemeral: false,
+    };
+    const started = await transport.call("thread/start", startParams);
+    const mintedId = started?.thread?.id;
+    if (typeof mintedId !== "string" || !THREAD_ID.test(mintedId)) {
+      throw createCodedError(
+        "desktop_experiment_thread_mint_failed",
+        "thread/start did not return a usable thread id",
+        { resultType: typeof mintedId },
+      );
+    }
+    return Object.freeze({
+      threadId: mintedId,
+      source: "minted",
+      serverIdentity: transport.serverIdentity ?? serverIdentity,
+    });
+  } finally {
+    try {
+      await transport.close();
+    } catch {
+      /* ignore close races */
+    }
+  }
 }
 
 /**

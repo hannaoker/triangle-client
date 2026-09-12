@@ -17,6 +17,7 @@ import {
   buildDesktopExperimentBinding,
   buildNonceWakeTurnText,
   createDesktopExperimentNonce,
+  resolveDesktopExperimentThread,
   runNativeDesktopWakeListener,
 } from "../src/native-desktop-wake-experiment.mjs";
 
@@ -29,7 +30,6 @@ function sampleEnv(overrides = {}) {
   return {
     MESH_ALLOW_DESKTOP_EXPERIMENT: "1",
     MESH_DESKTOP_TEST_ROOT: "/private/tmp/mesh-desktop-nonce-test",
-    MESH_DESKTOP_TEST_THREAD_ID: threadId,
     MESH_DESKTOP_SERVER_IDENTITY: serverIdentity,
     MESH_DESKTOP_AUTH_TOKEN_FILE: "/private/tmp/mesh-desktop-nonce-test/ws.token",
     MESH_DESKTOP_AUTH_TOKEN_ENV: undefined,
@@ -37,7 +37,7 @@ function sampleEnv(overrides = {}) {
   };
 }
 
-test("desktop experiment guards require opt-in, private root, thread, identity, and auth", () => {
+test("desktop experiment guards require opt-in, private root, identity, and auth; thread is optional", () => {
   assert.throws(
     () => assertDesktopExperimentGuards({}),
     (error) => error.code === "desktop_experiment_opt_in_required",
@@ -69,11 +69,16 @@ test("desktop experiment guards require opt-in, private root, thread, identity, 
     (error) => error.code === "desktop_experiment_identity_invalid",
   );
 
-  const ok = assertDesktopExperimentGuards(sampleEnv());
-  assert.equal(ok.threadId, threadId);
-  assert.equal(ok.debugPort, DESKTOP_EXPERIMENT_DEBUG_PORT);
-  assert.equal(ok.authTokenFile, "/private/tmp/mesh-desktop-nonce-test/ws.token");
-  assert.equal(ok.authTokenEnv, null);
+  const mintDefault = assertDesktopExperimentGuards(sampleEnv());
+  assert.equal(mintDefault.threadId, null);
+  assert.equal(mintDefault.debugPort, DESKTOP_EXPERIMENT_DEBUG_PORT);
+  assert.equal(mintDefault.authTokenFile, "/private/tmp/mesh-desktop-nonce-test/ws.token");
+  assert.equal(mintDefault.authTokenEnv, null);
+
+  const withOverride = assertDesktopExperimentGuards(sampleEnv({
+    MESH_DESKTOP_TEST_THREAD_ID: threadId,
+  }));
+  assert.equal(withOverride.threadId, threadId);
 });
 
 test("nonce wake turn text embeds unique nonce and exact reply marker", () => {
@@ -117,6 +122,115 @@ test("assertDebugPortFree fails closed when the fixed debug port is busy", async
   );
   await new Promise((resolve) => blocker.close(resolve));
   await assertDebugPortFree(busyPort);
+});
+
+test("resolveDesktopExperimentThread mints a disposable thread then bind/listen works", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-desktop-mint-"));
+  const tokenFile = path.join(root, "ws.token");
+  await writeFile(tokenFile, "capability-token-for-desktop-tests\n", "utf8");
+
+  const openSocket = createScriptedAuthHandshakeSocket({
+    expectedAuthorization: authorization,
+    serverIdentity,
+    initializeResult: { userAgent: "codex_cli_rs/test" },
+    emitServerHello: true,
+  });
+
+  const minted = await resolveDesktopExperimentThread({
+    endpoint,
+    serverIdentity,
+    tokenFile,
+    cwd: root,
+    awaitAuthenticatedHello: true,
+    openSocket,
+    requestTimeoutMs: 5_000,
+  });
+  assert.equal(minted.source, "minted");
+  assert.match(minted.threadId, /^thread_scripted_/);
+
+  const binding = buildDesktopExperimentBinding({
+    threadId: minted.threadId,
+    endpoint,
+    serverIdentity,
+  });
+  const nonce = "NDW_linux_mint_then_bind_01";
+  const evidence = await runNativeDesktopWakeListener({
+    binding,
+    nonce,
+    tokenFile,
+    awaitAuthenticatedHello: true,
+    openSocket,
+    waitTimeoutMs: 5_000,
+    requestTimeoutMs: 5_000,
+    logger: { log() {}, error() {} },
+  });
+
+  assert.equal(evidence.nonce, nonce);
+  assert.equal(evidence.threadId, minted.threadId);
+  assert.equal(evidence.turnStatus, "completed");
+  assert.match(evidence.turnId, /^turn_/);
+  assert.match(evidence.turnText, new RegExp(nonce));
+});
+
+test("resolveDesktopExperimentThread resumes override when thread exists on this server", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-desktop-override-"));
+  const tokenFile = path.join(root, "ws.token");
+  await writeFile(tokenFile, "capability-token-for-desktop-tests\n", "utf8");
+
+  const openSocket = createScriptedAuthHandshakeSocket({
+    expectedAuthorization: authorization,
+    serverIdentity,
+    initializeResult: {},
+    emitServerHello: true,
+  });
+
+  const resolved = await resolveDesktopExperimentThread({
+    endpoint,
+    serverIdentity,
+    tokenFile,
+    preferredThreadId: threadId,
+    cwd: root,
+    awaitAuthenticatedHello: true,
+    openSocket,
+    requestTimeoutMs: 5_000,
+  });
+  assert.equal(resolved.source, "override");
+  assert.equal(resolved.threadId, threadId);
+});
+
+test("resolveDesktopExperimentThread fails closed when override is missing on this server", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-desktop-missing-"));
+  const tokenFile = path.join(root, "ws.token");
+  await writeFile(tokenFile, "capability-token-for-desktop-tests\n", "utf8");
+
+  const openSocket = createScriptedAuthHandshakeSocket({
+    expectedAuthorization: authorization,
+    serverIdentity,
+    initializeResult: {},
+    emitServerHello: true,
+    onCall: async (method) => {
+      if (method === "thread/resume") {
+        throw new Error("thread not found on this server");
+      }
+      return undefined;
+    },
+  });
+
+  await assert.rejects(
+    () => resolveDesktopExperimentThread({
+      endpoint,
+      serverIdentity,
+      tokenFile,
+      preferredThreadId: threadId,
+      cwd: root,
+      awaitAuthenticatedHello: true,
+      openSocket,
+      requestTimeoutMs: 5_000,
+    }),
+    (error) =>
+      error.code === "desktop_experiment_thread_missing"
+      && error.preferredThreadId === threadId,
+  );
 });
 
 test("runNativeDesktopWakeListener uses authenticated transport + shared session", async () => {
