@@ -12,10 +12,7 @@
  */
 
 import { createConcurrencyGate } from "../packages/agent-worker/src/concurrency-gate.mjs";
-import {
-  createFakeHarness,
-  createProfileScheduler,
-} from "../packages/agent-worker/src/profile-scheduler.mjs";
+import { createProfileScheduler } from "../packages/agent-worker/src/profile-scheduler.mjs";
 
 function parseArgs(argv) {
   let hours = null;
@@ -48,14 +45,20 @@ async function main() {
   const gate = createConcurrencyGate({ limit: options.limit });
   let active = 0;
   let peak = 0;
-  const drained = new Map();
-  const harness = createFakeHarness({
-    actionable: async () => true,
-    drain: async ({ instanceId, highWatermark }) => {
+  let drainCount = 0;
+  let duplicateDrains = 0;
+  let peakHeapUsedBytes = 0;
+  let peakRssBytes = 0;
+  const lastDrainedByInstance = new Map();
+  const harness = Object.freeze({
+    async preflight() { return true; },
+    async run({ instanceId, highWatermark }) {
       active += 1;
       peak = Math.max(peak, active);
-      const key = `${instanceId}:${highWatermark}`;
-      drained.set(key, (drained.get(key) ?? 0) + 1);
+      drainCount += 1;
+      const previous = lastDrainedByInstance.get(instanceId) ?? 0;
+      if (highWatermark <= previous) duplicateDrains += 1;
+      lastDrainedByInstance.set(instanceId, Math.max(previous, highWatermark));
       await new Promise((resolve) => setTimeout(resolve, 1));
       active -= 1;
       return { status: "drained" };
@@ -73,6 +76,13 @@ async function main() {
   let watermark = 0;
   const expectedByInstance = new Map();
 
+  function sampleMemory() {
+    const memory = process.memoryUsage();
+    peakHeapUsedBytes = Math.max(peakHeapUsedBytes, memory.heapUsed);
+    peakRssBytes = Math.max(peakRssBytes, memory.rss);
+  }
+  sampleMemory();
+
   while (true) {
     if (deadline != null && Date.now() >= deadline) break;
     if (options.cycles != null && submitted >= options.cycles) break;
@@ -81,12 +91,14 @@ async function main() {
     const instanceId = id(((submitted - 1) % options.profiles) + 1);
     expectedByInstance.set(instanceId, watermark);
     scheduler.submitWake({ instanceId, highWatermark: watermark });
-    if (submitted % 50 === 0) await scheduler.idle();
+    if (submitted % 50 === 0) {
+      await scheduler.idle();
+      sampleMemory();
+    }
   }
   await scheduler.idle();
+  sampleMemory();
 
-  const duplicates = [...drained.values()].filter((count) => count > 1);
-  const drainCount = harness.calls.filter((call) => call.type === "drain").length;
   const reconciledByInstance = new Map(
     scheduler.snapshot().map((state) => [state.instanceId, state.lastReconciled]),
   );
@@ -98,8 +110,11 @@ async function main() {
     drainCount,
     peakConcurrentReasoners: peak,
     maxConcurrentReasoners: options.limit,
-    duplicateDrains: duplicates.length,
+    duplicateDrains,
     lostWakeProfiles: lostWakeProfiles.length,
+    retainedObservationCount: expectedByInstance.size + lastDrainedByInstance.size,
+    peakHeapUsedBytes,
+    peakRssBytes,
     finalWatermarks: [...expectedByInstance].map(([instanceId, expected]) => ({
       instanceId,
       expected,
@@ -109,7 +124,7 @@ async function main() {
     mode: options.hours != null ? `wall-hours:${options.hours}` : `cycles:${options.cycles}`,
   };
   process.stdout.write(`${JSON.stringify(report)}\n`);
-  if (peak > options.limit || duplicates.length > 0 || lostWakeProfiles.length > 0 || drainCount < 1) {
+  if (peak > options.limit || duplicateDrains > 0 || lostWakeProfiles.length > 0 || drainCount < 1) {
     process.exitCode = 1;
   }
 }

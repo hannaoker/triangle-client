@@ -359,6 +359,7 @@ test("standalone soak report proves every submitted profile watermark reconciled
   const report = JSON.parse(result.stdout);
   assert.equal(report.lostWakeProfiles, 0);
   assert.equal(report.finalWatermarks.length, 5);
+  assert.ok(report.retainedObservationCount <= 10);
   assert.equal(
     report.finalWatermarks.every(({ expected, reconciled }) => expected === reconciled),
     true,
