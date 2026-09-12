@@ -64,10 +64,6 @@ function positiveInteger(value, name, minimum = 0) {
   return value;
 }
 
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function createCodedError(code, message, extra = {}) {
   const error = new Error(message);
   error.code = code;
@@ -459,7 +455,6 @@ export function createSharedCodexSession({
   requestTimeoutMs = 30_000,
   maxQueue = 8,
   maxConsecutiveFailures = 5,
-  sleep = sleepMs,
   now = () => Date.now(),
   logger = console,
 } = {}) {
@@ -481,6 +476,8 @@ export function createSharedCodexSession({
   let initialized = false;
   let unsubscribe = null;
   const pendingTurns = new Map();
+  /** Session-retained turn completions so waiters do not depend on transport event buffers. */
+  const completedTurns = new Map();
   const queue = [];
   let draining = false;
   let stopped = false;
@@ -516,13 +513,29 @@ export function createSharedCodexSession({
   }
 
   async function call(method, params) {
-    const result = await Promise.race([
-      transport.call(method, params),
-      sleep(requestTimeoutMs).then(() => {
-        throw createCodedError("request_timeout", `${method} timed out`, { outcome: "unknown" });
-      }),
-    ]);
-    return result;
+    let timer = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(createCodedError("request_timeout", `${method} timed out`, { outcome: "unknown" }));
+      }, requestTimeoutMs);
+    });
+    try {
+      return await Promise.race([transport.call(method, params), timeoutPromise]);
+    } finally {
+      if (timer != null) clearTimeout(timer);
+    }
+  }
+
+  function collectAuthenticatedIdentities(connectResult, initializeResult) {
+    const identities = [];
+    const push = (value) => {
+      if (typeof value === "string" && value.length > 0) identities.push(value);
+    };
+    push(connectResult?.serverIdentity);
+    push(connectResult?.serverInfo?.name);
+    push(initializeResult?.serverInfo?.name);
+    push(initializeResult?.serverIdentity);
+    return identities;
   }
 
   function onTransportEvent(event) {
@@ -535,10 +548,14 @@ export function createSharedCodexSession({
     }
     if (event.method === "turn/completed") {
       const turnId = event.params?.turn?.id;
-      const waiter = turnId ? pendingTurns.get(turnId) : null;
-      if (waiter) {
-        pendingTurns.delete(turnId);
-        waiter.resolve(event.params.turn);
+      const turn = event.params?.turn;
+      if (turnId && turn) {
+        completedTurns.set(turnId, turn);
+        const waiter = pendingTurns.get(turnId);
+        if (waiter) {
+          pendingTurns.delete(turnId);
+          waiter.resolve(turn);
+        }
       }
       activeTurnId = null;
       if (phase !== "submission_unknown" && phase !== "transaction_stuck") {
@@ -568,18 +585,36 @@ export function createSharedCodexSession({
       await bindingStore.write(validated);
     }
     setPhase("reconnecting");
-    await transport.connect();
+    const connectResult = await transport.connect();
     if (typeof transport.onEvent === "function") {
       unsubscribe?.();
       unsubscribe = transport.onEvent(onTransportEvent);
     }
-    await call("initialize", {
+    const initializeResult = await call("initialize", {
       clientInfo: {
         name: "triangle-shared-codex-listener",
         title: "Triangle shared Codex listener",
         version: SHARED_CODEX_ADAPTER_VERSION,
       },
     });
+    const candidates = collectAuthenticatedIdentities(connectResult, initializeResult);
+    const mismatch = candidates.find((identity) => identity !== validated.serverIdentity);
+    if (candidates.length === 0 || mismatch != null) {
+      lastError = createCodedError(
+        "server_identity_mismatch",
+        "connected server identity does not match durable binding",
+        {
+          expected: validated.serverIdentity,
+          actual: mismatch ?? null,
+        },
+      );
+      setPhase("disconnected");
+      initialized = false;
+      unsubscribe?.();
+      unsubscribe = null;
+      if (typeof transport.close === "function") await transport.close();
+      throw lastError;
+    }
     if (typeof transport.notify === "function") {
       await transport.notify("initialized", {});
     }
@@ -595,25 +630,39 @@ export function createSharedCodexSession({
     return call("thread/read", { threadId: validated.threadId, includeTurns });
   }
 
+  function findRetainedCompletion(turnId) {
+    const sessionRetained = completedTurns.get(turnId);
+    if (sessionRetained) return sessionRetained;
+    const existing = [...(transport.events ?? [])].find(
+      (event) => event.method === "turn/completed" && event.params?.turn?.id === turnId,
+    );
+    return existing?.params?.turn ?? null;
+  }
+
   async function waitForTurn(turnId, { timeoutMs = requestTimeoutMs } = {}) {
     if (typeof turnId !== "string" || turnId.length === 0) {
       throw new TypeError("turnId is required");
     }
-    const existing = [...(transport.events ?? [])].find(
-      (event) => event.method === "turn/completed" && event.params?.turn?.id === turnId,
-    );
-    if (existing) return existing.params.turn;
+    // Register the waiter before inspecting retained events so a completion that
+    // arrives between the check and pendingTurns.set cannot be missed.
     return new Promise((resolve, reject) => {
+      let settled = false;
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         pendingTurns.delete(turnId);
         reject(createCodedError("request_timeout", "turn completion timed out", { outcome: "unknown" }));
       }, timeoutMs);
-      pendingTurns.set(turnId, {
-        resolve: (turn) => {
-          clearTimeout(timer);
-          resolve(turn);
-        },
-      });
+      const settle = (turn) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        pendingTurns.delete(turnId);
+        resolve(turn);
+      };
+      pendingTurns.set(turnId, { resolve: settle });
+      const existing = findRetainedCompletion(turnId);
+      if (existing) settle(existing);
     });
   }
 
@@ -656,10 +705,9 @@ export function createSharedCodexSession({
         outcome: "unknown",
       });
     }
-    const alreadyCompleted = Array.isArray(transport.events)
-      && transport.events.some(
-        (event) => event.method === "turn/completed" && event.params?.turn?.id === turnId,
-      );
+    // Completions that fire during/immediately after turn/start are retained in
+    // completedTurns by onTransportEvent (independent of transport event buffers).
+    const alreadyCompleted = findRetainedCompletion(turnId) != null;
     if (alreadyCompleted) {
       activeTurnId = null;
       if (phase !== "submission_unknown" && phase !== "transaction_stuck") {
