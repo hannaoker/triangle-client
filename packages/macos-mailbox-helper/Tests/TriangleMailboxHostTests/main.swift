@@ -41,6 +41,10 @@ enum TriangleMailboxHostTests {
                 try await contractCase.run()
                 print("PASS \(contractCase.name)")
             }
+            for contractCase in MailboxTransactionContractCases.all {
+                try await contractCase.run()
+                print("PASS \(contractCase.name)")
+            }
             try StatusOutputContractCases.boundedStatus()
             print("PASS sanitized operator status")
             try await EndToEndContractCases.crossSessionMailboxLifecycle()

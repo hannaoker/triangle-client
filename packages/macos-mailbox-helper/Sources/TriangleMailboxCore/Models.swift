@@ -329,6 +329,13 @@ public enum HelperCommand: String, CaseIterable, Equatable, Sendable {
     case watchStatus = "watch-status"
     case watchRevoke = "watch-revoke"
     case watchPoll = "watch-poll"
+    case transactionPreflight = "transaction-preflight"
+    case transactionStatus = "transaction-status"
+    case transactionClaim = "transaction-claim"
+    case transactionReply = "transaction-reply"
+    case transactionAck = "transaction-ack"
+    case transactionAbandon = "transaction-abandon"
+    case transactionRecordFailure = "transaction-record-failure"
 }
 
 public enum WorkerKind: String, CaseIterable, Equatable, Sendable {
@@ -344,6 +351,12 @@ public struct ParsedCommand: Equatable, Sendable {
     public let worker: WorkerKind?
     public let installationID: InstallationID?
     public let cursor: Int?
+    public let protocolOwnership: MailboxTransactionProtocol?
+    public let deliveryID: Int?
+    public let roomID: String?
+    public let eventID: String?
+    public let failureReason: String?
+    public let confirmAbandon: Bool
 
     public init(
         command: HelperCommand,
@@ -351,7 +364,13 @@ public struct ParsedCommand: Equatable, Sendable {
         origin: MeshOrigin? = nil,
         worker: WorkerKind? = nil,
         installationID: InstallationID? = nil,
-        cursor: Int? = nil
+        cursor: Int? = nil,
+        protocolOwnership: MailboxTransactionProtocol? = nil,
+        deliveryID: Int? = nil,
+        roomID: String? = nil,
+        eventID: String? = nil,
+        failureReason: String? = nil,
+        confirmAbandon: Bool = false
     ) {
         self.command = command
         self.profile = profile
@@ -359,6 +378,12 @@ public struct ParsedCommand: Equatable, Sendable {
         self.worker = worker
         self.installationID = installationID
         self.cursor = cursor
+        self.protocolOwnership = protocolOwnership
+        self.deliveryID = deliveryID
+        self.roomID = roomID
+        self.eventID = eventID
+        self.failureReason = failureReason
+        self.confirmAbandon = confirmAbandon
     }
 }
 
@@ -384,6 +409,17 @@ public enum CommandParser {
             return try parseWatchCommand(command, Array(arguments.dropFirst()))
         }
 
+        if command == .transactionPreflight
+            || command == .transactionStatus
+            || command == .transactionClaim
+            || command == .transactionReply
+            || command == .transactionAck
+            || command == .transactionAbandon
+            || command == .transactionRecordFailure
+        {
+            return try parseTransactionCommand(command, Array(arguments.dropFirst()))
+        }
+
         var flagValues: [String: String] = [:]
         var index = 1
         while index < arguments.count {
@@ -407,7 +443,9 @@ public enum CommandParser {
             allowedFlags = ["--profile"]
         case .runWorker:
             allowedFlags = ["--profile", "--worker"]
-        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
+        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+             .transactionAck, .transactionAbandon, .transactionRecordFailure:
             allowedFlags = []
         }
         guard Set(flagValues.keys).isSubset(of: allowedFlags) else {
@@ -448,7 +486,107 @@ public enum CommandParser {
                 throw CommandParseError.invalidFlagValue
             }
             return ParsedCommand(command: command, profile: profile, worker: worker)
-        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
+        case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+             .transactionAck, .transactionAbandon, .transactionRecordFailure:
+            throw CommandParseError.invalidCommand
+        }
+    }
+
+    private static func parseTransactionCommand(_ command: HelperCommand, _ flags: [String]) throws -> ParsedCommand {
+        var flagValues: [String: String] = [:]
+        var confirmAbandon = false
+        var index = 0
+        while index < flags.count {
+            let argument = flags[index]
+            if argument == "--confirm" {
+                guard !confirmAbandon else { throw CommandParseError.unknownOrDuplicateFlag }
+                confirmAbandon = true
+                index += 1
+                continue
+            }
+            guard argument.hasPrefix("--"), index + 1 < flags.count else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
+            let value = flags[index + 1]
+            guard !value.hasPrefix("--"), flagValues[argument] == nil else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
+            flagValues[argument] = value
+            index += 2
+        }
+
+        let allowedFlags: Set<String>
+        switch command {
+        case .transactionStatus:
+            allowedFlags = ["--profile", "--protocol"]
+        case .transactionPreflight, .transactionAck, .transactionReply:
+            allowedFlags = ["--profile", "--protocol"]
+        case .transactionClaim:
+            allowedFlags = ["--profile", "--protocol", "--delivery-id", "--room-id", "--event-id"]
+        case .transactionAbandon:
+            allowedFlags = ["--profile", "--protocol"]
+        case .transactionRecordFailure:
+            allowedFlags = ["--profile", "--protocol", "--reason"]
+        default:
+            throw CommandParseError.invalidCommand
+        }
+        guard Set(flagValues.keys) == allowedFlags else {
+            throw CommandParseError.unknownOrDuplicateFlag
+        }
+        if command == .transactionAbandon {
+            guard confirmAbandon else { throw CommandParseError.missingRequiredFlag }
+        } else if confirmAbandon {
+            throw CommandParseError.unknownOrDuplicateFlag
+        }
+
+        guard let profileValue = flagValues["--profile"],
+              let protocolValue = flagValues["--protocol"],
+              let protocolOwnership = MailboxTransactionProtocol(rawValue: protocolValue)
+        else { throw CommandParseError.invalidFlagValue }
+        let profile: ProfileName
+        do { profile = try ProfileName(profileValue) }
+        catch { throw CommandParseError.invalidFlagValue }
+
+        switch command {
+        case .transactionStatus, .transactionPreflight, .transactionReply, .transactionAck:
+            return ParsedCommand(command: command, profile: profile, protocolOwnership: protocolOwnership)
+        case .transactionAbandon:
+            return ParsedCommand(
+                command: command,
+                profile: profile,
+                protocolOwnership: protocolOwnership,
+                confirmAbandon: true
+            )
+        case .transactionRecordFailure:
+            guard let reason = flagValues["--reason"],
+                  reason.wholeMatch(of: /^[a-z][a-z0-9_]{0,63}$/) != nil
+            else { throw CommandParseError.invalidFlagValue }
+            return ParsedCommand(
+                command: command,
+                profile: profile,
+                protocolOwnership: protocolOwnership,
+                failureReason: reason
+            )
+        case .transactionClaim:
+            guard let deliveryRaw = flagValues["--delivery-id"],
+                  let deliveryID = Int(deliveryRaw),
+                  deliveryID > 0,
+                  String(deliveryID) == deliveryRaw,
+                  let roomID = flagValues["--room-id"],
+                  MailboxRoomID(rawValue: roomID) != nil,
+                  let eventID = flagValues["--event-id"],
+                  MailboxEventID(rawValue: eventID) != nil
+            else { throw CommandParseError.invalidFlagValue }
+            return ParsedCommand(
+                command: command,
+                profile: profile,
+                protocolOwnership: protocolOwnership,
+                deliveryID: deliveryID,
+                roomID: roomID,
+                eventID: eventID
+            )
+        default:
             throw CommandParseError.invalidCommand
         }
     }

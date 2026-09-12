@@ -14,6 +14,7 @@ import {
   createMemoryBindingStore,
   createMemoryCorrelationStore,
   createSharedCodexSession,
+  createTrustedTransactionProxy,
   createTrustedTransactionProxyStub,
   validateBinding,
 } from "../src/shared-codex-app-server.mjs";
@@ -392,11 +393,20 @@ test("successful App Server calls clear timeout timers promptly", async () => {
   );
 });
 
-test("trusted transaction proxy stub fails closed until Slice 6 lands", async () => {
+test("trusted transaction proxy stub fails closed until helper is present", async () => {
   const proxy = createTrustedTransactionProxyStub();
   await assert.rejects(() => proxy.claim(), (error) => error.code === "slice6_required");
   await assert.rejects(() => proxy.reply(), (error) => error.code === "slice6_required");
   await assert.rejects(() => proxy.ack(), (error) => error.code === "slice6_required");
+});
+
+test("createTrustedTransactionProxy uses helper when path and profile are set", () => {
+  const proxy = createTrustedTransactionProxy({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "hermes-bot",
+    protocol: "coordinator-delivery-v1",
+  });
+  assert.equal(proxy.name, "slice6_helper_trusted_transaction_proxy");
 });
 
 test("correlation store records delivery-to-turn mapping before completion", async () => {

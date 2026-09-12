@@ -123,7 +123,9 @@ Wall-clock 24-hour soak evidence is recorded below under Verification evidence.
 ## Explicitly out of Phase 2 Complete
 
 - Trusted Swift transaction proxy (hard gate before production Hermes /
-  coordinator-delivery claim/reply/ack)
+  coordinator-delivery claim/reply/ack) — **implementation started** in
+  [2026-09-12-slice6-trusted-transaction-proxy.md](2026-09-12-slice6-trusted-transaction-proxy.md);
+  Mac security review + Darwin suite evidence still required before production
 - Optional autonomous Codex SDK adapter
 - Wakeable Grok/Cursor UI sessions
 - Claiming interactive App Server / Bob canary work as Phase 2 evidence

@@ -23,6 +23,12 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
+  createHelperTrustedTransactionProxy,
+  deriveTrustedClaimId,
+  deriveTrustedReplyIdempotencyKey,
+  resolveTrustedTransactionProxy,
+} from "./helper-transaction-proxy.mjs";
+import {
   createAtomicFileCursorStore,
   createMemoryCursorStore,
   createWakeClient,
@@ -310,8 +316,9 @@ export function createMemoryCorrelationStore() {
 
 /**
  * Tiny Slice 6 placeholder. Production Hermes / coordinator-delivery paths must
- * replace this with the trusted transaction proxy. Self-serve mailbox drain can
- * proceed without it for local adapter tests only.
+ * use `resolveTrustedTransactionProxy` / `createHelperTrustedTransactionProxy`
+ * when the signed helper is present. Self-serve mailbox drain can proceed
+ * without it for local adapter tests only.
  */
 export function createTrustedTransactionProxyStub() {
   return Object.freeze({
@@ -334,6 +341,19 @@ export function createTrustedTransactionProxyStub() {
         "trusted transaction proxy (Slice 6) is required before production ack",
       );
     },
+  });
+}
+
+/**
+ * Production entry: helper CLI proxy when `helperPath` + profile are present;
+ * otherwise the fail-closed stub (never a silent Node-side bypass for
+ * coordinator-delivery).
+ */
+export function createTrustedTransactionProxy(options = {}) {
+  return resolveTrustedTransactionProxy({
+    ...options,
+    createStub: createTrustedTransactionProxyStub,
+    createHelper: createHelperTrustedTransactionProxy,
   });
 }
 
@@ -980,4 +1000,8 @@ export {
   createMemoryCursorStore,
   createAtomicFileCursorStore,
   ensureHelperWatchGrant,
+  createHelperTrustedTransactionProxy,
+  deriveTrustedClaimId,
+  deriveTrustedReplyIdempotencyKey,
+  resolveTrustedTransactionProxy,
 };

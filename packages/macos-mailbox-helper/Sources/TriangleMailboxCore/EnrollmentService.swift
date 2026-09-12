@@ -816,7 +816,7 @@ public struct VerifiedCredential: Sendable, CustomStringConvertible, CustomDebug
     public var origin: MeshOrigin { binding.origin }
     public var agentID: AgentID { binding.agentID }
     public var handle: MailboxHandle { binding.handle }
-    var authorizationValue: String { "Bearer \(binding.token.secretValue)" }
+    public var authorizationValue: String { "Bearer \(binding.token.secretValue)" }
     public var description: String { "VerifiedCredential(origin: \(origin.value), agentID: \(agentID.value), handle: \(handle.value), token: <redacted>)" }
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: ["origin": origin.value, "agentID": agentID.value, "handle": handle.value, "token": "<redacted>"], displayStyle: .struct) }
