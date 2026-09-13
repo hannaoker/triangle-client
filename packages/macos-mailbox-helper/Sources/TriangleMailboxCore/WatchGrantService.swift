@@ -73,7 +73,7 @@ public struct WatchGrantService: Sendable {
             throw WatchGrantServiceError.actorNotDeclared
         }
 
-        let existing = try? store.read(for: installationID)
+        var existing = try? store.read(for: installationID)
         let replacement = existing?.watchCredential
         if let existing, existing.origin != origin {
             throw WatchGrantServiceError.invalidResponse
@@ -83,15 +83,18 @@ public struct WatchGrantService: Sendable {
         let createHeaders = try await auth.authorizationHeaders(for: actorProfile, method: "POST", url: createURL)
         let staged: StagedWatchGrant
         do {
-            staged = try await client.createGrant(
-                origin: origin,
+            staged = try await createGrantRecoveringStaleLocalBinding(
                 installationID: installationID,
+                origin: origin,
                 agentIDs: agentIDs,
                 authorizationHeaders: createHeaders,
-                replacementCredential: replacement
+                replacementCredential: replacement,
+                localBindingPresent: &existing
             )
-        } catch let error as MeshWatchClientError {
-            throw mapClientError(error)
+        } catch let error as WatchGrantServiceError {
+            throw error
+        } catch {
+            throw WatchGrantServiceError.invalidResponse
         }
 
         for member in members {
@@ -306,6 +309,65 @@ public struct WatchGrantService: Sendable {
             audience: binding.audience,
             purpose: binding.purpose
         )
+    }
+
+    /// When MESH rejects create-with-replacement because the local watch secret is
+    /// stale/revoked, discard the local binding and retry create-without-replacement
+    /// once. Status alone can look finalized while the on-disk credential is dead.
+    private func createGrantRecoveringStaleLocalBinding(
+        installationID: InstallationID,
+        origin: MeshOrigin,
+        agentIDs: [AgentID],
+        authorizationHeaders: [String: String],
+        replacementCredential: WatchCredential?,
+        localBindingPresent: inout WatchGrantBinding?
+    ) async throws -> StagedWatchGrant {
+        do {
+            return try await client.createGrant(
+                origin: origin,
+                installationID: installationID,
+                agentIDs: agentIDs,
+                authorizationHeaders: authorizationHeaders,
+                replacementCredential: replacementCredential
+            )
+        } catch let error as MeshWatchClientError {
+            guard
+                replacementCredential != nil,
+                Self.isStaleReplacementRejection(error)
+            else {
+                throw mapClientError(error)
+            }
+            try discardLocalWatchBinding(installationID: installationID)
+            localBindingPresent = nil
+            do {
+                return try await client.createGrant(
+                    origin: origin,
+                    installationID: installationID,
+                    agentIDs: agentIDs,
+                    authorizationHeaders: authorizationHeaders,
+                    replacementCredential: nil
+                )
+            } catch let retryError as MeshWatchClientError {
+                throw mapClientError(retryError)
+            }
+        }
+    }
+
+    private func discardLocalWatchBinding(installationID: InstallationID) throws {
+        do {
+            try store.delete(for: installationID)
+        } catch WatchGrantStoreError.itemNotFound {
+            // Already gone locally.
+        } catch WatchGrantStoreError.interactionNotAllowed, WatchGrantStoreError.keychainFailure {
+            throw WatchGrantServiceError.keychainUnavailable
+        } catch {
+            throw WatchGrantServiceError.keychainUnavailable
+        }
+    }
+
+    private static func isStaleReplacementRejection(_ error: MeshWatchClientError) -> Bool {
+        guard case .rejected(_, let code) = error else { return false }
+        return code == "replacement_unauthorized" || code == "watch_credential_invalid"
     }
 
     private func mapClientError(_ error: MeshWatchClientError) -> WatchGrantServiceError {

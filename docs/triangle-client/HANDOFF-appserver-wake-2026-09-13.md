@@ -23,7 +23,7 @@ that thread → MESH `transaction-reply` + `transaction-ack` clear the claim.
 **Blockers fixed this pass:**
 
 1. Shared host seeded wake cursor as bare `0` — must be `{"cursor":N}` (`macos-shared-codex-app-server-host.mjs` + reader migration).
-2. Stale local watch credential → `watch_credential_invalid` / `replacement_unauthorized`. Delete local watch file and `watch-ensure` (create without replacement).
+2. Stale local watch credential → `watch_credential_invalid` / `replacement_unauthorized`. Current helpers discard the local watch binding inside `watch-ensure` and recreate once without a replacement header. Node no longer treats finalized `watch-status` alone as ensure success (it probes with a short `watch-poll`). Manual fallback if an older helper is still installed: move aside `credentials/local/watch/<installation>.json` (or the mailbox-watch Keychain item) and re-run `watch-ensure`.
 3. App Server wake used `self-serve-drain`; mcp-interactive claims need `coordinator-delivery-v1`.
 4. Wake listener failures resolved `Promise.all` and exited the supervisor (KeepAlive thrash). Loops now retry until abort.
 5. After `turn/start` timeout, `submission_unknown` soft-returned forever (claim stuck). Admit now reconnects and retries.
