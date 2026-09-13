@@ -74,6 +74,19 @@ Fail closed when Keychain, helper signature, or watch-grant membership is
 unavailable. Never log watch credentials or mailbox tokens. Interactive
 `mcp-interactive` profiles stay out of event-driven wake membership.
 
+## Local operator console
+
+Scaffolded read-only status UI (CLI/JSON) for helper, profiles, instances, and
+watch grants — without dumping Application Support credential material:
+
+```sh
+node packages/client-console/src/cli.mjs status --human
+npm run test:console
+```
+
+See [packages/client-console/README.md](packages/client-console/README.md) and
+the [Triangle Client guide](docs/triangle-client/README.md#local-operator-console-scaffold).
+
 ## Testing and builds
 
 ```sh

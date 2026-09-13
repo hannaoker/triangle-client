@@ -159,6 +159,22 @@ The service script is an operator interface from a reviewed source checkout:
 kept alive by launchd. Runtime failures back off independently, so one failing
 profile does not stop its peers.
 
+### Local operator console (scaffold)
+
+For a single read-only view of helper presence, enrolled profiles, instance
+delivery mode/runtime, and watch-status without spelunking Application Support
+JSON, use the console package:
+
+```sh
+node packages/client-console/src/cli.mjs status --human
+npm --prefix packages/client-console test
+```
+
+It invokes the signed helper / `triangle-client` for secret-free operator JSON
+only (never Keychain or `mesh_` / `mesh_watch_` secrets). Enroll, watch-ensure,
+and service start/stop are explicit commands; see
+[packages/client-console/README.md](../../packages/client-console/README.md).
+
 ## Concurrency and resource scaling
 
 The default global reasoning limit is two. A FIFO gate admits no more than two

@@ -1,0 +1,24 @@
+{
+  "name": "@the-triangle/client-console",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Local operator console for Triangle Client: secret-free install/enroll/watch/worker status via the signed helper.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "triangle-client-console": "./src/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/status.mjs",
+    "./paths": "./src/paths.mjs",
+    "./secrets": "./src/secrets.mjs",
+    "./actions": "./src/actions.mjs"
+  },
+  "scripts": {
+    "start": "node ./src/cli.mjs status --human",
+    "test": "node --test test/*.test.mjs"
+  }
+}
