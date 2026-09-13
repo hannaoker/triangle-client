@@ -23,9 +23,15 @@ LEGACY_COMMON_ARTIFACTS = [
     "packages/agent-worker/runners/runner-common.mjs",
 ]
 SUPERVISOR_ARTIFACTS = [
+    "packages/agent-worker/src/authenticated-app-server-transport.mjs",
     "packages/agent-worker/src/client-supervisor-cli.mjs",
     "packages/agent-worker/src/client-supervisor.mjs",
     "packages/agent-worker/src/concurrency-gate.mjs",
+    "packages/agent-worker/src/helper-transaction-proxy.mjs",
+    "packages/agent-worker/src/helper-watch-transport.mjs",
+    "packages/agent-worker/src/profile-scheduler.mjs",
+    "packages/agent-worker/src/shared-codex-app-server.mjs",
+    "packages/agent-worker/src/wake-client.mjs",
 ]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
 

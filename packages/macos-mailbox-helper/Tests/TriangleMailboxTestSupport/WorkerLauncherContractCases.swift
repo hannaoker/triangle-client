@@ -354,9 +354,15 @@ private final class ResolverFixture {
         ]
         if manifestVersion == 4 {
             artifactNames += [
+                "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
                 "packages/agent-worker/src/client-supervisor.mjs",
                 "packages/agent-worker/src/concurrency-gate.mjs",
+                "packages/agent-worker/src/helper-transaction-proxy.mjs",
+                "packages/agent-worker/src/helper-watch-transport.mjs",
+                "packages/agent-worker/src/profile-scheduler.mjs",
+                "packages/agent-worker/src/shared-codex-app-server.mjs",
+                "packages/agent-worker/src/wake-client.mjs",
             ]
         }
         var artifacts: [String: String] = [:]

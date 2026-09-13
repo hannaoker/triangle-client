@@ -124,13 +124,19 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "agents/codex/worker/agent-worker.json",
     "packages/agent-worker/runners/codex-runner.mjs",
     "packages/agent-worker/runners/runner-common.mjs",
+    "packages/agent-worker/src/authenticated-app-server-transport.mjs",
     "packages/agent-worker/src/cli.mjs",
     "packages/agent-worker/src/client-supervisor-cli.mjs",
     "packages/agent-worker/src/client-supervisor.mjs",
     "packages/agent-worker/src/command-runner.mjs",
     "packages/agent-worker/src/concurrency-gate.mjs",
+    "packages/agent-worker/src/helper-transaction-proxy.mjs",
+    "packages/agent-worker/src/helper-watch-transport.mjs",
     "packages/agent-worker/src/mailbox-client.mjs",
+    "packages/agent-worker/src/profile-scheduler.mjs",
     "packages/agent-worker/src/runtime.mjs",
+    "packages/agent-worker/src/shared-codex-app-server.mjs",
+    "packages/agent-worker/src/wake-client.mjs",
   ]);
   for (const [relative, digest] of Object.entries(manifest.artifacts)) {
     const installed = path.join(manifest.projectRoot, relative);
