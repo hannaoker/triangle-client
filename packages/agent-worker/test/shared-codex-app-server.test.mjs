@@ -278,6 +278,64 @@ test("waitForTurn observes immediate completion on a non-retaining transport", a
   assert.equal(admitted.status, "completed");
 });
 
+test("wake bridge resets after watch failure so retry start is allowed", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = matchingTransport(binding);
+  const session = createSharedCodexSession({ binding, transport });
+  let polls = 0;
+  const helperError = new Error("watch helper poll failed");
+  helperError.code = "helper_unavailable";
+  const bridge = createAppServerWakeBridge({
+    binding,
+    session,
+    watchTransport: {
+      async poll() {
+        polls += 1;
+        if (polls === 1) throw helperError;
+        return { cursor: polls, events: [] };
+      },
+    },
+    async resolveDelivery() {
+      return null;
+    },
+  });
+
+  await assert.rejects(
+    () => bridge.start({ maxCycles: 1 }),
+    (error) => error.code === "helper_unavailable",
+  );
+  const retried = await bridge.start({ maxCycles: 1 });
+  assert.equal(retried.cycles, 1);
+  assert.equal(polls, 2);
+  assert.equal((await bridge.stop()).status, "disconnected");
+});
+
+test("app server session reconnects after stop shutdown for durable restart", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = matchingTransport(binding);
+  const session = createSharedCodexSession({ binding, transport });
+  const bridge = createAppServerWakeBridge({
+    binding,
+    session,
+    watchTransport: createFakeWatchTransport({
+      polls: [
+        { cursor: 1, events: [] },
+        { cursor: 2, events: [] },
+      ],
+    }),
+    async resolveDelivery() {
+      return null;
+    },
+  });
+
+  assert.equal((await bridge.start({ maxCycles: 1 })).cycles, 1);
+  await bridge.stop();
+  assert.equal(session.status().status, "disconnected");
+  // stop() → session.shutdown() must not brick the next start()/connect().
+  assert.equal((await bridge.start({ maxCycles: 1 })).cycles, 1);
+  await bridge.stop();
+});
+
 test("empty mailbox resolveDelivery causes zero model turns", async () => {
   const binding = validateBinding(sampleBinding());
   const transport = matchingTransport(binding);

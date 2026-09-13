@@ -404,6 +404,43 @@ test("runtime errors are sanitized and SIGINT or SIGTERM aborts with determinist
   }
 });
 
+test("sanitized logger may include a short secret-free error code", async () => {
+  const secret = instance().mailbox.meshToken;
+  const logged = capture();
+  let logger;
+  assert.equal(await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify(bootstrap())]),
+    stderr: logged.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      logger = options.logger;
+      return {
+        async watch() {
+          logger.error("triangle_client_app_server_wake_failed", {
+            error: "App Server bound wake listener failed",
+            code: "helper_unavailable",
+            message: `poll failed with ${secret}`,
+          });
+          logger.error("triangle_client_grok_bot_wake_failed", {
+            code: "already_started",
+          });
+          logger.error("triangle_client_instance_failed", {
+            code: `mesh_${"x".repeat(20)}`,
+          });
+          return { instances: [] };
+        },
+      };
+    },
+  }), 0);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(helper_unavailable\)/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(already_started\)/);
+  // Reject codes that look like credential material; fall back to bare message.
+  assert.match(logged.value(), /triangle-client: instance cycle failed\n/);
+  assert.doesNotMatch(logged.value(), new RegExp(secret));
+  assert.doesNotMatch(logged.value(), /mesh_/);
+});
+
 test("the executable terminates cleanly on SIGTERM even while its private stdin pipe is open", async () => {
   const child = spawn(process.execPath, [fileURLToPath(new URL("../src/client-supervisor-cli.mjs", import.meta.url))], {
     stdio: ["pipe", "pipe", "pipe", "ipc"],
