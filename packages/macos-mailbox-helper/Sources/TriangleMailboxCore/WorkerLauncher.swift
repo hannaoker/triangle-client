@@ -108,6 +108,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/helper-watch-transport.mjs",
                 "packages/agent-worker/src/profile-scheduler.mjs",
                 "packages/agent-worker/src/shared-codex-app-server.mjs",
+                "packages/agent-worker/src/grok-bot-wake.mjs",
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
@@ -215,6 +216,8 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     }
 
     public func resolveAdapter(for instance: ClientInstance) throws -> WorkerCommand {
+        // grok-bot has no headless runner; wake is host-side (webhook), not worker polling.
+        if instance.runtimeAdapter == .grokBot { throw WorkerLauncherError.invalidManifest }
         let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
         let base = try resolve(worker, instance: instance)
         let runner = base.workingDirectory.appendingPathComponent("packages/agent-worker/runners/\(worker.rawValue)-runner.mjs")
