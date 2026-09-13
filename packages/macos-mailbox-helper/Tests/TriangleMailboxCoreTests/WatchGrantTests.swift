@@ -58,6 +58,16 @@ struct WatchGrantTests {
         try await WatchGrantContractCases.failsClosedWithoutStore()
     }
 
+    @Test("recovers from stale replacement credential")
+    func recoversFromStaleReplacement() async throws {
+        try await WatchGrantContractCases.recoversFromStaleReplacement()
+    }
+
+    @Test("keeps local binding on unrelated create rejection")
+    func unrelatedCreateRejectionKeepsLocalBinding() async throws {
+        try await WatchGrantContractCases.unrelatedCreateRejectionKeepsLocalBinding()
+    }
+
 #if canImport(Security)
     @Test("Keychain query policy")
     func keychainQueryPolicy() throws {

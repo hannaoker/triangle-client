@@ -69,6 +69,50 @@ function assertInstallationId(installationId) {
   return installationId;
 }
 
+function isStaleWatchCredentialDiagnosis(diagnosis) {
+  if (!diagnosis || typeof diagnosis !== "object") return false;
+  const rejected = diagnosis.rejectedCode;
+  return rejected === "replacement_unauthorized" || rejected === "watch_credential_invalid";
+}
+
+/**
+ * Cheap local-credential probe. Held poll may block when the secret is valid;
+ * treat helper timeout as "accepted & held" (usable). Immediate 401-style
+ * rejection means the on-disk credential is dead even if watch-status looks ready.
+ */
+async function probeLocalWatchCredential({
+  helperPath,
+  installationId,
+  run,
+  timeoutMs = 5_000,
+  signal,
+} = {}) {
+  try {
+    const result = await run(
+      helperPath,
+      ["watch-poll", "--installation", installationId, "--cursor", "0"],
+      { timeoutMs, signal },
+    );
+    if (result.code === 0 || result.code === 3) {
+      return { usable: true };
+    }
+    const diagnosis = parseWatchFailureDiagnosis(result.stderr);
+    return { usable: false, diagnosis };
+  } catch (error) {
+    if (
+      error
+      && typeof error === "object"
+      && error.code === "helper_unavailable"
+      && typeof error.message === "string"
+      && /timed out/i.test(error.message)
+    ) {
+      // Server accepted the credential and held the poll until our probe timeout.
+      return { usable: true, held: true };
+    }
+    throw error;
+  }
+}
+
 /**
  * @param {object} options
  * @param {string} options.helperPath Absolute path to triangle-mailbox
@@ -103,40 +147,42 @@ export async function ensureHelperWatchGrant({
     ["watch-ensure", "--installation", installationId, "--actor-profile", actorProfile],
     { timeoutMs, signal },
   );
-  if (result.code !== 0) {
-    const diagnosis = parseWatchFailureDiagnosis(result.stderr);
-    // Replacement can 401 when Keychain/server grant material drift. If status
-    // already reports a finalized ready grant, keep using it instead of failing
-    // the supervisor loop closed.
-    if (
-      diagnosis?.rejectedCode === "replacement_unauthorized"
-      || (diagnosis?.code === "watch_rejected" && diagnosis?.rejectedCode === "replacement_unauthorized")
-    ) {
-      const statusResult = await run(
-        helperPath,
-        ["watch-status", "--installation", installationId],
-        { timeoutMs: Math.min(timeoutMs, 15_000), signal },
-      );
-      if (statusResult.code === 0) {
-        try {
-          const status = JSON.parse(String(statusResult.stdout || "").trim());
-          if (
-            status
-            && typeof status === "object"
-            && status.state === "finalized"
-            && status.listenerReady === true
-            && status.installationId === installationId
-          ) {
-            return { ensured: true, reusedExisting: true };
-          }
-        } catch {
-          // fall through to helper_unavailable
-        }
-      }
-    }
-    throw createHelperUnavailableError("watch helper ensure failed", diagnosis);
+  if (result.code === 0) {
+    return { ensured: true };
   }
-  return { ensured: true };
+
+  const diagnosis = parseWatchFailureDiagnosis(result.stderr);
+  // Current helpers discard a stale local binding and recreate once inside
+  // watch-ensure. Older helpers may still surface replacement_unauthorized while
+  // watch-status looks finalized. Never treat status alone as proof the local
+  // credential can poll — probe with a short watch-poll instead.
+  if (isStaleWatchCredentialDiagnosis(diagnosis)) {
+    const probe = await probeLocalWatchCredential({
+      helperPath,
+      installationId,
+      run,
+      timeoutMs: Math.min(timeoutMs, 5_000),
+      signal,
+    });
+    if (probe.usable) {
+      return { ensured: true, reusedExisting: true };
+    }
+    const failedDiagnosis = {
+      ...(diagnosis || {}),
+      ...(probe.diagnosis || {}),
+      operatorAction:
+        probe.diagnosis?.operatorAction
+        || diagnosis?.operatorAction
+        || "replace_watch_grant",
+      detail:
+        probe.diagnosis?.detail
+        || diagnosis?.detail
+        || "Local watch credential is invalid; discard the local watch binding and re-run watch-ensure without replacement.",
+    };
+    throw createHelperUnavailableError("watch helper ensure failed", failedDiagnosis);
+  }
+
+  throw createHelperUnavailableError("watch helper ensure failed", diagnosis);
 }
 
 /**

@@ -204,14 +204,24 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
             )
         case .rejected(let statusCode, let code):
             let sanitized = sanitizeRejectedCode(code)
+            let staleLocalCredential =
+                sanitized == "replacement_unauthorized" || sanitized == "watch_credential_invalid"
             return WatchGrantFailureDiagnosis(
                 code: .rejected,
                 gate: .network,
-                operatorAction: .retryNetwork,
-                safeToRetry: statusCode >= 500 || statusCode == 429,
-                detail: "MESH rejected the watch grant request.",
+                operatorAction: staleLocalCredential ? .replaceWatchGrant : .retryNetwork,
+                safeToRetry: staleLocalCredential ? false : (statusCode >= 500 || statusCode == 429),
+                detail: staleLocalCredential
+                    ? "MESH rejected the local watch credential; discard the local watch binding and re-run watch-ensure without replacement."
+                    : "MESH rejected the watch grant request.",
                 rejectedStatusCode: statusCode,
-                rejectedCode: sanitized
+                rejectedCode: sanitized,
+                operatorNotes: staleLocalCredential
+                    ? [
+                        "Current helpers discard a stale local watch binding and recreate once automatically.",
+                        "If ensure still fails, move aside credentials/local/watch/<installation>.json (or the mailbox-watch Keychain item) and re-run watch-ensure.",
+                    ]
+                    : []
             )
         case .resyncRequired(let restartCursor):
             return WatchGrantFailureDiagnosis(

@@ -28,6 +28,8 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant allows mcp-interactive notify members", run: includesInteractiveMember),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
+            .init(name: "watch grant recovers from stale replacement credential", run: recoversFromStaleReplacement),
+            .init(name: "watch grant does not discard local binding on unrelated create rejection", run: unrelatedCreateRejectionKeepsLocalBinding),
         ]
 #if canImport(Security)
         cases.append(.init(name: "watch grant Keychain query policy", run: keychainQueryPolicy))
@@ -129,6 +131,8 @@ public enum WatchGrantContractCases {
             (.noEventDrivenMembers, .membership, .noEventDrivenMembers, .reviewWatchMembership),
             (.helperUnavailable, .network, .helperUnavailable, .retryNetwork),
             (.rejected(statusCode: 403, code: "watch_forbidden"), .network, .rejected, .retryNetwork),
+            (.rejected(statusCode: 401, code: "replacement_unauthorized"), .network, .rejected, .replaceWatchGrant),
+            (.rejected(statusCode: 401, code: "watch_credential_invalid"), .network, .rejected, .replaceWatchGrant),
             (.credentialMissing, .keychain, .credentialMissing, .ensureWatchGrant),
         ]
         for (error, gate, code, action) in cases {
@@ -323,6 +327,64 @@ public enum WatchGrantContractCases {
         }
     }
 
+    public static func recoversFromStaleReplacement() async throws {
+        for rejectedCode in ["replacement_unauthorized", "watch_credential_invalid"] {
+            let fixture = try await Fixture()
+            let stale = try WatchGrantBinding(
+                installationID: fixture.installationID,
+                origin: MeshOrigin("https://thetriangle.dev"),
+                grantID: WatchGrantID("watchgrant_" + String(repeating: "9", count: 64)),
+                agentIDs: [fixture.actorAgentID],
+                watchCredential: WatchCredential("mesh_watch_" + String(repeating: "9", count: 64))
+            )
+            try fixture.store.create(stale)
+            fixture.transport.rejectCreateWithReplacementOnce = (401, rejectedCode)
+
+            let status = try await fixture.service.ensureGrant(
+                installationID: fixture.installationID,
+                actorProfile: fixture.actorProfile,
+                memberProfiles: [fixture.actorProfile]
+            )
+            try expect(status.state == "finalized", "\(rejectedCode): ensure did not recover")
+            try expect(fixture.transport.createCallCount == 2, "\(rejectedCode): expected discard+retry create")
+            try expect(
+                fixture.transport.createReplacementHeaderFlags == [true, false],
+                "\(rejectedCode): second create must omit replacement header"
+            )
+            let stored = try fixture.store.read(for: fixture.installationID)
+            try expect(stored != stale, "\(rejectedCode): stale local credential was not replaced")
+            try expect(stored.grantID.value == "watchgrant_" + String(repeating: "3", count: 64), "\(rejectedCode): unexpected recovered grant id")
+            try expect(!String(describing: status).contains("mesh_watch_"), "\(rejectedCode): status exposed secret")
+        }
+    }
+
+    public static func unrelatedCreateRejectionKeepsLocalBinding() async throws {
+        let fixture = try await Fixture()
+        let existing = try WatchGrantBinding(
+            installationID: fixture.installationID,
+            origin: MeshOrigin("https://thetriangle.dev"),
+            grantID: WatchGrantID("watchgrant_" + String(repeating: "8", count: 64)),
+            agentIDs: [fixture.actorAgentID],
+            watchCredential: WatchCredential("mesh_watch_" + String(repeating: "8", count: 64))
+        )
+        try fixture.store.create(existing)
+        fixture.transport.rejectCreateWithReplacementOnce = (403, "watch_forbidden")
+
+        do {
+            _ = try await fixture.service.ensureGrant(
+                installationID: fixture.installationID,
+                actorProfile: fixture.actorProfile,
+                memberProfiles: [fixture.actorProfile]
+            )
+            throw ContractFailure("unrelated create rejection succeeded")
+        } catch WatchGrantServiceError.rejected(let statusCode, let code) {
+            try expect(statusCode == 403 && code == "watch_forbidden", "unexpected rejection mapping")
+        }
+        try expect(fixture.transport.createCallCount == 1, "unrelated rejection should not retry create")
+        let stored = try fixture.store.read(for: fixture.installationID)
+        try expect(stored == existing, "unrelated rejection deleted local binding")
+    }
+
 #if canImport(Security)
     public static func keychainQueryPolicy() throws {
         let installation = try InstallationID("inst_N7VhDq3mQ2")
@@ -496,6 +558,10 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     private let installationID: InstallationID
     private(set) var paths: [String] = []
     private(set) var loggedBodies: [String] = []
+    private(set) var createCallCount = 0
+    private(set) var createReplacementHeaderFlags: [Bool] = []
+    /// When set, the next create that includes Mesh-Watch-Credential returns this rejection once.
+    var rejectCreateWithReplacementOnce: (statusCode: Int, code: String)?
     var nextPoll: PollScript = .success(WatchPollResponse(cursor: 0, events: []))
     private var stagedCredential = "mesh_watch_stage_" + String(repeating: "1", count: 64)
     private var watchCredential = "mesh_watch_" + String(repeating: "2", count: 64)
@@ -515,6 +581,19 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
             }
             let path = request.url.path
             if path == "/api/v1/mailbox/watch/grants" && request.method == "POST" {
+                createCallCount += 1
+                let hasReplacement = request.headers.keys.contains { $0.caseInsensitiveCompare("Mesh-Watch-Credential") == .orderedSame }
+                createReplacementHeaderFlags.append(hasReplacement)
+                if hasReplacement, let rejection = rejectCreateWithReplacementOnce {
+                    rejectCreateWithReplacementOnce = nil
+                    let body = Data("{\"error\":\"\(rejection.code)\"}".utf8)
+                    return MeshHTTPResponse(
+                        statusCode: rejection.statusCode,
+                        headers: ["Content-Type": "application/json"],
+                        body: body,
+                        finalURL: request.url
+                    )
+                }
                 let requested: [String]
                 if let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
                    let agentIDs = object["agent_ids"] as? [String]

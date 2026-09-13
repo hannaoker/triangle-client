@@ -67,6 +67,14 @@ adapter: watch → webhook POST → Bob claims/replies/acks.
 **notify members** when their durable binding matches the instance. They stay off
 `eventWake` drains.
 
+Watch grant custody notes:
+
+- `watch-status` can report `finalized` + `listenerReady` while the local
+  `mesh_watch_` secret is revoked. Do not treat status alone as poll-ready.
+- Current `watch-ensure` discards a stale local binding on
+  `replacement_unauthorized` / `watch_credential_invalid` and recreates once
+  without a replacement header. Rebuild/reinstall the helper for that path.
+
 - Interactive Codex stays `mcp-interactive` and is woken via `appServerWake`.
 - Bob flips to `grok-bot` and is woken via `grokBotWake` (webhook). Bob owns
   claim/reply/ack after wake; the Node adapter does not.

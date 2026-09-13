@@ -187,7 +187,7 @@ test("ensureHelperWatchGrant invokes watch-ensure and fails closed on non-zero e
   );
 });
 
-test("ensureHelperWatchGrant reuses finalized grant when replacement is unauthorized", async () => {
+test("ensureHelperWatchGrant reuses existing grant only when poll probe succeeds", async () => {
   const calls = [];
   const result = await ensureHelperWatchGrant({
     helperPath: "/trusted/triangle-mailbox",
@@ -203,29 +203,132 @@ test("ensureHelperWatchGrant reuses finalized grant when replacement is unauthor
             status: "watch_operation_failed",
             code: "watch_rejected",
             gate: "network",
-            operatorAction: "retry_network",
+            operatorAction: "replace_watch_grant",
             safeToRetry: false,
             mustNotReregister: true,
-            detail: "MESH rejected the watch grant request.",
+            detail: "MESH rejected the local watch credential; discard the local watch binding and re-run watch-ensure without replacement.",
             rejectedCode: "replacement_unauthorized",
             rejectedStatusCode: 401,
             operatorNotes: [],
           }) + "\n",
         };
       }
-      return {
-        code: 0,
-        stdout: JSON.stringify({
-          installationId: "inst_N7VhDq3mQ2",
-          state: "finalized",
-          listenerReady: true,
-          memberCount: 1,
-        }) + "\n",
-        stderr: "",
-      };
+      if (args[0] === "watch-poll") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ cursor: 0, events: [] }) + "\n",
+          stderr: "",
+        };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected" };
     },
   });
-  assert.deepEqual(calls, ["watch-ensure", "watch-status"]);
+  assert.deepEqual(calls, ["watch-ensure", "watch-poll"]);
+  assert.equal(result.ensured, true);
+  assert.equal(result.reusedExisting, true);
+});
+
+test("ensureHelperWatchGrant fails closed when status would look ready but poll is credential-invalid", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => ensureHelperWatchGrant({
+      helperPath: "/trusted/triangle-mailbox",
+      installationId: "inst_N7VhDq3mQ2",
+      actorProfile: "bob",
+      async run(_file, args) {
+        calls.push(args[0]);
+        if (args[0] === "watch-ensure") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: JSON.stringify({
+              status: "watch_operation_failed",
+              code: "watch_rejected",
+              gate: "network",
+              operatorAction: "replace_watch_grant",
+              safeToRetry: false,
+              mustNotReregister: true,
+              detail: "MESH rejected the local watch credential; discard the local watch binding and re-run watch-ensure without replacement.",
+              rejectedCode: "replacement_unauthorized",
+              rejectedStatusCode: 401,
+              operatorNotes: [],
+            }) + "\n",
+          };
+        }
+        if (args[0] === "watch-status") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              installationId: "inst_N7VhDq3mQ2",
+              state: "finalized",
+              listenerReady: true,
+              memberCount: 1,
+            }) + "\n",
+            stderr: "",
+          };
+        }
+        if (args[0] === "watch-poll") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: JSON.stringify({
+              status: "watch_operation_failed",
+              code: "watch_rejected",
+              gate: "network",
+              operatorAction: "replace_watch_grant",
+              safeToRetry: false,
+              mustNotReregister: true,
+              detail: "MESH rejected the local watch credential; discard the local watch binding and re-run watch-ensure without replacement.",
+              rejectedCode: "watch_credential_invalid",
+              rejectedStatusCode: 401,
+              operatorNotes: [],
+            }) + "\n",
+          };
+        }
+        return { code: 1, stdout: "", stderr: "unexpected" };
+      },
+    }),
+    (error) =>
+      error.code === "helper_unavailable"
+      && error.diagnosis?.rejectedCode === "watch_credential_invalid"
+      && error.operatorAction === "replace_watch_grant"
+      && !calls.includes("watch-status"),
+  );
+  assert.deepEqual(calls, ["watch-ensure", "watch-poll"]);
+});
+
+test("ensureHelperWatchGrant treats held-poll probe timeout as usable existing grant", async () => {
+  const calls = [];
+  const result = await ensureHelperWatchGrant({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    actorProfile: "bob",
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (args[0] === "watch-ensure") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "watch_operation_failed",
+            code: "watch_rejected",
+            gate: "network",
+            operatorAction: "replace_watch_grant",
+            safeToRetry: false,
+            mustNotReregister: true,
+            detail: "MESH rejected the local watch credential.",
+            rejectedCode: "replacement_unauthorized",
+            rejectedStatusCode: 401,
+            operatorNotes: [],
+          }) + "\n",
+        };
+      }
+      const error = new Error("watch helper timed out");
+      error.code = "helper_unavailable";
+      throw error;
+    },
+  });
+  assert.deepEqual(calls, ["watch-ensure", "watch-poll"]);
   assert.equal(result.ensured, true);
   assert.equal(result.reusedExisting, true);
 });
