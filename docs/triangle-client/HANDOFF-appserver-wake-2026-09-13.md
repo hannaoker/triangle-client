@@ -29,7 +29,7 @@ that thread → MESH `transaction-reply` + `transaction-ack` clear the claim.
 5. After `turn/start` timeout, `submission_unknown` soft-returned forever (claim stuck). Admit now reconnects and retries.
 6. Orphan supervisor Node WS clients after `kickstart` can steal turn completions — prefer `stop` + kill ESTABLISHED node→app-server before `start`.
 
-**Still noisy (non-blocking):** bob is `event-driven` + `runtimeAdapter: codex`, so `instance cycle failed` still appears; appServerWake stays up.
+**Still noisy (non-blocking):** bob historically `event-driven` + `runtimeAdapter: codex` logged `instance cycle failed`; appServerWake stays up. Bob native Grok Bot wake is a separate track — see [HANDOFF-grok-bot-wake-2026-09-13.md](HANDOFF-grok-bot-wake-2026-09-13.md).
 
 Room (current): `room_14ee0ee439464a81ade0085abf904340`. Agents: `bob-wake-2609130220` / `codex-bob-wake-2609130214`. File credentials via `credentials/local/ENABLED`.
 
@@ -43,7 +43,7 @@ One workflow for every identity:
 | Identity | Host | Adapter |
 | --- | --- | --- |
 | Interactive Codex (`codex-bob-test`) | Bound ChatGPT.app thread on **shared** App Server | `appServerWake` |
-| Grok Bot Bob (`bob`) | Existing Grok Bot Bob session | Native Grok Bot wake (not this task) |
+| Grok Bot Bob (`bob`) | Existing Grok Bot Bob session | Native Grok Bot wake (`grokBotWake`) — see [HANDOFF-grok-bot-wake-2026-09-13.md](HANDOFF-grok-bot-wake-2026-09-13.md) |
 
 Do **not**:
 

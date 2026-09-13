@@ -5,12 +5,14 @@ public enum RuntimeAdapter: String, Codable, CaseIterable, Sendable {
     case codex
     case hermes
     case antigravity
+    case grokBot = "grok-bot"
 }
 
 public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
     case worker
     case mcpInteractive = "mcp-interactive"
     case eventDriven = "event-driven"
+    case grokBot = "grok-bot"
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -57,9 +59,15 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public var participatesInEventDrivenWake: Bool { enabled && deliveryMode == .eventDriven }
     /// mcp-interactive profiles wake via Shared Codex App Server (not eventWake drains).
     public var participatesInAppServerWake: Bool { enabled && deliveryMode == .mcpInteractive }
-    /// Installation watch grant notify members: event-driven drains + App Server hosts.
+    /// grok-bot profiles wake via native Grok Bot webhook (not eventWake / App Server).
+    public var participatesInGrokBotWake: Bool { enabled && deliveryMode == .grokBot }
+    /// Installation watch grant notify members: event-driven drains + App Server + Grok Bot hosts.
     public var participatesInWatchGrantNotify: Bool {
-        enabled && (deliveryMode == .eventDriven || deliveryMode == .mcpInteractive)
+        enabled && (
+            deliveryMode == .eventDriven
+            || deliveryMode == .mcpInteractive
+            || deliveryMode == .grokBot
+        )
     }
 
     public init(

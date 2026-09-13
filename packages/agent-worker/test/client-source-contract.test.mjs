@@ -101,6 +101,7 @@ test("repository is the complete standalone client source and contains no MESH s
     ".",
     "./client-supervisor",
     "./concurrency-gate",
+    "./grok-bot-wake",
     "./mailbox-client",
     "./outbound-client",
     "./profile-scheduler",

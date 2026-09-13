@@ -37,6 +37,12 @@ public enum TriangleClientCLIContractCases {
         let parsedDeliveryMode = try TriangleClientCommandParser.parse([
             "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "mcp-interactive",
         ])
+        let parsedGrokBotMode = try TriangleClientCommandParser.parse([
+            "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "grok-bot",
+        ])
+        let parsedGrokBotRuntime = try TriangleClientCommandParser.parse([
+            "agent", "add", "--profile", "bob", "--runtime", "grok-bot",
+        ])
         try clientExpect(parsedAdd == .add(profile: alpha, adapter: .codex), "add did not parse")
         try clientExpect(parsedList == .list, "list did not parse")
         try clientExpect(parsedStatus == .status(profile: alpha), "status did not parse")
@@ -44,6 +50,8 @@ public enum TriangleClientCLIContractCases {
         try clientExpect(parsedDisable == .disable(profile: alpha), "disable did not parse")
         try clientExpect(parsedRemove == .remove(profile: alpha), "remove did not parse")
         try clientExpect(parsedDeliveryMode == .setDeliveryMode(profile: alpha, mode: .mcpInteractive), "set-delivery-mode did not parse")
+        try clientExpect(parsedGrokBotMode == .setDeliveryMode(profile: alpha, mode: .grokBot), "grok-bot delivery mode did not parse")
+        try clientExpect(parsedGrokBotRuntime == .add(profile: try ProfileName("bob"), adapter: .grokBot), "grok-bot runtime did not parse")
 
         let rejected = [
             ["agent", "add", "--adapter", "codex"],

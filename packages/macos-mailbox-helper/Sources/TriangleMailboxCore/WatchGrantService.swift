@@ -246,12 +246,13 @@ public struct WatchGrantService: Sendable {
             } catch {
                 throw ClientInstanceStoreError.unsafeStorage
             }
-            // Auto membership: event-driven drains + the App Server-bound
-            // mcp-interactive host (when binding is present). Do not pull every
-            // mcp-interactive profile on the machine into the grant.
+            // Auto membership: event-driven drains + App Server-bound
+            // mcp-interactive + Grok Bot-bound hosts (when bindings are present).
+            // Do not pull every mcp-interactive / grok-bot profile into the grant.
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
-            profiles = (eventDriven + boundInteractive).map(\.profile)
+            let boundGrokBot = Self.grokBotBoundMembers(from: instances)
+            profiles = (eventDriven + boundInteractive + boundGrokBot).map(\.profile)
         } else {
             profiles = [actorProfile]
         }
@@ -267,6 +268,8 @@ public struct WatchGrantService: Sendable {
             } catch {
                 throw ClientInstanceStoreError.unsafeStorage
             }
+            // mcp-interactive App Server hosts are notify-only; they cannot act.
+            // grok-bot may act (Bob owns post-wake claim/reply/ack outside this adapter).
             if actorInstance.deliveryMode == .mcpInteractive {
                 throw WatchGrantServiceError.interactiveDeliveryExcluded
             }
@@ -334,6 +337,22 @@ public struct WatchGrantService: Sendable {
               !boundInstanceId.isEmpty
         else { return [] }
         return interactive.filter { $0.instanceID.value == boundInstanceId }
+    }
+
+    /// grok-bot profiles whose instanceId matches the durable Grok Bot wake binding.
+    private static func grokBotBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
+        let grokBots = instances.filter(\.participatesInGrokBotWake)
+        guard !grokBots.isEmpty else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let bindingURL = home
+            .appendingPathComponent("Library/Application Support/The Triangle/client/grok-bot-binding.json")
+        guard FileManager.default.isReadableFile(atPath: bindingURL.path),
+              let data = try? Data(contentsOf: bindingURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let boundInstanceId = object["instanceId"] as? String,
+              !boundInstanceId.isEmpty
+        else { return [] }
+        return grokBots.filter { $0.instanceID.value == boundInstanceId }
     }
 }
 

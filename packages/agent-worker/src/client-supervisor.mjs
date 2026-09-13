@@ -18,6 +18,10 @@ import {
   createTrustedTransactionProxy,
   validateBinding,
 } from "./shared-codex-app-server.mjs";
+import {
+  createGrokBotWakeBridge,
+  validateGrokBotBinding,
+} from "./grok-bot-wake.mjs";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
@@ -45,6 +49,27 @@ const APP_SERVER_BINDING_KEYS = [
   "roomScope",
   "serverIdentity",
   "threadId",
+];
+const GROK_BOT_WAKE_KEYS = [
+  "actorProfile",
+  "binding",
+  "bindingPath",
+  "cursorPath",
+  "ensureBeforeWatch",
+  "helperPath",
+  "installationId",
+  "webhookKeyPath",
+  "webhookUrlPath",
+];
+const GROK_BOT_BINDING_KEYS = [
+  "adapterVersion",
+  "agentId",
+  "enabled",
+  "grokAgentId",
+  "installationId",
+  "instanceId",
+  "profile",
+  "wakeMode",
 ];
 
 function positiveInteger(value, name) {
@@ -258,10 +283,66 @@ function validateAppServerWake(appServerWake) {
   });
 }
 
+function validateGrokBotWake(grokBotWake) {
+  if (grokBotWake == null) return null;
+  if (!hasExactKeys(grokBotWake, GROK_BOT_WAKE_KEYS)) {
+    throw new TypeError("grokBotWake schema is invalid");
+  }
+  if (typeof grokBotWake.installationId !== "string" || !INSTALLATION_ID.test(grokBotWake.installationId)) {
+    throw new TypeError("grokBotWake.installationId is invalid");
+  }
+  if (typeof grokBotWake.helperPath !== "string" || !grokBotWake.helperPath.startsWith("/") || grokBotWake.helperPath.includes("\0")) {
+    throw new TypeError("grokBotWake.helperPath is invalid");
+  }
+  if (typeof grokBotWake.cursorPath !== "string" || !grokBotWake.cursorPath.startsWith("/") || grokBotWake.cursorPath.includes("\0")) {
+    throw new TypeError("grokBotWake.cursorPath is invalid");
+  }
+  if (typeof grokBotWake.bindingPath !== "string" || !grokBotWake.bindingPath.startsWith("/") || grokBotWake.bindingPath.includes("\0")) {
+    throw new TypeError("grokBotWake.bindingPath is invalid");
+  }
+  if (typeof grokBotWake.webhookUrlPath !== "string" || !grokBotWake.webhookUrlPath.startsWith("/") || grokBotWake.webhookUrlPath.includes("\0")) {
+    throw new TypeError("grokBotWake.webhookUrlPath is invalid");
+  }
+  if (typeof grokBotWake.webhookKeyPath !== "string" || !grokBotWake.webhookKeyPath.startsWith("/") || grokBotWake.webhookKeyPath.includes("\0")) {
+    throw new TypeError("grokBotWake.webhookKeyPath is invalid");
+  }
+  if (typeof grokBotWake.actorProfile !== "string" || grokBotWake.actorProfile.length === 0 || grokBotWake.actorProfile.includes("\0")) {
+    throw new TypeError("grokBotWake.actorProfile is invalid");
+  }
+  if (typeof grokBotWake.ensureBeforeWatch !== "boolean") {
+    throw new TypeError("grokBotWake.ensureBeforeWatch must be a boolean");
+  }
+  if (!hasExactKeys(grokBotWake.binding, GROK_BOT_BINDING_KEYS)) {
+    throw new TypeError("grokBotWake.binding schema is invalid");
+  }
+  const binding = validateGrokBotBinding(grokBotWake.binding);
+  if (!binding.enabled) {
+    throw new TypeError("grokBotWake.binding.enabled must be true");
+  }
+  if (binding.installationId !== grokBotWake.installationId) {
+    throw new TypeError("grokBotWake binding installationId mismatch");
+  }
+  if (binding.profile !== grokBotWake.actorProfile) {
+    throw new TypeError("grokBotWake binding profile mismatch");
+  }
+  return Object.freeze({
+    installationId: grokBotWake.installationId,
+    helperPath: grokBotWake.helperPath,
+    cursorPath: grokBotWake.cursorPath,
+    bindingPath: grokBotWake.bindingPath,
+    webhookUrlPath: grokBotWake.webhookUrlPath,
+    webhookKeyPath: grokBotWake.webhookKeyPath,
+    actorProfile: grokBotWake.actorProfile,
+    ensureBeforeWatch: grokBotWake.ensureBeforeWatch,
+    binding,
+  });
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
   appServerWake = null,
+  grokBotWake = null,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
   createWorker = createAgentWorker,
@@ -275,6 +356,7 @@ export function createClientSupervisor({
   createCursorStore = createAtomicFileCursorStore,
   createSession = createSharedCodexSession,
   createWakeBridge = createAppServerWakeBridge,
+  createGrokBotBridge = createGrokBotWakeBridge,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -289,7 +371,8 @@ export function createClientSupervisor({
   }
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
-  if (instances.length < 1 && !wakeConfig && !appServerConfig) {
+  const grokBotConfig = validateGrokBotWake(grokBotWake);
+  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
@@ -364,6 +447,18 @@ export function createClientSupervisor({
     }
     if (wakeConfig?.profiles.some((profile) => profile.instanceId === appServerConfig.binding.instanceId)) {
       throw new TypeError("appServerWake instanceId collides with an eventWake profile");
+    }
+  }
+
+  if (grokBotConfig) {
+    if (seen.has(grokBotConfig.binding.instanceId)) {
+      throw new TypeError("grokBotWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === grokBotConfig.binding.instanceId)) {
+      throw new TypeError("grokBotWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === grokBotConfig.binding.instanceId) {
+      throw new TypeError("grokBotWake instanceId collides with an appServerWake profile");
     }
   }
 
@@ -444,12 +539,39 @@ export function createClientSupervisor({
     }
   }
 
+  let grokBotBridge = null;
+  if (grokBotConfig) {
+    const watchTransport = createWatchTransport({
+      helperPath: grokBotConfig.helperPath,
+      installationId: grokBotConfig.installationId,
+    });
+    const cursorStore = createCursorStore({ filePath: grokBotConfig.cursorPath });
+    grokBotBridge = createGrokBotBridge({
+      binding: grokBotConfig.binding,
+      watchTransport,
+      cursorStore,
+      helperPath: grokBotConfig.helperPath,
+      installationId: grokBotConfig.installationId,
+      actorProfile: grokBotConfig.actorProfile,
+      // When eventWake is also present, supervisor ensures with that actor first.
+      ensureBeforeWatch: false,
+      webhookUrlPath: grokBotConfig.webhookUrlPath,
+      webhookKeyPath: grokBotConfig.webhookKeyPath,
+      logger,
+    });
+    if (!grokBotBridge || typeof grokBotBridge.start !== "function") {
+      throw new TypeError("createGrokBotBridge must return a Grok Bot wake bridge");
+    }
+  }
+
   return Object.freeze({
     instanceIds: Object.freeze(entries.map(({ instanceId }) => instanceId)),
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
     appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
+    grokBotInstanceId: grokBotConfig?.binding.instanceId ?? null,
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
+    grokBotWake: grokBotConfig,
 
     async runOnce({ signal } = {}) {
       const results = await Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -482,6 +604,14 @@ export function createClientSupervisor({
           helperPath: appServerConfig.helperPath,
           installationId: appServerConfig.installationId,
           actorProfile: wakeConfig.actorProfile,
+          signal,
+        });
+      } else if (grokBotBridge && grokBotConfig.ensureBeforeWatch) {
+        // Grok Bot Bob may act as grant actor (unlike mcp-interactive).
+        await ensureWatchGrant({
+          helperPath: grokBotConfig.helperPath,
+          installationId: grokBotConfig.installationId,
+          actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
           signal,
         });
       }
@@ -551,12 +681,43 @@ export function createClientSupervisor({
         })()
         : Promise.resolve(null);
 
-      const [instances, wakeResult, appServerResult] = await Promise.all([
+      const grokBotLoop = grokBotBridge
+        ? (async () => {
+          while (!signal?.aborted) {
+            try {
+              return await grokBotBridge.start({ signal });
+            } catch (error) {
+              if (signal?.aborted || error?.name === "AbortError") return null;
+              logger.error?.("triangle_client_grok_bot_wake_failed", {
+                error: "Grok Bot wake listener failed",
+                code: error?.code,
+                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
+              });
+              await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 5_000);
+                signal?.addEventListener?.("abort", () => {
+                  clearTimeout(timer);
+                  resolve();
+                }, { once: true });
+              });
+            }
+          }
+          return null;
+        })()
+        : Promise.resolve(null);
+
+      const [instances, wakeResult, appServerResult, grokBotResult] = await Promise.all([
         workerLoop,
         wakeLoop,
         appServerLoop,
+        grokBotLoop,
       ]);
-      return { instances, eventWake: wakeResult, appServerWake: appServerResult };
+      return {
+        instances,
+        eventWake: wakeResult,
+        appServerWake: appServerResult,
+        grokBotWake: grokBotResult,
+      };
     },
   });
 }
