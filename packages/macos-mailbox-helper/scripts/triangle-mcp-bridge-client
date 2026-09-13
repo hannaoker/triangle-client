@@ -1,0 +1,70 @@
+#!/usr/bin/python3
+"""Stdio <-> TCP client for triangle MCP bridge (sandbox-friendly)."""
+import argparse
+import os
+import select
+import socket
+import sys
+
+PORTS = {
+    "codex-bob-test": 17387,
+    "cursor-grok-mesh-one": 17388,
+}
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["mcp"])
+    ap.add_argument("--profile", required=True)
+    args = ap.parse_args()
+    port = PORTS.get(args.profile)
+    if port is None:
+        sys.stderr.write('{"error":"unknown_profile"}\n')
+        return 2
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.setblocking(False)
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    stdin_open = True
+    try:
+        while True:
+            readers = [sock]
+            if stdin_open:
+                readers.append(stdin_fd)
+            rlist, _, _ = select.select(readers, [], [], 60.0)
+            if not rlist:
+                # idle timeout with no activity
+                continue
+            if stdin_open and stdin_fd in rlist:
+                data = os.read(stdin_fd, 65536)
+                if not data:
+                    stdin_open = False
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except Exception:
+                        pass
+                else:
+                    # sendall needs blocking or loop
+                    view = memoryview(data)
+                    while len(view):
+                        try:
+                            sent = sock.send(view)
+                            view = view[sent:]
+                        except BlockingIOError:
+                            select.select([], [sock], [], 5.0)
+            if sock in rlist:
+                try:
+                    data = sock.recv(65536)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    break
+                os.write(stdout_fd, data)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

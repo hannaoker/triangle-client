@@ -36,7 +36,7 @@ public protocol MailboxTransactionTransport: Sendable {
         inReplyToEventID: String?
     ) async throws -> MailboxReplyTransportResult
     func lookupReplyEventID(roomID: String, idempotencyKey: String) async throws -> String?
-    func acknowledge(deliveryID: Int) async throws
+    func acknowledge(deliveryID: Int, claimID: String) async throws
 }
 
 public struct MailboxClaimTransportResult: Equatable, Sendable {
@@ -261,7 +261,7 @@ public struct MailboxTransactionService: Sendable {
             throw MailboxTransactionServiceError.upstreamUnavailable
         }
         do {
-            try await transport.acknowledge(deliveryID: open.deliveryID)
+            try await transport.acknowledge(deliveryID: open.deliveryID, claimID: open.claimID.value)
         } catch {
             throw MailboxTransactionServiceError.upstreamUnavailable
         }

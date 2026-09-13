@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+"""MCP bridge: fork/exec helper with the accepted TCP socket as stdio.
+
+Avoids Python subprocess pipes, which hang this Swift helper on macOS.
+One client at a time per profile.
+"""
+import os
+import socket
+import sys
+import threading
+import time
+
+HELPER = os.path.expanduser(
+    "~/Library/Application Support/The Triangle/bin/triangle-mailbox"
+)
+PROFILES = {
+    "codex-bob-test": 17387,
+    "cursor-grok-mesh-one": 17388,
+}
+LOCKS = {p: threading.Lock() for p in PROFILES}
+
+def log(msg):
+    sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
+    sys.stderr.flush()
+
+def handle(conn, profile):
+    lock = LOCKS[profile]
+    if not lock.acquire(blocking=False):
+        log("busy %s" % profile)
+        try:
+            conn.sendall(b'{"error":"bridge_busy"}\n')
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+
+    pid = None
+    try:
+        log("session start %s" % profile)
+        # Make the socket blocking for the helper.
+        conn.setblocking(True)
+        fd = conn.fileno()
+        pid = os.fork()
+        if pid == 0:
+            # Child: stdio = TCP socket
+            try:
+                os.dup2(fd, 0)
+                os.dup2(fd, 1)
+                # Keep stderr to LaunchAgent log
+                # Close extras above 2 except we already dup2'd
+                maxfd = os.sysconf("SC_OPEN_MAX") if hasattr(os, "sysconf") else 256
+                for i in range(3, min(maxfd, 1024)):
+                    try:
+                        if i != fd:
+                            os.close(i)
+                    except Exception:
+                        pass
+                os.environ["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+                os.execv(HELPER, [HELPER, "mcp", "--profile", profile])
+            except Exception as e:
+                sys.stderr.write("exec failed: %s\n" % e)
+                sys.stderr.flush()
+                os._exit(127)
+        # Parent: wait for helper to exit (client disconnect or done)
+        t0 = time.time()
+        _, status = os.waitpid(pid, 0)
+        pid = None
+        code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
+        log("session end %s status=%s elapsed=%.1f" % (profile, code, time.time() - t0))
+    except Exception as e:
+        log("session error %s %s" % (profile, e))
+        if pid:
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            except Exception:
+                pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        lock.release()
+
+def serve(profile, port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(8)
+    log("listening %s %s" % (profile, port))
+    while True:
+        conn, addr = sock.accept()
+        log("accept %s %s" % (profile, addr))
+        threading.Thread(target=handle, args=(conn, profile), daemon=True).start()
+
+def main():
+    for profile, port in PROFILES.items():
+        threading.Thread(target=serve, args=(profile, port), daemon=True).start()
+    while True:
+        time.sleep(3600)
+
+if __name__ == "__main__":
+    main()

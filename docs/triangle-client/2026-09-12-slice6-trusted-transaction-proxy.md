@@ -39,6 +39,15 @@ Out of Phase 1/2 Complete. Not Bob canary. Not optional Codex SDK.
   profile are present; otherwise keeps the fail-closed stub
 - Self-serve local adapter tests may still proceed without the proxy
 
+## Slice 6.1 — outbound initiate (allowlisted)
+
+When **no** drain transaction is open, `mesh.messages.send` is forwarded to
+upstream MCP so a model can initiate (open room + `message.created`).
+
+When a drain transaction **is** open, send remains reply-gated through the
+trusted rewriter (`claim → reply → ack`). Do not loosen drain send into free
+chat: pending delivery still requires claim-bound reply and ack.
+
 ## Not claimed / still required
 
 - Darwin host suite execution (`bash scripts/test-host.sh`) — Linux CI cannot

@@ -155,6 +155,17 @@ public struct MCPTransactionRewriter: Sendable {
             ?? arguments["inReplyToEventId"] as? String
         let inReply = inReplyRaw.flatMap(MailboxEventID.init(rawValue:))
 
+        // Slice 6.1: when no drain transaction is open, forward outbound initiate
+        // (open room + message.created) to upstream MCP. Keep claim->reply->ack
+        // gated when a transaction is open — do not loosen drain into free chat.
+        do {
+            if try store.readOpen(instanceID: instanceID) == nil {
+                return .forward(raw)
+            }
+        } catch {
+            return .reject(code: -32603, message: "reply_failed")
+        }
+
         do {
             let open = try await service.reply(
                 instanceID: instanceID,
@@ -285,13 +296,14 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         text: String,
         inReplyToEventID: String?
     ) async throws -> MailboxReplyTransportResult {
-        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID)/messages")!
+        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID)/events")!
         var headers = [
             "Accept": "application/json",
             "Content-Type": "application/json",
         ]
         headers.merge(try await authorizationHeaders("POST", url)) { _, new in new }
         var bodyObject: [String: Any] = [
+            "type": "message.created",
             "idempotency_key": idempotencyKey,
             "body": ["text": text],
         ]
@@ -313,7 +325,7 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
 
     public func lookupReplyEventID(roomID: String, idempotencyKey: String) async throws -> String? {
         // Bounded history lookup: first page only; never logs message text.
-        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID)/history?after_sequence=0&limit=50")!
+        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID)/events?after_sequence=0&limit=50")!
         var headers = ["Accept": "application/json"]
         headers.merge(try await authorizationHeaders("GET", url)) { _, new in new }
         let response = try await transport.send(MeshHTTPRequest(method: "GET", url: url, headers: headers, body: Data()))
@@ -334,7 +346,7 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         return nil
     }
 
-    public func acknowledge(deliveryID: Int) async throws {
+    public func acknowledge(deliveryID: Int, claimID: String) async throws {
         let url = URL(string: origin.value + "/api/v1/mailbox/ack")!
         var headers = [
             "Accept": "application/json",
@@ -342,7 +354,11 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         ]
         headers.merge(try await authorizationHeaders("POST", url)) { _, new in new }
         let body = try JSONSerialization.data(
-            withJSONObject: ["delivery_ids": [deliveryID]],
+            withJSONObject: [
+                "delivery_ids": [deliveryID],
+                "status": "processed",
+                "claims": [["delivery_id": deliveryID, "claim_id": claimID]],
+            ],
             options: [.sortedKeys]
         )
         let response = try await transport.send(MeshHTTPRequest(method: "POST", url: url, headers: headers, body: body))
@@ -402,10 +418,11 @@ public final class RecordingMailboxTransactionTransport: MailboxTransactionTrans
         }
     }
 
-    public func acknowledge(deliveryID: Int) async throws {
+    public func acknowledge(deliveryID: Int, claimID: String) async throws {
         try lock.withLock {
             acks.append(deliveryID)
             if let ackHandler { try ackHandler(deliveryID) }
+            _ = claimID
         }
     }
 }
