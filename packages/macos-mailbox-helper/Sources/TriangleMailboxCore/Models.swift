@@ -332,6 +332,7 @@ public enum HelperCommand: String, CaseIterable, Equatable, Sendable {
     case transactionPreflight = "transaction-preflight"
     case transactionStatus = "transaction-status"
     case transactionClaim = "transaction-claim"
+    case transactionClaimNext = "transaction-claim-next"
     case transactionReply = "transaction-reply"
     case transactionAck = "transaction-ack"
     case transactionAbandon = "transaction-abandon"
@@ -413,6 +414,7 @@ public enum CommandParser {
         if command == .transactionPreflight
             || command == .transactionStatus
             || command == .transactionClaim
+            || command == .transactionClaimNext
             || command == .transactionReply
             || command == .transactionAck
             || command == .transactionAbandon
@@ -445,7 +447,7 @@ public enum CommandParser {
         case .runWorker:
             allowedFlags = ["--profile", "--worker"]
         case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll,
-             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
              .transactionAck, .transactionAbandon, .transactionRecordFailure:
             allowedFlags = []
         }
@@ -488,7 +490,7 @@ public enum CommandParser {
             }
             return ParsedCommand(command: command, profile: profile, worker: worker)
         case .runSupervisor, .preflightSupervisor, .watchEnsure, .watchStatus, .watchRevoke, .watchPoll,
-             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
              .transactionAck, .transactionAbandon, .transactionRecordFailure:
             throw CommandParseError.invalidCommand
         }
@@ -519,7 +521,7 @@ public enum CommandParser {
 
         let allowedFlags: Set<String>
         switch command {
-        case .transactionStatus:
+        case .transactionStatus, .transactionClaimNext:
             allowedFlags = ["--profile", "--protocol"]
         case .transactionPreflight, .transactionAck, .transactionReply:
             allowedFlags = ["--profile", "--protocol"]
@@ -550,7 +552,7 @@ public enum CommandParser {
         catch { throw CommandParseError.invalidFlagValue }
 
         switch command {
-        case .transactionStatus, .transactionPreflight, .transactionReply, .transactionAck:
+        case .transactionStatus, .transactionClaimNext, .transactionPreflight, .transactionReply, .transactionAck:
             return ParsedCommand(command: command, profile: profile, protocolOwnership: protocolOwnership)
         case .transactionAbandon:
             return ParsedCommand(

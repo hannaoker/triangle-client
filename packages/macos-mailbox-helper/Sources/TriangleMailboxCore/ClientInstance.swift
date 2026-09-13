@@ -55,6 +55,12 @@ public struct ClientInstance: Codable, Equatable, Sendable {
 
     public var participatesInWorkerPolling: Bool { enabled && deliveryMode == .worker }
     public var participatesInEventDrivenWake: Bool { enabled && deliveryMode == .eventDriven }
+    /// mcp-interactive profiles wake via Shared Codex App Server (not eventWake drains).
+    public var participatesInAppServerWake: Bool { enabled && deliveryMode == .mcpInteractive }
+    /// Installation watch grant notify members: event-driven drains + App Server hosts.
+    public var participatesInWatchGrantNotify: Bool {
+        enabled && (deliveryMode == .eventDriven || deliveryMode == .mcpInteractive)
+    }
 
     public init(
         profile: ProfileName,

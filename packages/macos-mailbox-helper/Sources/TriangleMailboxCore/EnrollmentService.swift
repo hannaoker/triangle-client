@@ -496,7 +496,15 @@ public struct EnrollmentService: Sendable {
     ) {
         self.store = store
         #if canImport(Security)
-        self.workloadKeyStore = workloadKeyStore ?? (store is KeychainCredentialStore ? KeychainWorkloadKeyStore() : InMemoryWorkloadKeyStore())
+        if let workloadKeyStore {
+            self.workloadKeyStore = workloadKeyStore
+        } else if store is KeychainCredentialStore {
+            self.workloadKeyStore = KeychainWorkloadKeyStore()
+        } else if store is FileCredentialStore {
+            self.workloadKeyStore = FileWorkloadKeyStore()
+        } else {
+            self.workloadKeyStore = InMemoryWorkloadKeyStore()
+        }
         #else
         self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
         #endif
@@ -637,6 +645,9 @@ public struct EnrollmentService: Sendable {
         if let returnedToken = registeredIdentity.token {
             token = returnedToken
         } else {
+            // Identity-v1 omits compatibility mesh_ bearer; keep a local placeholder so
+            // CredentialBinding can be stored. Live auth uses workload JWT/DPoP when the
+            // workload key is persisted (must not be InMemory across process exit).
             do {
                 var randomBytes = [UInt8](repeating: 0, count: 32)
                 _ = SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes)
@@ -838,7 +849,15 @@ public struct VerifiedCredentialGate: Sendable {
     ) {
         self.store = store
         #if canImport(Security)
-        self.workloadKeyStore = workloadKeyStore ?? (store is KeychainCredentialStore ? KeychainWorkloadKeyStore() : InMemoryWorkloadKeyStore())
+        if let workloadKeyStore {
+            self.workloadKeyStore = workloadKeyStore
+        } else if store is KeychainCredentialStore {
+            self.workloadKeyStore = KeychainWorkloadKeyStore()
+        } else if store is FileCredentialStore {
+            self.workloadKeyStore = FileWorkloadKeyStore()
+        } else {
+            self.workloadKeyStore = InMemoryWorkloadKeyStore()
+        }
         #else
         self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
         #endif

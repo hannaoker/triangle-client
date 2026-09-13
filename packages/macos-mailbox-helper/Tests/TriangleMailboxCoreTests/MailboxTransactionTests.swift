@@ -69,6 +69,12 @@ struct MailboxTransactionTests {
     @Test("policy evaluator filters list and preflight")
     func policy() async throws { try await MailboxTransactionContractCases.policyEvaluatorShared() }
 
+    @Test("claimNext lists preflights and claims pending delivery")
+    func claimNext() async throws { try await MailboxTransactionContractCases.claimNextFromPendingDelivery() }
+
+    @Test("authenticated reply body includes threading fields")
+    func replyBodyThreading() async throws { try await MailboxTransactionContractCases.authenticatedReplyBodyThreadingFields() }
+
     @Test("MCP rewriter ignores model claim and reply IDs")
     func mcpRewrite() async throws { try await MailboxTransactionContractCases.mcpRewriterIgnoresModelIDs() }
 

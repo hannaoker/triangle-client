@@ -349,19 +349,33 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
     }
 }
 
-/// Metadata-only delivery candidate (never carries message text).
+/// Metadata-only delivery candidate (message text is optional ephemeral admit hint only).
 public struct MailboxDeliveryCandidate: Equatable, Sendable {
     public let deliveryID: Int
     public let roomID: MailboxRoomID
     public let eventID: MailboxEventID
     public let roomSequence: Int
+    /// Ephemeral admit prompt from mailbox list; never written to open.json.
+    public let admitText: String?
 
-    public init(deliveryID: Int, roomID: MailboxRoomID, eventID: MailboxEventID, roomSequence: Int) throws {
+    public init(
+        deliveryID: Int,
+        roomID: MailboxRoomID,
+        eventID: MailboxEventID,
+        roomSequence: Int,
+        admitText: String? = nil
+    ) throws {
         guard deliveryID > 0, roomSequence > 0 else { throw MailboxTransactionStoreError.invalidRecord }
+        if let admitText {
+            guard !admitText.isEmpty, admitText.utf8.count <= 32 * 1024 else {
+                throw MailboxTransactionStoreError.invalidRecord
+            }
+        }
         self.deliveryID = deliveryID
         self.roomID = roomID
         self.eventID = eventID
         self.roomSequence = roomSequence
+        self.admitText = admitText
     }
 }
 

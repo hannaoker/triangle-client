@@ -558,6 +558,7 @@ export async function runClientSupervisorCLI({
             resolveDelivery: createProductionAppServerDeliveryResolver({
               helperPath: bootstrap.appServerWake.helperPath,
               profile: bootstrap.appServerWake.actorProfile,
+              protocol: "coordinator-delivery-v1",
             }),
           }
           : {}),

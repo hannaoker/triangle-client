@@ -265,6 +265,38 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         self.authorizationHeaders = authorizationHeaders
     }
 
+    public func listPendingCandidates() async throws -> [MailboxDeliveryCandidate] {
+        let url = URL(string: origin.value + "/api/v1/mailbox?after=0&limit=50")!
+        var headers = ["Accept": "application/json"]
+        headers.merge(try await authorizationHeaders("GET", url)) { _, new in new }
+        let response = try await transport.send(MeshHTTPRequest(method: "GET", url: url, headers: headers, body: Data()))
+        guard response.statusCode == 200,
+              let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let items = object["items"] as? [[String: Any]]
+        else {
+            throw MailboxTransactionServiceError.invalidUpstreamResponse
+        }
+        return try items.map { item in
+            guard let deliveryID = Self.intValue(item["deliveryId"] ?? item["delivery_id"]),
+                  let roomRaw = item["roomId"] as? String ?? item["room_id"] as? String,
+                  let roomID = MailboxRoomID(rawValue: roomRaw),
+                  let eventRaw = item["eventId"] as? String ?? item["event_id"] as? String,
+                  let eventID = MailboxEventID(rawValue: eventRaw),
+                  let roomSequence = Self.intValue(item["roomSequence"] ?? item["room_sequence"])
+            else {
+                throw MailboxTransactionServiceError.invalidUpstreamResponse
+            }
+            let admitText = Self.admitText(from: item)
+            return try MailboxDeliveryCandidate(
+                deliveryID: deliveryID,
+                roomID: roomID,
+                eventID: eventID,
+                roomSequence: roomSequence,
+                admitText: admitText
+            )
+        }
+    }
+
     public func claim(deliveryID: Int, claimID: String) async throws -> MailboxClaimTransportResult {
         let url = URL(string: origin.value + "/api/v1/mailbox/claim")!
         var headers = [
@@ -302,14 +334,18 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
             "Content-Type": "application/json",
         ]
         headers.merge(try await authorizationHeaders("POST", url)) { _, new in new }
-        var bodyObject: [String: Any] = [
-            "type": "message.created",
-            "idempotency_key": idempotencyKey,
-            "body": ["text": text],
+        var bodyFields: [String: Any] = [
+            "text": text,
+            "replyRequired": false,
         ]
         if let inReplyToEventID {
-            bodyObject["in_reply_to_event_id"] = inReplyToEventID
+            bodyFields["inReplyToEventId"] = inReplyToEventID
         }
+        let bodyObject: [String: Any] = [
+            "type": "message.created",
+            "idempotency_key": idempotencyKey,
+            "body": bodyFields,
+        ]
         let body = try JSONSerialization.data(withJSONObject: bodyObject, options: [.sortedKeys])
         let response = try await transport.send(MeshHTTPRequest(method: "POST", url: url, headers: headers, body: body))
         if response.statusCode == 409 {
@@ -366,6 +402,40 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
             throw MailboxTransactionServiceError.invalidUpstreamResponse
         }
     }
+
+    private static func admitText(from item: [String: Any]) -> String? {
+        if let text = item["text"] as? String, !text.isEmpty, text.utf8.count <= 32 * 1024 {
+            return text
+        }
+        if let body = item["body"] as? [String: Any],
+           let text = body["text"] as? String,
+           !text.isEmpty,
+           text.utf8.count <= 32 * 1024
+        {
+            return text
+        }
+        if let event = item["event"] as? [String: Any] {
+            if let text = event["text"] as? String, !text.isEmpty, text.utf8.count <= 32 * 1024 {
+                return text
+            }
+            if let body = event["body"] as? [String: Any],
+               let text = body["text"] as? String,
+               !text.isEmpty,
+               text.utf8.count <= 32 * 1024
+            {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return number.intValue
+        }
+        return nil
+    }
 }
 
 /// In-memory transport for crash / contract tests (no message text stored).
@@ -374,6 +444,9 @@ public final class RecordingMailboxTransactionTransport: MailboxTransactionTrans
     public private(set) var claims: [(Int, String)] = []
     public private(set) var replies: [(roomID: String, key: String, textLength: Int)] = []
     public private(set) var acks: [Int] = []
+    public private(set) var listCalls = 0
+    public var pendingCandidates: [MailboxDeliveryCandidate] = []
+    public var listHandler: (@Sendable () throws -> [MailboxDeliveryCandidate])?
     public var claimHandler: (@Sendable (Int, String) throws -> MailboxClaimTransportResult)?
     public var replyHandler: (@Sendable (String, String, String, String?) throws -> MailboxReplyTransportResult)?
     public var lookupHandler: (@Sendable (String, String) throws -> String?)?
@@ -381,6 +454,14 @@ public final class RecordingMailboxTransactionTransport: MailboxTransactionTrans
     private var committedReplies: [String: (text: String, eventID: String)] = [:]
 
     public init() {}
+
+    public func listPendingCandidates() async throws -> [MailboxDeliveryCandidate] {
+        try lock.withLock {
+            listCalls += 1
+            if let listHandler { return try listHandler() }
+            return pendingCandidates
+        }
+    }
 
     public func claim(deliveryID: Int, claimID: String) async throws -> MailboxClaimTransportResult {
         try lock.withLock {

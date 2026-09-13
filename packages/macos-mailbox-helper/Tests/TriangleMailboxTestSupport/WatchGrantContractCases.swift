@@ -24,7 +24,8 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant status is secret-free", run: statusSecretFree),
             .init(name: "watch grant poll and resync mapping", run: pollAndResync),
             .init(name: "watch grant revoke clears local binding", run: revokeClearsBinding),
-            .init(name: "watch grant excludes mcp-interactive members", run: excludesInteractive),
+            .init(name: "watch grant excludes mcp-interactive actors", run: excludesInteractiveActor),
+            .init(name: "watch grant allows mcp-interactive notify members", run: includesInteractiveMember),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
         ]
@@ -275,7 +276,7 @@ public enum WatchGrantContractCases {
         }
     }
 
-    public static func excludesInteractive() async throws {
+    public static func excludesInteractiveActor() async throws {
         let fixture = try await Fixture()
         try fixture.instances.setDeliveryMode(.mcpInteractive, profile: fixture.actorProfile)
         do {
@@ -287,6 +288,25 @@ public enum WatchGrantContractCases {
         } catch WatchGrantServiceError.interactiveDeliveryExcluded {
             return
         }
+    }
+
+    public static func includesInteractiveMember() async throws {
+        let fixture = try await Fixture()
+        try fixture.instances.setDeliveryMode(.mcpInteractive, profile: fixture.memberProfile)
+        let status = try await fixture.service.ensureGrant(
+            installationID: fixture.installationID,
+            actorProfile: fixture.actorProfile,
+            memberProfiles: [fixture.actorProfile, fixture.memberProfile]
+        )
+        try expect(status.state == "finalized", "interactive member grant was not finalized")
+        try expect(
+            status.agentIDs.contains(fixture.memberAgentID.value),
+            "mcp-interactive notify member missing from grant"
+        )
+        try expect(
+            status.agentIDs.contains(fixture.actorAgentID.value),
+            "event-driven actor missing from grant"
+        )
     }
 
     public static func failsClosedWithoutStore() async throws {

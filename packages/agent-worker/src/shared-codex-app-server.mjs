@@ -339,6 +339,14 @@ export function createTrustedTransactionProxyStub() {
         status: "idle",
       });
     },
+    async claimNext() {
+      return Object.freeze({
+        shouldStartModel: false,
+        transactionStuck: false,
+        open: null,
+        status: "idle",
+      });
+    },
     async claim() {
       throw createCodedError(
         "slice6_required",
@@ -482,6 +490,7 @@ export function createSharedCodexSession({
   transport,
   bindingStore = null,
   correlationStore = createMemoryCorrelationStore(),
+  transactionProxy = null,
   requestTimeoutMs = 30_000,
   maxQueue = 8,
   maxConsecutiveFailures = 5,
@@ -495,6 +504,11 @@ export function createSharedCodexSession({
   positiveInteger(requestTimeoutMs, "requestTimeoutMs", 1);
   positiveInteger(maxQueue, "maxQueue", 1);
   positiveInteger(maxConsecutiveFailures, "maxConsecutiveFailures", 1);
+  if (transactionProxy != null) {
+    if (typeof transactionProxy.reply !== "function" || typeof transactionProxy.ack !== "function") {
+      throw new TypeError("transactionProxy.reply and transactionProxy.ack are required");
+    }
+  }
 
   let phase = validated.enabled ? "disconnected" : "disabled";
   let lastSuccessfulWakeAt = null;
@@ -765,6 +779,57 @@ export function createSharedCodexSession({
     return result;
   }
 
+  function extractAssistantText(turn) {
+    const items = [];
+    const pushText = (value) => {
+      if (typeof value === "string" && value.trim().length > 0) items.push(value.trim());
+    };
+    const walk = (node) => {
+      if (node == null) return;
+      if (typeof node === "string") {
+        pushText(node);
+        return;
+      }
+      if (Array.isArray(node)) {
+        for (const child of node) walk(child);
+        return;
+      }
+      if (typeof node !== "object") return;
+      if (typeof node.text === "string") pushText(node.text);
+      if (typeof node.content === "string") pushText(node.content);
+      if (Array.isArray(node.content)) walk(node.content);
+      if (Array.isArray(node.items)) walk(node.items);
+      if (Array.isArray(node.output)) walk(node.output);
+      if (Array.isArray(node.message?.content)) walk(node.message.content);
+    };
+    walk(turn?.assistantMessage);
+    walk(turn?.assistant_message);
+    walk(turn?.output);
+    walk(turn?.items);
+    walk(turn?.messages);
+    const unique = [...new Set(items)];
+    return unique.join("\n").trim();
+  }
+
+  async function settleMeshTransaction(item, turn) {
+    if (!transactionProxy) return;
+    const roomId = item.roomId;
+    const text = extractAssistantText(turn);
+    if (typeof roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(roomId)) {
+      throw createCodedError("mesh_reply_context_missing", "roomId missing for MESH reply");
+    }
+    if (!text) {
+      throw createCodedError("assistant_text_missing", "completed turn had no assistant text for MESH reply");
+    }
+    assertNoSecretMaterial({ text }, "mesh reply");
+    await transactionProxy.reply({
+      roomId,
+      text,
+      inReplyToEventId: item.inboundEventId ?? null,
+    });
+    await transactionProxy.ack();
+  }
+
   async function pumpQueue() {
     if (draining || stopped) return;
     draining = true;
@@ -783,6 +848,7 @@ export function createSharedCodexSession({
           if (turn?.status !== "completed") {
             throw createCodedError("turn_failed", "turn did not complete successfully");
           }
+          await settleMeshTransaction(item, turn);
           consecutiveFailures = 0;
           retryCount = 0;
           lastSuccessfulWakeAt = now();
@@ -794,6 +860,16 @@ export function createSharedCodexSession({
           consecutiveFailures += 1;
           retryCount += 1;
           lastError = error;
+          if (item.deliveryId) {
+            try {
+              await correlationStore.update(item.deliveryId, {
+                status: "failed",
+                error: { code: error?.code ?? "error", message: error?.message },
+              });
+            } catch {
+              /* ignore correlation write failures */
+            }
+          }
           if (consecutiveFailures >= maxConsecutiveFailures) {
             setPhase("transaction_stuck");
             logger.error?.("triangle_app_server_transaction_stuck", {
@@ -814,17 +890,37 @@ export function createSharedCodexSession({
    * Admit work into the bound chat. Queues when busy; does not steer/interrupt.
    * Hints must be coalesced by the wake client; distinct deliveries stay distinct.
    */
-  async function admit({ deliveryId, text, input = null } = {}) {
+  async function admit({
+    deliveryId,
+    text,
+    input = null,
+    roomId = null,
+    inboundEventId = null,
+  } = {}) {
     if (stopped) throw createCodedError("stopped", "session is stopped");
     if (!validated.enabled) {
       setPhase("disabled");
       return { status: "disabled" };
     }
     if (phase === "transaction_stuck") {
-      return { status: "transaction_stuck" };
+      throw createCodedError("transaction_stuck", "session is stuck after repeated turn failures");
     }
     if (phase === "submission_unknown") {
-      return { status: "submission_unknown" };
+      // turn/start timed out once; soft-returning here permanently wedged the
+      // LaunchAgent session (claim succeeded, admit never retried). Reconnect
+      // and clear the unknown state before accepting new admissions.
+      logger.error?.("triangle_app_server_submission_unknown_recover", {
+        threadId: validated.threadId,
+        deliveryId,
+      });
+      await reconnect();
+      if (phase === "submission_unknown" || phase === "transaction_stuck") {
+        throw createCodedError(
+          "submission_unknown",
+          "session still unknown after reconnect",
+          { outcome: "unknown" },
+        );
+      }
     }
     if (typeof deliveryId !== "string" || deliveryId.length === 0) {
       throw new TypeError("deliveryId is required");
@@ -845,9 +941,18 @@ export function createSharedCodexSession({
       deliveryId,
       threadId: validated.threadId,
       status: "queued",
+      roomId: roomId ?? null,
+      inboundEventId: inboundEventId ?? null,
     });
     const outcome = await new Promise((resolve, reject) => {
-      queue.push({ deliveryId, input: turnInput, resolve, reject });
+      queue.push({
+        deliveryId,
+        input: turnInput,
+        roomId: roomId ?? null,
+        inboundEventId: inboundEventId ?? null,
+        resolve,
+        reject,
+      });
       queueDepth = queue.length;
       if (phase === "subscribed" || phase === "connected" || phase === "pending") {
         setPhase("pending");
@@ -959,7 +1064,12 @@ export function createAppServerWakeBridge({
       throw new TypeError("resolveDelivery must return { deliveryId, text } or null");
     }
     assertNoSecretMaterial({ deliveryId, text }, "delivery");
-    return session.admit({ deliveryId, text });
+    return session.admit({
+      deliveryId,
+      text,
+      roomId: delivery.roomId ?? null,
+      inboundEventId: delivery.inboundEventId ?? null,
+    });
   }
 
   return Object.freeze({
@@ -1006,12 +1116,14 @@ export function createAppServerWakeBridge({
           try {
             return await handleWake(wake);
           } catch (error) {
+            // Admit failures must not tear down the bound wake listener; the
+            // next notify/reconcile still needs a live App Server bridge.
             logger.error?.("triangle_app_server_wake_admit_failed", {
               code: error?.code,
               message: error?.message,
               instanceId: wake?.instanceId,
             });
-            throw error;
+            return { status: "failed", code: error?.code ?? null };
           }
         },
       });

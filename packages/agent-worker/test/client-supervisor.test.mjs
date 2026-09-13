@@ -638,7 +638,9 @@ test("supervisor bootstraps opt-in appServerWake beside workers", async () => {
   assert.equal(supervisor.appServerWake.binding.threadId, "01a06f9f-2db1-7143-b8b9-08c634cc7999");
   const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
   assert.equal(bridgeStarted, true);
-  assert.deepEqual(ensured, ["event-codex"]);
+  // appServer-only supervisors do not ensure here: grant refresh requires an
+  // event-driven actor (wakeConfig), and the bridge itself skips ensure.
+  assert.deepEqual(ensured, []);
   assert.equal(result.appServerWake?.cycles, 1);
 });
 

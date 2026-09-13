@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -379,6 +379,20 @@ test("atomic file cursor store survives reload after a durable write", async () 
     await store.write(17);
     const reloaded = createAtomicFileCursorStore({ filePath: fixture.filePath });
     assert.equal(await reloaded.read(), 17);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("atomic file cursor store accepts legacy bare-integer seed files", async () => {
+  const fixture = tempCursorPath();
+  try {
+    mkdirSync(path.dirname(fixture.filePath), { recursive: true, mode: 0o700 });
+    writeFileSync(fixture.filePath, "0\n", { mode: 0o600 });
+    const store = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    assert.equal(await store.read(), 0);
+    await store.write(3);
+    assert.equal(JSON.parse(readFileSync(fixture.filePath, "utf8")).cursor, 3);
   } finally {
     fixture.cleanup();
   }

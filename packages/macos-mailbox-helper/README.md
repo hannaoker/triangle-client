@@ -251,7 +251,7 @@ the trusted transaction proxy (Slice 6):
 5. `mesh.mailbox.ack` — finalize the open delivery only
 
 Coordinator-delivery (Hermes) uses helper CLI
-`transaction-claim` / `transaction-reply` / `transaction-ack` instead of
+`transaction-claim` / `transaction-claim-next` / `transaction-reply` / `transaction-ack` instead of
 harness-held MESH credentials.
 
 ### Sender prompt pattern

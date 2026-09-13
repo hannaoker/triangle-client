@@ -186,3 +186,46 @@ test("ensureHelperWatchGrant invokes watch-ensure and fails closed on non-zero e
       && error.operatorAction === "repair_workload_auth",
   );
 });
+
+test("ensureHelperWatchGrant reuses finalized grant when replacement is unauthorized", async () => {
+  const calls = [];
+  const result = await ensureHelperWatchGrant({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    actorProfile: "bob",
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (args[0] === "watch-ensure") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "watch_operation_failed",
+            code: "watch_rejected",
+            gate: "network",
+            operatorAction: "retry_network",
+            safeToRetry: false,
+            mustNotReregister: true,
+            detail: "MESH rejected the watch grant request.",
+            rejectedCode: "replacement_unauthorized",
+            rejectedStatusCode: 401,
+            operatorNotes: [],
+          }) + "\n",
+        };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          installationId: "inst_N7VhDq3mQ2",
+          state: "finalized",
+          listenerReady: true,
+          memberCount: 1,
+        }) + "\n",
+        stderr: "",
+      };
+    },
+  });
+  assert.deepEqual(calls, ["watch-ensure", "watch-status"]);
+  assert.equal(result.ensured, true);
+  assert.equal(result.reusedExisting, true);
+});

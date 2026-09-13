@@ -165,9 +165,15 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const removed = [
+    "packages/agent-worker/src/authenticated-app-server-transport.mjs",
     "packages/agent-worker/src/client-supervisor-cli.mjs",
     "packages/agent-worker/src/client-supervisor.mjs",
     "packages/agent-worker/src/concurrency-gate.mjs",
+    "packages/agent-worker/src/helper-transaction-proxy.mjs",
+    "packages/agent-worker/src/helper-watch-transport.mjs",
+    "packages/agent-worker/src/profile-scheduler.mjs",
+    "packages/agent-worker/src/shared-codex-app-server.mjs",
+    "packages/agent-worker/src/wake-client.mjs",
   ];
   for (const relative of removed) {
     delete manifest.artifacts[relative];

@@ -29,6 +29,8 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive delivery mode is omitted from coordinator bootstrap", run: mcpInteractiveDeliveryOmitted),
         .init(name: "event-driven profiles launch via eventWake bootstrap not worker instances", run: eventDrivenWakeBootstrap),
         .init(name: "mcp-interactive stays excluded from eventWake membership", run: mcpInteractiveExcludedFromEventWake),
+        .init(name: "mcp-interactive emits appServerWake when binding present", run: mcpInteractiveAppServerWakeBootstrap),
+        .init(name: "mcp-interactive without binding stays omitted", run: mcpInteractiveAppServerBindingMissing),
         .init(name: "invalid durable installation identity fails closed", run: invalidInstallationIdentityFailsClosed),
         .init(name: "concurrent durable installation identity resolution is stable", run: concurrentInstallationIdentityResolutionIsStable),
     ]
@@ -326,6 +328,50 @@ public enum ClientSupervisorContractCases {
         try expect(!eventWake.profiles.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into eventWake profiles")
         try expect(!eventWake.drains.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into eventWake drains")
         try expect(!bootstrap.instances.contains { $0.instanceId == interactiveID }, "mcp-interactive leaked into worker instances")
+        try expect(bootstrap.appServerWake == nil, "appServerWake emitted without binding")
+    }
+
+    public static func mcpInteractiveAppServerWakeBootstrap() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "interactive-codex", adapter: .codex, digit: "3"),
+            ],
+            provisionAppServerBinding: true
+        )
+        try fixture.instanceStore.setDeliveryMode(.mcpInteractive, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        let interactive = fixture.specifications[1]
+        let interactiveID = ClientInstanceID.derive(profile: interactive.profile).value
+        let appServerWake = try require(bootstrap.appServerWake, "appServerWake missing")
+        try expect(appServerWake.actorProfile == interactive.profile.value, "wrong appServerWake actor")
+        try expect(appServerWake.binding.instanceId == interactiveID, "binding instance mismatch")
+        try expect(appServerWake.binding.agentId == interactive.agentID.value, "binding agent mismatch")
+        try expect(appServerWake.ensureBeforeWatch == true, "ensureBeforeWatch should be true")
+        try expect(appServerWake.authTokenFile != nil, "authTokenFile missing")
+        try expect(appServerWake.authTokenEnv == nil, "authTokenEnv should be null")
+        try expect(!bootstrap.instances.contains { $0.instanceId == interactiveID }, "interactive leaked into workers")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let raw = String(decoding: encoded, as: UTF8.self)
+        try expect(!raw.contains("mesh_watch_"), "watch credential leaked into bootstrap")
+        try expect(!raw.contains(interactive.token), "interactive mailbox token leaked into appServerWake")
+    }
+
+    public static func mcpInteractiveAppServerBindingMissing() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "interactive-codex", adapter: .codex, digit: "3"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.mcpInteractive, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        let interactiveID = ClientInstanceID.derive(profile: fixture.specifications[1].profile).value
+        try expect(launch.omitted.contains {
+            $0.instanceID == interactiveID && $0.reasonCode == "app_server_binding_missing"
+        }, "missing binding was not recorded")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.appServerWake == nil, "appServerWake emitted without binding file")
     }
 
     public static func noEligibleProfile() async throws {
@@ -550,7 +596,8 @@ private final class SupervisorFixture: @unchecked Sendable {
         specifications: [InstanceSpecification],
         events: EventLog = EventLog(),
         resolverFailureAt: Int? = nil,
-        coordinatorFails: Bool = false
+        coordinatorFails: Bool = false,
+        provisionAppServerBinding: Bool = false
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
@@ -563,6 +610,9 @@ private final class SupervisorFixture: @unchecked Sendable {
         let helperBinary = helperRoot.appendingPathComponent("triangle-mailbox")
         FileManager.default.createFile(atPath: helperBinary.path, contents: Data("#!/bin/sh\nexit 0\n".utf8), attributes: [.posixPermissions: 0o700])
         let cursorURL = helperRoot.appendingPathComponent("wake-cursor.json")
+        let appServerBindingURL = helperRoot.appendingPathComponent("app-server-binding.json")
+        let appServerWakeCursorURL = helperRoot.appendingPathComponent("app-server-wake-cursor.json")
+        let appServerAuthTokenURL = helperRoot.appendingPathComponent("app-server-ws.token")
         let installationID = try InstallationID("inst_N7VhDq3mQ2")
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
@@ -588,6 +638,29 @@ private final class SupervisorFixture: @unchecked Sendable {
                 reasonCode: "identity_verified"
             ))
         }
+        if provisionAppServerBinding {
+            let interactive = try require(
+                specifications.first(where: { $0.profile.value.contains("interactive") }),
+                "interactive specification required for app-server binding"
+            )
+            let instanceId = ClientInstanceID.derive(profile: interactive.profile).value
+            let bindingObject: [String: Any] = [
+                "adapterVersion": "1",
+                "enabled": true,
+                "installationId": installationID.value,
+                "instanceId": instanceId,
+                "agentId": interactive.agentID.value,
+                "roomScope": "room_" + String(repeating: "a", count: 32),
+                "serverIdentity": "codex-app-server/test",
+                "endpoint": "ws://127.0.0.1:9999/rpc",
+                "threadId": "01a06f9f-2db1-7143-b8b9-08c634cc7999",
+            ]
+            let bindingData = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
+            try bindingData.write(to: appServerBindingURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: appServerBindingURL.path)
+            try Data("desktop-canary-token\n".utf8).write(to: appServerAuthTokenURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: appServerAuthTokenURL.path)
+        }
         credentials = RecordingMultiCredentialStore(bindings: bindings, events: events)
         let gate = VerifiedCredentialGate(
             store: credentials,
@@ -602,7 +675,10 @@ private final class SupervisorFixture: @unchecked Sendable {
             processRunner: process,
             installationIdentity: InMemoryClientInstallationIdentityStore(installationID: installationID),
             helperExecutableURL: helperBinary,
-            wakeCursorURL: cursorURL
+            wakeCursorURL: cursorURL,
+            appServerBindingURL: appServerBindingURL,
+            appServerWakeCursorURL: appServerWakeCursorURL,
+            appServerAuthTokenURL: appServerAuthTokenURL
         )
     }
 
@@ -732,6 +808,7 @@ private struct TestBootstrap: Decodable {
     let maxConcurrentReasoners: Int
     let instances: [TestBootstrapInstance]
     let eventWake: TestEventWake?
+    let appServerWake: TestAppServerWake?
 }
 private struct TestBootstrapInstance: Decodable {
     let instanceId: String
@@ -753,6 +830,28 @@ private struct TestEventWake: Decodable {
 private struct TestEventWakeProfile: Decodable {
     let instanceId: String
     let agentId: String
+}
+private struct TestAppServerWake: Decodable {
+    let installationId: String
+    let helperPath: String
+    let cursorPath: String
+    let bindingPath: String
+    let actorProfile: String
+    let ensureBeforeWatch: Bool
+    let authTokenFile: String?
+    let authTokenEnv: String?
+    let binding: TestAppServerBinding
+}
+private struct TestAppServerBinding: Decodable {
+    let adapterVersion: String
+    let enabled: Bool
+    let installationId: String
+    let instanceId: String
+    let agentId: String
+    let roomScope: String
+    let serverIdentity: String
+    let endpoint: String
+    let threadId: String
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

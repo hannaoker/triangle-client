@@ -15,6 +15,7 @@ import {
   createCapabilityTokenAuthResolver,
   createProductionAppServerDeliveryResolver,
   createSharedCodexSession,
+  createTrustedTransactionProxy,
   validateBinding,
 } from "./shared-codex-app-server.mjs";
 
@@ -399,10 +400,24 @@ export function createClientSupervisor({
       resolveAuth: () => authResolver.resolveAuth(),
     });
     const bindingStore = createBindingStore({ filePath: appServerConfig.bindingPath });
+    const deliveryResolver = typeof resolveDelivery === "function"
+      ? resolveDelivery
+      : createProductionAppServerDeliveryResolver({
+        helperPath: appServerConfig.helperPath,
+        profile: appServerConfig.actorProfile,
+        // mcp-interactive App Server claims own the coordinator-delivery lane.
+        protocol: "coordinator-delivery-v1",
+      });
+    const transactionProxy = createTrustedTransactionProxy({
+      helperPath: appServerConfig.helperPath,
+      profile: appServerConfig.actorProfile,
+      protocol: "coordinator-delivery-v1",
+    });
     const session = createSession({
       binding: appServerConfig.binding,
       transport: appTransport,
       bindingStore,
+      transactionProxy,
       logger,
     });
     const watchTransport = createWatchTransport({
@@ -410,12 +425,6 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
-    const deliveryResolver = typeof resolveDelivery === "function"
-      ? resolveDelivery
-      : createProductionAppServerDeliveryResolver({
-        helperPath: appServerConfig.helperPath,
-        profile: appServerConfig.actorProfile,
-      });
     appServerBridge = createWakeBridge({
       binding: appServerConfig.binding,
       session,
@@ -424,6 +433,8 @@ export function createClientSupervisor({
       helperPath: appServerConfig.helperPath,
       installationId: appServerConfig.installationId,
       actorProfile: appServerConfig.actorProfile,
+      // Supervisor already refreshed the grant with an event-driven actor.
+      // Bridge must not re-ensure using the mcp-interactive claim profile.
       ensureBeforeWatch: false,
       resolveDelivery: deliveryResolver,
       logger,
@@ -464,12 +475,13 @@ export function createClientSupervisor({
           actorProfile: wakeConfig.actorProfile,
           signal,
         });
-      }
-      if (appServerBridge && appServerConfig.ensureBeforeWatch) {
+      } else if (appServerBridge && appServerConfig.ensureBeforeWatch && wakeConfig?.actorProfile) {
+        // App Server actorProfile is mcp-interactive (claim/reply owner). Grant
+        // ensure must use an event-driven actor so notify members can refresh.
         await ensureWatchGrant({
           helperPath: appServerConfig.helperPath,
           installationId: appServerConfig.installationId,
-          actorProfile: appServerConfig.actorProfile,
+          actorProfile: wakeConfig.actorProfile,
           signal,
         });
       }
@@ -486,24 +498,57 @@ export function createClientSupervisor({
         }
       }));
 
+      // Keep wake loops independent and durable: a listener failure must not
+      // resolve Promise.all and exit the supervisor (LaunchAgent KeepAlive thrash).
+      // Retry until abort instead of returning.
       const wakeLoop = wakeRuntime
-        ? wakeRuntime.start({ signal }).catch((error) => {
-          if (signal?.aborted || error?.name === "AbortError") return null;
-          logger.error?.("triangle_client_event_wake_failed", {
-            error: "Event-driven wake listener failed",
-          });
-          throw error;
-        })
+        ? (async () => {
+          while (!signal?.aborted) {
+            try {
+              return await wakeRuntime.start({ signal });
+            } catch (error) {
+              if (signal?.aborted || error?.name === "AbortError") return null;
+              logger.error?.("triangle_client_event_wake_failed", {
+                error: "Event-driven wake listener failed",
+                code: error?.code,
+                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
+              });
+              await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 5_000);
+                signal?.addEventListener?.("abort", () => {
+                  clearTimeout(timer);
+                  resolve();
+                }, { once: true });
+              });
+            }
+          }
+          return null;
+        })()
         : Promise.resolve(null);
 
       const appServerLoop = appServerBridge
-        ? appServerBridge.start({ signal }).catch((error) => {
-          if (signal?.aborted || error?.name === "AbortError") return null;
-          logger.error?.("triangle_client_app_server_wake_failed", {
-            error: "App Server bound wake listener failed",
-          });
-          throw error;
-        })
+        ? (async () => {
+          while (!signal?.aborted) {
+            try {
+              return await appServerBridge.start({ signal });
+            } catch (error) {
+              if (signal?.aborted || error?.name === "AbortError") return null;
+              logger.error?.("triangle_client_app_server_wake_failed", {
+                error: "App Server bound wake listener failed",
+                code: error?.code,
+                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
+              });
+              await new Promise((resolve) => {
+                const timer = setTimeout(resolve, 5_000);
+                signal?.addEventListener?.("abort", () => {
+                  clearTimeout(timer);
+                  resolve();
+                }, { once: true });
+              });
+            }
+          }
+          return null;
+        })()
         : Promise.resolve(null);
 
       const [instances, wakeResult, appServerResult] = await Promise.all([

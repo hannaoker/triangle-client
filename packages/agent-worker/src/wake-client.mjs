@@ -54,10 +54,15 @@ export function createAtomicFileCursorStore({ filePath, initial = 0 } = {}) {
     try {
       const raw = await readFile(resolvedPath, "utf8");
       const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object") {
+      // Accept {"cursor":N} (canonical) or a bare non-negative integer (legacy
+      // host seed that used to write "0\\n").
+      if (typeof parsed === "number") {
+        cursor = positiveInteger(parsed, "cursor", 0);
+      } else if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        cursor = positiveInteger(parsed.cursor, "cursor", 0);
+      } else {
         throw new TypeError("wake cursor file is invalid");
       }
-      cursor = positiveInteger(parsed.cursor, "cursor", 0);
     } catch (error) {
       if (error?.code === "ENOENT") {
         cursor = positiveInteger(initial, "initial", 0);
