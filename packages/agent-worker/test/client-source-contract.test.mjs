@@ -131,3 +131,68 @@ test("first-add launch control gates retirement and polling on readiness and act
   requirePatterns(source, [/ready\.json/, /parentPid/, /configDigest/, /waitForReadiness/, /restoreLegacy/, /activationMarker/, /stabilityMilliseconds/], "first-add readiness control");
   assert.match(source, /waitForReadiness[\s\S]*retireLegacy[\s\S]*writeActivationMarker/);
 });
+
+test("release bundle and E2E runbook define a coherent public install story", () => {
+  const bundle = doc("release-bundle.md");
+  requirePatterns(bundle, [
+    /Developer ID/i,
+    /local-ad-hoc/i,
+    /signingMode/,
+    /does not|does \*\*not\*\*/i,
+    /stable distributed Keychain/i,
+    /Application Support\/The Triangle/,
+    /dev\.thetriangle\.client/,
+    /mesh_|mesh_watch_/,
+    /ChatGPT\.app/,
+    /check-release-readiness\.sh/,
+  ], "release bundle");
+  assert.match(bundle, /not invent|Do not invent|Never invent/i);
+
+  const runbook = doc("e2e-operator-runbook.md");
+  requirePatterns(runbook, [
+    /install-macos-mailbox-helper\.sh --install-client/,
+    /enroll/i,
+    /stdin/i,
+    /prepare-runtime/,
+    /agent add/,
+    /event-driven/,
+    /watch-ensure/,
+    /watch-status/,
+    /mcp-interactive/,
+    /codex-desktop-wake-handoff/,
+    /developer_id/,
+    /not claimed from Linux|must not claim.*Linux|not executable from\s+Linux/i,
+  ], "e2e operator runbook");
+
+  const workflow = doc("release-workflow.md");
+  requirePatterns(workflow, [
+    /Release readiness checklist/,
+    /check-release-readiness\.sh/,
+    /verify-secret-boundaries\.sh/,
+    /Phase 2.*Complete/i,
+  ], "release workflow");
+
+  assert.ok(existsSync(path.join(root, "scripts/release/check-release-readiness.sh")));
+  assert.ok(existsSync(path.join(root, "scripts/release/verify-secret-boundaries.sh")));
+});
+
+test("release readiness docs mode passes and public mode fails closed without signing env", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const script = path.join(root, "scripts/release/check-release-readiness.sh");
+  const docs = spawnSync("/bin/bash", [script, "--mode", "docs"], { encoding: "utf8", env: process.env });
+  assert.equal(docs.status, 0, docs.stderr || docs.stdout);
+  assert.match(docs.stdout, /Release readiness PASSED for mode=docs/);
+
+  const publicMode = spawnSync("/bin/bash", [script, "--mode", "public"], {
+    encoding: "utf8",
+    env: { ...process.env, TRIANGLE_DEVELOPER_ID: "", TRIANGLE_DEVELOPER_TEAM_ID: "" },
+  });
+  assert.notEqual(publicMode.status, 0);
+  assert.match(`${publicMode.stdout}${publicMode.stderr}`, /TRIANGLE_DEVELOPER_ID/);
+
+  const adhoc = spawnSync("/bin/bash", [script, "--mode", "adhoc-dev"], {
+    encoding: "utf8",
+    env: { ...process.env, TRIANGLE_ACK_ADHOC_NON_PUBLIC: "" },
+  });
+  assert.notEqual(adhoc.status, 0);
+});

@@ -57,10 +57,20 @@ CLI never shows or exports a token. LaunchAgent plists, profile records,
 subprocess arguments, adapter environments, model directories, logs, and
 chatbot transcripts are not credential stores.
 
+## Release package and E2E runbook
+
+- [Release bundle](release-bundle.md) — what is installed where, signing vs
+  ad-hoc, first-start, upgrade, uninstall, and security boundaries
+- [E2E operator runbook](e2e-operator-runbook.md) — clean-Mac path from install
+  through enroll, runtime, event-driven watch, and App Server wake pointers
+- [Release workflow](release-workflow.md) — risk-based gates and the release
+  readiness checklist (`scripts/release/check-release-readiness.sh`)
+
 ## Install
 
 Public installation requires the reviewed Developer ID and team settings
-described in the [macOS helper guide](../../packages/macos-mailbox-helper/README.md).
+described in the [macOS helper guide](../../packages/macos-mailbox-helper/README.md)
+and [release-bundle.md](release-bundle.md).
 Install both signed command-line tools and the single service:
 
 ```sh
