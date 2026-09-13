@@ -109,6 +109,16 @@ enum TriangleMailboxCLI {
                  .transactionAck, .transactionAbandon, .transactionRecordFailure:
                 try await runTransaction(command)
             }
+        } catch CommandParseError.helpRequested(let command) {
+            do {
+                let rendered = try WatchCommandHelpRenderer.render(WatchCommandHelp(command: command))
+                FileHandle.standardOutput.write(rendered.stdout)
+                exit(rendered.exitCode)
+            } catch {
+                let rendered = CLIOutputRenderer.localValidationFailure
+                FileHandle.standardError.write(rendered.stderr)
+                exit(rendered.exitCode)
+            }
         } catch is CommandParseError {
             let rendered = CLIOutputRenderer.localValidationFailure
             FileHandle.standardOutput.write(rendered.stdout)
@@ -125,6 +135,8 @@ enum TriangleMailboxCLI {
         } catch MailboxTransactionServiceError.unverifiedReplyConflict {
             writeJSON(["error": "unverified_reply_conflict"])
             exit(5)
+        } catch let error as WatchGrantServiceError {
+            renderWatchFailure(error)
         } catch {
             let rendered = CLIOutputRenderer.operationFailure
             FileHandle.standardOutput.write(rendered.stdout)
@@ -306,44 +318,54 @@ enum TriangleMailboxCLI {
             instanceStore: FileClientInstanceStore()
         )
 
-        switch command.command {
-        case .watchEnsure:
-            guard let actor = command.profile else { throw CommandParseError.missingRequiredFlag }
-            let status = try await service.ensureGrant(installationID: installationID, actorProfile: actor)
-            let rendered = try WatchGrantOperatorStatusRenderer.render(status)
-            FileHandle.standardOutput.write(rendered.stdout)
-            if rendered.exitCode != 0 { exit(rendered.exitCode) }
-        case .watchStatus:
-            let status = try service.status(installationID: installationID)
-            let rendered = try WatchGrantOperatorStatusRenderer.render(status)
-            FileHandle.standardOutput.write(rendered.stdout)
-            if rendered.exitCode != 0 { exit(rendered.exitCode) }
-        case .watchRevoke:
-            let status = try await service.revoke(installationID: installationID)
-            let rendered = try WatchGrantOperatorStatusRenderer.render(status)
-            FileHandle.standardOutput.write(rendered.stdout)
-            if rendered.exitCode != 0 { exit(rendered.exitCode) }
-        case .watchPoll:
-            guard let cursor = command.cursor else { throw CommandParseError.missingRequiredFlag }
-            do {
-                let response = try await service.poll(installationID: installationID, cursor: cursor)
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys]
-                var stdout = try encoder.encode(response)
-                stdout.append(0x0a)
-                FileHandle.standardOutput.write(stdout)
-            } catch WatchGrantServiceError.resyncRequired(let restartCursor) {
-                let payload: [String: Any] = [
-                    "error": "resync_required",
-                    "restart_cursor": restartCursor,
-                ]
-                let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-                FileHandle.standardOutput.write(data)
-                FileHandle.standardOutput.write(Data([0x0a]))
-                exit(3)
+        do {
+            switch command.command {
+            case .watchEnsure:
+                guard let actor = command.profile else { throw CommandParseError.missingRequiredFlag }
+                let status = try await service.ensureGrant(installationID: installationID, actorProfile: actor)
+                let rendered = try WatchGrantOperatorStatusRenderer.render(status)
+                FileHandle.standardOutput.write(rendered.stdout)
+                if rendered.exitCode != 0 { exit(rendered.exitCode) }
+            case .watchStatus:
+                let status = try service.status(installationID: installationID)
+                let rendered = try WatchGrantOperatorStatusRenderer.render(status)
+                FileHandle.standardOutput.write(rendered.stdout)
+                if rendered.exitCode != 0 { exit(rendered.exitCode) }
+            case .watchRevoke:
+                let status = try await service.revoke(installationID: installationID)
+                let rendered = try WatchGrantOperatorStatusRenderer.render(status)
+                FileHandle.standardOutput.write(rendered.stdout)
+                if rendered.exitCode != 0 { exit(rendered.exitCode) }
+            case .watchPoll:
+                guard let cursor = command.cursor else { throw CommandParseError.missingRequiredFlag }
+                do {
+                    let response = try await service.poll(installationID: installationID, cursor: cursor)
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    var stdout = try encoder.encode(response)
+                    stdout.append(0x0a)
+                    FileHandle.standardOutput.write(stdout)
+                } catch WatchGrantServiceError.resyncRequired(let restartCursor) {
+                    let payload: [String: Any] = [
+                        "error": "resync_required",
+                        "restart_cursor": restartCursor,
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+                    FileHandle.standardOutput.write(data)
+                    FileHandle.standardOutput.write(Data([0x0a]))
+                    exit(3)
+                }
+            default:
+                throw CommandParseError.invalidCommand
             }
-        default:
-            throw CommandParseError.invalidCommand
+        } catch let error as CommandParseError {
+            throw error
+        } catch let error as WatchGrantServiceError {
+            renderWatchFailure(error)
+        } catch let error as VerifiedCredentialGateError {
+            renderWatchFailure(error)
+        } catch let error as ClientInstanceStoreError {
+            renderWatchFailure(error)
         }
     }
 
@@ -352,5 +374,17 @@ enum TriangleMailboxCLI {
         FileHandle.standardOutput.write(rendered.stdout)
         FileHandle.standardError.write(rendered.stderr)
         if rendered.exitCode != 0 { exit(rendered.exitCode) }
+    }
+
+    private static func renderWatchFailure(_ error: Error) -> Never {
+        do {
+            let rendered = try WatchGrantFailureRenderer.render(WatchGrantFailureDiagnosis.from(error))
+            FileHandle.standardError.write(rendered.stderr)
+            exit(rendered.exitCode)
+        } catch {
+            let rendered = CLIOutputRenderer.operationFailure
+            FileHandle.standardError.write(rendered.stderr)
+            exit(rendered.exitCode)
+        }
     }
 }

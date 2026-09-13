@@ -392,6 +392,7 @@ public enum CommandParseError: Error, Equatable, Sendable {
     case missingRequiredFlag
     case unknownOrDuplicateFlag
     case invalidFlagValue
+    case helpRequested(HelperCommand)
 }
 
 public enum CommandParser {
@@ -592,6 +593,10 @@ public enum CommandParser {
     }
 
     private static func parseWatchCommand(_ command: HelperCommand, _ flags: [String]) throws -> ParsedCommand {
+        if flags == ["--help"] || flags == ["-h"] {
+            throw CommandParseError.helpRequested(command)
+        }
+
         var flagValues: [String: String] = [:]
         var index = 0
         while index < flags.count {

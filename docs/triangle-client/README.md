@@ -71,6 +71,13 @@ For source development only, add `--local-ad-hoc`. Ad-hoc signing is not a
 public distribution identity and must not be used to claim a production-grade
 installation.
 
+If an older Application Support helper rejects `watch-ensure` as unknown
+(`local_validation_failed`), re-run the installer from current `main` and confirm
+`triangle-mailbox watch-ensure --help` returns `"supported":true`. See the
+[macOS helper guide](../../packages/macos-mailbox-helper/README.md) for upgrade
+steps, watch-ensure failure JSON (`code` / `gate` / `operatorAction`), and the
+`mcp-interactive` watch-membership exclusion.
+
 The installer builds and atomically installs:
 
 ```text

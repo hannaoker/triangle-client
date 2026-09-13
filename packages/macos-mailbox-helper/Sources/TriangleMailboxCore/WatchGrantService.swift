@@ -7,6 +7,7 @@ public enum WatchGrantServiceError: Error, Equatable, Sendable, CustomStringConv
     case actorNotDeclared
     case interactiveDeliveryExcluded
     case workloadAuthUnavailable
+    case workloadKeyMissing
     case credentialMissing
     case invalidCursor
     case rejected(statusCode: Int, code: String)
@@ -21,6 +22,7 @@ public enum WatchGrantServiceError: Error, Equatable, Sendable, CustomStringConv
         case .actorNotDeclared: "actor profile is not declared in the watch grant membership"
         case .interactiveDeliveryExcluded: "interactive delivery modes cannot join event-driven watch grants"
         case .workloadAuthUnavailable: "workload authentication is unavailable for watch grant operations"
+        case .workloadKeyMissing: "workload key material is missing for watch grant operations"
         case .credentialMissing: "watch grant credential is not installed"
         case .invalidCursor: "watch cursor is invalid"
         case .rejected(_, let code): "watch grant request was rejected (\(code))"
@@ -236,7 +238,14 @@ public struct WatchGrantService: Sendable {
         if let memberProfiles {
             profiles = memberProfiles
         } else if let instanceStore {
-            let instances = try instanceStore.list()
+            let instances: [ClientInstance]
+            do {
+                instances = try instanceStore.list()
+            } catch let error as ClientInstanceStoreError {
+                throw error
+            } catch {
+                throw ClientInstanceStoreError.unsafeStorage
+            }
             let interactive = instances.filter { $0.enabled && ($0.deliveryMode == .mcpInteractive) }
             if interactive.contains(where: { $0.profile == actorProfile }) {
                 throw WatchGrantServiceError.interactiveDeliveryExcluded
@@ -251,7 +260,14 @@ public struct WatchGrantService: Sendable {
         var members: [MemberBinding] = []
         for profile in profiles.sorted(by: { $0.value < $1.value }) {
             if let instanceStore {
-                let instance = try instanceStore.read(profile: profile)
+                let instance: ClientInstance
+                do {
+                    instance = try instanceStore.read(profile: profile)
+                } catch let error as ClientInstanceStoreError {
+                    throw error
+                } catch {
+                    throw ClientInstanceStoreError.unsafeStorage
+                }
                 if instance.deliveryMode == .mcpInteractive {
                     throw WatchGrantServiceError.interactiveDeliveryExcluded
                 }
@@ -314,11 +330,15 @@ public struct WorkloadWatchGrantAuthProvider: WatchGrantAuthProviding {
         let record: WorkloadKeyRecord
         do {
             record = try workloadKeyStore.read(for: profile)
+        } catch WorkloadKeyStoreError.itemNotFound {
+            throw WatchGrantServiceError.workloadKeyMissing
+        } catch WorkloadKeyStoreError.interactionNotAllowed, WorkloadKeyStoreError.keychainFailure {
+            throw WatchGrantServiceError.keychainUnavailable
         } catch {
             throw WatchGrantServiceError.workloadAuthUnavailable
         }
         guard record.workloadID != nil else {
-            throw WatchGrantServiceError.workloadAuthUnavailable
+            throw WatchGrantServiceError.workloadKeyMissing
         }
         let manager: WorkloadTokenManager
         do {
