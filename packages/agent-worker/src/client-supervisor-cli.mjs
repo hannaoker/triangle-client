@@ -15,7 +15,7 @@ const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -51,11 +51,34 @@ const EXACT_APP_SERVER_BINDING_KEYS = [
   "serverIdentity",
   "threadId",
 ];
+const EXACT_GROK_BOT_WAKE_KEYS = [
+  "actorProfile",
+  "binding",
+  "bindingPath",
+  "cursorPath",
+  "ensureBeforeWatch",
+  "helperPath",
+  "installationId",
+  "webhookKeyPath",
+  "webhookUrlPath",
+];
+const EXACT_GROK_BOT_BINDING_KEYS = [
+  "adapterVersion",
+  "agentId",
+  "enabled",
+  "grokAgentId",
+  "installationId",
+  "instanceId",
+  "profile",
+  "wakeMode",
+];
 const ACTIVATION_TIMEOUT_MS = 30_000;
 const BINDING_ENDPOINT = /^wss?:\/\/[^\s\0]{1,500}$/i;
 const BINDING_SERVER_IDENTITY = /^[A-Za-z0-9._:/+=-]{1,200}$/;
 const BINDING_THREAD_ID = /^[A-Za-z0-9._:-]{8,120}$/;
 const BINDING_ROOM_SCOPE = /^[A-Za-z0-9._:-]{1,120}$/;
+const GROK_AGENT_ID = /^[A-Za-z0-9._:-]{8,120}$/;
+const GROK_BOT_PROFILE = /^[A-Za-z0-9._-]{1,64}$/;
 
 function invalidBootstrap() {
   return new TypeError("Invalid Triangle Client bootstrap");
@@ -273,7 +296,27 @@ function appServerWakeOutsideValues(appServerWake) {
   ].filter((value) => typeof value === "string");
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake, appServerWake) {
+function grokBotWakeOutsideValues(grokBotWake) {
+  if (!grokBotWake) return [];
+  return [
+    grokBotWake.installationId,
+    grokBotWake.helperPath,
+    grokBotWake.cursorPath,
+    grokBotWake.bindingPath,
+    grokBotWake.webhookUrlPath,
+    grokBotWake.webhookKeyPath,
+    grokBotWake.actorProfile,
+    grokBotWake.binding?.adapterVersion,
+    grokBotWake.binding?.installationId,
+    grokBotWake.binding?.instanceId,
+    grokBotWake.binding?.agentId,
+    grokBotWake.binding?.profile,
+    grokBotWake.binding?.grokAgentId,
+    grokBotWake.binding?.wakeMode,
+  ].filter((value) => typeof value === "string");
+}
+
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -303,6 +346,9 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake) {
         }
       }
       for (const candidate of appServerWakeOutsideValues(appServerWake)) {
+        if (candidate.includes(secret)) throw invalidBootstrap();
+      }
+      for (const candidate of grokBotWakeOutsideValues(grokBotWake)) {
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
     }
@@ -422,6 +468,63 @@ function validateAppServerWake(appServerWake, seenWorkerIds, eventWake) {
   }
 }
 
+function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWake) {
+  if (!hasExactKeys(grokBotWake, EXACT_GROK_BOT_WAKE_KEYS)) throw invalidBootstrap();
+  if (
+    typeof grokBotWake.installationId !== "string"
+    || !INSTALLATION_ID.test(grokBotWake.installationId)
+    || typeof grokBotWake.helperPath !== "string"
+    || !grokBotWake.helperPath.startsWith("/")
+    || grokBotWake.helperPath.includes("\0")
+    || typeof grokBotWake.cursorPath !== "string"
+    || !grokBotWake.cursorPath.startsWith("/")
+    || grokBotWake.cursorPath.includes("\0")
+    || typeof grokBotWake.bindingPath !== "string"
+    || !grokBotWake.bindingPath.startsWith("/")
+    || grokBotWake.bindingPath.includes("\0")
+    || typeof grokBotWake.webhookUrlPath !== "string"
+    || !grokBotWake.webhookUrlPath.startsWith("/")
+    || grokBotWake.webhookUrlPath.includes("\0")
+    || typeof grokBotWake.webhookKeyPath !== "string"
+    || !grokBotWake.webhookKeyPath.startsWith("/")
+    || grokBotWake.webhookKeyPath.includes("\0")
+    || typeof grokBotWake.actorProfile !== "string"
+    || grokBotWake.actorProfile.length === 0
+    || grokBotWake.actorProfile.includes("\0")
+    || typeof grokBotWake.ensureBeforeWatch !== "boolean"
+    || !hasExactKeys(grokBotWake.binding, EXACT_GROK_BOT_BINDING_KEYS)
+  ) {
+    throw invalidBootstrap();
+  }
+  const binding = grokBotWake.binding;
+  if (
+    binding.adapterVersion !== "1"
+    || binding.enabled !== true
+    || typeof binding.installationId !== "string"
+    || !INSTALLATION_ID.test(binding.installationId)
+    || binding.installationId !== grokBotWake.installationId
+    || typeof binding.instanceId !== "string"
+    || !INSTANCE_ID.test(binding.instanceId)
+    || typeof binding.agentId !== "string"
+    || !AGENT_ID.test(binding.agentId)
+    || typeof binding.profile !== "string"
+    || !GROK_BOT_PROFILE.test(binding.profile)
+    || binding.profile !== grokBotWake.actorProfile
+    || typeof binding.grokAgentId !== "string"
+    || !GROK_AGENT_ID.test(binding.grokAgentId)
+    || binding.wakeMode !== "webhook"
+  ) {
+    throw invalidBootstrap();
+  }
+  if (
+    seenWorkerIds.has(binding.instanceId)
+    || eventWake?.profiles?.some((profile) => profile.instanceId === binding.instanceId)
+    || appServerWake?.binding?.instanceId === binding.instanceId
+  ) {
+    throw invalidBootstrap();
+  }
+}
+
 export function parseClientSupervisorBootstrap(text) {
   try {
     if (typeof text !== "string" || Buffer.byteLength(text) > MAX_BOOTSTRAP_BYTES) {
@@ -446,14 +549,28 @@ export function parseClientSupervisorBootstrap(text) {
     if (Object.hasOwn(bootstrap, "appServerWake")) {
       validateAppServerWake(bootstrap.appServerWake, seen, bootstrap.eventWake);
     }
+    if (Object.hasOwn(bootstrap, "grokBotWake")) {
+      validateGrokBotWake(
+        bootstrap.grokBotWake,
+        seen,
+        bootstrap.eventWake,
+        bootstrap.appServerWake,
+      );
+    }
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")
       && !Object.hasOwn(bootstrap, "appServerWake")
+      && !Object.hasOwn(bootstrap, "grokBotWake")
     ) {
       throw invalidBootstrap();
     }
-    assertMailboxTokensAreConfined(bootstrap.instances, bootstrap.eventWake, bootstrap.appServerWake);
+    assertMailboxTokensAreConfined(
+      bootstrap.instances,
+      bootstrap.eventWake,
+      bootstrap.appServerWake,
+      bootstrap.grokBotWake,
+    );
     return bootstrap;
   } catch {
     throw invalidBootstrap();
@@ -551,6 +668,7 @@ export async function runClientSupervisorCLI({
         instances: bootstrap.instances,
         eventWake: bootstrap.eventWake ?? null,
         appServerWake: bootstrap.appServerWake ?? null,
+        grokBotWake: bootstrap.grokBotWake ?? null,
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake

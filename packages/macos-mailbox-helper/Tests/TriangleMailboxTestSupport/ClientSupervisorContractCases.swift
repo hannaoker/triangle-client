@@ -31,6 +31,8 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive stays excluded from eventWake membership", run: mcpInteractiveExcludedFromEventWake),
         .init(name: "mcp-interactive emits appServerWake when binding present", run: mcpInteractiveAppServerWakeBootstrap),
         .init(name: "mcp-interactive without binding stays omitted", run: mcpInteractiveAppServerBindingMissing),
+        .init(name: "grok-bot emits grokBotWake when binding present", run: grokBotWakeBootstrap),
+        .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
         .init(name: "invalid durable installation identity fails closed", run: invalidInstallationIdentityFailsClosed),
         .init(name: "concurrent durable installation identity resolution is stable", run: concurrentInstallationIdentityResolutionIsStable),
     ]
@@ -374,6 +376,52 @@ public enum ClientSupervisorContractCases {
         try expect(bootstrap.appServerWake == nil, "appServerWake emitted without binding file")
     }
 
+    public static func grokBotWakeBootstrap() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "bob-grok", adapter: .grokBot, digit: "7"),
+            ],
+            provisionGrokBotBinding: true
+        )
+        try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "worker count wrong with grokBotWake")
+        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
+        let grokBotWake = try require(bootstrap.grokBotWake, "grokBotWake missing")
+        let bob = fixture.specifications[1]
+        let bobID = ClientInstanceID.derive(profile: bob.profile).value
+        try expect(grokBotWake.actorProfile == bob.profile.value, "wrong grokBotWake actor")
+        try expect(grokBotWake.binding.instanceId == bobID, "binding instance mismatch")
+        try expect(grokBotWake.binding.agentId == bob.agentID.value, "binding agent mismatch")
+        try expect(grokBotWake.binding.profile == bob.profile.value, "binding profile mismatch")
+        try expect(grokBotWake.binding.wakeMode == "webhook", "wakeMode should be webhook")
+        try expect(grokBotWake.ensureBeforeWatch == true, "ensureBeforeWatch should be true")
+        try expect(grokBotWake.webhookUrlPath.hasSuffix("grok-bot-webhook.url"), "webhook url path wrong")
+        try expect(grokBotWake.webhookKeyPath.hasSuffix("grok-bot-webhook.key"), "webhook key path wrong")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let raw = String(decoding: encoded, as: UTF8.self)
+        try expect(!raw.contains(bob.token), "bob mailbox token leaked into grokBotWake")
+        try expect(!raw.contains("webhook-secret-key"), "webhook key leaked into bootstrap")
+    }
+
+    public static func grokBotBindingMissing() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "bob-grok", adapter: .grokBot, digit: "7"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        let bobID = ClientInstanceID.derive(profile: fixture.specifications[1].profile).value
+        try expect(launch.omitted.contains {
+            $0.instanceID == bobID && $0.reasonCode == "grok_bot_binding_missing"
+        }, "missing grok-bot binding was not recorded")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.grokBotWake == nil, "grokBotWake emitted without binding file")
+    }
+
     public static func noEligibleProfile() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "bad-only", adapter: .codex, digit: "9", verificationFails: true),
@@ -597,7 +645,8 @@ private final class SupervisorFixture: @unchecked Sendable {
         events: EventLog = EventLog(),
         resolverFailureAt: Int? = nil,
         coordinatorFails: Bool = false,
-        provisionAppServerBinding: Bool = false
+        provisionAppServerBinding: Bool = false,
+        provisionGrokBotBinding: Bool = false
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
@@ -613,6 +662,10 @@ private final class SupervisorFixture: @unchecked Sendable {
         let appServerBindingURL = helperRoot.appendingPathComponent("app-server-binding.json")
         let appServerWakeCursorURL = helperRoot.appendingPathComponent("app-server-wake-cursor.json")
         let appServerAuthTokenURL = helperRoot.appendingPathComponent("app-server-ws.token")
+        let grokBotBindingURL = helperRoot.appendingPathComponent("grok-bot-binding.json")
+        let grokBotWakeCursorURL = helperRoot.appendingPathComponent("grok-bot-wake-cursor.json")
+        let grokBotWebhookURLPath = helperRoot.appendingPathComponent("grok-bot-webhook.url")
+        let grokBotWebhookKeyPath = helperRoot.appendingPathComponent("grok-bot-webhook.key")
         let installationID = try InstallationID("inst_N7VhDq3mQ2")
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
@@ -661,6 +714,30 @@ private final class SupervisorFixture: @unchecked Sendable {
             try Data("desktop-canary-token\n".utf8).write(to: appServerAuthTokenURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: appServerAuthTokenURL.path)
         }
+        if provisionGrokBotBinding {
+            let bob = try require(
+                specifications.first(where: { $0.profile.value.contains("grok") || $0.adapter == .grokBot }),
+                "grok-bot specification required for grok-bot binding"
+            )
+            let instanceId = ClientInstanceID.derive(profile: bob.profile).value
+            let bindingObject: [String: Any] = [
+                "adapterVersion": "1",
+                "enabled": true,
+                "installationId": installationID.value,
+                "instanceId": instanceId,
+                "agentId": bob.agentID.value,
+                "profile": bob.profile.value,
+                "grokAgentId": "12aedccc-8662-4a7f-84da-3d35c9e97842",
+                "wakeMode": "webhook",
+            ]
+            let bindingData = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
+            try bindingData.write(to: grokBotBindingURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: grokBotBindingURL.path)
+            try Data("https://example.test/mesh/wake\n".utf8).write(to: grokBotWebhookURLPath)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: grokBotWebhookURLPath.path)
+            try Data("webhook-secret-key\n".utf8).write(to: grokBotWebhookKeyPath)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: grokBotWebhookKeyPath.path)
+        }
         credentials = RecordingMultiCredentialStore(bindings: bindings, events: events)
         let gate = VerifiedCredentialGate(
             store: credentials,
@@ -678,7 +755,11 @@ private final class SupervisorFixture: @unchecked Sendable {
             wakeCursorURL: cursorURL,
             appServerBindingURL: appServerBindingURL,
             appServerWakeCursorURL: appServerWakeCursorURL,
-            appServerAuthTokenURL: appServerAuthTokenURL
+            appServerAuthTokenURL: appServerAuthTokenURL,
+            grokBotBindingURL: grokBotBindingURL,
+            grokBotWakeCursorURL: grokBotWakeCursorURL,
+            grokBotWebhookURLPath: grokBotWebhookURLPath,
+            grokBotWebhookKeyPath: grokBotWebhookKeyPath
         )
     }
 
@@ -809,6 +890,7 @@ private struct TestBootstrap: Decodable {
     let instances: [TestBootstrapInstance]
     let eventWake: TestEventWake?
     let appServerWake: TestAppServerWake?
+    let grokBotWake: TestGrokBotWake?
 }
 private struct TestBootstrapInstance: Decodable {
     let instanceId: String
@@ -852,6 +934,27 @@ private struct TestAppServerBinding: Decodable {
     let serverIdentity: String
     let endpoint: String
     let threadId: String
+}
+private struct TestGrokBotWake: Decodable {
+    let installationId: String
+    let helperPath: String
+    let cursorPath: String
+    let bindingPath: String
+    let webhookUrlPath: String
+    let webhookKeyPath: String
+    let actorProfile: String
+    let ensureBeforeWatch: Bool
+    let binding: TestGrokBotBinding
+}
+private struct TestGrokBotBinding: Decodable {
+    let adapterVersion: String
+    let enabled: Bool
+    let installationId: String
+    let instanceId: String
+    let agentId: String
+    let profile: String
+    let grokAgentId: String
+    let wakeMode: String
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

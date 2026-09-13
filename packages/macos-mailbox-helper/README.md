@@ -141,9 +141,12 @@ INSTALLATION='inst_YOUR_INSTALLATION_ID'
 "$HELPER" watch-revoke --installation "$INSTALLATION"
 ```
 
-`mcp-interactive` profiles are rejected from watch membership by design. Set
-delivery mode to `worker` or `event-driven` before `watch-ensure`. If Keychain is
-unavailable, watch commands fail closed.
+`mcp-interactive` profiles may join watch membership as **notify-only** members
+when an App Server binding matches their instance (so `appServerWake` receives
+hints). `grok-bot` profiles may likewise join watch membership as notify members
+(and may act as grant actor) when a Grok Bot binding matches. Actors must not be
+`mcp-interactive`. Set delivery mode appropriately before `watch-ensure`. If
+Keychain is unavailable, watch commands fail closed.
 
 ### Interpreting watch-ensure failures
 
@@ -163,7 +166,10 @@ after a failure (operator-run on the Mac; not claimed from Linux CI):
 
 1. `"$HELPER" watch-ensure --help` — must be supported (upgrade if not).
 2. `"$HELPER" status --profile PROFILE` — profile must verify.
-3. Delivery mode must not be `mcp-interactive` for watch members.
+3. Delivery mode: `mcp-interactive` cannot be the watch grant **actor**; it may
+   be a notify member with a matching App Server binding. `grok-bot` may notify
+   (and may act) with a matching Grok Bot binding. `event-driven` remains the
+   preferred actor when available.
 4. Keychain services `dev.thetriangle.mesh.mailbox` and
    `dev.thetriangle.mesh.workload-key` should exist for the profile;
    `dev.thetriangle.mesh.mailbox-watch` appears only after a successful ensure.

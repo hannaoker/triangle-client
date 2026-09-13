@@ -602,3 +602,100 @@ test("CLI wires durable helper resolveDelivery for appServerWake bootstrap", asy
   assert.equal(await received.resolveDelivery({ reason: "wake" }), null);
   assert.equal(stderr.value(), "");
 });
+
+function grokBotWake(overrides = {}) {
+  const wakeId = "3356f7bfb8e902f4b519d8238e3555e4974217898af96bed249cf0cfb729c1eb";
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/grok-bot-wake-cursor.json",
+    bindingPath: "/private/grok-bot-binding.json",
+    webhookUrlPath: "/private/grok-bot-webhook.url",
+    webhookKeyPath: "/private/grok-bot-webhook.key",
+    actorProfile: "bob",
+    ensureBeforeWatch: true,
+    binding: {
+      adapterVersion: "1",
+      enabled: true,
+      installationId: "inst_N7VhDq3mQ2",
+      instanceId: wakeId,
+      agentId: "agent_582567705a9348c38f18c91d2bac9dd8",
+      profile: "bob",
+      grokAgentId: "12aedccc-8662-4a7f-84da-3d35c9e97842",
+      wakeMode: "webhook",
+    },
+    ...overrides,
+  };
+}
+
+test("bootstrap accepts grokBotWake opt-in and rejects unsafe payloads", () => {
+  const withGrok = bootstrap({ grokBotWake: grokBotWake() });
+  const parsed = parseClientSupervisorBootstrap(JSON.stringify(withGrok));
+  assert.deepEqual(parsed.grokBotWake, grokBotWake());
+
+  const grokOnly = {
+    version: 1,
+    maxConcurrentReasoners: 2,
+    instances: [],
+    grokBotWake: grokBotWake(),
+  };
+  assert.equal(
+    parseClientSupervisorBootstrap(JSON.stringify(grokOnly)).grokBotWake.binding.wakeMode,
+    "webhook",
+  );
+
+  for (const candidate of [
+    bootstrap({ grokBotWake: { ...grokBotWake(), extra: true } }),
+    bootstrap({
+      grokBotWake: {
+        ...grokBotWake(),
+        binding: { ...grokBotWake().binding, wakeMode: "poll" },
+      },
+    }),
+    bootstrap({
+      grokBotWake: {
+        ...grokBotWake(),
+        binding: { ...grokBotWake().binding, instanceId: instance().instanceId },
+      },
+    }),
+    bootstrap({
+      grokBotWake: {
+        ...grokBotWake(),
+        binding: { ...grokBotWake().binding, enabled: false },
+      },
+    }),
+    bootstrap({
+      appServerWake: appServerWake(),
+      grokBotWake: {
+        ...grokBotWake(),
+        binding: {
+          ...grokBotWake().binding,
+          instanceId: appServerWake().binding.instanceId,
+        },
+      },
+    }),
+  ]) {
+    assert.throws(
+      () => parseClientSupervisorBootstrap(JSON.stringify(candidate)),
+      /Invalid Triangle Client bootstrap/,
+    );
+  }
+});
+
+test("CLI forwards grokBotWake into supervisor creation", async () => {
+  let received;
+  const stderr = capture();
+  const result = await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify(bootstrap({ grokBotWake: grokBotWake() }))]),
+    stderr: stderr.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], grokBotWake: null }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.deepEqual(received.grokBotWake, grokBotWake());
+  assert.equal(stderr.value(), "");
+});

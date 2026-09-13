@@ -705,3 +705,116 @@ test("supervisor rejects appServerWake collision with worker instance ids", () =
     createWakeBridge: () => ({ async start() {}, async stop() {} }),
   }), /collides/i);
 });
+
+function grokBotWakeFixture(instanceIndex = 4) {
+  const instanceId = id(instanceIndex);
+  return {
+    installationId: "inst_N7VhDq3mQ2",
+    helperPath: "/trusted/triangle-mailbox",
+    cursorPath: "/private/grok-bot-wake-cursor.json",
+    bindingPath: "/private/grok-bot-binding.json",
+    webhookUrlPath: "/private/grok-bot-webhook.url",
+    webhookKeyPath: "/private/grok-bot-webhook.key",
+    actorProfile: "bob",
+    ensureBeforeWatch: true,
+    binding: {
+      adapterVersion: "1",
+      enabled: true,
+      installationId: "inst_N7VhDq3mQ2",
+      instanceId,
+      agentId: "agent_582567705a9348c38f18c91d2bac9dd8",
+      profile: "bob",
+      grokAgentId: "12aedccc-8662-4a7f-84da-3d35c9e97842",
+      wakeMode: "webhook",
+    },
+  };
+}
+
+test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
+  const ensured = [];
+  let bridgeStarted = false;
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    grokBotWake: grokBotWakeFixture(4),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({
+      async watch() { return { processed: 0, stopped: true }; },
+      async runOnce() { return { found: null, processed: 0 }; },
+    }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async (options) => {
+      ensured.push(options.actorProfile);
+      return { ensured: true };
+    },
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createGrokBotBridge: (options) => {
+      assert.equal(options.webhookUrlPath, "/private/grok-bot-webhook.url");
+      assert.equal(options.webhookKeyPath, "/private/grok-bot-webhook.key");
+      assert.equal(options.binding.wakeMode, "webhook");
+      return {
+        async start() {
+          bridgeStarted = true;
+          return { status: "stopped", cycles: 1 };
+        },
+        async stop() {},
+      };
+    },
+    logger: { error() {} },
+  });
+
+  assert.equal(supervisor.grokBotInstanceId, id(4));
+  assert.equal(supervisor.grokBotWake.binding.grokAgentId, "12aedccc-8662-4a7f-84da-3d35c9e97842");
+  const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
+  assert.equal(bridgeStarted, true);
+  assert.deepEqual(ensured, ["bob"]);
+  assert.equal(result.grokBotWake?.cycles, 1);
+});
+
+test("supervisor rejects grokBotWake collision with worker and appServerWake", () => {
+  assert.throws(() => createClientSupervisor({
+    instances: [{
+      instanceId: id(4),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(4) },
+    }],
+    grokBotWake: grokBotWakeFixture(4),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
+  }), /collides/i);
+
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    grokBotWake: {
+      ...grokBotWakeFixture(3),
+      binding: {
+        ...grokBotWakeFixture(3).binding,
+        instanceId: id(3),
+      },
+    },
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createAuthResolver: () => ({ async resolveAuth() { return { authorization: "Bearer x", serverIdentity: "s" }; } }),
+    createAppServerTransport: () => ({ async connect() {}, async call() {}, onEvent() { return () => {}; }, async close() {} }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({ async connect() {}, async shutdown() {}, admit: async () => ({}), status: () => ({}) }),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
+  }), /collides/i);
+});

@@ -92,6 +92,10 @@ public struct ClientSupervisor: Sendable {
     private let appServerBindingURL: URL
     private let appServerWakeCursorURL: URL
     private let appServerAuthTokenURL: URL
+    private let grokBotBindingURL: URL
+    private let grokBotWakeCursorURL: URL
+    private let grokBotWebhookURLPath: URL
+    private let grokBotWebhookKeyPath: URL
 
     public init(
         instanceStore: any ClientInstanceStore,
@@ -104,7 +108,11 @@ public struct ClientSupervisor: Sendable {
         wakeCursorURL: URL? = nil,
         appServerBindingURL: URL? = nil,
         appServerWakeCursorURL: URL? = nil,
-        appServerAuthTokenURL: URL? = nil
+        appServerAuthTokenURL: URL? = nil,
+        grokBotBindingURL: URL? = nil,
+        grokBotWakeCursorURL: URL? = nil,
+        grokBotWebhookURLPath: URL? = nil,
+        grokBotWebhookKeyPath: URL? = nil
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
@@ -134,6 +142,14 @@ public struct ClientSupervisor: Sendable {
             ?? clientRoot.appendingPathComponent("app-server-wake-cursor.json")
         self.appServerAuthTokenURL = appServerAuthTokenURL
             ?? clientRoot.appendingPathComponent("app-server-ws.token")
+        self.grokBotBindingURL = grokBotBindingURL
+            ?? clientRoot.appendingPathComponent("grok-bot-binding.json")
+        self.grokBotWakeCursorURL = grokBotWakeCursorURL
+            ?? clientRoot.appendingPathComponent("grok-bot-wake-cursor.json")
+        self.grokBotWebhookURLPath = grokBotWebhookURLPath
+            ?? clientRoot.appendingPathComponent("grok-bot-webhook.url")
+        self.grokBotWebhookKeyPath = grokBotWebhookKeyPath
+            ?? clientRoot.appendingPathComponent("grok-bot-webhook.key")
     }
 
     public func prepareEnabledInstances() async throws -> PreparedClientSupervisorLaunch {
@@ -149,6 +165,9 @@ public struct ClientSupervisor: Sendable {
             case .mcpInteractive:
                 // Recorded as omitted from worker/eventWake; may still feed appServerWake.
                 return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_mcp_interactive")
+            case .grokBot:
+                // Recorded as omitted from worker/eventWake; may still feed grokBotWake.
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_grok_bot")
             case .eventDriven, .worker:
                 return nil
             }
@@ -156,13 +175,16 @@ public struct ClientSupervisor: Sendable {
         let workers = allInstances.filter(\.participatesInWorkerPolling)
         let wakeMembers = allInstances.filter(\.participatesInEventDrivenWake)
         let appServerMembers = allInstances.filter(\.participatesInAppServerWake)
-        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty),
+        let grokBotMembers = allInstances.filter(\.participatesInGrokBotWake)
+        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty || !grokBotMembers.isEmpty),
               Set(workers.map(\.profile)).count == workers.count,
               Set(wakeMembers.map(\.profile)).count == wakeMembers.count,
               Set(appServerMembers.map(\.profile)).count == appServerMembers.count,
+              Set(grokBotMembers.map(\.profile)).count == grokBotMembers.count,
               workers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               wakeMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
-              appServerMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
+              appServerMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
+              grokBotMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
         else { throw ClientSupervisorError.noEligibleInstances }
 
         // This entire resolution phase deliberately precedes the first
@@ -180,9 +202,16 @@ public struct ClientSupervisor: Sendable {
             }
         }
 
-        let coordinatorSources = !resolved.isEmpty
-            ? resolved.map(\.instance)
-            : (!wakeMembers.isEmpty ? wakeMembers : appServerMembers)
+        let coordinatorSources: [ClientInstance]
+        if !resolved.isEmpty {
+            coordinatorSources = resolved.map(\.instance)
+        } else if !wakeMembers.isEmpty {
+            coordinatorSources = wakeMembers
+        } else if !appServerMembers.isEmpty {
+            coordinatorSources = appServerMembers
+        } else {
+            coordinatorSources = grokBotMembers
+        }
         guard !coordinatorSources.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
         let coordinator: WorkerCommand
         do {
@@ -248,7 +277,16 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil else {
+        let grokBotWake: PreparedGrokBotWakeBootstrap?
+        do {
+            grokBotWake = try await prepareGrokBotWake(members: grokBotMembers, omitted: &omitted)
+        } catch let error as ClientSupervisorError {
+            throw error
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil else {
             throw ClientSupervisorError.noEligibleInstances
         }
 
@@ -261,6 +299,23 @@ public struct ClientSupervisor: Sendable {
         if let appServerWake {
             let workerIds = Set(prepared.map(\.instanceId))
             guard !workerIds.contains(appServerWake.binding.instanceId) else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
+        }
+        if let grokBotWake, let eventWake {
+            let wakeIds = Set(eventWake.profiles.map(\.instanceId))
+            guard !wakeIds.contains(grokBotWake.binding.instanceId) else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
+        }
+        if let grokBotWake {
+            let workerIds = Set(prepared.map(\.instanceId))
+            guard !workerIds.contains(grokBotWake.binding.instanceId) else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
+        }
+        if let grokBotWake, let appServerWake {
+            guard grokBotWake.binding.instanceId != appServerWake.binding.instanceId else {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
@@ -278,7 +333,8 @@ public struct ClientSupervisor: Sendable {
             maxConcurrentReasoners: 2,
             instances: prepared,
             eventWake: eventWake,
-            appServerWake: appServerWake
+            appServerWake: appServerWake,
+            grokBotWake: grokBotWake
         )
         let data: Data
         do {
@@ -489,6 +545,117 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
+    private func prepareGrokBotWake(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> PreparedGrokBotWakeBootstrap? {
+        guard !members.isEmpty else { return nil }
+        guard helperExecutableURL.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+        else { throw ClientSupervisorError.runtimeUnavailable }
+        guard grokBotBindingURL.path.hasPrefix("/"),
+              grokBotWakeCursorURL.path.hasPrefix("/"),
+              grokBotWebhookURLPath.path.hasPrefix("/"),
+              grokBotWebhookKeyPath.path.hasPrefix("/")
+        else { throw ClientSupervisorError.invalidBootstrap }
+
+        // Binding + webhook files are operator-provisioned. Absent → skip.
+        guard FileManager.default.isReadableFile(atPath: grokBotBindingURL.path),
+              FileManager.default.isReadableFile(atPath: grokBotWebhookURLPath.path),
+              FileManager.default.isReadableFile(atPath: grokBotWebhookKeyPath.path)
+        else {
+            for instance in members {
+                omitted.append(.init(
+                    instanceID: instance.instanceID.value,
+                    reasonCode: "grok_bot_binding_missing"
+                ))
+            }
+            return nil
+        }
+
+        let installationID: InstallationID
+        do {
+            installationID = try installationIdentity.resolve()
+        } catch {
+            throw ClientSupervisorError.runtimeUnavailable
+        }
+
+        let bindingData: Data
+        do {
+            bindingData = try Data(contentsOf: grokBotBindingURL)
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        guard let object = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any] else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
+        let bindingInstanceIdHint = object["instanceId"] as? String
+        let matched = sortedMembers.first(where: { $0.instanceID.value == bindingInstanceIdHint })
+        guard let primary = matched ?? (sortedMembers.count == 1 ? sortedMembers.first : nil) else {
+            for instance in sortedMembers {
+                omitted.append(.init(
+                    instanceID: instance.instanceID.value,
+                    reasonCode: "grok_bot_binding_mismatch"
+                ))
+            }
+            return nil
+        }
+        let credential: VerifiedCredential
+        do {
+            credential = try await gate.credential(for: primary.profile)
+        } catch {
+            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
+            return nil
+        }
+
+        let bindingInstanceId = object["instanceId"] as? String
+        let bindingAgentId = object["agentId"] as? String
+        let bindingInstallationId = object["installationId"] as? String
+        let bindingProfile = object["profile"] as? String
+        guard bindingInstanceId == primary.instanceID.value,
+              bindingAgentId == credential.agentID.value,
+              bindingInstallationId == installationID.value,
+              bindingProfile == primary.profile.value
+        else {
+            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "grok_bot_binding_mismatch"))
+            return nil
+        }
+
+        guard let adapterVersion = object["adapterVersion"] as? String,
+              adapterVersion == "1",
+              object["enabled"] as? Bool == true,
+              let grokAgentId = object["grokAgentId"] as? String,
+              !grokAgentId.isEmpty,
+              let wakeMode = object["wakeMode"] as? String,
+              wakeMode == "webhook"
+        else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        return PreparedGrokBotWakeBootstrap(
+            installationId: installationID.value,
+            helperPath: helperExecutableURL.path,
+            cursorPath: grokBotWakeCursorURL.path,
+            bindingPath: grokBotBindingURL.path,
+            webhookUrlPath: grokBotWebhookURLPath.path,
+            webhookKeyPath: grokBotWebhookKeyPath.path,
+            actorProfile: primary.profile.value,
+            ensureBeforeWatch: true,
+            binding: PreparedGrokBotBinding(
+                adapterVersion: adapterVersion,
+                enabled: true,
+                installationId: installationID.value,
+                instanceId: primary.instanceID.value,
+                agentId: credential.agentID.value,
+                profile: primary.profile.value,
+                grokAgentId: grokAgentId,
+                wakeMode: wakeMode
+            )
+        )
+    }
+
     public func run() async throws {
         let launch = try await prepareEnabledInstances()
         let request = ClientSupervisorProcessRequest(
@@ -548,9 +715,10 @@ private struct PreparedBootstrap: Encodable {
     let instances: [PreparedBootstrapInstance]
     let eventWake: PreparedEventWakeBootstrap?
     let appServerWake: PreparedAppServerWakeBootstrap?
+    let grokBotWake: PreparedGrokBotWakeBootstrap?
 
     private enum CodingKeys: String, CodingKey {
-        case version, maxConcurrentReasoners, instances, eventWake, appServerWake
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake
     }
 
     func encode(to encoder: Encoder) throws {
@@ -560,6 +728,7 @@ private struct PreparedBootstrap: Encodable {
         try container.encode(instances, forKey: .instances)
         try container.encodeIfPresent(eventWake, forKey: .eventWake)
         try container.encodeIfPresent(appServerWake, forKey: .appServerWake)
+        try container.encodeIfPresent(grokBotWake, forKey: .grokBotWake)
     }
 }
 private struct PreparedBootstrapInstance: Encodable {
@@ -645,6 +814,29 @@ private struct PreparedAppServerBinding: Encodable {
     let serverIdentity: String
     let endpoint: String
     let threadId: String
+}
+
+private struct PreparedGrokBotWakeBootstrap: Encodable {
+    let installationId: String
+    let helperPath: String
+    let cursorPath: String
+    let bindingPath: String
+    let webhookUrlPath: String
+    let webhookKeyPath: String
+    let actorProfile: String
+    let ensureBeforeWatch: Bool
+    let binding: PreparedGrokBotBinding
+}
+
+private struct PreparedGrokBotBinding: Encodable {
+    let adapterVersion: String
+    let enabled: Bool
+    let installationId: String
+    let instanceId: String
+    let agentId: String
+    let profile: String
+    let grokAgentId: String
+    let wakeMode: String
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {
