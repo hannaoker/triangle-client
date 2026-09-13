@@ -642,6 +642,45 @@ test("supervisor bootstraps opt-in appServerWake beside workers", async () => {
   assert.equal(result.appServerWake?.cycles, 1);
 });
 
+test("supervisor wires production durable resolveDelivery into App Server wake bridge", async () => {
+  let bridgeResolver;
+  createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createAuthResolver: () => ({
+      async resolveAuth() {
+        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
+      },
+    }),
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge({ resolveDelivery }) {
+      bridgeResolver = resolveDelivery;
+      return { async start() { return { status: "stopped", cycles: 0 }; }, async stop() {} };
+    },
+    logger: { error() {} },
+  });
+  assert.equal(typeof bridgeResolver, "function");
+  assert.equal(bridgeResolver.name, "resolveDelivery");
+});
+
 test("supervisor rejects appServerWake collision with worker instance ids", () => {
   assert.throws(() => createClientSupervisor({
     instances: [{

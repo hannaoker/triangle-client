@@ -13,6 +13,7 @@ import {
   createAtomicFileCursorStore,
   createAuthenticatedAppServerTransport,
   createCapabilityTokenAuthResolver,
+  createProductionAppServerDeliveryResolver,
   createSharedCodexSession,
   validateBinding,
 } from "./shared-codex-app-server.mjs";
@@ -273,7 +274,7 @@ export function createClientSupervisor({
   createCursorStore = createAtomicFileCursorStore,
   createSession = createSharedCodexSession,
   createWakeBridge = createAppServerWakeBridge,
-  resolveDelivery = async () => null,
+  resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
   maxIdlePollIntervalMs = 300_000,
@@ -409,6 +410,12 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
+    const deliveryResolver = typeof resolveDelivery === "function"
+      ? resolveDelivery
+      : createProductionAppServerDeliveryResolver({
+        helperPath: appServerConfig.helperPath,
+        profile: appServerConfig.actorProfile,
+      });
     appServerBridge = createWakeBridge({
       binding: appServerConfig.binding,
       session,
@@ -418,7 +425,7 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
       actorProfile: appServerConfig.actorProfile,
       ensureBeforeWatch: false,
-      resolveDelivery,
+      resolveDelivery: deliveryResolver,
       logger,
     });
     if (!appServerBridge || typeof appServerBridge.start !== "function") {

@@ -306,3 +306,62 @@ export function resolveTrustedTransactionProxy({
     return createStub();
   }
 }
+
+/**
+ * Production App Server `resolveDelivery`: reconcile the durable helper
+ * transaction store (Slice 6) without inventing a Node `mesh_` credential path.
+ *
+ * Returns `{ deliveryId, text }` when `transaction-status` reports
+ * `shouldStartModel` with an open claim; otherwise `null` (empty → skip turn).
+ */
+export function createHelperDurableDeliveryResolver({
+  helperPath,
+  profile,
+  protocol = "self-serve-drain",
+  createProxy,
+  run,
+} = {}) {
+  assertHelperPath(helperPath);
+  assertProfile(profile);
+  assertProtocol(protocol);
+  if (typeof createProxy !== "function") {
+    throw new TypeError("createProxy is required");
+  }
+
+  const proxy = createProxy({ helperPath, profile, protocol, run });
+
+  return Object.freeze(async function resolveDelivery({ signal } = {}) {
+    if (typeof proxy.status !== "function") return null;
+    let status;
+    try {
+      status = await proxy.status({ signal });
+    } catch (error) {
+      if (error?.code === "slice6_required" || error?.code === "helper_unavailable") {
+        return null;
+      }
+      throw error;
+    }
+    if (!status || typeof status !== "object" || status.shouldStartModel !== true) {
+      return null;
+    }
+    if (status.transactionStuck === true) {
+      throw createCodedError("transaction_stuck", "transaction is stuck");
+    }
+    const open = status.open;
+    if (!open || typeof open !== "object" || Array.isArray(open)) return null;
+    if (open.state === "replied") return null;
+    if (!Number.isSafeInteger(open.deliveryId) || open.deliveryId <= 0) return null;
+    if (typeof open.roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(open.roomId)) {
+      return null;
+    }
+
+    const deliveryId = `delivery_${open.deliveryId}`;
+    const text = [
+      "Continue the bound desktop turn for the open durable mailbox transaction.",
+      `deliveryId=${open.deliveryId}`,
+      `roomId=${open.roomId}`,
+      `state=${typeof open.state === "string" ? open.state : "claimed"}`,
+    ].join("\n");
+    return { deliveryId, text };
+  });
+}

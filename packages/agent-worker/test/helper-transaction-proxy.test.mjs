@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createHelperDurableDeliveryResolver,
   createHelperTrustedTransactionProxy,
   deriveTrustedClaimId,
   deriveTrustedReplyIdempotencyKey,
   resolveTrustedTransactionProxy,
 } from "../src/helper-transaction-proxy.mjs";
 import {
+  createProductionAppServerDeliveryResolver,
   createTrustedTransactionProxy,
   createTrustedTransactionProxyStub,
 } from "../src/shared-codex-app-server.mjs";
@@ -152,4 +154,56 @@ test("malicious helper path is rejected before spawn", () => {
       }),
     /helperPath/,
   );
+});
+
+test("durable delivery resolver returns null when helper status is empty", async () => {
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      assert.equal(args[0], "transaction-status");
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: false,
+          transactionStuck: false,
+          open: null,
+          status: "idle",
+        }),
+        stderr: "",
+      };
+    },
+  });
+  assert.equal(await resolveDelivery({ reason: "wake" }), null);
+});
+
+test("durable delivery resolver maps open helper status into admit payload", async () => {
+  const resolveDelivery = createProductionAppServerDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    async run(_file, args) {
+      assert.equal(args[0], "transaction-status");
+      assert.ok(args.includes("self-serve-drain"));
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: true,
+          transactionStuck: false,
+          open: {
+            deliveryId: 42,
+            roomId,
+            state: "claimed",
+          },
+        }),
+        stderr: "",
+      };
+    },
+  });
+  const delivery = await resolveDelivery({ reason: "wake", highWatermark: 7 });
+  assert.equal(delivery.deliveryId, "delivery_42");
+  assert.match(delivery.text, /deliveryId=42/);
+  assert.match(delivery.text, new RegExp(`roomId=${roomId}`));
+  assert.doesNotMatch(delivery.text, /mesh_/);
 });

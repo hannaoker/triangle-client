@@ -29,6 +29,7 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
+  createHelperDurableDeliveryResolver,
   createHelperTrustedTransactionProxy,
   deriveTrustedClaimId,
   deriveTrustedReplyIdempotencyKey,
@@ -41,6 +42,7 @@ import {
 } from "./wake-client.mjs";
 
 export const SHARED_CODEX_ADAPTER_VERSION = "1";
+export const MAX_COMPLETED_TURNS = 64;
 
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -329,6 +331,14 @@ export function createMemoryCorrelationStore() {
 export function createTrustedTransactionProxyStub() {
   return Object.freeze({
     name: "slice6_trusted_transaction_proxy_stub",
+    async status() {
+      return Object.freeze({
+        shouldStartModel: false,
+        transactionStuck: false,
+        open: null,
+        status: "idle",
+      });
+    },
     async claim() {
       throw createCodedError(
         "slice6_required",
@@ -347,6 +357,17 @@ export function createTrustedTransactionProxyStub() {
         "trusted transaction proxy (Slice 6) is required before production ack",
       );
     },
+  });
+}
+
+/**
+ * Production App Server wake delivery resolver via Slice 6 helper status.
+ * Never invents a Node-side `mesh_` credential path.
+ */
+export function createProductionAppServerDeliveryResolver(options = {}) {
+  return createHelperDurableDeliveryResolver({
+    ...options,
+    createProxy: options.createProxy ?? createTrustedTransactionProxy,
   });
 }
 
@@ -559,11 +580,17 @@ export function createSharedCodexSession({
       const turnId = event.params?.turn?.id;
       const turn = event.params?.turn;
       if (turnId && turn) {
-        completedTurns.set(turnId, turn);
         const waiter = pendingTurns.get(turnId);
         if (waiter) {
           pendingTurns.delete(turnId);
+          completedTurns.delete(turnId);
           waiter.resolve(turn);
+        } else {
+          completedTurns.set(turnId, turn);
+          while (completedTurns.size > MAX_COMPLETED_TURNS) {
+            const oldest = completedTurns.keys().next().value;
+            completedTurns.delete(oldest);
+          }
         }
       }
       activeTurnId = null;
@@ -667,6 +694,7 @@ export function createSharedCodexSession({
         settled = true;
         clearTimeout(timer);
         pendingTurns.delete(turnId);
+        completedTurns.delete(turnId);
         resolve(turn);
       };
       pendingTurns.set(turnId, { resolve: settle });
@@ -1013,6 +1041,7 @@ export {
   createMemoryCursorStore,
   createAtomicFileCursorStore,
   ensureHelperWatchGrant,
+  createHelperDurableDeliveryResolver,
   createHelperTrustedTransactionProxy,
   deriveTrustedClaimId,
   deriveTrustedReplyIdempotencyKey,

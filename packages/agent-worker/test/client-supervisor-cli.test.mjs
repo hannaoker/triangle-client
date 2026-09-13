@@ -576,3 +576,29 @@ test("CLI forwards appServerWake into supervisor creation", async () => {
   assert.deepEqual(received.appServerWake, appServerWake());
   assert.equal(stderr.value(), "");
 });
+
+test("CLI wires durable helper resolveDelivery for appServerWake bootstrap", async () => {
+  let received;
+  const stderr = capture();
+  const result = await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify({
+      version: 1,
+      maxConcurrentReasoners: 2,
+      instances: [],
+      appServerWake: appServerWake(),
+    })]),
+    stderr: stderr.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], appServerWake: null }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.equal(typeof received.resolveDelivery, "function");
+  assert.equal(received.resolveDelivery.name, "resolveDelivery");
+  // Missing helper → fail closed empty, never a silent always-null without attempting status.
+  assert.equal(await received.resolveDelivery({ reason: "wake" }), null);
+  assert.equal(stderr.value(), "");
+});

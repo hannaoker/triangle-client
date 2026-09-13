@@ -117,6 +117,22 @@ function run(args, env) {
   return spawnSync("/bin/bash", [installer, ...args], { encoding: "utf8", env });
 }
 
+test("watch command help and operator notes never expose credential prefixes", () => {
+  const source = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WatchGrantFailure.swift");
+  const helpInit = source.match(/public init\(command: HelperCommand\) \{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(helpInit, "WatchCommandHelp init missing");
+  assert.doesNotMatch(helpInit, /mesh_/);
+  assert.match(helpInit, /\.watchStatus/);
+  assert.match(helpInit, /Secret-free status JSON only/);
+
+  const notes = [...source.matchAll(/operatorNotes:\s*\[[\s\S]*?\]/g)].map((match) => match[0]);
+  assert.ok(notes.length > 0, "expected operatorNotes literals");
+  for (const block of notes) {
+    assert.doesNotMatch(block, /mesh_watch_/);
+    assert.doesNotMatch(block, /"Do not place mesh_/);
+  }
+});
+
 test("operator documentation defines the complete low-friction custody lifecycle", () => {
   const helper = text("packages/macos-mailbox-helper/README.md");
   for (const pattern of [
