@@ -13,7 +13,8 @@
   ],
   "scripts": {
     "test": "npm run test:runtime && npm run test:gateway",
-    "test:runtime": "npm --prefix packages/agent-worker run test:triangle-client && node --test tests/triangle-client-service.test.mjs && node --test tests/worker-service-render.test.mjs && node packages/macos-mailbox-helper/scripts/run-tests.mjs host",
-    "test:gateway": "npm --prefix packages/a2a-gateway test && npm --prefix agents/codex test && npm --prefix agents/hermes test"
+    "test:runtime": "npm --prefix packages/agent-worker run test:triangle-client && npm --prefix packages/client-console test && node --test tests/triangle-client-service.test.mjs && node --test tests/worker-service-render.test.mjs && node packages/macos-mailbox-helper/scripts/run-tests.mjs host",
+    "test:gateway": "npm --prefix packages/a2a-gateway test && npm --prefix agents/codex test && npm --prefix agents/hermes test",
+    "test:console": "npm --prefix packages/client-console test"
   }
 }
