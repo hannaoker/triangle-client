@@ -2,6 +2,7 @@ import { createCommandRunner, createRunnerEnvironment } from "./command-runner.m
 import { createConcurrencyGate } from "./concurrency-gate.mjs";
 import {
   createHelperWatchTransport,
+  createInstallationWatchTransportFactory,
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import { createMailboxClient, validateMailboxClientOptions } from "./mailbox-client.mjs";
@@ -378,6 +379,9 @@ export function createClientSupervisor({
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
   const gate = createConcurrencyGate({ limit: maxConcurrentReasoners });
   const seen = new Set();
+  // One MESH held poll per installation: App Server + Grok Bot (+ eventWake)
+  // that share an installationId must coalesce onto a single watch-poll.
+  const sharedWatchTransport = createInstallationWatchTransportFactory(createWatchTransport);
 
   const entries = instances.map((instance) => {
     if (!instance || !INSTANCE_ID.test(instance.instanceId)) {
@@ -464,7 +468,7 @@ export function createClientSupervisor({
 
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
-    ? createWatchTransport({
+    ? sharedWatchTransport({
       helperPath: wakeConfig.helperPath,
       installationId: wakeConfig.installationId,
     })
@@ -515,7 +519,7 @@ export function createClientSupervisor({
       transactionProxy,
       logger,
     });
-    const watchTransport = createWatchTransport({
+    const watchTransport = sharedWatchTransport({
       helperPath: appServerConfig.helperPath,
       installationId: appServerConfig.installationId,
     });
@@ -541,7 +545,7 @@ export function createClientSupervisor({
 
   let grokBotBridge = null;
   if (grokBotConfig) {
-    const watchTransport = createWatchTransport({
+    const watchTransport = sharedWatchTransport({
       helperPath: grokBotConfig.helperPath,
       installationId: grokBotConfig.installationId,
     });
@@ -659,6 +663,8 @@ export function createClientSupervisor({
             logger.error?.(logEvent, {
               error: logMessage,
               code: error?.code,
+              rejectedCode: typeof error?.rejectedCode === "string" ? error.rejectedCode : undefined,
+              failureCode: typeof error?.failureCode === "string" ? error.failureCode : undefined,
               message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
             });
             // Clear sticky started/session state before retry so the next

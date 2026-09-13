@@ -27,15 +27,44 @@ function createResyncError(restartCursor) {
 }
 
 function createHelperUnavailableError(message = "watch helper is unavailable", diagnosis = null) {
-  const error = new Error(message);
+  const rejectedCode = typeof diagnosis?.rejectedCode === "string" ? diagnosis.rejectedCode : null;
+  const failureCode = typeof diagnosis?.code === "string" ? diagnosis.code : null;
+  const suffix = rejectedCode || failureCode;
+  const error = new Error(suffix ? `${message} (${suffix})` : message);
   error.code = "helper_unavailable";
   if (diagnosis && typeof diagnosis === "object") {
     error.diagnosis = diagnosis;
-    if (typeof diagnosis.code === "string") error.failureCode = diagnosis.code;
+    if (failureCode) error.failureCode = failureCode;
+    if (rejectedCode) error.rejectedCode = rejectedCode;
     if (typeof diagnosis.gate === "string") error.gate = diagnosis.gate;
     if (typeof diagnosis.operatorAction === "string") error.operatorAction = diagnosis.operatorAction;
   }
   return error;
+}
+
+function createAbortError() {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+async function settleWithSignal(promise, signal) {
+  if (signal?.aborted) throw createAbortError();
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(createAbortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function parseWatchFailureDiagnosis(stderr) {
@@ -231,7 +260,10 @@ export function createHelperWatchTransport({
         throw createHelperUnavailableError("watch helper returned invalid resync payload");
       }
       if (result.code !== 0) {
-        throw createHelperUnavailableError("watch helper poll failed");
+        throw createHelperUnavailableError(
+          "watch helper poll failed",
+          parseWatchFailureDiagnosis(result.stderr),
+        );
       }
       let payload;
       try {
@@ -254,6 +286,100 @@ export function createHelperWatchTransport({
       };
     },
   });
+}
+
+/**
+ * Coalesce concurrent held polls onto one underlying transport.
+ *
+ * MESH admits one poll per installation. App Server + Grok Bot bridges that
+ * share an installation must not each spawn `watch-poll` or the second gets
+ * `poll_limit_exceeded`. This wrapper joins identical in-flight cursors and
+ * serializes divergent cursors so only one helper invocation runs at a time.
+ */
+export function createSharedWatchTransport({ transport } = {}) {
+  if (!transport || typeof transport.poll !== "function") {
+    throw new TypeError("transport.poll is required");
+  }
+
+  /** @type {{ cursor: number, promise: Promise<{cursor: number, events: unknown[]}> } | null} */
+  let inFlight = null;
+
+  return Object.freeze({
+    async poll({ cursor, signal } = {}) {
+      const supplied = positiveInteger(cursor ?? 0, "cursor", 0);
+      if (signal?.aborted) throw createAbortError();
+
+      while (inFlight) {
+        if (inFlight.cursor === supplied) {
+          // Same cursor: fan the held poll out to every waiter.
+          return settleWithSignal(inFlight.promise, signal);
+        }
+        // Behind/ahead bridges wait out the active hold, then claim a turn.
+        await settleWithSignal(
+          inFlight.promise.then(() => null, () => null),
+          signal,
+        );
+      }
+
+      let resolveTracked;
+      let rejectTracked;
+      const tracked = new Promise((resolve, reject) => {
+        resolveTracked = resolve;
+        rejectTracked = reject;
+      });
+      // Claim the slot synchronously so a twin poll() in this turn joins us.
+      inFlight = { cursor: supplied, promise: tracked };
+      try {
+        const pending = transport.poll({ cursor: supplied, signal });
+        Promise.resolve(pending).then(
+          (value) => {
+            if (inFlight?.promise === tracked) inFlight = null;
+            resolveTracked(value);
+          },
+          (error) => {
+            if (inFlight?.promise === tracked) inFlight = null;
+            rejectTracked(error);
+          },
+        );
+      } catch (error) {
+        if (inFlight?.promise === tracked) inFlight = null;
+        rejectTracked(error);
+      }
+      return settleWithSignal(tracked, signal);
+    },
+  });
+}
+
+/**
+ * Cache shared coalescing transports by installation id so supervisor bridges
+ * that reuse one MESH grant share one helper held poll.
+ */
+export function createInstallationWatchTransportFactory(createWatchTransport) {
+  if (typeof createWatchTransport !== "function") {
+    throw new TypeError("createWatchTransport is required");
+  }
+  const byInstallation = new Map();
+  return function createInstallationWatchTransport(options = {}) {
+    const installationId = assertInstallationId(options.installationId);
+    const helperPath = options.helperPath;
+    if (typeof helperPath !== "string" || helperPath.length === 0) {
+      throw new TypeError("helperPath is required");
+    }
+    const existing = byInstallation.get(installationId);
+    if (existing) {
+      if (existing.helperPath !== helperPath) {
+        throw new TypeError("shared watch transport helperPath mismatch for installation");
+      }
+      return existing.transport;
+    }
+    const underlying = createWatchTransport(options);
+    if (!underlying || typeof underlying.poll !== "function") {
+      throw new TypeError("createWatchTransport must return a transport");
+    }
+    const transport = createSharedWatchTransport({ transport: underlying });
+    byInstallation.set(installationId, { helperPath, transport });
+    return transport;
+  };
 }
 
 /**

@@ -902,3 +902,138 @@ test("supervisor stops App Server and Grok Bot bridges before wake retry", async
   assert.ok(logs.some((entry) => entry.event === "triangle_client_grok_bot_wake_failed" && entry.code === "helper_unavailable"));
   assert.equal(logs.some((entry) => entry.code === "already_started"), false);
 });
+
+test("supervisor shares one watch transport poll across App Server and Grok Bot wakes", async () => {
+  const { createWakeClient } = await import("../src/wake-client.mjs");
+  const transportCalls = [];
+  let underlyingPolls = 0;
+  let releasePoll;
+  const held = new Promise((resolve) => { releasePoll = resolve; });
+  const appAgent = "agent_codex_desktop_001";
+  const grokAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
+  const appWakes = [];
+  const grokWakes = [];
+  /** @type {{ poll: Function } | null} */
+  let sharedTransport = null;
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    grokBotWake: grokBotWakeFixture(4),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport({ helperPath, installationId }) {
+      transportCalls.push({ helperPath, installationId });
+      return {
+        async poll({ cursor }) {
+          underlyingPolls += 1;
+          await held;
+          return {
+            cursor: cursor + 1,
+            events: [
+              { agent_id: appAgent, high_watermark: cursor + 1 },
+              { agent_id: grokAgent, high_watermark: cursor + 1 },
+            ],
+          };
+        },
+      };
+    },
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createAuthResolver: () => ({
+      async resolveAuth() {
+        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
+      },
+    }),
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => {
+      let cursor = 32;
+      return {
+        async read() { return cursor; },
+        async write(next) { cursor = next; return cursor; },
+      };
+    },
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge({ binding, watchTransport, cursorStore }) {
+      sharedTransport = watchTransport;
+      const client = createWakeClient({
+        profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
+        transport: watchTransport,
+        cursorStore,
+        coalesceMs: 1,
+        onWake: async (wake) => {
+          appWakes.push(wake);
+          return { status: "empty" };
+        },
+      });
+      return {
+        async start({ signal }) {
+          return client.watch({ signal, maxCycles: 1 });
+        },
+        async stop() {
+          await client.stop();
+        },
+      };
+    },
+    createGrokBotBridge({ binding, watchTransport, cursorStore }) {
+      assert.equal(watchTransport, sharedTransport);
+      const client = createWakeClient({
+        profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
+        transport: watchTransport,
+        cursorStore,
+        coalesceMs: 1,
+        onWake: async (wake) => {
+          grokWakes.push(wake);
+          return { status: "accepted" };
+        },
+      });
+      return {
+        async start({ signal }) {
+          return client.watch({ signal, maxCycles: 1 });
+        },
+        async stop() {
+          await client.stop();
+        },
+      };
+    },
+    logger: { error() {} },
+  });
+
+  assert.equal(transportCalls.length, 1);
+  assert.deepEqual(transportCalls[0], {
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+
+  const watching = supervisor.watch({
+    signal: AbortSignal.timeout(2_000),
+    sleep: async () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(underlyingPolls, 1);
+  releasePoll();
+  const result = await watching;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(underlyingPolls, 1);
+  assert.equal(result.appServerWake?.cycles, 1);
+  assert.equal(result.grokBotWake?.cycles, 1);
+  assert.equal(appWakes.length, 1);
+  assert.equal(grokWakes.length, 1);
+  assert.equal(appWakes[0].highWatermark, 33);
+  assert.equal(grokWakes[0].highWatermark, 33);
+  assert.equal(appWakes[0].instanceId, id(3));
+  assert.equal(grokWakes[0].instanceId, id(4));
+});

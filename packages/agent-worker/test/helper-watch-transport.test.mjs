@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   createFakeWatchTransport,
   createHelperWatchTransport,
+  createSharedWatchTransport,
+  createInstallationWatchTransportFactory,
   ensureHelperWatchGrant,
 } from "../src/helper-watch-transport.mjs";
 import { createMemoryCursorStore, createWakeClient } from "../src/wake-client.mjs";
@@ -68,6 +70,37 @@ test("helper watch transport fails closed on helper failure", async () => {
     },
   });
   await assert.rejects(() => transport.poll({ cursor: 0 }), (error) => error.code === "helper_unavailable");
+});
+
+test("helper watch transport attaches rejectedCode from watch_operation_failed stderr", async () => {
+  const transport = createHelperWatchTransport({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    async run() {
+      return {
+        code: 1,
+        stdout: "",
+        stderr: JSON.stringify({
+          status: "watch_operation_failed",
+          code: "watch_rejected",
+          gate: "network",
+          operatorAction: "retry_later",
+          safeToRetry: true,
+          rejectedCode: "poll_limit_exceeded",
+          rejectedStatusCode: 429,
+        }) + "\n",
+      };
+    },
+  });
+  await assert.rejects(
+    () => transport.poll({ cursor: 32 }),
+    (error) =>
+      error.code === "helper_unavailable"
+      && error.rejectedCode === "poll_limit_exceeded"
+      && error.failureCode === "watch_rejected"
+      && error.diagnosis?.rejectedStatusCode === 429
+      && /poll_limit_exceeded/.test(error.message),
+  );
 });
 
 test("helper watch transport rejects invalid installation ids", () => {
@@ -331,4 +364,87 @@ test("ensureHelperWatchGrant treats held-poll probe timeout as usable existing g
   assert.deepEqual(calls, ["watch-ensure", "watch-poll"]);
   assert.equal(result.ensured, true);
   assert.equal(result.reusedExisting, true);
+});
+
+test("shared watch transport coalesces concurrent same-cursor polls", async () => {
+  let underlyingPolls = 0;
+  let releasePoll;
+  const held = new Promise((resolve) => { releasePoll = resolve; });
+  const underlying = {
+    async poll({ cursor }) {
+      underlyingPolls += 1;
+      await held;
+      return {
+        cursor: cursor + 1,
+        events: [
+          { agent_id: "agent_a", high_watermark: cursor + 1 },
+          { agent_id: "agent_b", high_watermark: cursor + 1 },
+        ],
+      };
+    },
+  };
+  const shared = createSharedWatchTransport({ transport: underlying });
+  const first = shared.poll({ cursor: 32 });
+  const second = shared.poll({ cursor: 32 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(underlyingPolls, 1);
+  releasePoll();
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(underlyingPolls, 1);
+  assert.deepEqual(left, right);
+  assert.equal(left.cursor, 33);
+  assert.equal(left.events.length, 2);
+});
+
+test("shared watch transport serializes divergent cursors to one in-flight poll", async () => {
+  const cursors = [];
+  let active = 0;
+  let peak = 0;
+  const underlying = {
+    async poll({ cursor }) {
+      cursors.push(cursor);
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return { cursor: cursor + 5, events: [{ agent_id: "agent_a", high_watermark: cursor + 5 }] };
+    },
+  };
+  const shared = createSharedWatchTransport({ transport: underlying });
+  const [first, second] = await Promise.all([
+    shared.poll({ cursor: 10 }),
+    shared.poll({ cursor: 12 }),
+  ]);
+  assert.equal(peak, 1);
+  assert.deepEqual(cursors, [10, 12]);
+  assert.equal(first.cursor, 15);
+  assert.equal(second.cursor, 17);
+});
+
+test("installation watch transport factory reuses one coalesced transport per installation", async () => {
+  const created = [];
+  const factory = createInstallationWatchTransportFactory(({ helperPath, installationId }) => {
+    created.push({ helperPath, installationId });
+    return {
+      async poll({ cursor }) {
+        return { cursor, events: [] };
+      },
+    };
+  });
+  const left = factory({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_EaA3qkuzOuQwTSFw",
+  });
+  const right = factory({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_EaA3qkuzOuQwTSFw",
+  });
+  assert.equal(left, right);
+  assert.equal(created.length, 1);
+  const other = factory({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  assert.notEqual(other, left);
+  assert.equal(created.length, 2);
 });

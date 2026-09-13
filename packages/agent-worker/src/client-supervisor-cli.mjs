@@ -593,24 +593,33 @@ async function readBoundedInput(input, signal) {
 const SAFE_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 function sanitizedErrorCode(detail) {
-  const code = detail?.code;
-  if (typeof code !== "string" || !SAFE_ERROR_CODE.test(code)) return null;
-  // Defense in depth: never echo mesh credential-shaped tokens as a "code".
-  if (/mesh_(?:watch_)?/.test(code)) return null;
-  return code;
+  // Prefer MESH rejection / gate codes when present so operators can tell
+  // poll_limit_exceeded races from a bare dead helper.
+  for (const candidate of [detail?.rejectedCode, detail?.failureCode, detail?.code]) {
+    if (typeof candidate !== "string" || !SAFE_ERROR_CODE.test(candidate)) continue;
+    // Defense in depth: never echo mesh credential-shaped tokens as a "code".
+    if (/mesh_(?:watch_)?/.test(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function sanitizedHttpStatus(detail) {
+  const status = detail?.httpStatus ?? detail?.status;
+  return Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null;
 }
 
 function sanitizedLogger(stderr) {
   return Object.freeze({
     error(_event, detail) {
       const code = sanitizedErrorCode(detail);
+      const httpStatus = sanitizedHttpStatus(detail);
       // Keep production stderr secret-free; optionally surface a short code so
       // operators can tell helper_unavailable apart from already_started spam.
-      stderr.write(
-        code
-          ? `triangle-client: instance cycle failed (${code})\n`
-          : "triangle-client: instance cycle failed\n",
-      );
+      let line = "triangle-client: instance cycle failed";
+      if (code && httpStatus != null) line += ` (${code}/${httpStatus})`;
+      else if (code) line += ` (${code})`;
+      stderr.write(`${line}\n`);
     },
   });
 }

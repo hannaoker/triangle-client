@@ -184,6 +184,10 @@ test("wake bridge posts on MESH hint and keeps watching after webhook failure", 
     assert.equal(result.cycles, 3);
     assert.equal(calls, 3); // reconcile + two wakes
     assert.ok(logs.some((entry) => entry.event === "triangle_grok_bot_wake_failed"));
+    assert.ok(logs.some((entry) =>
+      entry.detail?.code === "webhook_rejected"
+      && entry.detail?.httpStatus === 503
+      && entry.detail?.reason === "startup_reconcile"));
     assert.ok(logs.every((entry) => !JSON.stringify(entry).includes("test-webhook-key-value")));
     assert.ok(logs.every((entry) => !JSON.stringify(entry).includes(httpUrl)));
     statuses.push(await bridge.stop());
