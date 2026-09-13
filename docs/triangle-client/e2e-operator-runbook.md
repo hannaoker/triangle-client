@@ -12,8 +12,11 @@ Companion docs:
 - [Triangle Client guide](README.md) — product semantics and scaling
 - [Release workflow](release-workflow.md) — what must pass before calling a
   cut shippable to other machines
-- [Codex desktop wake handoff](codex-desktop-wake-handoff.md) — optional App
+- [Codex desktop wake handoff](codex-desktop-wake-handoff.md) — Codex App
   Server / desktop wake (Mac-only proofs)
+- [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —
+  Bob vs Codex host adapters; do not treat event-driven `codex exec` as Grok Bot
+
 
 ## 0. Decide signing mode before you touch Keychain
 
@@ -211,8 +214,14 @@ strings, treat it as a release blocker and stop.
 
 ## 7. Optional: App Server / desktop wake pointers
 
-Phase 2 durable wake/scheduling is **Complete**. Desktop App Server attach and
-Bob canary remain **Mac operator** work:
+Phase 2 durable wake/scheduling is **Complete**. Event-driven watch on a
+profile is the **mailbox-identity** loop (claim → reason → reply → ack). That
+is **not** Grok Bot Bob unless the reasoner is a native Grok Bot wake adapter.
+Interactive Codex inbound uses App Server, not `event-driven` + `codex exec`.
+See [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md).
+
+Desktop App Server attach and the Bob→Codex **session** canary remain **Mac
+operator** work:
 
 - Product path and Gate A runbook:
   [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md)

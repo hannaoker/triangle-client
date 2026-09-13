@@ -2,7 +2,10 @@
 
 Status: Complete
 
-Updated: 2026-09-12
+Updated: 2026-09-13
+
+Post-complete host split (does not reopen this bar):
+[2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md).
 
 Source design Phase 2 / implementation Slice 5 (ownership) + Slice 7 (listener).
 

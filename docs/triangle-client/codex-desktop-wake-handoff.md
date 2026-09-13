@@ -1,14 +1,20 @@
 # Codex desktop wake-up: implementation handoff
 
 Verified: 2026-09-05 UTC (2026-09-04 America/Los_Angeles).
-Updated: 2026-09-12.
+Updated: 2026-09-13.
 
 Status:
 - Native desktop idle-chat wake-up proved (2026-09-05).
 - Phase 2 durable wake/scheduling is **Complete** (2026-09-12 wall soak).
 - Shared Codex App Server track: **authenticated WS transport + supervisor wiring landed** (PR #9);
-  **production-shaped native-desktop nonce experiment script + Mac runbook landed**;
-  Mac operator Gate A execution and Bob canary remain (not claimed from Linux).
+  **production-shaped native-desktop nonce experiment script + Mac runbook landed**.
+- **2026-09-13:** MESH identity `bob` completed unattended watch→claim→reply→ack
+  on Mini using a **temporary Codex runner**. That is **not** Grok Bot Bob and
+  **not** App Server. Interactive Codex (`codex-bob-test`) is still
+  `mcp-interactive` with no live `appServerWake` binding. See
+  [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md).
+- Remaining on this track: live App Server binding + Bob→**Codex session**
+  canary. Native Grok Bot wake is a separate adapter.
 
 ## Decision and scope
 
@@ -44,7 +50,7 @@ This is not a claim that every remaining task is mechanical or release-safe.
 | B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — helper watch transport; `createAppServerWakeBridge`; supervisor/CLI opt-in `appServerWake` bootstrap |
 | C. Admission / busy queue / correlation | **Partial** — in-memory queue + correlation; durable production persistence and race matrix still open |
 | D. Lifecycle / doctor status surface | **Partial** — `session.status()` distinguishes doctor phases; public `mesh` flags not designed yet |
-| E. Real Bob canary | **Not started** |
+| E. Real Bob canary | **Mailbox-identity loop proved (2026-09-13, temporary Codex runner under `bob`). App Server session canary and native Grok Bot wake remain.** |
 | Slice 6 trusted transaction proxy | **Landed on main (PR #7)** — use `createTrustedTransactionProxy` / helper CLI; Mac security review still required before production Hermes claim/reply/ack |
 | Optional Codex SDK subprocess | **Out of scope** |
 
@@ -386,7 +392,11 @@ Then test background/unsubscribed chats, approvals, cancellation, multiple rooms
 server restart, transport authentication, resource bounds, and a fake-harness soak.
 Do not call one successful local turn a latency distribution or production soak.
 
-**Increment status:** not started (separate from Gate A script landing).
+**Increment status (2026-09-13):** mailbox-identity canary passed on Mini
+(`BOB-WATCH-85b9b18a` → Bob reply seq 43) via event-driven drain under a
+temporary Codex runner. **App Server session canary (same idle desktop thread)
+is not started.** Native Grok Bot wake is not this gate.
+
 
 #### Bob canary checklist (operator; not implemented in this increment)
 

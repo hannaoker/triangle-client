@@ -65,6 +65,11 @@ chatbot transcripts are not credential stores.
   through enroll, runtime, event-driven watch, and App Server wake pointers
 - [Release workflow](release-workflow.md) — risk-based gates and the release
   readiness checklist (`scripts/release/check-release-readiness.sh`)
+- [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —
+  one watch→claim→reply→ack workflow; Codex uses App Server, Grok Bot Bob
+  needs a native wake adapter (headless `codex exec` under Bob is only a
+  mailbox-identity proof)
+
 
 ## Install
 
