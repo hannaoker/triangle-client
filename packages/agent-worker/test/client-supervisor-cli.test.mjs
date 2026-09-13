@@ -420,7 +420,13 @@ test("sanitized logger may include a short secret-free error code", async () => 
           logger.error("triangle_client_app_server_wake_failed", {
             error: "App Server bound wake listener failed",
             code: "helper_unavailable",
+            rejectedCode: "poll_limit_exceeded",
+            failureCode: "watch_rejected",
             message: `poll failed with ${secret}`,
+          });
+          logger.error("triangle_client_grok_bot_wake_failed", {
+            code: "webhook_rejected",
+            httpStatus: 503,
           });
           logger.error("triangle_client_grok_bot_wake_failed", {
             code: "already_started",
@@ -433,7 +439,8 @@ test("sanitized logger may include a short secret-free error code", async () => 
       };
     },
   }), 0);
-  assert.match(logged.value(), /triangle-client: instance cycle failed \(helper_unavailable\)/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(poll_limit_exceeded\)/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(webhook_rejected\/503\)/);
   assert.match(logged.value(), /triangle-client: instance cycle failed \(already_started\)/);
   // Reject codes that look like credential material; fall back to bare message.
   assert.match(logged.value(), /triangle-client: instance cycle failed\n/);

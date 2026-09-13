@@ -276,6 +276,7 @@ export function createGrokBotWakeBridge({
               message: error?.message,
               instanceId: wake?.instanceId,
               httpStatus: error?.status ?? null,
+              reason: typeof wake?.reason === "string" ? wake.reason.slice(0, 64) : undefined,
             });
             return { status: "failed", code: error?.code ?? null };
           }
