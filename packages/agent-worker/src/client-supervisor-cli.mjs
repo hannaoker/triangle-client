@@ -8,6 +8,7 @@ import { TextDecoder } from "node:util";
 import { createClientSupervisor } from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
+import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -552,6 +553,14 @@ export async function runClientSupervisorCLI({
         appServerWake: bootstrap.appServerWake ?? null,
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
+        ...(bootstrap.appServerWake
+          ? {
+            resolveDelivery: createProductionAppServerDeliveryResolver({
+              helperPath: bootstrap.appServerWake.helperPath,
+              profile: bootstrap.appServerWake.actorProfile,
+            }),
+          }
+          : {}),
       });
       const configDigest = createHash("sha256").update(Buffer.from(bootstrapText, "utf8")).digest("hex");
       const generation = randomUUID();

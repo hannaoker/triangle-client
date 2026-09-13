@@ -180,7 +180,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 detail: "Workload key material is missing for a watch grant member profile.",
                 operatorNotes: [
                     "Re-enroll the profile so workload-key Keychain material is installed.",
-                    "Do not place mesh_ or mesh_watch_ tokens in Node env or plists.",
+                    "Do not place mailbox or watch credentials in Node env or plists.",
                 ]
             )
         case .credentialMissing:
@@ -385,7 +385,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             ]
         case .watchStatus:
             requires = ["--installation"]
-            notes = ["Secret-free status JSON only; never prints mesh_watch_ material."]
+            notes = ["Secret-free status JSON only; never prints watch credential material."]
         case .watchRevoke:
             requires = ["--installation"]
             notes = ["Revokes remotely and deletes the local mailbox-watch Keychain item."]

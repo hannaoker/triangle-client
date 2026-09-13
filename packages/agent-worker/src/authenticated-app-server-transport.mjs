@@ -16,6 +16,12 @@ import { readFile } from "node:fs/promises";
 const ENDPOINT = /^wss?:\/\/[^\s\0]{1,500}$/i;
 const SERVER_IDENTITY = /^[A-Za-z0-9._:/+=-]{1,200}$/;
 const BEARER = /^Bearer [^\s\0]{1,4096}$/;
+export const MAX_RETAINED_EVENTS = 64;
+const RETAINED_EVENT_METHODS = new Set([
+  "triangle/authenticated",
+  "turn/started",
+  "turn/completed",
+]);
 
 function createCodedError(code, message, extra = {}) {
   const error = new Error(message);
@@ -372,7 +378,12 @@ export function createAuthenticatedAppServerTransport({
   const retainedEvents = [];
 
   function emitEvent(event) {
-    retainedEvents.push(event);
+    if (RETAINED_EVENT_METHODS.has(event?.method)) {
+      retainedEvents.push(event);
+      while (retainedEvents.length > MAX_RETAINED_EVENTS) {
+        retainedEvents.shift();
+      }
+    }
     for (const listener of listeners) listener(event);
   }
 
@@ -414,10 +425,15 @@ export function createAuthenticatedAppServerTransport({
         waiter.reject(createCodedError("not_connected", "WebSocket closed"));
       }
     };
-    next.addEventListener?.("message", handleMessage);
-    next.addEventListener?.("close", handleClose);
-    next.onmessage = handleMessage;
-    next.onclose = handleClose;
+    // Register through one API only. Browser-like sockets invoke both
+    // addEventListener and onmessage/onclose when both are set.
+    if (typeof next.addEventListener === "function") {
+      next.addEventListener("message", handleMessage);
+      next.addEventListener("close", handleClose);
+    } else {
+      next.onmessage = handleMessage;
+      next.onclose = handleClose;
+    }
   }
 
   function identityFromHello(event, expectedIdentity) {

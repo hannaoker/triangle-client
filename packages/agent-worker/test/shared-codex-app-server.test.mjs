@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   SHARED_CODEX_ADAPTER_VERSION,
+  MAX_COMPLETED_TURNS,
   assertCompatibleBinding,
   createAppServerWakeBridge,
   createAtomicFileBindingStore,
@@ -13,6 +14,7 @@ import {
   createFakeWatchTransport,
   createMemoryBindingStore,
   createMemoryCorrelationStore,
+  createProductionAppServerDeliveryResolver,
   createSharedCodexSession,
   createTrustedTransactionProxy,
   createTrustedTransactionProxyStub,
@@ -344,6 +346,111 @@ test("wake bridge admits a delivery through helper-shaped fake watch transport",
   assert.equal(session.status().status, "disconnected");
 });
 
+test("production durable resolver: one wake starts one Codex turn", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = matchingTransport(binding);
+  const session = createSharedCodexSession({ binding, transport });
+  const roomId = `room_${"d".repeat(32)}`;
+  let statusCalls = 0;
+  const resolveDelivery = createProductionAppServerDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    async run(_file, args) {
+      assert.equal(args[0], "transaction-status");
+      statusCalls += 1;
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: true,
+          transactionStuck: false,
+          open: { deliveryId: 9, roomId, state: "claimed" },
+        }),
+        stderr: "",
+      };
+    },
+  });
+  const watchTransport = createFakeWatchTransport({
+    polls: [
+      { cursor: 1, events: [] },
+      {
+        cursor: 5,
+        events: [{ agent_id: agentId, high_watermark: 5 }],
+      },
+    ],
+  });
+  const bridge = createAppServerWakeBridge({
+    binding,
+    session,
+    watchTransport,
+    coalesceMs: 5,
+    async resolveDelivery(input) {
+      if (input.reason === "startup_reconcile") return null;
+      return resolveDelivery(input);
+    },
+  });
+
+  await bridge.start({ maxCycles: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(statusCalls >= 1);
+  assert.equal(transport.calls.filter((call) => call.method === "turn/start").length, 1);
+  assert.doesNotMatch(JSON.stringify(transport.calls), /mesh_/);
+  await bridge.stop();
+});
+
+test("waitForTurn removes completion state after consumption", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = createNonRetainingImmediateTransport({
+    threadId: binding.threadId,
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    requestTimeoutMs: 40,
+  });
+  await session.connect();
+  const started = await session.startTurn({
+    deliveryId: "delivery_consume_1",
+    input: [{ type: "text", text: "once" }],
+  });
+  const first = await session.waitForTurn(started.turn.id, { timeoutMs: 40 });
+  assert.equal(first.status, "completed");
+  await assert.rejects(
+    () => session.waitForTurn(started.turn.id, { timeoutMs: 40 }),
+    (error) => error.code === "request_timeout",
+  );
+  await session.shutdown();
+});
+
+test("completedTurns retention is bounded for unconsumed completions", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = createNonRetainingImmediateTransport({
+    threadId: binding.threadId,
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    requestTimeoutMs: 50,
+  });
+  await session.connect();
+  for (let index = 0; index < MAX_COMPLETED_TURNS + 8; index += 1) {
+    await session.startTurn({
+      deliveryId: `delivery_bound_${index}`,
+      input: [{ type: "text", text: `item-${index}` }],
+    });
+  }
+  // Oldest unconsumed completions must have been dropped from the bound map.
+  await assert.rejects(
+    () => session.waitForTurn("turn_imm_0001", { timeoutMs: 30 }),
+    (error) => error.code === "request_timeout",
+  );
+  const latestId = `turn_imm_${String(MAX_COMPLETED_TURNS + 8).padStart(4, "0")}`;
+  const latest = await session.waitForTurn(latestId, { timeoutMs: 50 });
+  assert.equal(latest.id, latestId);
+  await session.shutdown();
+});
+
 test("submission timeout becomes submission_unknown and stops auto-resubmit", async () => {
   const binding = validateBinding(sampleBinding());
   const transport = matchingTransport(binding, {
@@ -398,6 +505,7 @@ test("trusted transaction proxy stub fails closed until helper is present", asyn
   await assert.rejects(() => proxy.claim(), (error) => error.code === "slice6_required");
   await assert.rejects(() => proxy.reply(), (error) => error.code === "slice6_required");
   await assert.rejects(() => proxy.ack(), (error) => error.code === "slice6_required");
+  assert.equal((await proxy.status()).shouldStartModel, false);
 });
 
 test("createTrustedTransactionProxy uses helper when path and profile are set", () => {
