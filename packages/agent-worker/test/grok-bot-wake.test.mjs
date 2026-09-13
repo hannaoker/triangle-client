@@ -191,6 +191,38 @@ test("wake bridge posts on MESH hint and keeps watching after webhook failure", 
   assert.equal(statuses[0].status, "stopped");
 });
 
+test("wake bridge resets after watch failure so retry start is allowed", async () => {
+  let polls = 0;
+  const helperError = new Error("watch helper poll failed");
+  helperError.code = "helper_unavailable";
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: {
+      async poll() {
+        polls += 1;
+        if (polls === 1) throw helperError;
+        return { cursor: polls, events: [] };
+      },
+    },
+    dispatcher: {
+      wakeMode: "webhook",
+      async deliver() {
+        return { status: "accepted", httpStatus: 200 };
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => bridge.start({ maxCycles: 1 }),
+    (error) => error.code === "helper_unavailable",
+  );
+  // Sticky started=true would throw already_started on the next attempt.
+  const retried = await bridge.start({ maxCycles: 1 });
+  assert.equal(retried.cycles, 1);
+  assert.equal(polls, 2);
+  assert.equal((await bridge.stop()).status, "stopped");
+});
+
 test("wake bridge does not claim reply or ack and ignores other profiles", async () => {
   const posted = [];
   const bridge = createGrokBotWakeBridge({

@@ -282,8 +282,21 @@ export function createGrokBotWakeBridge({
         },
       });
       started = true;
-      await wakeClient.reconcileStartup({ signal });
-      return wakeClient.watch({ signal, maxCycles });
+      try {
+        await wakeClient.reconcileStartup({ signal });
+        return await wakeClient.watch({ signal, maxCycles });
+      } catch (error) {
+        // Failed start must not leave `started` sticky — supervisor retries
+        // call start() again and would otherwise spam already_started.
+        try {
+          await wakeClient?.stop();
+        } catch {
+          /* ignore cleanup errors */
+        }
+        wakeClient = null;
+        started = false;
+        throw error;
+      }
     },
 
     async stop() {

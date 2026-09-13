@@ -631,79 +631,76 @@ export function createClientSupervisor({
       // Keep wake loops independent and durable: a listener failure must not
       // resolve Promise.all and exit the supervisor (LaunchAgent KeepAlive thrash).
       // Retry until abort instead of returning.
-      const wakeLoop = wakeRuntime
-        ? (async () => {
-          while (!signal?.aborted) {
-            try {
-              return await wakeRuntime.start({ signal });
-            } catch (error) {
-              if (signal?.aborted || error?.name === "AbortError") return null;
-              logger.error?.("triangle_client_event_wake_failed", {
-                error: "Event-driven wake listener failed",
-                code: error?.code,
-                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
-              });
-              await new Promise((resolve) => {
-                const timer = setTimeout(resolve, 5_000);
-                signal?.addEventListener?.("abort", () => {
-                  clearTimeout(timer);
-                  resolve();
-                }, { once: true });
-              });
+      async function sleepBeforeWakeRetry() {
+        if (typeof sleep === "function") {
+          await sleep(5_000, { signal });
+          return;
+        }
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 5_000);
+          signal?.addEventListener?.("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+      }
+
+      async function runDurableWakeLoop({
+        start,
+        stop = null,
+        logEvent,
+        logMessage,
+      }) {
+        while (!signal?.aborted) {
+          try {
+            return await start();
+          } catch (error) {
+            if (signal?.aborted || error?.name === "AbortError") return null;
+            logger.error?.(logEvent, {
+              error: logMessage,
+              code: error?.code,
+              message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
+            });
+            // Clear sticky started/session state before retry so the next
+            // start() cannot spam already_started after a watch-poll failure.
+            if (typeof stop === "function") {
+              try {
+                await stop();
+              } catch {
+                /* ignore stop errors during restart */
+              }
             }
+            await sleepBeforeWakeRetry();
           }
-          return null;
-        })()
+        }
+        return null;
+      }
+
+      const wakeLoop = wakeRuntime
+        ? runDurableWakeLoop({
+          start: () => wakeRuntime.start({ signal }),
+          stop: typeof wakeRuntime.stop === "function" ? () => wakeRuntime.stop() : null,
+          logEvent: "triangle_client_event_wake_failed",
+          logMessage: "Event-driven wake listener failed",
+        })
         : Promise.resolve(null);
 
       const appServerLoop = appServerBridge
-        ? (async () => {
-          while (!signal?.aborted) {
-            try {
-              return await appServerBridge.start({ signal });
-            } catch (error) {
-              if (signal?.aborted || error?.name === "AbortError") return null;
-              logger.error?.("triangle_client_app_server_wake_failed", {
-                error: "App Server bound wake listener failed",
-                code: error?.code,
-                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
-              });
-              await new Promise((resolve) => {
-                const timer = setTimeout(resolve, 5_000);
-                signal?.addEventListener?.("abort", () => {
-                  clearTimeout(timer);
-                  resolve();
-                }, { once: true });
-              });
-            }
-          }
-          return null;
-        })()
+        ? runDurableWakeLoop({
+          start: () => appServerBridge.start({ signal }),
+          stop: () => appServerBridge.stop(),
+          logEvent: "triangle_client_app_server_wake_failed",
+          logMessage: "App Server bound wake listener failed",
+        })
         : Promise.resolve(null);
 
       const grokBotLoop = grokBotBridge
-        ? (async () => {
-          while (!signal?.aborted) {
-            try {
-              return await grokBotBridge.start({ signal });
-            } catch (error) {
-              if (signal?.aborted || error?.name === "AbortError") return null;
-              logger.error?.("triangle_client_grok_bot_wake_failed", {
-                error: "Grok Bot wake listener failed",
-                code: error?.code,
-                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
-              });
-              await new Promise((resolve) => {
-                const timer = setTimeout(resolve, 5_000);
-                signal?.addEventListener?.("abort", () => {
-                  clearTimeout(timer);
-                  resolve();
-                }, { once: true });
-              });
-            }
-          }
-          return null;
-        })()
+        ? runDurableWakeLoop({
+          start: () => grokBotBridge.start({ signal }),
+          stop: () => grokBotBridge.stop(),
+          logEvent: "triangle_client_grok_bot_wake_failed",
+          logMessage: "Grok Bot wake listener failed",
+        })
         : Promise.resolve(null);
 
       const [instances, wakeResult, appServerResult, grokBotResult] = await Promise.all([

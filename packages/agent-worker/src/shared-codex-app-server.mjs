@@ -624,7 +624,9 @@ export function createSharedCodexSession({
   }
 
   async function connect() {
-    if (stopped) throw createCodedError("stopped", "session is stopped");
+    // Durable supervisor stop→start cycles call shutdown() then connect() again.
+    // Re-arm so a prior stop does not permanently brick the shared session.
+    stopped = false;
     if (!validated.enabled) {
       setPhase("disabled");
       return doctorStatus();
@@ -1128,8 +1130,21 @@ export function createAppServerWakeBridge({
         },
       });
       started = true;
-      await wakeClient.reconcileStartup({ signal });
-      return wakeClient.watch({ signal, maxCycles });
+      try {
+        await wakeClient.reconcileStartup({ signal });
+        return await wakeClient.watch({ signal, maxCycles });
+      } catch (error) {
+        // Failed start must not leave `started` sticky — supervisor retries
+        // call start() again and would otherwise spam already_started.
+        try {
+          await wakeClient?.stop();
+        } catch {
+          /* ignore cleanup errors */
+        }
+        wakeClient = null;
+        started = false;
+        throw error;
+      }
     },
 
     async stop() {

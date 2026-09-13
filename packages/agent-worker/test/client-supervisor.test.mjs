@@ -818,3 +818,87 @@ test("supervisor rejects grokBotWake collision with worker and appServerWake", (
     createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
   }), /collides/i);
 });
+
+test("supervisor stops App Server and Grok Bot bridges before wake retry", async () => {
+  const logs = [];
+  const appServer = { starts: 0, stops: 0 };
+  const grokBot = { starts: 0, stops: 0 };
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    grokBotWake: grokBotWakeFixture(4),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createAuthResolver: () => ({
+      async resolveAuth() {
+        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
+      },
+    }),
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge: () => ({
+      async start() {
+        appServer.starts += 1;
+        if (appServer.starts === 1) {
+          const helper = new Error("watch helper poll failed");
+          helper.code = "helper_unavailable";
+          throw helper;
+        }
+        return { status: "stopped", cycles: 1 };
+      },
+      async stop() {
+        appServer.stops += 1;
+      },
+    }),
+    createGrokBotBridge: () => ({
+      async start() {
+        grokBot.starts += 1;
+        if (grokBot.starts === 1) {
+          const helper = new Error("watch helper poll failed");
+          helper.code = "helper_unavailable";
+          throw helper;
+        }
+        return { status: "stopped", cycles: 1 };
+      },
+      async stop() {
+        grokBot.stops += 1;
+      },
+    }),
+    logger: {
+      error(event, detail) {
+        logs.push({ event, code: detail?.code });
+      },
+    },
+  });
+
+  const result = await supervisor.watch({
+    signal: AbortSignal.timeout(1_000),
+    sleep: async () => {},
+  });
+
+  assert.equal(appServer.starts, 2);
+  assert.equal(appServer.stops, 1);
+  assert.equal(grokBot.starts, 2);
+  assert.equal(grokBot.stops, 1);
+  assert.equal(result.appServerWake?.cycles, 1);
+  assert.equal(result.grokBotWake?.cycles, 1);
+  assert.ok(logs.some((entry) => entry.event === "triangle_client_app_server_wake_failed" && entry.code === "helper_unavailable"));
+  assert.ok(logs.some((entry) => entry.event === "triangle_client_grok_bot_wake_failed" && entry.code === "helper_unavailable"));
+  assert.equal(logs.some((entry) => entry.code === "already_started"), false);
+});
