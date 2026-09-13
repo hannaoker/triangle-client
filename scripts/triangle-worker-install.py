@@ -31,6 +31,7 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/helper-watch-transport.mjs",
     "packages/agent-worker/src/profile-scheduler.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
+    "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/wake-client.mjs",
 ]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
