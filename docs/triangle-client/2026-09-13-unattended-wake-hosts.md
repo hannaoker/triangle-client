@@ -11,6 +11,19 @@ that bar. See
 [phase 1/2 completion criteria](2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md)
 and [Phase 2](2026-09-03-realtime-mailbox-phase-2.md).
 
+## Shared watch grant + per-host cursors
+
+Multiple wake bridges may share one installation watch grant but keep **separate**
+cursor files (`app-server-wake-cursor.json`, `grok-bot-wake-cursor.json`, …).
+`watch-poll` can return events for agents that are not in a given bridge’s
+profile set. The shared wake client must still advance that bridge’s cursor to
+the poll response tip when the batch matches zero local profiles; otherwise the
+bridge re-polls the same cursor forever and never reaches a held tip poll.
+
+After deploying that fix, an already-stuck cursor may still need a one-time bump
+to the installation tip (see
+[HANDOFF-appserver-wake-2026-09-13.md](HANDOFF-appserver-wake-2026-09-13.md)).
+
 ## One workflow, three host adapters
 
 The workflow is the same for every mailbox identity:
