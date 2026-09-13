@@ -10,6 +10,12 @@ The MESH core server and protocol source live separately in
 See the [Triangle Client guide](docs/triangle-client/README.md) for supported
 modes, installation, enrollment, lifecycle, and security boundaries.
 
+**Release install on another Mac:** [release bundle](docs/triangle-client/release-bundle.md)
+(signing, layout, upgrade/uninstall) and the
+[E2E operator runbook](docs/triangle-client/e2e-operator-runbook.md)
+(install → enroll → runtime → event-driven watch). Preflight:
+`./scripts/release/check-release-readiness.sh --mode docs`.
+
 The **macOS mailbox credential helper** (`triangle-mailbox`) is the Keychain
 custodian for durable mailbox identity and installation-scoped watch grants.
 

@@ -266,6 +266,11 @@ verification fails.
 
 See [`docs/triangle-client/README.md`](../../docs/triangle-client/README.md) for
 the complete operating guide, scaling model, and uninstall procedure.
+For a release-oriented layout and clean-Mac E2E sequence (including
+event-driven `watch-ensure`), see
+[`docs/triangle-client/release-bundle.md`](../../docs/triangle-client/release-bundle.md)
+and
+[`docs/triangle-client/e2e-operator-runbook.md`](../../docs/triangle-client/e2e-operator-runbook.md).
 
 ## Legacy worker migration and rollback
 
