@@ -32,7 +32,18 @@ while [[ $# -gt 0 ]]; do
   if [[ "$1" == "--scratch-path" ]]; then scratch=$2; shift 2; else shift; fi
 done
 mkdir -p "$scratch/release"
-printf '#!/bin/sh\\nprintf helper-%s\\n' "\${TRIANGLE_TEST_BINARY_VERSION:-one}" > "$scratch/release/triangle-mailbox"
+version="\${TRIANGLE_TEST_BINARY_VERSION:-one}"
+cat > "$scratch/release/triangle-mailbox" <<STUB
+#!/bin/bash
+set -eu
+if [[ "\\\${1:-}" == watch-ensure || "\\\${1:-}" == watch-poll || "\\\${1:-}" == watch-status || "\\\${1:-}" == watch-revoke ]]; then
+  if [[ "\\\${2:-}" == "--help" || "\\\${2:-}" == "-h" ]]; then
+    printf '{"command":"%s","notes":[],"phase":"watch-grant-phase-2","requires":[],"supported":true}\\n' "\\\$1"
+    exit 0
+  fi
+fi
+printf 'helper-%s\\n' "\${version}"
+STUB
 chmod 700 "$scratch/release/triangle-mailbox"
 cp "$scratch/release/triangle-mailbox" "$scratch/release/triangle-client"
 chmod 700 "$scratch/release/triangle-client"
@@ -122,6 +133,12 @@ test("operator documentation defines the complete low-friction custody lifecycle
     /Developer ID/i,
     /local-ad-hoc[\s\S]*(non-public|local testing|development only)/i,
     /rollback/i,
+    /watch-ensure --help/,
+    /Upgrade an existing install/,
+    /Interpreting watch-ensure failures/,
+    /mcp-interactive[\s\S]*watch membership/i,
+    /gate[\s\S]*workload_auth|membership|keychain/i,
+    /cliSurface/,
   ]) assert.match(helper, pattern);
   assert.doesNotMatch(helper, /show-token|export-token/);
 
@@ -163,6 +180,31 @@ test("operator documentation defines the complete low-friction custody lifecycle
   assert.match(deployment, /helper[^\n]*internally injects|internally injects[^\n]*helper/i);
 });
 
+test("installer refuses helpers that lack the Phase 2 watch CLI help surface", (t) => {
+  const f = fixture(t);
+  const brokenSwift = path.join(f.base, "tools", "swift-broken-watch");
+  fs.writeFileSync(brokenSwift, `#!/bin/bash
+set -eu
+scratch=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--scratch-path" ]]; then scratch=$2; shift 2; else shift; fi
+done
+mkdir -p "$scratch/release"
+printf '#!/bin/sh\\nprintf legacy-helper\\n' > "$scratch/release/triangle-mailbox"
+chmod 700 "$scratch/release/triangle-mailbox"
+cp "$scratch/release/triangle-mailbox" "$scratch/release/triangle-client"
+chmod 700 "$scratch/release/triangle-client"
+`, { mode: 0o700 });
+  fs.chmodSync(brokenSwift, 0o700);
+  const result = run(["--local-ad-hoc"], { ...f.env, TRIANGLE_SWIFT_COMMAND: brokenSwift });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /watch CLI surface/i);
+  assert.equal(
+    fs.existsSync(path.join(f.home, "Library", "Application Support", "The Triangle", "bin", "triangle-mailbox")),
+    false,
+  );
+});
+
 test("installer defaults to public Developer ID mode and rejects missing signing configuration", (t) => {
   const f = fixture(t);
   const result = run([], f.env);
@@ -197,6 +239,13 @@ test("explicit local ad-hoc mode release-builds and atomically installs at the f
   assert.match(fs.readFileSync(f.log, "utf8"), /codesign --verify --strict/);
   assert.equal(fs.readFileSync(unrelated, "utf8"), "preserve me\n");
   assert.equal(fs.readdirSync(applicationRoot).some((name) => name.startsWith(".mailbox-helper-install.")), false);
+  const metadata = JSON.parse(fs.readFileSync(path.join(applicationRoot, "install-manifest", "triangle-mailbox-install.json"), "utf8"));
+  assert.deepEqual(metadata.cliSurface, ["watch-ensure", "watch-poll", "watch-status", "watch-revoke"]);
+  const helper = path.join(applicationRoot, "bin", "triangle-mailbox");
+  const help = spawnSync(helper, ["watch-ensure", "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /"supported":\s*true/);
+  assert.match(help.stdout, /watch-grant-phase-2/);
 });
 
 test("installer rejects symlinks and unsafe existing ownership or mode", (t) => {

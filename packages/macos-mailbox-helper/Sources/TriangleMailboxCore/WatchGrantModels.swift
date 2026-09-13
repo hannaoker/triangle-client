@@ -361,6 +361,13 @@ public enum WatchGrantOperatorAction: String, Codable, Equatable, Sendable {
     case replaceWatchGrant = "replace_watch_grant"
     case revokeWatchGrant = "revoke_watch_grant"
     case unlockLoginKeychain = "unlock_login_keychain"
+    case useEventDrivenProfile = "use_event_driven_profile"
+    case reviewWatchMembership = "review_watch_membership"
+    case repairWorkloadAuth = "repair_workload_auth"
+    case useDeveloperIdHelper = "use_developer_id_helper"
+    case retryNetwork = "retry_network"
+    case enrollOrVerifyProfile = "enroll_or_verify_profile"
+    case resyncWatchCursor = "resync_watch_cursor"
 }
 
 public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {

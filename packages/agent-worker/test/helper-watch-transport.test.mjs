@@ -157,4 +157,32 @@ test("ensureHelperWatchGrant invokes watch-ensure and fails closed on non-zero e
     }),
     (error) => error.code === "helper_unavailable",
   );
+  await assert.rejects(
+    () => ensureHelperWatchGrant({
+      helperPath: "/trusted/triangle-mailbox",
+      installationId: "inst_N7VhDq3mQ2",
+      actorProfile: "event-hermes",
+      async run() {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "watch_operation_failed",
+            code: "workload_key_missing",
+            gate: "workload_auth",
+            operatorAction: "repair_workload_auth",
+            safeToRetry: false,
+            mustNotReregister: true,
+            detail: "Workload key material is missing for a watch grant member profile.",
+            operatorNotes: [],
+          }) + "\n",
+        };
+      },
+    }),
+    (error) =>
+      error.code === "helper_unavailable"
+      && error.failureCode === "workload_key_missing"
+      && error.gate === "workload_auth"
+      && error.operatorAction === "repair_workload_auth",
+  );
 });

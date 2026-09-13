@@ -26,10 +26,36 @@ function createResyncError(restartCursor) {
   return error;
 }
 
-function createHelperUnavailableError(message = "watch helper is unavailable") {
+function createHelperUnavailableError(message = "watch helper is unavailable", diagnosis = null) {
   const error = new Error(message);
   error.code = "helper_unavailable";
+  if (diagnosis && typeof diagnosis === "object") {
+    error.diagnosis = diagnosis;
+    if (typeof diagnosis.code === "string") error.failureCode = diagnosis.code;
+    if (typeof diagnosis.gate === "string") error.gate = diagnosis.gate;
+    if (typeof diagnosis.operatorAction === "string") error.operatorAction = diagnosis.operatorAction;
+  }
   return error;
+}
+
+function parseWatchFailureDiagnosis(stderr) {
+  if (typeof stderr !== "string" || stderr.trim().length === 0) return null;
+  try {
+    const payload = JSON.parse(stderr.trim().split("\n").at(-1));
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    if (payload.status !== "watch_operation_failed") return null;
+    if (typeof payload.code !== "string" || typeof payload.gate !== "string") return null;
+    return {
+      status: payload.status,
+      code: payload.code,
+      gate: payload.gate,
+      operatorAction: typeof payload.operatorAction === "string" ? payload.operatorAction : undefined,
+      safeToRetry: payload.safeToRetry === true,
+      detail: typeof payload.detail === "string" ? payload.detail : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function assertInstallationId(installationId) {
@@ -74,7 +100,8 @@ export async function ensureHelperWatchGrant({
     { timeoutMs, signal },
   );
   if (result.code !== 0) {
-    throw createHelperUnavailableError("watch helper ensure failed");
+    const diagnosis = parseWatchFailureDiagnosis(result.stderr);
+    throw createHelperUnavailableError("watch helper ensure failed", diagnosis);
   }
   return { ensured: true };
 }

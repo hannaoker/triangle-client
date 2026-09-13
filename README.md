@@ -65,7 +65,11 @@ triangle-mailbox watch-revoke --installation inst_…
 ```
 
 `watch-status` is secret-free and includes an `operatorAction` next step
-(ensure / replace / revoke / unlock Keychain).
+(ensure / replace / revoke / unlock Keychain). Failed `watch-ensure` emits
+secret-free stderr JSON with `code`, `gate`, and `operatorAction`. Re-run
+`./scripts/install-macos-mailbox-helper.sh` from current main if
+`watch-ensure --help` returns `local_validation_failed` (Sep-2-era binary).
+`mcp-interactive` profiles cannot join watch membership.
 
 ## Deployment
 

@@ -327,7 +327,7 @@ installed_at=$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')
 signing_mode=developer_id
 team_json="\"${TRIANGLE_DEVELOPER_TEAM_ID:-}\""
 if [[ $local_ad_hoc -eq 1 ]]; then signing_mode=local_ad_hoc; team_json=null; fi
-printf '{"version":1,"identifier":"%s","signingMode":"%s","teamId":%s,"sha256":"%s","installedAt":"%s","verifiedAt":"%s"}\n' \
+printf '{"version":1,"identifier":"%s","signingMode":"%s","teamId":%s,"sha256":"%s","installedAt":"%s","verifiedAt":"%s","cliSurface":["watch-ensure","watch-poll","watch-status","watch-revoke"]}\n' \
   "$identifier" "$signing_mode" "$team_json" "$digest" "$installed_at" "$installed_at" > "${temporary}/triangle-mailbox-install.json"
 printf '{"version":1,"identifier":"%s","signingMode":"%s","teamId":%s,"sha256":"%s","installedAt":"%s","verifiedAt":"%s"}\n' \
   "$identifier" "$signing_mode" "$team_json" "$client_digest" "$installed_at" "$installed_at" > "${temporary}/triangle-client-install.json"
@@ -386,6 +386,32 @@ installed_client_digest=$(/usr/bin/shasum -a 256 "$client_target" | /usr/bin/awk
   exit 1
 }
 
+verify_watch_cli_surface() {
+  local helper=$1
+  local verb help_json
+  for verb in watch-ensure watch-poll watch-status watch-revoke; do
+    if ! help_json=$("$helper" "$verb" --help); then
+      echo "installed helper is missing Phase 2 watch CLI surface (${verb} --help failed)" >&2
+      return 1
+    fi
+    if ! /usr/bin/python3 - "$verb" "$help_json" <<'PY'
+import json, sys
+verb = sys.argv[1]
+payload = json.loads(sys.argv[2])
+if payload.get("command") != verb or payload.get("supported") is not True:
+    raise SystemExit(f"{verb} help payload missing or unsupported")
+if payload.get("phase") != "watch-grant-phase-2":
+    raise SystemExit(f"{verb} help payload is not the Phase 2 watch surface")
+PY
+    then
+      echo "installed helper is missing Phase 2 watch CLI surface (${verb} --help payload invalid)" >&2
+      return 1
+    fi
+  done
+}
+
+verify_watch_cli_surface "$target"
+
 committed=1
 trap - EXIT HUP INT TERM
 /bin/rm -rf "$temporary"
@@ -409,3 +435,7 @@ if [[ $install_client -eq 1 ]]; then
   "$client_service" install
 fi
 echo "Installed verified Triangle mailbox helper at ${target} and Triangle Client at ${client_target}" >&2
+echo "Phase 2 watch CLI surface verified: watch-ensure / watch-poll / watch-status / watch-revoke" >&2
+if [[ $local_ad_hoc -eq 1 ]]; then
+  echo "NOTE: ad-hoc signing cannot use Developer ID Keychain access groups; prefer Developer ID for LaunchAgent custody." >&2
+fi

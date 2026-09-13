@@ -19,12 +19,14 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant store create/read/replace/delete", run: storeLifecycle),
             .init(name: "watch grant store errors redact secrets", run: secretFreeErrors),
             .init(name: "watch command parser", run: commandParser),
+            .init(name: "watch command help surface", run: commandHelpSurface),
             .init(name: "watch grant ensure join finalize stores credential", run: ensureLifecycle),
             .init(name: "watch grant status is secret-free", run: statusSecretFree),
             .init(name: "watch grant poll and resync mapping", run: pollAndResync),
             .init(name: "watch grant revoke clears local binding", run: revokeClearsBinding),
             .init(name: "watch grant excludes mcp-interactive members", run: excludesInteractive),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
+            .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
         ]
 #if canImport(Security)
         cases.append(.init(name: "watch grant Keychain query policy", run: keychainQueryPolicy))
@@ -88,7 +90,7 @@ public enum WatchGrantContractCases {
         }
         for error: WatchGrantServiceError in [
             .keychainUnavailable, .helperUnavailable, .noEventDrivenMembers, .actorNotDeclared,
-            .interactiveDeliveryExcluded, .workloadAuthUnavailable, .credentialMissing, .invalidCursor,
+            .interactiveDeliveryExcluded, .workloadAuthUnavailable, .workloadKeyMissing, .credentialMissing, .invalidCursor,
             .rejected(statusCode: 401, code: "watch_credential_invalid"), .resyncRequired(restartCursor: 9),
             .invalidResponse,
         ] {
@@ -96,6 +98,74 @@ public enum WatchGrantContractCases {
             try expect(!text.contains(canary), "service error exposed secret")
             try expect(!text.contains("mesh_"), "service error exposed mesh_ prefix")
         }
+    }
+
+    public static func commandHelpSurface() throws {
+        for command in [HelperCommand.watchEnsure, .watchPoll, .watchStatus, .watchRevoke] {
+            do {
+                _ = try CommandParser.parse([command.rawValue, "--help"])
+                throw ContractFailure("\(command.rawValue) --help did not request help")
+            } catch CommandParseError.helpRequested(let requested) {
+                try expect(requested == command, "\(command.rawValue) help mapped to wrong command")
+            }
+            let rendered = try WatchCommandHelpRenderer.render(WatchCommandHelp(command: command))
+            try expect(rendered.exitCode == 0, "\(command.rawValue) help exit mismatch")
+            let text = String(decoding: rendered.stdout, as: UTF8.self)
+            try expect(text.contains("\"supported\":true"), "\(command.rawValue) help missing supported")
+            try expect(text.contains("\"command\":\"\(command.rawValue)\""), "\(command.rawValue) help missing command")
+            try expect(text.contains("watch-grant-phase-2"), "\(command.rawValue) help missing phase")
+            try expect(!text.contains("mesh_"), "\(command.rawValue) help exposed secret prefix")
+        }
+    }
+
+    public static func failureDiagnosis() throws {
+        let canary = "mesh_watch_" + String(repeating: "f", count: 64)
+        let cases: [(WatchGrantServiceError, WatchGrantFailureGate, WatchGrantFailureCode, WatchGrantOperatorAction)] = [
+            (.keychainUnavailable, .keychain, .keychainUnavailable, .unlockLoginKeychain),
+            (.interactiveDeliveryExcluded, .membership, .interactiveDeliveryExcluded, .useEventDrivenProfile),
+            (.workloadKeyMissing, .workloadAuth, .workloadKeyMissing, .repairWorkloadAuth),
+            (.workloadAuthUnavailable, .workloadAuth, .workloadAuthUnavailable, .repairWorkloadAuth),
+            (.noEventDrivenMembers, .membership, .noEventDrivenMembers, .reviewWatchMembership),
+            (.helperUnavailable, .network, .helperUnavailable, .retryNetwork),
+            (.rejected(statusCode: 403, code: "watch_forbidden"), .network, .rejected, .retryNetwork),
+            (.credentialMissing, .keychain, .credentialMissing, .ensureWatchGrant),
+        ]
+        for (error, gate, code, action) in cases {
+            let diagnosis = WatchGrantFailureDiagnosis.from(error)
+            try expect(diagnosis.gate == gate, "\(code.rawValue) gate mismatch")
+            try expect(diagnosis.code == code, "\(code.rawValue) code mismatch")
+            try expect(diagnosis.operatorAction == action, "\(code.rawValue) action mismatch")
+            try expect(diagnosis.status == "watch_operation_failed", "\(code.rawValue) status mismatch")
+            let rendered = try WatchGrantFailureRenderer.render(diagnosis)
+            try expect(rendered.exitCode == 1, "\(code.rawValue) should fail closed")
+            let text = String(decoding: rendered.stderr, as: UTF8.self)
+            try expect(text.contains("\"gate\":\"\(gate.rawValue)\""), "\(code.rawValue) stderr missing gate")
+            try expect(text.contains("\"code\":\"\(code.rawValue)\""), "\(code.rawValue) stderr missing code")
+            try expect(text.contains("\"operatorAction\":"), "\(code.rawValue) stderr missing operatorAction")
+            try expect(!text.contains(canary), "\(code.rawValue) stderr exposed canary")
+            try expect(!text.contains("mesh_watch_"), "\(code.rawValue) stderr exposed watch credential prefix")
+            try expect(!String(describing: diagnosis).contains(canary), "\(code.rawValue) description exposed canary")
+        }
+
+        let interactive = WatchGrantFailureDiagnosis.from(WatchGrantServiceError.interactiveDeliveryExcluded)
+        try expect(
+            interactive.operatorNotes.contains(where: { $0.contains("mcp-interactive") }),
+            "interactive exclusion omitted mcp-interactive note"
+        )
+        let keychain = WatchGrantFailureDiagnosis.from(WatchGrantServiceError.keychainUnavailable)
+        try expect(
+            keychain.operatorNotes.contains(where: { $0.contains("Developer ID") }),
+            "keychain failure omitted Developer ID note"
+        )
+
+        let profile = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.localAuthorizationRequired)
+        try expect(profile.gate == .keychain, "credential gate lock should map to keychain")
+        try expect(profile.operatorAction == .unlockLoginKeychain, "credential gate lock action mismatch")
+
+        let poisoned = WatchGrantFailureDiagnosis.from(
+            WatchGrantServiceError.rejected(statusCode: 401, code: "mesh_watch_leak_attempt")
+        )
+        try expect(poisoned.rejectedCode == "watch_rejected", "rejected code sanitizer allowed mesh_ prefix")
     }
 
     public static func commandParser() throws {

@@ -86,6 +86,43 @@ Phase 2 wake transport keeps the opaque `mesh_watch_` credential inside the
 signed helper Keychain (`dev.thetriangle.mesh.mailbox-watch`). Operator and Node
 surfaces never receive the secret.
 
+### Upgrade an existing install
+
+Sep-2-era helpers reject `watch-ensure` as an unknown command
+(`local_validation_failed`). Re-run the installer from current `main` so the
+Application Support binary includes the Phase 2 watch surface:
+
+```sh
+# Public / LaunchAgent custody (Developer ID):
+export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
+export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
+./scripts/install-macos-mailbox-helper.sh
+
+# Local development only (no Developer ID Keychain access groups):
+./scripts/install-macos-mailbox-helper.sh --local-ad-hoc
+```
+
+Confirm the installed helper knows the watch verbs (exit 0, JSON with
+`"supported":true` — not `local_validation_failed`):
+
+```sh
+HELPER="$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox"
+"$HELPER" watch-ensure --help
+"$HELPER" watch-poll --help
+"$HELPER" watch-status --help
+"$HELPER" watch-revoke --help
+```
+
+The installer refuses to commit if any of those probes fail. Install metadata at
+`~/Library/Application Support/The Triangle/install-manifest/triangle-mailbox-install.json`
+includes `cliSurface: ["watch-ensure","watch-poll","watch-status","watch-revoke"]`.
+
+Ad-hoc vs Developer ID: `--local-ad-hoc` is fine for parsing/help checks and
+local experiments, but it cannot embed Keychain access-group entitlements. Prefer
+Developer ID for LaunchAgent custody and durable `mailbox-watch` items.
+
+### Operator commands
+
 ```sh
 HELPER="$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox"
 INSTALLATION='inst_YOUR_INSTALLATION_ID'
@@ -104,8 +141,33 @@ INSTALLATION='inst_YOUR_INSTALLATION_ID'
 "$HELPER" watch-revoke --installation "$INSTALLATION"
 ```
 
-`mcp-interactive` profiles are rejected from watch membership. If Keychain is
+`mcp-interactive` profiles are rejected from watch membership by design. Set
+delivery mode to `worker` or `event-driven` before `watch-ensure`. If Keychain is
 unavailable, watch commands fail closed.
+
+### Interpreting watch-ensure failures
+
+Failed `watch-ensure` writes secret-free JSON to **stderr** (exit 1), not the
+opaque enrollment-era `operation_failed` blob. Fields:
+
+| Field | Meaning |
+| --- | --- |
+| `code` | Machine-readable failure (`workload_key_missing`, `interactive_delivery_excluded`, …) |
+| `gate` | Which gate failed: `validation`, `membership`, `workload_auth`, `keychain`, `network`, or `profile` |
+| `operatorAction` | Next step (`unlock_login_keychain`, `use_event_driven_profile`, `repair_workload_auth`, …) |
+| `operatorNotes` | Short secret-free hints (ad-hoc vs Developer ID, mcp-interactive exclusion, …) |
+| `safeToRetry` / `mustNotReregister` | Retry / re-registration policy |
+
+Never expect `mesh_` or `mesh_watch_` material in this JSON. Common Mac checks
+after a failure (operator-run on the Mac; not claimed from Linux CI):
+
+1. `"$HELPER" watch-ensure --help` — must be supported (upgrade if not).
+2. `"$HELPER" status --profile PROFILE` — profile must verify.
+3. Delivery mode must not be `mcp-interactive` for watch members.
+4. Keychain services `dev.thetriangle.mesh.mailbox` and
+   `dev.thetriangle.mesh.workload-key` should exist for the profile;
+   `dev.thetriangle.mesh.mailbox-watch` appears only after a successful ensure.
+5. If `gate` is `keychain` on an ad-hoc helper, reinstall with Developer ID.
 
 Use this MCP client configuration when the host accepts a stdio command:
 
