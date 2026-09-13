@@ -52,6 +52,10 @@ function parseWatchFailureDiagnosis(stderr) {
       operatorAction: typeof payload.operatorAction === "string" ? payload.operatorAction : undefined,
       safeToRetry: payload.safeToRetry === true,
       detail: typeof payload.detail === "string" ? payload.detail : undefined,
+      rejectedCode: typeof payload.rejectedCode === "string" ? payload.rejectedCode : undefined,
+      rejectedStatusCode: Number.isSafeInteger(payload.rejectedStatusCode)
+        ? payload.rejectedStatusCode
+        : undefined,
     };
   } catch {
     return null;
@@ -101,6 +105,35 @@ export async function ensureHelperWatchGrant({
   );
   if (result.code !== 0) {
     const diagnosis = parseWatchFailureDiagnosis(result.stderr);
+    // Replacement can 401 when Keychain/server grant material drift. If status
+    // already reports a finalized ready grant, keep using it instead of failing
+    // the supervisor loop closed.
+    if (
+      diagnosis?.rejectedCode === "replacement_unauthorized"
+      || (diagnosis?.code === "watch_rejected" && diagnosis?.rejectedCode === "replacement_unauthorized")
+    ) {
+      const statusResult = await run(
+        helperPath,
+        ["watch-status", "--installation", installationId],
+        { timeoutMs: Math.min(timeoutMs, 15_000), signal },
+      );
+      if (statusResult.code === 0) {
+        try {
+          const status = JSON.parse(String(statusResult.stdout || "").trim());
+          if (
+            status
+            && typeof status === "object"
+            && status.state === "finalized"
+            && status.listenerReady === true
+            && status.installationId === installationId
+          ) {
+            return { ensured: true, reusedExisting: true };
+          }
+        } catch {
+          // fall through to helper_unavailable
+        }
+      }
+    }
     throw createHelperUnavailableError("watch helper ensure failed", diagnosis);
   }
   return { ensured: true };
@@ -218,6 +251,9 @@ function runHelper(file, args, { timeoutMs, signal } = {}) {
         LANG: process.env.LANG,
         LC_ALL: process.env.LC_ALL,
         NO_COLOR: "1",
+        ...(process.env.TRIANGLE_FILE_CREDENTIALS
+          ? { TRIANGLE_FILE_CREDENTIALS: process.env.TRIANGLE_FILE_CREDENTIALS }
+          : {}),
       },
     });
     let stdout = "";
@@ -263,9 +299,9 @@ function runHelper(file, args, { timeoutMs, signal } = {}) {
     child.on("error", () => finish(createHelperUnavailableError("watch helper failed to start")));
     child.on("close", (code) => {
       signal?.removeEventListener("abort", onAbort);
-      // Never return stderr text to callers; it may contain diagnostics.
-      void stderr;
-      finish(null, { stdout, stderr: "", code });
+      // Return secret-free watch diagnosis JSON on stderr for ensure/status callers.
+      // Poll success paths ignore stderr; failure parsers only accept watch_operation_failed.
+      finish(null, { stdout, stderr, code });
     });
   });
 }

@@ -125,7 +125,9 @@ public enum MCPProxyContractCases {
     }
 
     public static func invalidInput() async throws {
-        let cases = [
+        let tokenAsIdLine = "{\"jsonrpc\":\"2.0\",\"id\":\"\(token)\",\"method\":\"tools/list\"}\n"
+        let oversized = Data(repeating: 0x61, count: MCPProxy.maximumMessageBytes + 1) + Data("\n".utf8)
+        let cases: [Data] = [
             Data("not-json\n".utf8),
             Data("[]\n".utf8),
             Data(#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#.utf8) + Data("\n".utf8),
@@ -133,8 +135,8 @@ public enum MCPProxyContractCases {
             Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","origin":"https://evil.example"}"#.utf8) + Data("\n".utf8),
             Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","token":"mesh_override"}"#.utf8) + Data("\n".utf8),
             Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","agentId":"agent_override"}"#.utf8) + Data("\n".utf8),
-            Data("{\"jsonrpc\":\"2.0\",\"id\":\"\(token)\",\"method\":\"tools/list\"}\n".utf8),
-            Data(repeating: 0x61, count: MCPProxy.maximumMessageBytes + 1) + Data("\n".utf8),
+            Data(tokenAsIdLine.utf8),
+            oversized,
         ]
         for input in cases {
             let transport = RecordingProxyTransport(identityAndMCP: [])
@@ -416,7 +418,17 @@ private final class RecordingProxyTransport: MeshTransport, @unchecked Sendable 
     init(identityAndMCP responses: [MeshHTTPResponse]) { self.responses = [MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: MCPProxyContractCases.identityBodyForFixture, finalURL: URL(string: "https://thetriangle.dev/api/v1/agents/me")!)] + responses }
     var requests: [MeshHTTPRequest] { lock.withLock { captured } }
     var mcpRequests: [MeshHTTPRequest] { requests.filter { $0.url.path == "/api/mcp" } }
-    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse { try lock.withLock { captured.append(request); guard !responses.isEmpty else { throw MeshClientError.transportUnavailable }; return responses.removeFirst() } }
+    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
+        try record(request)
+    }
+
+    private func record(_ request: MeshHTTPRequest) throws -> MeshHTTPResponse {
+        try lock.withLock {
+            captured.append(request)
+            guard !responses.isEmpty else { throw MeshClientError.transportUnavailable }
+            return responses.removeFirst()
+        }
+    }
 }
 
 private struct OfflineProxyTransport: MeshTransport { func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse { throw MeshClientError.transportUnavailable } }

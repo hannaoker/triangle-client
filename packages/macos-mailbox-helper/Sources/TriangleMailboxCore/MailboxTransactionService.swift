@@ -28,6 +28,8 @@ public enum MailboxTransactionServiceCrashPoint: Equatable, Sendable {
 
 /// Network boundary used by the trusted transaction proxy (REST, not MCP).
 public protocol MailboxTransactionTransport: Sendable {
+    /// Metadata-only pending mailbox page (never includes message text).
+    func listPendingCandidates() async throws -> [MailboxDeliveryCandidate]
     func claim(deliveryID: Int, claimID: String) async throws -> MailboxClaimTransportResult
     func sendReply(
         roomID: String,
@@ -114,6 +116,68 @@ public struct MailboxTransactionService: Sendable {
                 "eventId": candidate.eventID.value,
                 "roomSequence": candidate.roomSequence,
             ] as [String: Any]
+        }
+        return payload
+    }
+
+    /// List → preflight → claim the next actionable delivery, or resume an open claim.
+    /// Used by App Server wake so a pending mailbox delivery can start a model turn.
+    public func claimNext(
+        instanceID: ClientInstanceID,
+        protocolOwnership: MailboxTransactionProtocol
+    ) async throws -> [String: Any] {
+        if let open = try store.readOpen(instanceID: instanceID) {
+            if open.protocolOwnership != protocolOwnership {
+                throw MailboxTransactionServiceError.protocolMismatch
+            }
+            if open.isStuck {
+                throw MailboxTransactionServiceError.transactionStuck
+            }
+            let quarantined = try store.listQuarantined(instanceID: instanceID)
+            let evaluation = try MailboxPolicyEvaluator.evaluate(
+                protocolOwnership: protocolOwnership,
+                candidates: [],
+                open: open,
+                quarantined: quarantined
+            )
+            return secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+        }
+
+        let candidates: [MailboxDeliveryCandidate]
+        do {
+            candidates = try await transport.listPendingCandidates()
+        } catch {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        let quarantined = try store.listQuarantined(instanceID: instanceID)
+        let evaluation = try MailboxPolicyEvaluator.evaluate(
+            protocolOwnership: protocolOwnership,
+            candidates: candidates,
+            open: nil,
+            quarantined: quarantined
+        )
+        guard let next = evaluation.actionable.min(by: { $0.deliveryID < $1.deliveryID }) else {
+            return secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+        }
+        let claimed = try await claim(
+            instanceID: instanceID,
+            protocolOwnership: protocolOwnership,
+            deliveryID: next.deliveryID,
+            roomID: next.roomID
+        )
+        let afterClaim = try MailboxPolicyEvaluator.evaluate(
+            protocolOwnership: protocolOwnership,
+            candidates: candidates,
+            open: claimed,
+            quarantined: quarantined
+        )
+        var payload = secretFreeStatus(evaluation: afterClaim, quarantined: quarantined)
+        if var open = payload["open"] as? [String: Any] {
+            open["inboundEventId"] = next.eventID.value
+            payload["open"] = open
+        }
+        if let admitText = next.admitText {
+            payload["admitText"] = admitText
         }
         return payload
     }

@@ -25,8 +25,8 @@ Out of Phase 1/2 Complete. Not Bob canary. Not optional Codex SDK.
 - `MCPTransactionRewriter.swift` — ignores model-supplied claim/reply IDs;
   enforces room match, nested-claim refusal, unrelated-ack refusal
 - Helper CLI: `transaction-preflight`, `transaction-status`,
-  `transaction-claim`, `transaction-reply` (text on stdin), `transaction-ack`,
-  `transaction-abandon --confirm`, `transaction-record-failure`
+  `transaction-claim`, `transaction-claim-next`, `transaction-reply` (text on stdin),
+  `transaction-ack`, `transaction-abandon --confirm`, `transaction-record-failure`
 - `triangle-mailbox mcp` enables the rewriter against the durable store
 - Contract cases covering crash boundaries, storage faults, malicious params,
   protocol mismatch, stuck after five failures, and no message content in

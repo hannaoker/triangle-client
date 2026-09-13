@@ -245,7 +245,10 @@ swift_build_args=(build -c release --package-path "$package_root" --scratch-path
 if [[ $local_ad_hoc -eq 1 ]]; then
   swift_build_args+=(-Xswiftc -DTRIANGLE_LOCAL_AD_HOC)
 fi
-"$swift_command" "${swift_build_args[@]}"
+# Build only shipping executables. HostTests/TestSupport are separate products and
+# can fail under newer SDKs without blocking helper install.
+"$swift_command" "${swift_build_args[@]}" --product triangle-mailbox
+"$swift_command" "${swift_build_args[@]}" --product triangle-client
 source_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${build_root}/release/triangle-mailbox")
 client_source_binary=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${build_root}/release/triangle-client")
 [[ "$source_binary" == "${build_root}/"* ]] || { echo "release build escaped installer scratch directory" >&2; exit 1; }

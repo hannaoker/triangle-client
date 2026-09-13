@@ -26,7 +26,7 @@ Only the **host that receives the wake** changes:
 | Identity | Host that must wake | Adapter |
 | --- | --- | --- |
 | Grok Bot **Bob** (`bob`) | The existing Grok Bot Bob session | **Native Grok Bot wake** (not built yet) |
-| Interactive **Codex** (`codex-bob-test` and later) | The existing Codex / ChatGPT.app conversation | **Shared Codex App Server** (reuse; scaffolded, not live-bound) |
+| Interactive **Codex** (`codex-bob-test` and later) | The existing Codex / ChatGPT.app conversation | **Shared Codex App Server** (session canary proved on Mini 2026-09-13; LaunchAgent live binding still open) |
 
 Do **not** treat a headless `codex exec` under Bob’s MESH identity as Bob. That
 was a transport proof: the mailbox identity `bob` can complete the loop. The
@@ -45,9 +45,10 @@ Server exists to support.
   append `message.created` → ack).
 - Trusted transaction proxy (Slice 6 / 6.1) for claim / outbound initiate / ack.
 
-`mcp-interactive` profiles stay off the event-driven watch grant. Interactive
-Codex stays `mcp-interactive` and is woken via `appServerWake`, not via a second
-mailbox owner.
+`mcp-interactive` profiles may join the installation watch grant as **notify-only**
+members (so App Server wake receives hints). They stay off `eventWake` drains.
+Interactive Codex stays `mcp-interactive` and is woken via `appServerWake`, not via a
+second mailbox owner / `codex exec`.
 
 ## What is proven (Mini, 2026-09-13)
 
@@ -65,8 +66,18 @@ Triangle Client on Mini (`inst_EaA3qkuzOuQwTSFw`):
 - Identity proof: `codex-bob-test` sent `message.created` canary
   `BOB-WATCH-85b9b18a` → Bob mailbox claimed → reply event sequence 43 echoed
   the nonce → ack. No supervisor restart, no manual Bob prompt.
-- Profile `codex-bob-test`: still `mcp-interactive`. **Not** a watch-grant
-  member. Bob’s reply queues; it does not wake a live Codex session.
+- Profile `codex-bob-test`: still `mcp-interactive`. Eligible as a **notify-only**
+  watch-grant member when `app-server-binding.json` matches its instance.
+  Durable shared App Server LaunchAgent `dev.thetriangle.shared-app-server` holds
+  thread `01a099c7-9aad-7e11-904d-fdb4daf24da1` and writes Application Support
+  binding/token/cursor. Swift emits live `appServerWake`; Node settles MESH
+  reply+ack after desktop turn. Live Bob→Codex LaunchAgent canary waits on
+  Keychain Allow after ad-hoc helper re-sign (see
+  [HANDOFF-appserver-wake-2026-09-13.md](HANDOFF-appserver-wake-2026-09-13.md)).
+  Earlier Gate A disposable session canary:
+  nonce `CODEX-APPSERVER-mtzhbdf9-a9e00a`, thread
+  `01a099a2-a2b0-7832-89d3-e3d8ece8234b`. See
+  [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) Gate E.
 
 Operator canary rules that matter:
 
@@ -85,9 +96,10 @@ Operator canary rules that matter:
    wake adapter must target Grok Bot Bob’s session. Do not keep `codex exec` as
    Bob’s production host. Do not route Bob through Codex App Server unless a
    later review proves Grok Bot can attach as a second App Server client.
-2. **Finish Codex App Server binding** for `codex-bob-test` (and later Codex
-   profiles): live `appServerWake`, Gate A visual if not already recorded on
-   this machine, then Bob→Codex canary into the **same idle desktop thread**.
+2. **Production-bind Codex App Server** for `codex-bob-test`: **shipped on Mini**
+   (shared App Server LaunchAgent + Swift `appServerWake` + MESH reply/ack).
+   Remaining: one Keychain Allow after ad-hoc helper re-sign, then live Bob
+   nonce canary. Do not flip Codex to `event-driven`.
 3. Optional: installer-provision Codex/Hermes auth into instance `*_HOME`;
    Hermes sandbox encodings; public `mesh` binding flags.
 

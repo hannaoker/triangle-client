@@ -50,7 +50,7 @@ This is not a claim that every remaining task is mechanical or release-safe.
 | B. MESH wake → session without Node `mesh_` secrets | **Landed (wiring + docs)** — helper watch transport; `createAppServerWakeBridge`; supervisor/CLI opt-in `appServerWake` bootstrap |
 | C. Admission / busy queue / correlation | **Partial** — in-memory queue + correlation; durable production persistence and race matrix still open |
 | D. Lifecycle / doctor status surface | **Partial** — `session.status()` distinguishes doctor phases; public `mesh` flags not designed yet |
-| E. Real Bob canary | **Mailbox-identity loop proved (2026-09-13, temporary Codex runner under `bob`). App Server session canary and native Grok Bot wake remain.** |
+| E. Real Bob canary | **Mailbox-identity loop proved (2026-09-13). App Server session canary proved (2026-09-13 Mini)** — Bob→`codex-bob-test` into same idle desktop thread (see Gate E). Native Grok Bot wake remains. |
 | Slice 6 trusted transaction proxy | **Landed on main (PR #7)** — use `createTrustedTransactionProxy` / helper CLI; Mac security review still required before production Hermes claim/reply/ack |
 | Optional Codex SDK subprocess | **Out of scope** |
 
@@ -102,9 +102,16 @@ Production Hermes / coordinator-delivery claim/reply/ack still requires
    is still human-on-Mac.
 2. **Durable correlation / crash recovery** and human-vs-listener race proofs.
 3. **Slice 6 Mac security review** before Hermes production claim/reply/ack (implementation on main).
-4. **Bob canary** (unique nonce, correlated durable reply → same desktop chat).
-5. **Public lifecycle flags** under `mesh` (binding subcommands still undesigned).
-6. **Optional SDK subprocess** remains optional and must not gate this track.
+4. **Production `appServerWake` on LaunchAgent supervisor** — Swift emits
+   `appServerWake` for bound `mcp-interactive`; Node settles MESH reply+ack;
+   durable shared App Server LaunchAgent writes Application Support binding.
+   Live Bob→Codex canary after ad-hoc re-sign needs one Keychain Allow
+   (`TRIANGLE_KEYCHAIN_UI=1`); see HANDOFF-appserver-wake-2026-09-13.md.
+5. **Installed helper `transaction-claim-next`** — rebuilt/installed on Mini
+   (ad-hoc). Prefer Developer ID for long-term LaunchAgent Keychain custody.
+6. **Public lifecycle flags** under `mesh` (binding subcommands still undesigned).
+7. **Optional SDK subprocess** remains optional and must not gate this track.
+8. **Native Grok Bot wake for Bob** (out of App Server track).
 
 ## Proven evidence
 
@@ -392,42 +399,65 @@ Then test background/unsubscribed chats, approvals, cancellation, multiple rooms
 server restart, transport authentication, resource bounds, and a fake-harness soak.
 Do not call one successful local turn a latency distribution or production soak.
 
-**Increment status (2026-09-13):** mailbox-identity canary passed on Mini
-(`BOB-WATCH-85b9b18a` → Bob reply seq 43) via event-driven drain under a
-temporary Codex runner. **App Server session canary (same idle desktop thread)
-is not started.** Native Grok Bot wake is not this gate.
+**Increment status (2026-09-13):**
 
+- Mailbox-identity canary passed on Mini (`BOB-WATCH-85b9b18a` → Bob reply seq
+  43) via event-driven drain under a temporary Codex runner.
+- **App Server session canary passed on Mini** (same idle disposable desktop
+  thread; not ordinary ChatGPT user-data):
+  - Script: `scripts/prototypes/appserver-wake-codex-bob-canary.mjs`
+  - Root: `/private/tmp/mesh-appserver-codex-bob-1789283966`
+  - Profile / installation: `codex-bob-test` / `inst_EaA3qkuzOuQwTSFw`
+  - Room: `room_8bc8ad0e978c43dcbf9d217dade97035`
+  - Nonce: `CODEX-APPSERVER-mtzhbdf9-a9e00a`
+  - Bob outbound: `event_74cd442cdd3e45cdba037ea56e651ee9` (seq 47)
+  - Claimed delivery: `181` → admit `delivery_181`
+  - Thread: `01a099a2-a2b0-7832-89d3-e3d8ece8234b`
+  - Turn: `01a099a3-6ed2-76b2-be43-a14d05137ddf` (`admitStatus: completed`)
+  - CDP DOM: admitted prompt embeds nonce; assistant reply echoes
+    `CODEX-APPSERVER-mtzhbdf9-a9e00a` (screenshot under canary root).
+  - Watch mode: `fake_watch_startup_reconcile` (pre-production; notify-only
+    grant membership for bound `mcp-interactive` now landed).
+- **Production auto-wake wiring (2026-09-13 evening Mini):** shared App Server
+  LaunchAgent `dev.thetriangle.shared-app-server` holding thread
+  `01a099c7-9aad-7e11-904d-fdb4daf24da1`; Application Support binding/token/cursor;
+  Swift `appServerWake` emit; Node reply+ack after turn; helper
+  `transaction-claim-next` installed. Live LaunchAgent Bob canary waiting on
+  Keychain Allow for the new ad-hoc helper CDHash
+  (`TRIANGLE_KEYCHAIN_UI=1 … status --profile bob`).
+- Native Grok Bot wake is not this gate.
 
-#### Bob canary checklist (operator; not implemented in this increment)
+#### Bob → Codex App Server canary checklist (operator)
 
-Do **not** run full Bob end-to-end from this Linux follow-up. When a Mac operator
-runs the canary after Gate A:
-
-1. Confirm Bob handle/`agent_id` against a live `mesh.agents.find` (or enrollment)
-   — skill table reference only (verify before use): handle `bob` →
-   `agent_582567705a9348c38f18c91d2bac9dd8`.
-2. Mint a **unique nonce** distinct from the Gate A desktop nonce; record it.
-3. Send durable outbound mail that requires Bob's correlated reply (room/event ids
-   recorded); do not impersonate Bob.
-4. Leave the bound desktop chat idle/subscribed; let wake → admit → turn path run.
-5. Pass only when the same desktop chat shows Bob's correlated reply content/nonce
-   without a new user message or manual poll.
-6. Capture: Bob agent id, nonce, outbound event/room, hint receipt, admission,
-   desktop turn id, completion, reply, ack (Slice 6 Mac-reviewed path when used).
+1. Confirm Bob handle/`agent_id` against live enrollment (reference: handle
+   `bob` → `agent_582567705a9348c38f18c91d2bac9dd8`).
+2. Gate A-shaped disposable App Server + ChatGPT under
+   `MESH_DESKTOP_TEST_ROOT` (not ordinary desktop user-data).
+3. Mint a unique nonce; Bob sends `message.created` into the Codex room with
+   `replyRequired: true`.
+4. If `codex-bob-test` has a stale open claim, abandon with
+   `transaction-abandon --confirm` so pending deliveries list again.
+5. Bridge: `createAppServerWakeBridge` + production
+   `resolveDelivery` (`transaction-claim-next` or list→claim shim) →
+   `session.admit` on the bound thread while desktop stays attached.
+6. Pass only when the **same** idle desktop thread shows the admitted turn and
+   assistant echo of the nonce (CDP or visual). Record nonce, event id,
+   delivery id, thread id, turn id.
 
 ## First next-agent task
 
-**Gate A on Mac:** execute
-`scripts/prototypes/native-desktop-wake-experiment.mjs` per the runbook above;
-record nonce + turn id + visual confirmation. Then run the **Bob canary** checklist
-(separate human/Mac pass). Do not reopen Phase 2 Complete. Durable correlation /
-race matrix remains after that. Linux agents may only extend glue/tests/docs —
-never claim ChatGPT.app results.
+1. Authorize Keychain for the ad-hoc helper (`TRIANGLE_KEYCHAIN_UI=1` status for
+   `bob` + `codex-bob-test`, click Allow), restart `dev.thetriangle.client`,
+   `watch-ensure` with actor `bob`, then run a Bob→Codex nonce canary against
+   the durable shared App Server thread (MESH reply+ack).
+2. Native Grok Bot Bob wake remains after that. Do not reopen Phase 2 Complete.
 
 ## Not proved / do not infer
 
 Closed-app startup; background/unsubscribed task wake; attachment to the ordinary
-desktop's private server; full desktop tools/approval compatibility; durable MESH
-delivery; exactly-once turn submission; user/listener race safety; Bob canary;
-Slice 6 production proxy. These remain explicit tests, not reasons to repeat the
-already-passed basic feasibility study.
+desktop's private unix server; full desktop tools/approval compatibility; durable
+correlation / exactly-once turn submission; user/listener race safety; native
+Grok Bot Bob wake; Slice 6 Mac-reviewed production proxy. Production LaunchAgent
+Bob→Codex canary (MESH reply+ack on the durable shared thread) is blocked only
+on Keychain Allow after the latest ad-hoc helper re-sign — wiring is otherwise
+landed.

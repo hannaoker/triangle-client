@@ -201,6 +201,13 @@ export function createHelperTrustedTransactionProxy({
       );
     },
 
+    async claimNext({ signal } = {}) {
+      return invoke(
+        ["transaction-claim-next", "--profile", profile, "--protocol", protocol],
+        { signal },
+      );
+    },
+
     async claim({ deliveryId, roomId, eventId, signal } = {}) {
       if (!Number.isSafeInteger(deliveryId) || deliveryId <= 0) {
         throw new TypeError("deliveryId is invalid");
@@ -311,13 +318,15 @@ export function resolveTrustedTransactionProxy({
  * Production App Server `resolveDelivery`: reconcile the durable helper
  * transaction store (Slice 6) without inventing a Node `mesh_` credential path.
  *
- * Returns `{ deliveryId, text }` when `transaction-status` reports
- * `shouldStartModel` with an open claim; otherwise `null` (empty → skip turn).
+ * Calls `transaction-claim-next` so a pending mailbox delivery can be listed,
+ * preflighted, selected, and claimed before the App Server bridge starts a turn.
+ * Returns `{ deliveryId, text }` when the helper reports `shouldStartModel` with
+ * an open claim; otherwise `null` (empty → skip turn).
  */
 export function createHelperDurableDeliveryResolver({
   helperPath,
   profile,
-  protocol = "self-serve-drain",
+  protocol = "coordinator-delivery-v1",
   createProxy,
   run,
 } = {}) {
@@ -331,10 +340,10 @@ export function createHelperDurableDeliveryResolver({
   const proxy = createProxy({ helperPath, profile, protocol, run });
 
   return Object.freeze(async function resolveDelivery({ signal } = {}) {
-    if (typeof proxy.status !== "function") return null;
+    if (typeof proxy.claimNext !== "function") return null;
     let status;
     try {
-      status = await proxy.status({ signal });
+      status = await proxy.claimNext({ signal });
     } catch (error) {
       if (error?.code === "slice6_required" || error?.code === "helper_unavailable") {
         return null;
@@ -356,12 +365,28 @@ export function createHelperDurableDeliveryResolver({
     }
 
     const deliveryId = `delivery_${open.deliveryId}`;
-    const text = [
+    const inboundEventId =
+      typeof open.inboundEventId === "string" && /^event_[a-f0-9]{32}$/.test(open.inboundEventId)
+        ? open.inboundEventId
+        : null;
+    const admitText =
+      typeof status.admitText === "string" && status.admitText.length > 0 && status.admitText.length <= 32 * 1024
+        ? status.admitText
+        : null;
+    const text = admitText ?? [
       "Continue the bound desktop turn for the open durable mailbox transaction.",
       `deliveryId=${open.deliveryId}`,
       `roomId=${open.roomId}`,
       `state=${typeof open.state === "string" ? open.state : "claimed"}`,
-    ].join("\n");
-    return { deliveryId, text };
+      inboundEventId ? `inboundEventId=${inboundEventId}` : null,
+      "Reply in one short assistant message that answers the inbound MESH message.",
+    ].filter(Boolean).join("\n");
+    return {
+      deliveryId,
+      text,
+      roomId: open.roomId,
+      inboundEventId,
+      numericDeliveryId: open.deliveryId,
+    };
   });
 }

@@ -11,7 +11,9 @@ enum TriangleClientCLI {
             let service = TriangleClientAgentService(
                 instanceStore: FileClientInstanceStore(),
                 credentialGate: VerifiedCredentialGate(
-                    store: KeychainCredentialStore(), transport: transport,
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 ),
                 runtimeReadiness: { instance in _ = try FileWorkerCommandResolver().resolveAdapter(for: instance) },

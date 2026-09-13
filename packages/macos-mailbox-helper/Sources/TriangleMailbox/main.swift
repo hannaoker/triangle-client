@@ -11,14 +11,18 @@ enum TriangleMailboxCLI {
                 guard let profile = command.profile, let origin = command.origin else { throw CommandParseError.missingRequiredFlag }
                 let input = try BoundedInputReader.readOneDocument(from: .standardInput)
                 let result = try await EnrollmentService(
-                    store: KeychainCredentialStore(), transport: URLSessionMeshTransport(),
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: URLSessionMeshTransport(),
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 ).enroll(profile: profile, origin: origin, inputData: input)
                 try render(result)
             case .status:
                 guard let profile = command.profile else { throw CommandParseError.missingRequiredFlag }
                 let result = try await EnrollmentService(
-                    store: KeychainCredentialStore(), transport: URLSessionMeshTransport(),
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: URLSessionMeshTransport(),
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 ).status(profile: profile)
                 let verifiedAt = result.status == .verified ? Date() : nil
@@ -33,10 +37,12 @@ enum TriangleMailboxCLI {
                 guard let profile = command.profile else { throw CommandParseError.missingRequiredFlag }
                 let transport = URLSessionMeshTransport()
                 let gate = VerifiedCredentialGate(
-                    store: KeychainCredentialStore(), transport: transport,
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 )
-                let workloadKeyStore = KeychainWorkloadKeyStore()
+                let workloadKeyStore = LocalCredentialStores.workload()
                 let result = await MCPProxy(
                     gate: gate,
                     transport: transport,
@@ -73,7 +79,9 @@ enum TriangleMailboxCLI {
                 guard let profile = command.profile, let worker = command.worker else { throw CommandParseError.missingRequiredFlag }
                 let transport = URLSessionMeshTransport()
                 let gate = VerifiedCredentialGate(
-                    store: KeychainCredentialStore(), transport: transport,
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 )
                 try await WorkerLauncher(
@@ -82,30 +90,36 @@ enum TriangleMailboxCLI {
             case .runSupervisor:
                 let transport = URLSessionMeshTransport()
                 let gate = VerifiedCredentialGate(
-                    store: KeychainCredentialStore(), transport: transport,
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 )
                 try await ClientSupervisor(
                     instanceStore: FileClientInstanceStore(),
                     gate: gate,
+                    workloadKeyStore: LocalCredentialStores.workload(),
                     resolver: FileWorkerCommandResolver(),
                     processRunner: FoundationClientSupervisorProcessRunner()
                 ).run()
             case .preflightSupervisor:
                 let transport = URLSessionMeshTransport()
                 let gate = VerifiedCredentialGate(
-                    store: KeychainCredentialStore(), transport: transport,
+                    store: LocalCredentialStores.mailbox(),
+                    workloadKeyStore: LocalCredentialStores.workload(),
+                    transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 )
                 try await ClientSupervisor(
                     instanceStore: FileClientInstanceStore(),
                     gate: gate,
+                    workloadKeyStore: LocalCredentialStores.workload(),
                     resolver: FileWorkerCommandResolver(),
                     processRunner: FoundationClientSupervisorProcessRunner()
                 ).preflight()
             case .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
                 try await runWatch(command)
-            case .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+            case .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
                  .transactionAck, .transactionAbandon, .transactionRecordFailure:
                 try await runTransaction(command)
             }
@@ -138,10 +152,22 @@ enum TriangleMailboxCLI {
         } catch let error as WatchGrantServiceError {
             renderWatchFailure(error)
         } catch {
-            let rendered = CLIOutputRenderer.operationFailure
-            FileHandle.standardOutput.write(rendered.stdout)
-            FileHandle.standardError.write(rendered.stderr)
-            exit(rendered.exitCode)
+            let detail = String(describing: error)
+            let payload: [String: Any] = [
+                "status": "operation_failed",
+                "mustNotReregister": true,
+                "safeToRetry": false,
+                "errorType": String(describing: type(of: error)),
+                "errorDetail": String(detail.prefix(300)),
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+                FileHandle.standardError.write(data)
+                FileHandle.standardError.write(Data([0x0a]))
+            } else {
+                let rendered = CLIOutputRenderer.operationFailure
+                FileHandle.standardError.write(rendered.stderr)
+            }
+            exit(1)
         }
     }
 
@@ -153,11 +179,13 @@ enum TriangleMailboxCLI {
         let instanceID = ClientInstanceID.derive(profile: profile)
         let transport = URLSessionMeshTransport()
         let gate = VerifiedCredentialGate(
-            store: KeychainCredentialStore(), transport: transport,
+            store: LocalCredentialStores.mailbox(),
+            workloadKeyStore: LocalCredentialStores.workload(),
+            transport: transport,
             reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
         )
         let credential = try await gate.credential(for: profile)
-        let workloadKeyStore = KeychainWorkloadKeyStore()
+        let workloadKeyStore = LocalCredentialStores.workload()
         let workloadAuth: WorkloadTokenManager?
         if let workloadRecord = try? workloadKeyStore.read(for: profile) {
             workloadAuth = try? WorkloadTokenManager(
@@ -183,6 +211,8 @@ enum TriangleMailboxCLI {
         switch command.command {
         case .transactionStatus:
             writeJSON(try service.status(instanceID: instanceID, protocolOwnership: protocolOwnership))
+        case .transactionClaimNext:
+            writeJSON(try await service.claimNext(instanceID: instanceID, protocolOwnership: protocolOwnership))
         case .transactionPreflight:
             let input = try BoundedInputReader.readOneDocument(from: .standardInput, limit: 64 * 1024)
             let candidates = try decodeCandidates(input)
@@ -306,12 +336,14 @@ enum TriangleMailboxCLI {
         guard let installationID = command.installationID else { throw CommandParseError.missingRequiredFlag }
         let transport = URLSessionMeshTransport()
         let gate = VerifiedCredentialGate(
-            store: KeychainCredentialStore(), transport: transport,
+            store: LocalCredentialStores.mailbox(),
+            workloadKeyStore: LocalCredentialStores.workload(),
+            transport: transport,
             reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
         )
-        let workloadKeyStore = KeychainWorkloadKeyStore()
+        let workloadKeyStore = LocalCredentialStores.workload()
         let service = WatchGrantService(
-            store: KeychainWatchGrantStore(),
+            store: LocalCredentialStores.watchGrant(),
             transport: transport,
             auth: WorkloadWatchGrantAuthProvider(gate: gate, workloadKeyStore: workloadKeyStore, transport: transport),
             credentialGate: gate,

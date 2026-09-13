@@ -31,6 +31,8 @@ public enum MailboxTransactionContractCases {
         .init(name: "crash before ack", run: crashBeforeAck),
         .init(name: "crash after ack", run: crashAfterAck),
         .init(name: "policy evaluator filters list and preflight", run: policyEvaluatorShared),
+        .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
+        .init(name: "authenticated reply body includes threading fields", run: authenticatedReplyBodyThreadingFields),
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
         .init(name: "no message content in storage or status", run: noContentInStorage),
@@ -730,6 +732,67 @@ public enum MailboxTransactionContractCases {
         try expect(filtered.count == 1 && filtered[0]["deliveryId"] as? Int == 2, "list filter mismatch")
     }
 
+    public static func claimNextFromPendingDelivery() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(deliveryID: 51, roomID: room, eventID: event, roomSequence: 3),
+        ]
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let instanceID = ClientInstanceID.derive(profile: profile)
+
+        try expect(try store.readOpen(instanceID: instanceID) == nil, "fixture started with open transaction")
+        let payload = try await service.claimNext(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport.listCalls == 1, "claimNext did not list mailbox")
+        try expect(transport.claims.map(\.0) == [51], "claimNext did not claim pending delivery")
+        try expect(payload["shouldStartModel"] as? Bool == true, "shouldStartModel missing after claim")
+        let open = payload["open"] as? [String: Any]
+        try expect(open?["deliveryId"] as? Int == 51, "open delivery mismatch")
+        try expect(open?["state"] as? String == "claimed", "open state mismatch")
+        try expect(try store.readOpen(instanceID: instanceID)?.deliveryID == 51, "local open missing after claimNext")
+
+        // Second call resumes without listing/claiming again.
+        let resumed = try await service.claimNext(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport.listCalls == 1, "resume listed mailbox again")
+        try expect(transport.claims.count == 1, "resume reclaimed delivery")
+        try expect(resumed["shouldStartModel"] as? Bool == true, "resume shouldStartModel false")
+    }
+
+    public static func authenticatedReplyBodyThreadingFields() async throws {
+        let origin = try MeshOrigin("https://thetriangle.dev")
+        let mesh = RecordingAuthenticatedMeshTransport()
+        let transport = AuthenticatedMailboxTransactionTransport(
+            origin: origin,
+            transport: mesh
+        ) { _, _ in ["Authorization": "Bearer test"] }
+        let sourceEvent = event.value
+        let result = try await transport.sendReply(
+            roomID: room.value,
+            idempotencyKey: "reply_" + String(repeating: "d", count: 32),
+            text: "threaded reply",
+            inReplyToEventID: sourceEvent
+        )
+        guard case .created = result else { throw ContractFailure("reply did not create") }
+        try expect(mesh.requests.count == 1, "expected one room append")
+        let request = mesh.requests[0]
+        try expect(request.method == "POST", "reply method mismatch")
+        try expect(request.url.path.contains("/api/v1/rooms/\(room.value)/events"), "reply path mismatch")
+        let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any]
+        try expect(object?["type"] as? String == "message.created", "type missing")
+        try expect(object?["in_reply_to_event_id"] == nil, "threading field leaked to top level")
+        try expect(object?["inReplyToEventId"] == nil, "camelCase threading field leaked to top level")
+        let body = object?["body"] as? [String: Any]
+        try expect(body?["text"] as? String == "threaded reply", "text missing from body")
+        try expect(body?["replyRequired"] as? Bool == false, "replyRequired missing from body")
+        try expect(body?["inReplyToEventId"] as? String == sourceEvent, "inReplyToEventId missing from body")
+    }
+
     public static func mcpRewriterIgnoresModelIDs() async throws {
         let store = InMemoryMailboxTransactionStore()
         let transport = RecordingMailboxTransactionTransport()
@@ -775,6 +838,14 @@ public enum MailboxTransactionContractCases {
         try expect(parsed.protocolOwnership == .coordinatorDeliveryV1, "protocol missing")
         try expect(parsed.deliveryID == 12, "delivery missing")
 
+        let claimNext = try CommandParser.parse([
+            "transaction-claim-next",
+            "--profile", "mailbox",
+            "--protocol", "self-serve-drain",
+        ])
+        try expect(claimNext.command == .transactionClaimNext, "claim-next command rejected")
+        try expect(claimNext.protocolOwnership == .selfServeDrain, "claim-next protocol missing")
+
         let abandon = try CommandParser.parse([
             "transaction-abandon",
             "--profile", "mailbox",
@@ -785,6 +856,7 @@ public enum MailboxTransactionContractCases {
 
         for invalid in [
             ["transaction-claim", "--profile", "mailbox", "--protocol", "coordinator-delivery-v1"],
+            ["transaction-claim-next", "--profile", "mailbox"],
             ["transaction-abandon", "--profile", "mailbox", "--protocol", "self-serve-drain"],
             ["transaction-record-failure", "--profile", "mailbox", "--protocol", "self-serve-drain", "--reason", "BAD"],
         ] {
@@ -840,5 +912,26 @@ public enum MailboxTransactionContractCases {
 
     private static func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         guard try condition() else { throw ContractFailure(message) }
+    }
+}
+
+private final class RecordingAuthenticatedMeshTransport: MeshTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var requests: [MeshHTTPRequest] = []
+
+    private func record(_ request: MeshHTTPRequest) {
+        lock.lock()
+        requests.append(request)
+        lock.unlock()
+    }
+
+    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
+        // Keep NSLock off the async context (macOS 27 SDK marks lock/unlock unavailable there).
+        record(request)
+        if request.method == "POST", request.url.path.contains("/events") {
+            let body = Data(#"{"event":{"id":"event_cccccccccccccccccccccccccccccccc"}}"#.utf8)
+            return MeshHTTPResponse(statusCode: 201, headers: [:], body: body, finalURL: request.url)
+        }
+        return MeshHTTPResponse(statusCode: 200, headers: [:], body: Data(#"{"items":[]}"#.utf8), finalURL: request.url)
     }
 }

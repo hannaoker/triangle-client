@@ -356,7 +356,7 @@ test("production durable resolver: one wake starts one Codex turn", async () => 
     helperPath: "/trusted/triangle-mailbox",
     profile: "event-codex",
     async run(_file, args) {
-      assert.equal(args[0], "transaction-status");
+      assert.equal(args[0], "transaction-claim-next");
       statusCalls += 1;
       return {
         code: 0,
@@ -451,12 +451,18 @@ test("completedTurns retention is bounded for unconsumed completions", async () 
   await session.shutdown();
 });
 
-test("submission timeout becomes submission_unknown and stops auto-resubmit", async () => {
+test("submission timeout becomes submission_unknown then admit recovers via reconnect", async () => {
   const binding = validateBinding(sampleBinding());
+  let turnStarts = 0;
   const transport = matchingTransport(binding, {
     async onCall(method) {
       if (method === "turn/start") {
-        await new Promise(() => {});
+        turnStarts += 1;
+        if (turnStarts === 1) {
+          await new Promise(() => {});
+        }
+        // Later starts fall through to the fake default (auto-complete).
+        return undefined;
       }
       return undefined;
     },
@@ -472,8 +478,10 @@ test("submission timeout becomes submission_unknown and stops auto-resubmit", as
     (error) => error.code === "request_timeout" && error.outcome === "unknown",
   );
   assert.equal(session.status().status, "submission_unknown");
-  const skipped = await session.admit({ deliveryId: "next", text: "should not run" });
-  assert.equal(skipped.status, "submission_unknown");
+  // Soft-returning here used to wedge LaunchAgent forever; admit must reconnect.
+  const result = await session.admit({ deliveryId: "next", text: "should run after reconnect" });
+  assert.equal(result.status, "completed");
+  assert.equal(turnStarts >= 2, true);
 });
 
 test("successful App Server calls clear timeout timers promptly", async () => {
@@ -498,6 +506,115 @@ test("successful App Server calls clear timeout timers promptly", async () => {
     elapsedMs < 5_000,
     `focused calls should finish without waiting out requestTimeoutMs (elapsed ${elapsedMs}ms)`,
   );
+});
+
+test("admit settles MESH reply then ack after completed turn", async () => {
+  const binding = validateBinding(sampleBinding());
+  const roomId = "room_" + "a".repeat(32);
+  const inboundEventId = "event_" + "b".repeat(32);
+  const replies = [];
+  const acks = [];
+  const transport = matchingTransport(binding, {
+    async onCall(method, _params, { emit, setStatus }) {
+      if (method !== "turn/start") return undefined;
+      const turnId = "turn_reply_0001";
+      setStatus({ type: "busy", turnId });
+      emit("turn/started", { threadId: binding.threadId, turn: { id: turnId, status: "in_progress" } });
+      queueMicrotask(() => {
+        setStatus({ type: "idle" });
+        emit("turn/completed", {
+          threadId: binding.threadId,
+          turn: {
+            id: turnId,
+            status: "completed",
+            assistantMessage: { content: [{ type: "text", text: "MESH assistant reply body" }] },
+          },
+        });
+      });
+      return { turn: { id: turnId, status: "in_progress" } };
+    },
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    transactionProxy: {
+      async reply(args) {
+        replies.push(args);
+        return { ok: true };
+      },
+      async ack() {
+        acks.push(true);
+        return { ok: true };
+      },
+    },
+  });
+  await session.connect();
+  const result = await session.admit({
+    deliveryId: "delivery_77",
+    text: "Bob inbound",
+    roomId,
+    inboundEventId,
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].roomId, roomId);
+  assert.equal(replies[0].inReplyToEventId, inboundEventId);
+  assert.match(replies[0].text, /MESH assistant reply body/);
+  assert.equal(acks.length, 1);
+  await session.shutdown();
+});
+
+test("admit marks correlation failed when MESH reply cannot settle", async () => {
+  const binding = validateBinding(sampleBinding());
+  const correlationStore = createMemoryCorrelationStore();
+  const transport = matchingTransport(binding, {
+    async onCall(method, _params, { emit, setStatus }) {
+      if (method !== "turn/start") return undefined;
+      const turnId = "turn_fail_reply_0001";
+      setStatus({ type: "busy", turnId });
+      emit("turn/started", { threadId: binding.threadId, turn: { id: turnId, status: "in_progress" } });
+      queueMicrotask(() => {
+        setStatus({ type: "idle" });
+        emit("turn/completed", {
+          threadId: binding.threadId,
+          turn: {
+            id: turnId,
+            status: "completed",
+            assistantMessage: { text: "unused" },
+          },
+        });
+      });
+      return { turn: { id: turnId, status: "in_progress" } };
+    },
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    correlationStore,
+    transactionProxy: {
+      async reply() {
+        const error = new Error("reply failed");
+        error.code = "helper_unavailable";
+        throw error;
+      },
+      async ack() {
+        throw new Error("ack should not run");
+      },
+    },
+  });
+  await session.connect();
+  await assert.rejects(
+    () =>
+      session.admit({
+        deliveryId: "delivery_88",
+        text: "Bob inbound",
+        roomId: "room_" + "c".repeat(32),
+        inboundEventId: "event_" + "d".repeat(32),
+      }),
+    (error) => error.code === "helper_unavailable",
+  );
+  assert.equal((await correlationStore.get("delivery_88")).status, "failed");
+  await session.shutdown();
 });
 
 test("trusted transaction proxy stub fails closed until helper is present", async () => {

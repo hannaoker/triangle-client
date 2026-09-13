@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.thetriangle.shared-app-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/zhenyuhou/.local/bin/node</string>
+    <string>/Users/zhenyuhou/Projects/The Triangle/triangle-client/scripts/macos-shared-codex-app-server-host.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/zhenyuhou/Library/Application Support/The Triangle/shared-app-server</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/zhenyuhou/Library/Logs/the-triangle/shared-app-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/zhenyuhou/Library/Logs/the-triangle/shared-app-server.error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/zhenyuhou/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/zhenyuhou</string>
+  </dict>
+</dict>
+</plist>

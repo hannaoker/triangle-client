@@ -110,7 +110,8 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
     ]
 
     public static let interactiveExclusionNotes: [String] = [
-        "mcp-interactive profiles cannot join event-driven watch grants; set delivery mode to worker or event-driven.",
+        "mcp-interactive profiles may be watch grant members for App Server notify-only wakes.",
+        "Watch grant actors must stay event-driven; mcp-interactive cannot act as the grant actor.",
     ]
 
     public static func from(_ error: WatchGrantServiceError) -> WatchGrantFailureDiagnosis {
@@ -139,7 +140,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 gate: .membership,
                 operatorAction: .reviewWatchMembership,
                 safeToRetry: false,
-                detail: "No event-driven profiles are eligible for a watch grant.",
+                detail: "No notify-eligible profiles are available for a watch grant.",
                 operatorNotes: interactiveExclusionNotes
             )
         case .actorNotDeclared:
@@ -156,7 +157,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 gate: .membership,
                 operatorAction: .useEventDrivenProfile,
                 safeToRetry: false,
-                detail: "Interactive delivery modes cannot join event-driven watch grants.",
+                detail: "mcp-interactive profiles cannot act as watch grant actors.",
                 operatorNotes: interactiveExclusionNotes
             )
         case .workloadAuthUnavailable:
@@ -379,8 +380,8 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
         case .watchEnsure:
             requires = ["--installation", "--actor-profile"]
             notes = [
-                "Creates/joins/finalizes an installation-scoped watch grant for event-driven members.",
-                "mcp-interactive profiles cannot join event-driven watch grants.",
+                "Creates/joins/finalizes an installation-scoped watch grant for notify members.",
+                "mcp-interactive profiles may be notify-only members (App Server wake); actors must stay event-driven.",
                 "Failures emit secret-free JSON on stderr with code, gate, and operatorAction.",
             ]
         case .watchStatus:
@@ -393,7 +394,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             requires = ["--installation", "--cursor"]
             notes = ["Held poll for Node wake clients; credentials stay in the helper Keychain."]
         case .enroll, .status, .mcp, .runWorker, .runSupervisor, .preflightSupervisor,
-             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionReply,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
              .transactionAck, .transactionAbandon, .transactionRecordFailure:
             requires = []
             notes = []

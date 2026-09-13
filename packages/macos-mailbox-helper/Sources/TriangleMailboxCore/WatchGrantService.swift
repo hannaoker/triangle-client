@@ -18,9 +18,9 @@ public enum WatchGrantServiceError: Error, Equatable, Sendable, CustomStringConv
         switch self {
         case .keychainUnavailable: "watch grant storage is unavailable"
         case .helperUnavailable: "watch grant helper is unavailable"
-        case .noEventDrivenMembers: "no event-driven profiles are eligible for a watch grant"
+        case .noEventDrivenMembers: "no notify-eligible profiles are available for a watch grant"
         case .actorNotDeclared: "actor profile is not declared in the watch grant membership"
-        case .interactiveDeliveryExcluded: "interactive delivery modes cannot join event-driven watch grants"
+        case .interactiveDeliveryExcluded: "mcp-interactive profiles cannot act as watch grant actors"
         case .workloadAuthUnavailable: "workload authentication is unavailable for watch grant operations"
         case .workloadKeyMissing: "workload key material is missing for watch grant operations"
         case .credentialMissing: "watch grant credential is not installed"
@@ -246,16 +246,31 @@ public struct WatchGrantService: Sendable {
             } catch {
                 throw ClientInstanceStoreError.unsafeStorage
             }
-            let interactive = instances.filter { $0.enabled && ($0.deliveryMode == .mcpInteractive) }
-            if interactive.contains(where: { $0.profile == actorProfile }) {
-                throw WatchGrantServiceError.interactiveDeliveryExcluded
-            }
-            profiles = instances.filter(\.participatesInEventDrivenWake).map(\.profile)
+            // Auto membership: event-driven drains + the App Server-bound
+            // mcp-interactive host (when binding is present). Do not pull every
+            // mcp-interactive profile on the machine into the grant.
+            let eventDriven = instances.filter(\.participatesInEventDrivenWake)
+            let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
+            profiles = (eventDriven + boundInteractive).map(\.profile)
         } else {
             profiles = [actorProfile]
         }
         guard !profiles.isEmpty else { throw WatchGrantServiceError.noEventDrivenMembers }
         guard profiles.contains(actorProfile) else { throw WatchGrantServiceError.actorNotDeclared }
+
+        if let instanceStore {
+            let actorInstance: ClientInstance
+            do {
+                actorInstance = try instanceStore.read(profile: actorProfile)
+            } catch let error as ClientInstanceStoreError {
+                throw error
+            } catch {
+                throw ClientInstanceStoreError.unsafeStorage
+            }
+            if actorInstance.deliveryMode == .mcpInteractive {
+                throw WatchGrantServiceError.interactiveDeliveryExcluded
+            }
+        }
 
         var members: [MemberBinding] = []
         for profile in profiles.sorted(by: { $0.value < $1.value }) {
@@ -268,10 +283,7 @@ public struct WatchGrantService: Sendable {
                 } catch {
                     throw ClientInstanceStoreError.unsafeStorage
                 }
-                if instance.deliveryMode == .mcpInteractive {
-                    throw WatchGrantServiceError.interactiveDeliveryExcluded
-                }
-                guard instance.participatesInEventDrivenWake else {
+                guard instance.participatesInWatchGrantNotify else {
                     throw WatchGrantServiceError.noEventDrivenMembers
                 }
             }
@@ -306,6 +318,22 @@ public struct WatchGrantService: Sendable {
         default:
             .invalidResponse
         }
+    }
+
+    /// mcp-interactive profiles whose instanceId matches the durable App Server binding.
+    private static func appServerBoundInteractiveMembers(from instances: [ClientInstance]) -> [ClientInstance] {
+        let interactive = instances.filter(\.participatesInAppServerWake)
+        guard !interactive.isEmpty else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let bindingURL = home
+            .appendingPathComponent("Library/Application Support/The Triangle/client/app-server-binding.json")
+        guard FileManager.default.isReadableFile(atPath: bindingURL.path),
+              let data = try? Data(contentsOf: bindingURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let boundInstanceId = object["instanceId"] as? String,
+              !boundInstanceId.isEmpty
+        else { return [] }
+        return interactive.filter { $0.instanceID.value == boundInstanceId }
     }
 }
 
