@@ -28,6 +28,7 @@ that thread → MESH `transaction-reply` + `transaction-ack` clear the claim.
 4. Wake listener failures resolved `Promise.all` and exited the supervisor (KeepAlive thrash). Loops now retry until abort.
 5. After `turn/start` timeout, `submission_unknown` soft-returned forever (claim stuck). Admit now reconnects and retries.
 6. Orphan supervisor Node WS clients after `kickstart` can steal turn completions — prefer `stop` + kill ESTABLISHED node→app-server before `start`.
+7. Shared installation `watch-poll` can return **other-agent-only** hints (e.g. Bob advances while App Server cursor stays put). Older wake clients advanced the cursor only on empty batches, so a foreign-only batch stalled the profile-scoped bridge at the same cursor. Fixed in `wake-client.mjs` (advance to `response.cursor` when zero local profiles match). **Already-stuck installs:** one-time bump the stuck file (e.g. `app-server-wake-cursor.json`) to the installation tip from a fresh `watch-poll`, then restart the wake host.
 
 **Still noisy (non-blocking):** bob historically `event-driven` + `runtimeAdapter: codex` logged `instance cycle failed`; appServerWake stays up. Bob native Grok Bot wake is a separate track — see [HANDOFF-grok-bot-wake-2026-09-13.md](HANDOFF-grok-bot-wake-2026-09-13.md).
 

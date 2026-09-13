@@ -196,6 +196,7 @@ export function createWakeClient({
 
   function acceptEvents(events) {
     if (!Array.isArray(events)) throw new TypeError("events must be an array");
+    let accepted = 0;
     for (const event of events) {
       if (!event || typeof event !== "object") continue;
       const agentId = event.agent_id ?? event.agentId;
@@ -205,8 +206,10 @@ export function createWakeClient({
       const instanceId = byAgent.get(agentId);
       const previous = pending.get(instanceId) ?? 0;
       if (highWatermark > previous) pending.set(instanceId, highWatermark);
+      accepted += 1;
     }
     if (pending.size > 0) scheduleFlush();
+    return accepted;
   }
 
   return Object.freeze({
@@ -238,8 +241,13 @@ export function createWakeClient({
         throw new TypeError("wake poll response is invalid");
       }
       const events = Array.isArray(response.events) ? response.events : [];
-      acceptEvents(events);
-      if (events.length === 0 && Number.isSafeInteger(response.cursor) && response.cursor >= cursor) {
+      // Advance on empty polls and on non-empty batches that match zero local
+      // profiles. Shared installation grants fan out events for every agent on
+      // the grant; a profile-scoped bridge that ignored foreign-only batches
+      // would re-poll the same cursor forever and never reach a held tip poll.
+      // Matching events still advance via flush(highWatermark).
+      const accepted = acceptEvents(events);
+      if (accepted === 0 && Number.isSafeInteger(response.cursor) && response.cursor >= cursor) {
         await cursorStore.write(response.cursor);
       }
       return { events: events.length, cursor: await cursorStore.read() };

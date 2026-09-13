@@ -78,6 +78,85 @@ test("wake client coalesces bursts and persists the newest cursor per profile", 
   );
 });
 
+test("wake client advances cursor when poll returns only other-agent events", async () => {
+  const wakes = [];
+  const polls = [];
+  const store = createMemoryCursorStore(25);
+  const client = createWakeClient({
+    profiles: [{ instanceId: id(1), agentId: "agent_codex" }],
+    transport: {
+      async poll({ cursor }) {
+        polls.push(cursor);
+        return {
+          cursor: 29,
+          events: [{ agent_id: "agent_bob", high_watermark: 29 }],
+        };
+      },
+    },
+    cursorStore: store,
+    coalesceMs: 5,
+    onWake: async (wake) => { wakes.push(wake); },
+  });
+
+  const result = await client.runOnce();
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.deepEqual(polls, [25]);
+  assert.equal(result.events, 1);
+  assert.equal(result.cursor, 29);
+  assert.equal(await store.read(), 29);
+  assert.deepEqual(wakes, []);
+});
+
+test("wake client advances cursor on empty event batches", async () => {
+  const wakes = [];
+  const store = createMemoryCursorStore(10);
+  const client = createWakeClient({
+    profiles: [{ instanceId: id(1), agentId: "agent_a" }],
+    transport: {
+      async poll() {
+        return { cursor: 12, events: [] };
+      },
+    },
+    cursorStore: store,
+    coalesceMs: 5,
+    onWake: async (wake) => { wakes.push(wake); },
+  });
+
+  const result = await client.runOnce();
+  assert.equal(result.events, 0);
+  assert.equal(result.cursor, 12);
+  assert.equal(await store.read(), 12);
+  assert.deepEqual(wakes, []);
+});
+
+test("wake client matching events still wake and advance via flush highWatermark", async () => {
+  const wakes = [];
+  const store = createMemoryCursorStore(25);
+  const client = createWakeClient({
+    profiles: [{ instanceId: id(1), agentId: "agent_codex" }],
+    transport: {
+      async poll() {
+        return {
+          cursor: 30,
+          events: [
+            { agent_id: "agent_bob", high_watermark: 29 },
+            { agent_id: "agent_codex", high_watermark: 28 },
+          ],
+        };
+      },
+    },
+    cursorStore: store,
+    coalesceMs: 5,
+    onWake: async (wake) => { wakes.push(wake); },
+  });
+
+  const result = await client.runOnce();
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(result.events, 2);
+  assert.equal(await store.read(), 28);
+  assert.deepEqual(wakes, [{ instanceId: id(1), highWatermark: 28 }]);
+});
+
 test("wake client resync reconciles every local profile before advancing the restart cursor", async () => {
   const store = createMemoryCursorStore(2);
   const wakes = [];
