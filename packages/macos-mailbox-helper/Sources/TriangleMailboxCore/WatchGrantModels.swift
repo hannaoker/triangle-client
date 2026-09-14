@@ -366,6 +366,7 @@ public enum WatchGrantOperatorAction: String, Codable, Equatable, Sendable {
     case repairWorkloadAuth = "repair_workload_auth"
     case useDeveloperIdHelper = "use_developer_id_helper"
     case retryNetwork = "retry_network"
+    case retryLater = "retry_later"
     case enrollOrVerifyProfile = "enroll_or_verify_profile"
     case resyncWatchCursor = "resync_watch_cursor"
 }

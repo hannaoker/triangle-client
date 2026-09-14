@@ -30,6 +30,7 @@ public enum WatchGrantFailureCode: String, Codable, Equatable, Sendable {
     case identityMismatch = "identity_mismatch"
     case verificationFailed = "verification_failed"
     case journalIneligible = "journal_ineligible"
+    case credentialBusy = "credential_busy"
     case profileStateInconsistent = "profile_state_inconsistent"
     case instanceStoreUnavailable = "instance_store_unavailable"
     case operationFailed = "operation_failed"
@@ -212,14 +213,14 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 operatorAction: staleLocalCredential ? .replaceWatchGrant : .retryNetwork,
                 safeToRetry: staleLocalCredential ? false : (statusCode >= 500 || statusCode == 429),
                 detail: staleLocalCredential
-                    ? "MESH rejected the local watch credential; discard the local watch binding and re-run watch-ensure without replacement."
+                    ? "MESH rejected the local watch credential; re-run watch-ensure so the helper can recreate without replacement."
                     : "MESH rejected the watch grant request.",
                 rejectedStatusCode: statusCode,
                 rejectedCode: sanitized,
                 operatorNotes: staleLocalCredential
                     ? [
-                        "Current helpers discard a stale local watch binding and recreate once automatically.",
-                        "If ensure still fails, move aside credentials/local/watch/<installation>.json (or the mailbox-watch Keychain item) and re-run watch-ensure.",
+                        "Current helpers keep the local binding until recreate succeeds, then replace it.",
+                        "If ensure still fails on an older helper, move aside credentials/local/watch/<installation>.json (or the mailbox-watch Keychain item) and re-run watch-ensure.",
                     ]
                     : []
             )
@@ -293,6 +294,19 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 operatorAction: .enrollOrVerifyProfile,
                 safeToRetry: false,
                 detail: "Enrollment journal state is ineligible for watch grant operations."
+            )
+        case .credentialBusy:
+            return WatchGrantFailureDiagnosis(
+                code: .credentialBusy,
+                gate: .profile,
+                operatorAction: .retryLater,
+                safeToRetry: true,
+                mustNotReregister: true,
+                detail: "Enrollment reservation is busy (enroll-*.lock contention); retry without reminting or reregistering.",
+                operatorNotes: [
+                    "Another triangle-mailbox process (watch-ensure, status, or transaction-*) holds the profile enrollment lock.",
+                    "Do not move aside watch JSON or re-enroll; wait briefly and retry the same command.",
+                ]
             )
         case .profileStateInconsistent:
             return WatchGrantFailureDiagnosis(

@@ -149,6 +149,16 @@ function parseJsonStdout(result, fallbackCode = "helper_unavailable") {
     throw createCodedError("unverified_reply_conflict", "reply conflict was not verified");
   }
   if (result.code !== 0) {
+    const gate = parseHelperStderrFailure(result.stderr);
+    if (gate?.code === "credential_busy" || gate?.code === "enroll_lock_busy") {
+      const error = createCodedError("credential_busy", "enrollment reservation is busy");
+      error.safeToRetry = gate.safeToRetry !== false;
+      error.mustNotReregister = gate.mustNotReregister !== false;
+      throw error;
+    }
+    if (gate?.code === "journal_ineligible") {
+      throw createCodedError("journal_ineligible", "enrollment journal is ineligible");
+    }
     throw createCodedError(fallbackCode, "transaction helper failed");
   }
   try {
@@ -156,6 +166,52 @@ function parseJsonStdout(result, fallbackCode = "helper_unavailable") {
   } catch {
     throw createCodedError(fallbackCode, "transaction helper returned unreadable JSON");
   }
+}
+
+/**
+ * Parse secret-free helper stderr JSON from transaction-* / gate failures.
+ * Accepts both watch_operation_failed and credential_busy / operation_failed shapes.
+ */
+function parseHelperStderrFailure(stderr) {
+  if (typeof stderr !== "string" || stderr.trim().length === 0) return null;
+  try {
+    const payload = JSON.parse(stderr.trim().split("\n").at(-1));
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    const code = typeof payload.code === "string"
+      ? payload.code
+      : (payload.status === "credential_busy" ? "credential_busy" : null);
+    if (!code) return null;
+    return {
+      code,
+      status: typeof payload.status === "string" ? payload.status : undefined,
+      safeToRetry: payload.safeToRetry === true,
+      mustNotReregister: payload.mustNotReregister === true,
+      detail: typeof payload.detail === "string" ? payload.detail : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sleepMs(ms, signal) {
+  if (signal?.aborted) {
+    const error = new Error("aborted");
+    error.name = "AbortError";
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -171,14 +227,31 @@ export function createHelperTrustedTransactionProxy({
   protocol,
   run = runHelper,
   timeoutMs = 60_000,
+  busyRetryLimit = 5,
 } = {}) {
   assertHelperPath(helperPath);
   assertProfile(profile);
   assertProtocol(protocol);
+  if (!Number.isSafeInteger(busyRetryLimit) || busyRetryLimit < 1) {
+    throw new TypeError("busyRetryLimit must be an integer >= 1");
+  }
 
   async function invoke(args, { stdin, signal } = {}) {
-    const result = await run(helperPath, args, { timeoutMs, signal, stdin });
-    return parseJsonStdout(result);
+    let lastError = null;
+    for (let attempt = 1; attempt <= busyRetryLimit; attempt += 1) {
+      const result = await run(helperPath, args, { timeoutMs, signal, stdin });
+      try {
+        return parseJsonStdout(result);
+      } catch (error) {
+        lastError = error;
+        if (error?.code === "credential_busy" && error?.safeToRetry !== false && attempt < busyRetryLimit) {
+          await sleepMs(Math.min(50 * attempt, 250), signal);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw lastError ?? createCodedError("helper_unavailable", "transaction helper failed");
   }
 
   return Object.freeze({

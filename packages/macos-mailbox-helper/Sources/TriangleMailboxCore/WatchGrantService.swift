@@ -88,8 +88,7 @@ public struct WatchGrantService: Sendable {
                 origin: origin,
                 agentIDs: agentIDs,
                 authorizationHeaders: createHeaders,
-                replacementCredential: replacement,
-                localBindingPresent: &existing
+                replacementCredential: replacement
             )
         } catch let error as WatchGrantServiceError {
             throw error
@@ -312,15 +311,15 @@ public struct WatchGrantService: Sendable {
     }
 
     /// When MESH rejects create-with-replacement because the local watch secret is
-    /// stale/revoked, discard the local binding and retry create-without-replacement
-    /// once. Status alone can look finalized while the on-disk credential is dead.
+    /// stale/revoked, retry create-without-replacement once. Keep the local binding
+    /// until a new grant is stored so concurrent watch-poll is not stranded as
+    /// `credential_missing` (status can still look finalized while the secret is dead).
     private func createGrantRecoveringStaleLocalBinding(
         installationID: InstallationID,
         origin: MeshOrigin,
         agentIDs: [AgentID],
         authorizationHeaders: [String: String],
-        replacementCredential: WatchCredential?,
-        localBindingPresent: inout WatchGrantBinding?
+        replacementCredential: WatchCredential?
     ) async throws -> StagedWatchGrant {
         do {
             return try await client.createGrant(
@@ -337,8 +336,9 @@ public struct WatchGrantService: Sendable {
             else {
                 throw mapClientError(error)
             }
-            try discardLocalWatchBinding(installationID: installationID)
-            localBindingPresent = nil
+            // Do not delete the local binding here. A failed recreate (or lock
+            // contention during member gate verify) would otherwise leave pollers
+            // with credential_missing while operators still see finalized status.
             do {
                 return try await client.createGrant(
                     origin: origin,
@@ -350,18 +350,6 @@ public struct WatchGrantService: Sendable {
             } catch let retryError as MeshWatchClientError {
                 throw mapClientError(retryError)
             }
-        }
-    }
-
-    private func discardLocalWatchBinding(installationID: InstallationID) throws {
-        do {
-            try store.delete(for: installationID)
-        } catch WatchGrantStoreError.itemNotFound {
-            // Already gone locally.
-        } catch WatchGrantStoreError.interactionNotAllowed, WatchGrantStoreError.keychainFailure {
-            throw WatchGrantServiceError.keychainUnavailable
-        } catch {
-            throw WatchGrantServiceError.keychainUnavailable
         }
     }
 

@@ -149,6 +149,8 @@ enum TriangleMailboxCLI {
         } catch MailboxTransactionServiceError.unverifiedReplyConflict {
             writeJSON(["error": "unverified_reply_conflict"])
             exit(5)
+        } catch let error as VerifiedCredentialGateError {
+            renderCredentialGateFailure(error)
         } catch let error as WatchGrantServiceError {
             renderWatchFailure(error)
         } catch {
@@ -169,6 +171,83 @@ enum TriangleMailboxCLI {
             }
             exit(1)
         }
+    }
+
+    private static func renderCredentialGateFailure(_ error: VerifiedCredentialGateError) -> Never {
+        let payload: [String: Any]
+        switch error {
+        case .credentialBusy:
+            payload = [
+                "status": "credential_busy",
+                "code": "credential_busy",
+                "mustNotReregister": true,
+                "safeToRetry": true,
+                "detail": "Enrollment reservation is busy; retry without reminting or reregistering.",
+            ]
+        case .journalIneligible:
+            payload = [
+                "status": "operation_failed",
+                "code": "journal_ineligible",
+                "mustNotReregister": true,
+                "safeToRetry": false,
+                "detail": "Enrollment journal state is ineligible.",
+            ]
+        case .profileNotFound:
+            payload = [
+                "status": "operation_failed",
+                "code": "profile_not_found",
+                "mustNotReregister": false,
+                "safeToRetry": false,
+                "detail": "Profile credential was not found.",
+            ]
+        case .localAuthorizationRequired:
+            payload = [
+                "status": "operation_failed",
+                "code": "local_authorization_required",
+                "mustNotReregister": true,
+                "safeToRetry": true,
+                "detail": "Login Keychain authorization is required.",
+            ]
+        case .offline:
+            payload = [
+                "status": "operation_failed",
+                "code": "offline",
+                "mustNotReregister": true,
+                "safeToRetry": true,
+                "detail": "Profile verification could not reach MESH.",
+            ]
+        case .identityMismatch:
+            payload = [
+                "status": "operation_failed",
+                "code": "identity_mismatch",
+                "mustNotReregister": true,
+                "safeToRetry": false,
+                "detail": "Stored profile identity does not match MESH.",
+            ]
+        case .verificationFailed:
+            payload = [
+                "status": "operation_failed",
+                "code": "verification_failed",
+                "mustNotReregister": true,
+                "safeToRetry": true,
+                "detail": "Profile credential verification failed.",
+            ]
+        case .profileStateInconsistent:
+            payload = [
+                "status": "operation_failed",
+                "code": "profile_state_inconsistent",
+                "mustNotReregister": true,
+                "safeToRetry": false,
+                "detail": "Profile Keychain and journal state are inconsistent.",
+            ]
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+            FileHandle.standardError.write(data)
+            FileHandle.standardError.write(Data([0x0a]))
+        } else {
+            FileHandle.standardError.write(CLIOutputRenderer.operationFailure.stderr)
+        }
+        exit(1)
     }
 
     private static func runTransaction(_ command: ParsedCommand) async throws {

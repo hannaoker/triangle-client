@@ -104,6 +104,26 @@ function isStaleWatchCredentialDiagnosis(diagnosis) {
   return rejected === "replacement_unauthorized" || rejected === "watch_credential_invalid";
 }
 
+function isCredentialBusyDiagnosis(diagnosis) {
+  if (!diagnosis || typeof diagnosis !== "object") return false;
+  return diagnosis.code === "credential_busy" || diagnosis.code === "enroll_lock_busy";
+}
+
+function sleepMs(ms, signal) {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * Cheap local-credential probe. Held poll may block when the secret is valid;
  * treat helper timeout as "accepted & held" (usable). Immediate 401-style
@@ -149,6 +169,7 @@ async function probeLocalWatchCredential({
  * @param {string} options.actorProfile Event-driven actor profile for ensure
  * @param {(file: string, args: string[], options: object) => Promise<{stdout: string, stderr: string, code: number|null}>} [options.run]
  * @param {number} [options.timeoutMs]
+ * @param {number} [options.busyRetryLimit] Retries when helper reports credential_busy
  */
 export async function ensureHelperWatchGrant({
   helperPath,
@@ -157,6 +178,7 @@ export async function ensureHelperWatchGrant({
   run = runHelper,
   timeoutMs = 60_000,
   signal,
+  busyRetryLimit = 5,
 } = {}) {
   if (typeof helperPath !== "string" || helperPath.length === 0) {
     throw new TypeError("helperPath is required");
@@ -166,25 +188,36 @@ export async function ensureHelperWatchGrant({
     throw new TypeError("actorProfile is invalid");
   }
   positiveInteger(timeoutMs, "timeoutMs", 1);
+  positiveInteger(busyRetryLimit, "busyRetryLimit", 1);
   if (signal?.aborted) {
     const error = new Error("aborted");
     error.name = "AbortError";
     throw error;
   }
-  const result = await run(
-    helperPath,
-    ["watch-ensure", "--installation", installationId, "--actor-profile", actorProfile],
-    { timeoutMs, signal },
-  );
-  if (result.code === 0) {
-    return { ensured: true };
+
+  let diagnosis = null;
+  for (let attempt = 1; attempt <= busyRetryLimit; attempt += 1) {
+    const result = await run(
+      helperPath,
+      ["watch-ensure", "--installation", installationId, "--actor-profile", actorProfile],
+      { timeoutMs, signal },
+    );
+    if (result.code === 0) {
+      return { ensured: true };
+    }
+
+    diagnosis = parseWatchFailureDiagnosis(result.stderr);
+    if (isCredentialBusyDiagnosis(diagnosis) && attempt < busyRetryLimit) {
+      await sleepMs(Math.min(50 * attempt, 250), signal);
+      continue;
+    }
+    break;
   }
 
-  const diagnosis = parseWatchFailureDiagnosis(result.stderr);
-  // Current helpers discard a stale local binding and recreate once inside
-  // watch-ensure. Older helpers may still surface replacement_unauthorized while
-  // watch-status looks finalized. Never treat status alone as proof the local
-  // credential can poll — probe with a short watch-poll instead.
+  // Current helpers keep the local binding until recreate succeeds, then replace.
+  // Older helpers may still surface replacement_unauthorized while watch-status
+  // looks finalized. Never treat status alone as proof the local credential can
+  // poll — probe with a short watch-poll instead.
   if (isStaleWatchCredentialDiagnosis(diagnosis)) {
     const probe = await probeLocalWatchCredential({
       helperPath,
@@ -206,7 +239,7 @@ export async function ensureHelperWatchGrant({
       detail:
         probe.diagnosis?.detail
         || diagnosis?.detail
-        || "Local watch credential is invalid; discard the local watch binding and re-run watch-ensure without replacement.",
+        || "Local watch credential is invalid; re-run watch-ensure so the helper can recreate without replacement.",
     };
     throw createHelperUnavailableError("watch helper ensure failed", failedDiagnosis);
   }

@@ -54,6 +54,11 @@ struct EnrollmentServiceTests {
     @Test("stored credentials require a fresh verified identity")
     func verifiedCredentialGate() async throws { try await EnrollmentContractCases.verifiedCredentialGate() }
 
+    @Test("enrollment lock contention is credentialBusy not journalIneligible")
+    func gateReservationContentionIsRetryable() async throws {
+        try await EnrollmentContractCases.gateReservationContentionIsRetryable()
+    }
+
     @Test("registration protocol and URLs are exact")
     func exactRegistrationContract() async throws { try await EnrollmentContractCases.exactRegistrationContract() }
 

@@ -134,6 +134,69 @@ test("helper proxy maps unverified_reply_conflict exit code", async () => {
   );
 });
 
+test("helper proxy retries credential_busy then succeeds", async () => {
+  const calls = [];
+  const proxy = createHelperTrustedTransactionProxy({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "bob",
+    protocol: "self-serve-drain",
+    busyRetryLimit: 3,
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (calls.length < 3) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "credential_busy",
+            code: "credential_busy",
+            mustNotReregister: true,
+            safeToRetry: true,
+            detail: "Enrollment reservation is busy; retry without reminting or reregistering.",
+          }),
+        };
+      }
+      return { code: 0, stdout: JSON.stringify({ acknowledged: true }), stderr: "" };
+    },
+  });
+  const acked = await proxy.ack();
+  assert.equal(acked.acknowledged, true);
+  assert.deepEqual(calls, ["transaction-ack", "transaction-ack", "transaction-ack"]);
+});
+
+test("helper proxy surfaces credential_busy after retries and never journal_ineligible for lock", async () => {
+  let attempts = 0;
+  const proxy = createHelperTrustedTransactionProxy({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "bob",
+    protocol: "self-serve-drain",
+    busyRetryLimit: 2,
+    async run() {
+      attempts += 1;
+      return {
+        code: 1,
+        stdout: "",
+        stderr: JSON.stringify({
+          status: "credential_busy",
+          code: "credential_busy",
+          mustNotReregister: true,
+          safeToRetry: true,
+          detail: "Enrollment reservation is busy",
+        }),
+      };
+    },
+  });
+  await assert.rejects(
+    () => proxy.ack(),
+    (error) => (
+      error.code === "credential_busy"
+      && error.safeToRetry === true
+      && error.code !== "journal_ineligible"
+    ),
+  );
+  assert.equal(attempts, 2);
+});
+
 test("resolveTrustedTransactionProxy prefers helper when available", () => {
   const proxy = resolveTrustedTransactionProxy({
     helperPath: "/trusted/triangle-mailbox",

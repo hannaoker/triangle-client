@@ -220,6 +220,72 @@ test("ensureHelperWatchGrant invokes watch-ensure and fails closed on non-zero e
   );
 });
 
+test("ensureHelperWatchGrant retries credential_busy then succeeds", async () => {
+  const calls = [];
+  const result = await ensureHelperWatchGrant({
+    helperPath: "/trusted/triangle-mailbox",
+    installationId: "inst_N7VhDq3mQ2",
+    actorProfile: "bob",
+    busyRetryLimit: 3,
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (calls.length < 3) {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "watch_operation_failed",
+            code: "credential_busy",
+            gate: "profile",
+            operatorAction: "retry_later",
+            safeToRetry: true,
+            mustNotReregister: true,
+            detail: "Enrollment reservation is busy",
+          }),
+        };
+      }
+      return { code: 0, stdout: "{\"state\":\"finalized\"}\n", stderr: "" };
+    },
+  });
+  assert.equal(result.ensured, true);
+  assert.deepEqual(calls, ["watch-ensure", "watch-ensure", "watch-ensure"]);
+});
+
+test("ensureHelperWatchGrant fails closed after credential_busy retries exhaust", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    () => ensureHelperWatchGrant({
+      helperPath: "/trusted/triangle-mailbox",
+      installationId: "inst_N7VhDq3mQ2",
+      actorProfile: "bob",
+      busyRetryLimit: 2,
+      async run() {
+        attempts += 1;
+        return {
+          code: 1,
+          stdout: "",
+          stderr: JSON.stringify({
+            status: "watch_operation_failed",
+            code: "credential_busy",
+            gate: "profile",
+            operatorAction: "retry_later",
+            safeToRetry: true,
+            mustNotReregister: true,
+            detail: "Enrollment reservation is busy",
+          }),
+        };
+      },
+    }),
+    (error) => (
+      error.code === "helper_unavailable"
+      && error.failureCode === "credential_busy"
+      && error.diagnosis?.safeToRetry === true
+      && error.diagnosis?.code !== "journal_ineligible"
+    ),
+  );
+  assert.equal(attempts, 2);
+});
+
 test("ensureHelperWatchGrant reuses existing grant only when poll probe succeeds", async () => {
   const calls = [];
   const result = await ensureHelperWatchGrant({

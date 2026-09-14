@@ -133,6 +133,26 @@ test("watch command help and operator notes never expose credential prefixes", (
   }
 });
 
+test("enroll-lock contention maps to credentialBusy not journalIneligible", () => {
+  const gate = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/EnrollmentService.swift");
+  assert.match(gate, /case credentialBusy/);
+  assert.match(gate, /EnrollmentReservationError\.alreadyInProgress/);
+  assert.match(gate, /throw VerifiedCredentialGateError\.credentialBusy/);
+  // Contended acquire must not be a bare catch-all → journalIneligible.
+  assert.doesNotMatch(
+    gate,
+    /do \{ lease = try reservation\.acquire\(for: profile\) \}\s*catch \{ throw VerifiedCredentialGateError\.journalIneligible \}/,
+  );
+
+  const failure = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WatchGrantFailure.swift");
+  assert.match(failure, /case credentialBusy = "credential_busy"/);
+  assert.match(failure, /case \.credentialBusy:[\s\S]*?safeToRetry: true/);
+
+  const watch = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WatchGrantService.swift");
+  assert.match(watch, /Keep the local binding[\s\S]*until a new grant is stored/);
+  assert.doesNotMatch(watch, /discardLocalWatchBinding/);
+});
+
 test("operator documentation defines the complete low-friction custody lifecycle", () => {
   const helper = text("packages/macos-mailbox-helper/README.md");
   for (const pattern of [
@@ -152,6 +172,7 @@ test("operator documentation defines the complete low-friction custody lifecycle
     /watch-ensure --help/,
     /Upgrade an existing install/,
     /Interpreting watch-ensure failures/,
+    /credential_busy/,
     /mcp-interactive[\s\S]*watch membership/i,
     /gate[\s\S]*workload_auth|membership|keychain/i,
     /cliSurface/,

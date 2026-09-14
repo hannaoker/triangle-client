@@ -30,6 +30,7 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
             .init(name: "watch grant recovers from stale replacement credential", run: recoversFromStaleReplacement),
             .init(name: "watch grant does not discard local binding on unrelated create rejection", run: unrelatedCreateRejectionKeepsLocalBinding),
+            .init(name: "watch grant keeps local binding when stale recreate fails", run: failedStaleRecreateKeepsLocalBinding),
         ]
 #if canImport(Security)
         cases.append(.init(name: "watch grant Keychain query policy", run: keychainQueryPolicy))
@@ -166,6 +167,13 @@ public enum WatchGrantContractCases {
         let profile = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.localAuthorizationRequired)
         try expect(profile.gate == .keychain, "credential gate lock should map to keychain")
         try expect(profile.operatorAction == .unlockLoginKeychain, "credential gate lock action mismatch")
+
+        let busy = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.credentialBusy)
+        try expect(busy.code == .credentialBusy, "credential busy code mismatch")
+        try expect(busy.safeToRetry, "credential busy must be retryable")
+        try expect(busy.mustNotReregister, "credential busy must not force reregister")
+        try expect(busy.operatorAction == .retryLater, "credential busy action mismatch")
+        try expect(busy.code != .journalIneligible, "lock contention must not map to journalIneligible")
 
         let poisoned = WatchGrantFailureDiagnosis.from(
             WatchGrantServiceError.rejected(statusCode: 401, code: "mesh_watch_leak_attempt")
@@ -346,7 +354,7 @@ public enum WatchGrantContractCases {
                 memberProfiles: [fixture.actorProfile]
             )
             try expect(status.state == "finalized", "\(rejectedCode): ensure did not recover")
-            try expect(fixture.transport.createCallCount == 2, "\(rejectedCode): expected discard+retry create")
+            try expect(fixture.transport.createCallCount == 2, "\(rejectedCode): expected create+retry without replacement")
             try expect(
                 fixture.transport.createReplacementHeaderFlags == [true, false],
                 "\(rejectedCode): second create must omit replacement header"
@@ -383,6 +391,40 @@ public enum WatchGrantContractCases {
         try expect(fixture.transport.createCallCount == 1, "unrelated rejection should not retry create")
         let stored = try fixture.store.read(for: fixture.installationID)
         try expect(stored == existing, "unrelated rejection deleted local binding")
+    }
+
+    public static func failedStaleRecreateKeepsLocalBinding() async throws {
+        let fixture = try await Fixture()
+        let existing = try WatchGrantBinding(
+            installationID: fixture.installationID,
+            origin: MeshOrigin("https://thetriangle.dev"),
+            grantID: WatchGrantID("watchgrant_" + String(repeating: "7", count: 64)),
+            agentIDs: [fixture.actorAgentID],
+            watchCredential: WatchCredential("mesh_watch_" + String(repeating: "7", count: 64))
+        )
+        try fixture.store.create(existing)
+        fixture.transport.rejectCreateWithReplacementOnce = (401, "watch_credential_invalid")
+        fixture.transport.rejectCreateWithoutReplacementOnce = (503, "watch_unavailable")
+
+        do {
+            _ = try await fixture.service.ensureGrant(
+                installationID: fixture.installationID,
+                actorProfile: fixture.actorProfile,
+                memberProfiles: [fixture.actorProfile]
+            )
+            throw ContractFailure("failed recreate unexpectedly succeeded")
+        } catch WatchGrantServiceError.rejected(let statusCode, let code) {
+            try expect(statusCode == 503 && code == "watch_unavailable", "unexpected recreate failure mapping")
+        }
+        try expect(fixture.transport.createCallCount == 2, "stale recreate should attempt without replacement")
+        try expect(
+            fixture.transport.createReplacementHeaderFlags == [true, false],
+            "second create must omit replacement header"
+        )
+        let stored = try fixture.store.read(for: fixture.installationID)
+        try expect(stored == existing, "failed stale recreate must keep local binding for concurrent pollers")
+        let status = try fixture.service.status(installationID: fixture.installationID)
+        try expect(status.state == "finalized", "local status should remain finalized until replace succeeds")
     }
 
 #if canImport(Security)
@@ -562,6 +604,8 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     private(set) var createReplacementHeaderFlags: [Bool] = []
     /// When set, the next create that includes Mesh-Watch-Credential returns this rejection once.
     var rejectCreateWithReplacementOnce: (statusCode: Int, code: String)?
+    /// When set, the next create that omits Mesh-Watch-Credential returns this rejection once.
+    var rejectCreateWithoutReplacementOnce: (statusCode: Int, code: String)?
     var nextPoll: PollScript = .success(WatchPollResponse(cursor: 0, events: []))
     private var stagedCredential = "mesh_watch_stage_" + String(repeating: "1", count: 64)
     private var watchCredential = "mesh_watch_" + String(repeating: "2", count: 64)
@@ -586,6 +630,16 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
                 createReplacementHeaderFlags.append(hasReplacement)
                 if hasReplacement, let rejection = rejectCreateWithReplacementOnce {
                     rejectCreateWithReplacementOnce = nil
+                    let body = Data("{\"error\":\"\(rejection.code)\"}".utf8)
+                    return MeshHTTPResponse(
+                        statusCode: rejection.statusCode,
+                        headers: ["Content-Type": "application/json"],
+                        body: body,
+                        finalURL: request.url
+                    )
+                }
+                if !hasReplacement, let rejection = rejectCreateWithoutReplacementOnce {
+                    rejectCreateWithoutReplacementOnce = nil
                     let body = Data("{\"error\":\"\(rejection.code)\"}".utf8)
                     return MeshHTTPResponse(
                         statusCode: rejection.statusCode,
