@@ -820,6 +820,9 @@ public enum VerifiedCredentialGateError: Error, Equatable, Sendable {
     case verificationFailed
     case journalIneligible
     case profileStateInconsistent
+    /// Enrollment file/in-memory reservation is held by another helper process.
+    /// Journal may already be verified; callers must retry, not reregister.
+    case credentialBusy
 }
 
 public struct VerifiedCredential: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -839,13 +842,19 @@ public struct VerifiedCredentialGate: Sendable {
     private let client: MeshClient
     private let reservation: any EnrollmentReservation
     private let journal: any EnrollmentJournal
+    /// How many acquire attempts (including the first) before surfacing `credentialBusy`.
+    private let reservationRetryLimit: Int
+    /// Base backoff between reservation acquire retries (multiplied by attempt index).
+    private let reservationRetryBaseNanoseconds: UInt64
 
     public init(
         store: any CredentialStore,
         workloadKeyStore: (any WorkloadKeyStore)? = nil,
         transport: any MeshTransport,
         reservation: any EnrollmentReservation,
-        journal: any EnrollmentJournal
+        journal: any EnrollmentJournal,
+        reservationRetryLimit: Int = 8,
+        reservationRetryBaseNanoseconds: UInt64 = 25_000_000
     ) {
         self.store = store
         #if canImport(Security)
@@ -864,12 +873,12 @@ public struct VerifiedCredentialGate: Sendable {
         client = MeshClient(transport: transport)
         self.reservation = reservation
         self.journal = journal
+        self.reservationRetryLimit = max(1, reservationRetryLimit)
+        self.reservationRetryBaseNanoseconds = reservationRetryBaseNanoseconds
     }
 
     public func credential(for profile: ProfileName) async throws -> VerifiedCredential {
-        let lease: any EnrollmentReservationLease
-        do { lease = try reservation.acquire(for: profile) }
-        catch { throw VerifiedCredentialGateError.journalIneligible }
+        let lease = try await acquireReservation(for: profile)
         defer { lease.release() }
         let binding: CredentialBinding
         switch LocalProfileReconciler(store: store, journal: journal).reconcile(profile) {
@@ -921,6 +930,33 @@ public struct VerifiedCredentialGate: Sendable {
             throw VerifiedCredentialGateError.verificationFailed
         }
         return VerifiedCredential(binding: binding)
+    }
+
+    /// Acquire the per-profile enrollment reservation, retrying briefly on lock contention.
+    /// Contended locks are `credentialBusy` (retryable), never `journalIneligible`.
+    private func acquireReservation(for profile: ProfileName) async throws -> any EnrollmentReservationLease {
+        var attempt = 0
+        while true {
+            attempt += 1
+            do {
+                return try reservation.acquire(for: profile)
+            } catch EnrollmentReservationError.alreadyInProgress {
+                if attempt >= reservationRetryLimit {
+                    throw VerifiedCredentialGateError.credentialBusy
+                }
+                let delay = min(
+                    reservationRetryBaseNanoseconds &* UInt64(attempt),
+                    200_000_000
+                )
+                if delay > 0 {
+                    try await Task.sleep(nanoseconds: delay)
+                }
+            } catch EnrollmentReservationError.unsafeReservation {
+                throw VerifiedCredentialGateError.journalIneligible
+            } catch {
+                throw VerifiedCredentialGateError.journalIneligible
+            }
+        }
     }
 }
 

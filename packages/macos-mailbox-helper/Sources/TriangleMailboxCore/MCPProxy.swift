@@ -436,6 +436,7 @@ public struct MCPProxy: Sendable {
         case .offline: "identity_verification_offline"
         case .identityMismatch: "identity_mismatch"
         case .journalIneligible: "profile_ineligible"
+        case .credentialBusy: "credential_busy"
         case .profileStateInconsistent: "profile_state_inconsistent"
         case .verificationFailed, .none: "identity_verification_failed"
         }

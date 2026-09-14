@@ -174,9 +174,15 @@ after a failure (operator-run on the Mac; not claimed from Linux CI):
    `dev.thetriangle.mesh.workload-key` should exist for the profile;
    `dev.thetriangle.mesh.mailbox-watch` appears only after a successful ensure.
 5. If `gate` is `keychain` on an ad-hoc helper, reinstall with Developer ID.
-6. If `rejectedCode` is `replacement_unauthorized` or `watch_credential_invalid`,
-   current helpers discard the stale local binding and recreate once. If an older
-   helper still fails, move aside
+6. If `code` is `credential_busy` (or `operatorAction` is `retry_later`), another
+   helper process holds the profile `enroll-*.lock` (often concurrent
+   `watch-ensure` / `status` / `transaction-*`). Retry the same command; do
+   **not** remint, move aside watch JSON, or re-enroll. Node ensure/transaction
+   proxies retry briefly automatically.
+7. If `rejectedCode` is `replacement_unauthorized` or `watch_credential_invalid`,
+   current helpers retry create without a replacement header and keep the local
+   binding until the new grant is stored (so concurrent `watch-poll` is not
+   stranded as `credential_missing`). If an older helper still fails, move aside
    `~/Library/Application Support/The Triangle/credentials/local/watch/<installation>.json`
    (file-custody Mini) or delete the mailbox-watch Keychain item, then re-run
    `watch-ensure`. Do not treat finalized `watch-status` alone as proof the

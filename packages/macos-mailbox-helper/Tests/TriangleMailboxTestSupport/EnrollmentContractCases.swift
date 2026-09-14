@@ -28,6 +28,7 @@ public enum EnrollmentContractCases {
         .init(name: "status reports missing and locked local profiles", run: localStatusStates),
         .init(name: "URLSession transport enforces the wire contract", run: urlSessionTransportContract),
         .init(name: "stored credentials require fresh verification", run: verifiedCredentialGate),
+        .init(name: "enrollment lock contention is credentialBusy not journalIneligible", run: gateReservationContentionIsRetryable),
         .init(name: "registration contract is exact", run: exactRegistrationContract),
         .init(name: "durable enrollment lifecycle survives restart", run: durableEnrollmentLifecycle),
         .init(name: "journal and Keychain state reconcile consistently", run: journalKeychainReconciliation),
@@ -746,6 +747,50 @@ public enum EnrollmentContractCases {
             try await freshGate.credential(for: profile)
         }
         try expect(try store.read(for: profile).handle.value == "codex-mailbox-live", "auth rejection deleted stored binding")
+    }
+
+    public static func gateReservationContentionIsRetryable() async throws {
+        let profile = try ProfileName("codex-mailbox-live")
+        let store = InMemoryCredentialStore()
+        try store.create(binding(), for: profile)
+        let journal = InMemoryEnrollmentJournal()
+        try journal.write(.testing(
+            profile: profile, origin: MeshOrigin("https://thetriangle.dev"), state: .verified,
+            agentID: AgentID(agentID), handle: MailboxHandle("codex-mailbox-live"), reasonCode: "identity_verified"
+        ))
+        let reservation = InMemoryEnrollmentReservation()
+        let held = try reservation.acquire(for: profile)
+        defer { held.release() }
+
+        let gate = VerifiedCredentialGate(
+            store: store,
+            transport: ScriptedTransport([response(200, meJSON())]),
+            reservation: reservation,
+            journal: journal,
+            reservationRetryLimit: 1,
+            reservationRetryBaseNanoseconds: 0
+        )
+        try await expectCredentialGateError(.credentialBusy, "enroll lock contention mapped away from credentialBusy") {
+            try await gate.credential(for: profile)
+        }
+
+        // Contended acquire must not be collapsed into journalIneligible (operators
+        // previously treated that as mustNotReregister / safeToRetry=false).
+        do {
+            _ = try await gate.credential(for: profile)
+            throw ContractFailure("held reservation unexpectedly released a credential")
+        } catch VerifiedCredentialGateError.credentialBusy {
+            // expected
+        } catch VerifiedCredentialGateError.journalIneligible {
+            throw ContractFailure("enroll lock contention was misclassified as journalIneligible")
+        } catch {
+            throw ContractFailure("unexpected gate error under lock contention: \(error)")
+        }
+
+        let diagnosis = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.credentialBusy)
+        try expect(diagnosis.safeToRetry && diagnosis.mustNotReregister, "credentialBusy diagnosis retry contract drifted")
+        try expect(diagnosis.code == .credentialBusy, "credentialBusy diagnosis code drifted")
+        try expect(diagnosis.code != .journalIneligible, "credentialBusy diagnosis collapsed to journalIneligible")
     }
 
     public static func exactRegistrationContract() async throws {
