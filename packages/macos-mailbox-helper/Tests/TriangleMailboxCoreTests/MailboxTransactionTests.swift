@@ -72,6 +72,9 @@ struct MailboxTransactionTests {
     @Test("claimNext lists preflights and claims pending delivery")
     func claimNext() async throws { try await MailboxTransactionContractCases.claimNextFromPendingDelivery() }
 
+    @Test
+    func claimedInboundResume() async throws { try await MailboxTransactionContractCases.claimedInboundSurvivesResume() }
+
     @Test("authenticated reply body includes threading fields")
     func replyBodyThreading() async throws { try await MailboxTransactionContractCases.authenticatedReplyBodyThreadingFields() }
 

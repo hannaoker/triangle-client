@@ -31,6 +31,7 @@ public protocol MailboxTransactionTransport: Sendable {
     /// Metadata-only pending mailbox page (never includes message text).
     func listPendingCandidates() async throws -> [MailboxDeliveryCandidate]
     func claim(deliveryID: Int, claimID: String) async throws -> MailboxClaimTransportResult
+    func readInboundEvent(roomID: String, eventID: String, roomSequence: Int) async throws -> String
     func sendReply(
         roomID: String,
         idempotencyKey: String,
@@ -163,7 +164,9 @@ public struct MailboxTransactionService: Sendable {
             instanceID: instanceID,
             protocolOwnership: protocolOwnership,
             deliveryID: next.deliveryID,
-            roomID: next.roomID
+            roomID: next.roomID,
+            inboundEventID: next.eventID,
+            inboundRoomSequence: next.roomSequence
         )
         let afterClaim = try MailboxPolicyEvaluator.evaluate(
             protocolOwnership: protocolOwnership,
@@ -172,10 +175,6 @@ public struct MailboxTransactionService: Sendable {
             quarantined: quarantined
         )
         var payload = secretFreeStatus(evaluation: afterClaim, quarantined: quarantined)
-        if var open = payload["open"] as? [String: Any] {
-            open["inboundEventId"] = next.eventID.value
-            payload["open"] = open
-        }
         if let admitText = next.admitText {
             payload["admitText"] = admitText
         }
@@ -187,6 +186,8 @@ public struct MailboxTransactionService: Sendable {
         protocolOwnership: MailboxTransactionProtocol,
         deliveryID: Int,
         roomID: MailboxRoomID,
+        inboundEventID: MailboxEventID? = nil,
+        inboundRoomSequence: Int? = nil,
         modelSuppliedClaimID: String? = nil
     ) async throws -> MailboxOpenTransaction {
         _ = modelSuppliedClaimID // intentionally ignored / replaced
@@ -214,6 +215,8 @@ public struct MailboxTransactionService: Sendable {
             protocolOwnership: protocolOwnership,
             deliveryID: deliveryID,
             roomID: roomID,
+            inboundEventID: inboundEventID,
+            inboundRoomSequence: inboundRoomSequence,
             state: .prepared
         )
         try store.prepare(prepared)
@@ -221,6 +224,44 @@ public struct MailboxTransactionService: Sendable {
             throw MailboxTransactionServiceError.upstreamUnavailable
         }
         return try await finishClaim(prepared)
+    }
+
+    /// Fetches peer text ephemerally for the exact event bound to the durable open claim.
+    public func readInbound(
+        instanceID: ClientInstanceID,
+        protocolOwnership: MailboxTransactionProtocol
+    ) async throws -> [String: Any] {
+        guard let open = try store.readOpen(instanceID: instanceID) else {
+            throw MailboxTransactionServiceError.notOpen
+        }
+        guard open.protocolOwnership == protocolOwnership else {
+            throw MailboxTransactionServiceError.protocolMismatch
+        }
+        guard open.state == .claimed,
+              let eventID = open.inboundEventID,
+              let roomSequence = open.inboundRoomSequence
+        else { throw MailboxTransactionServiceError.invalidState }
+        let text: String
+        do {
+            text = try await transport.readInboundEvent(
+                roomID: open.roomID.value,
+                eventID: eventID.value,
+                roomSequence: roomSequence
+            )
+        } catch MailboxTransactionServiceError.invalidUpstreamResponse {
+            throw MailboxTransactionServiceError.invalidUpstreamResponse
+        } catch {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        guard !text.isEmpty, text.utf8.count <= 32 * 1024 else {
+            throw MailboxTransactionServiceError.invalidUpstreamResponse
+        }
+        return [
+            "deliveryId": open.deliveryID,
+            "roomId": open.roomID.value,
+            "inboundEventId": eventID.value,
+            "text": text,
+        ]
     }
 
     public func reply(
@@ -243,6 +284,12 @@ public struct MailboxTransactionService: Sendable {
             throw MailboxTransactionServiceError.protocolMismatch
         }
         guard open.roomID == roomID else { throw MailboxTransactionServiceError.roomMismatch }
+        if let inboundEventID = open.inboundEventID,
+           let inReplyToEventID,
+           inReplyToEventID != inboundEventID
+        {
+            throw MailboxTransactionServiceError.invalidInput
+        }
         if open.isStuck { throw MailboxTransactionServiceError.transactionStuck }
 
         if open.state == .replied {
@@ -260,7 +307,7 @@ public struct MailboxTransactionService: Sendable {
                 roomID: roomID.value,
                 idempotencyKey: open.replyIdempotencyKey.value,
                 text: text,
-                inReplyToEventID: inReplyToEventID?.value
+                inReplyToEventID: (inReplyToEventID ?? open.inboundEventID)?.value
             )
         } catch {
             throw MailboxTransactionServiceError.upstreamUnavailable
@@ -411,6 +458,8 @@ public struct MailboxTransactionService: Sendable {
             payload["open"] = [
                 "deliveryId": open.deliveryID,
                 "roomId": open.roomID.value,
+                "inboundEventId": open.inboundEventID?.value as Any,
+                "inboundRoomSequence": open.inboundRoomSequence as Any,
                 "claimId": open.claimID.value,
                 "replyIdempotencyKey": open.replyIdempotencyKey.value,
                 "state": open.state.rawValue,

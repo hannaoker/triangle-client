@@ -120,7 +120,7 @@ enum TriangleMailboxCLI {
             case .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
                 try await runWatch(command)
             case .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
-                 .transactionAck, .transactionAbandon, .transactionRecordFailure:
+                 .transactionReadInbound, .transactionAck, .transactionAbandon, .transactionRecordFailure:
                 try await runTransaction(command)
             }
         } catch CommandParseError.helpRequested(let command) {
@@ -277,7 +277,8 @@ enum TriangleMailboxCLI {
         }
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
-            transport: transport
+            transport: transport,
+            actorID: credential.agentID
         ) { method, url in
             if let workloadAuth {
                 return try await workloadAuth.authorizationHeaders(method: method, url: url)
@@ -292,6 +293,8 @@ enum TriangleMailboxCLI {
             writeJSON(try service.status(instanceID: instanceID, protocolOwnership: protocolOwnership))
         case .transactionClaimNext:
             writeJSON(try await service.claimNext(instanceID: instanceID, protocolOwnership: protocolOwnership))
+        case .transactionReadInbound:
+            writeJSON(try await service.readInbound(instanceID: instanceID, protocolOwnership: protocolOwnership))
         case .transactionPreflight:
             let input = try BoundedInputReader.readOneDocument(from: .standardInput, limit: 64 * 1024)
             let candidates = try decodeCandidates(input)

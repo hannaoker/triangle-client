@@ -253,15 +253,18 @@ public struct MCPTransactionRewriter: Sendable {
 public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransport, Sendable {
     private let origin: MeshOrigin
     private let transport: any MeshTransport
+    private let actorID: AgentID
     private let authorizationHeaders: @Sendable (String, URL) async throws -> [String: String]
 
     public init(
         origin: MeshOrigin,
         transport: any MeshTransport,
+        actorID: AgentID,
         authorizationHeaders: @escaping @Sendable (String, URL) async throws -> [String: String]
     ) {
         self.origin = origin
         self.transport = transport
+        self.actorID = actorID
         self.authorizationHeaders = authorizationHeaders
     }
 
@@ -320,6 +323,32 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         }
         let idempotent = object["idempotent"] as? Bool ?? false
         return MailboxClaimTransportResult(claimed: true, claimID: claimID, idempotent: idempotent)
+    }
+
+    public func readInboundEvent(roomID: String, eventID: String, roomSequence: Int) async throws -> String {
+        let after = max(0, roomSequence - 1)
+        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID)/events?after_sequence=\(after)&limit=1")!
+        var headers = ["Accept": "application/json"]
+        headers.merge(try await authorizationHeaders("GET", url)) { _, new in new }
+        let response = try await transport.send(MeshHTTPRequest(method: "GET", url: url, headers: headers, body: Data()))
+        guard response.statusCode == 200,
+              let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              (object["roomId"] as? String ?? object["room_id"] as? String) == roomID,
+              let items = object["items"] as? [[String: Any]],
+              items.count == 1,
+              let item = items.first,
+              item["type"] as? String == "message.created",
+              let senderAgentID = item["senderAgentId"] as? String ?? item["sender_agent_id"] as? String,
+              AgentID(rawValue: senderAgentID) != nil,
+              senderAgentID != actorID.value,
+              (item["id"] as? String ?? item["eventId"] as? String ?? item["event_id"] as? String) == eventID,
+              Self.intValue(item["sequence"] ?? item["roomSequence"] ?? item["room_sequence"]) == roomSequence,
+              let body = item["body"] as? [String: Any],
+              let text = body["text"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              text.utf8.count <= 32 * 1024
+        else { throw MailboxTransactionServiceError.invalidUpstreamResponse }
+        return text
     }
 
     public func sendReply(
@@ -450,8 +479,10 @@ public final class RecordingMailboxTransactionTransport: MailboxTransactionTrans
     public var claimHandler: (@Sendable (Int, String) throws -> MailboxClaimTransportResult)?
     public var replyHandler: (@Sendable (String, String, String, String?) throws -> MailboxReplyTransportResult)?
     public var lookupHandler: (@Sendable (String, String) throws -> String?)?
+    public var inboundTextHandler: (@Sendable (String, String, Int) throws -> String)?
     public var ackHandler: (@Sendable (Int) throws -> Void)?
     private var committedReplies: [String: (text: String, eventID: String)] = [:]
+    public private(set) var inboundReadCalls = 0
 
     public init() {}
 
@@ -468,6 +499,14 @@ public final class RecordingMailboxTransactionTransport: MailboxTransactionTrans
             claims.append((deliveryID, claimID))
             if let claimHandler { return try claimHandler(deliveryID, claimID) }
             return MailboxClaimTransportResult(claimed: true, claimID: claimID, idempotent: false)
+        }
+    }
+
+    public func readInboundEvent(roomID: String, eventID: String, roomSequence: Int) async throws -> String {
+        try lock.withLock {
+            inboundReadCalls += 1
+            guard let inboundTextHandler else { throw MailboxTransactionServiceError.upstreamUnavailable }
+            return try inboundTextHandler(roomID, eventID, roomSequence)
         }
     }
 

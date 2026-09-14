@@ -32,6 +32,8 @@ public enum MailboxTransactionContractCases {
         .init(name: "crash after ack", run: crashAfterAck),
         .init(name: "policy evaluator filters list and preflight", run: policyEvaluatorShared),
         .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
+        .init(name: "claimed inbound survives resume and is read exactly", run: claimedInboundSurvivesResume),
+        .init(name: "authenticated inbound read validates exact event contract", run: authenticatedInboundReadContract),
         .init(name: "authenticated reply body includes threading fields", run: authenticatedReplyBodyThreadingFields),
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
@@ -75,6 +77,7 @@ public enum MailboxTransactionContractCases {
             try expect(object?["protocol"] as? String == "coordinator-delivery-v1", "protocol missing")
             try expect(Set(Array((object ?? [:]).keys)) == Set([
                 "version", "instanceId", "protocol", "deliveryId", "roomId", "claimId",
+                "inboundEventId", "inboundRoomSequence",
                 "replyIdempotencyKey", "state", "replyEventId", "replyResolution",
                 "failureCount", "lastFailureReason", "createdAt",
             ]), "open.json schema keys drifted")
@@ -764,12 +767,49 @@ public enum MailboxTransactionContractCases {
         try expect(resumed["shouldStartModel"] as? Bool == true, "resume shouldStartModel false")
     }
 
+    public static func claimedInboundSurvivesResume() async throws {
+        try await withFileStore { store, root, instanceID in
+            let transport = RecordingMailboxTransactionTransport()
+            transport.pendingCandidates = [
+                try MailboxDeliveryCandidate(deliveryID: 52, roomID: room, eventID: event, roomSequence: 17),
+            ]
+            transport.inboundTextHandler = { roomID, eventID, roomSequence in
+                try expect(roomID == room.value, "inbound read escaped claimed room")
+                try expect(eventID == event.value, "inbound read escaped claimed event")
+                try expect(roomSequence == 17, "inbound read escaped claimed sequence")
+                return "CODEX-BOB-E2E-20260913T190000PT"
+            }
+
+            let claimingService = MailboxTransactionService(store: store, transport: transport)
+            _ = try await claimingService.claimNext(
+                instanceID: instanceID,
+                protocolOwnership: .selfServeDrain
+            )
+
+            let data = try Data(contentsOf: root.appendingPathComponent("open.json"))
+            let rendered = String(decoding: data, as: UTF8.self)
+            try expect(rendered.contains(event.value), "claimed inbound event ID was not persisted")
+            try expect(!rendered.contains("CODEX-BOB-E2E"), "inbound text leaked into transaction store")
+
+            // A new service instance represents a later wake resuming the durable claim.
+            let resumedService = MailboxTransactionService(store: store, transport: transport)
+            let payload = try await resumedService.readInbound(
+                instanceID: instanceID,
+                protocolOwnership: .selfServeDrain
+            )
+            try expect(payload["inboundEventId"] as? String == event.value, "read returned wrong event ID")
+            try expect(payload["text"] as? String == "CODEX-BOB-E2E-20260913T190000PT", "read returned wrong text")
+            try expect(transport.inboundReadCalls == 1, "inbound event was not fetched exactly once")
+        }
+    }
+
     public static func authenticatedReplyBodyThreadingFields() async throws {
         let origin = try MeshOrigin("https://thetriangle.dev")
         let mesh = RecordingAuthenticatedMeshTransport()
         let transport = AuthenticatedMailboxTransactionTransport(
             origin: origin,
-            transport: mesh
+            transport: mesh,
+            actorID: AgentID(rawValue: "agent_" + String(repeating: "d", count: 32))!
         ) { _, _ in ["Authorization": "Bearer test"] }
         let sourceEvent = event.value
         let result = try await transport.sendReply(
@@ -791,6 +831,41 @@ public enum MailboxTransactionContractCases {
         try expect(body?["text"] as? String == "threaded reply", "text missing from body")
         try expect(body?["replyRequired"] as? Bool == false, "replyRequired missing from body")
         try expect(body?["inReplyToEventId"] as? String == sourceEvent, "inReplyToEventId missing from body")
+    }
+
+    public static func authenticatedInboundReadContract() async throws {
+        let origin = try MeshOrigin("https://thetriangle.dev")
+        let mesh = RecordingAuthenticatedMeshTransport()
+        let actor = AgentID(rawValue: "agent_" + String(repeating: "d", count: 32))!
+        let sender = "agent_" + String(repeating: "e", count: 32)
+        mesh.responseHandler = { request in
+            let body = Data(#"{"roomId":"\#(room.value)","items":[{"id":"\#(event.value)","roomId":"\#(room.value)","sequence":17,"senderAgentId":"\#(sender)","type":"message.created","body":{"text":"CODEX-BOB-E2E-EXACTPT"}}]}"#.utf8)
+            return MeshHTTPResponse(statusCode: 200, headers: [:], body: body, finalURL: request.url)
+        }
+        let transport = AuthenticatedMailboxTransactionTransport(
+            origin: origin,
+            transport: mesh,
+            actorID: actor
+        ) { _, _ in ["Authorization": "Bearer test"] }
+
+        let text = try await transport.readInboundEvent(roomID: room.value, eventID: event.value, roomSequence: 17)
+        try expect(text == "CODEX-BOB-E2E-EXACTPT", "canonical inbound text was not returned")
+        guard let request = mesh.requests.first else { throw ContractFailure("inbound history request missing") }
+        try expect(request.method == "GET", "inbound history method mismatch")
+        try expect(request.url.path == "/api/v1/rooms/\(room.value)/events", "inbound history path mismatch")
+        let components = URLComponents(url: request.url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        try expect(query == ["after_sequence": "16", "limit": "1"], "inbound history query is not exact")
+        try expect(request.headers["Authorization"] == "Bearer test", "inbound history authorization missing")
+
+        mesh.responseHandler = { request in
+            let body = Data(#"{"roomId":"\#(room.value)","items":[{"id":"\#(event.value)","roomId":"\#(room.value)","sequence":17,"senderAgentId":"\#(actor.value)","type":"message.created","body":{"text":"must reject self"}}]}"#.utf8)
+            return MeshHTTPResponse(statusCode: 200, headers: [:], body: body, finalURL: request.url)
+        }
+        do {
+            _ = try await transport.readInboundEvent(roomID: room.value, eventID: event.value, roomSequence: 17)
+            throw ContractFailure("self-sent inbound event was accepted")
+        } catch MailboxTransactionServiceError.invalidUpstreamResponse {}
     }
 
     public static func mcpRewriterIgnoresModelIDs() async throws {
@@ -845,6 +920,13 @@ public enum MailboxTransactionContractCases {
         ])
         try expect(claimNext.command == .transactionClaimNext, "claim-next command rejected")
         try expect(claimNext.protocolOwnership == .selfServeDrain, "claim-next protocol missing")
+
+        let readInbound = try CommandParser.parse([
+            "transaction-read-inbound",
+            "--profile", "mailbox",
+            "--protocol", "self-serve-drain",
+        ])
+        try expect(readInbound.command == .transactionReadInbound, "read-inbound command rejected")
 
         let abandon = try CommandParser.parse([
             "transaction-abandon",
@@ -918,6 +1000,7 @@ public enum MailboxTransactionContractCases {
 private final class RecordingAuthenticatedMeshTransport: MeshTransport, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var requests: [MeshHTTPRequest] = []
+    var responseHandler: (@Sendable (MeshHTTPRequest) throws -> MeshHTTPResponse)?
 
     private func record(_ request: MeshHTTPRequest) {
         lock.lock()
@@ -928,6 +1011,7 @@ private final class RecordingAuthenticatedMeshTransport: MeshTransport, @uncheck
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
         // Keep NSLock off the async context (macOS 27 SDK marks lock/unlock unavailable there).
         record(request)
+        if let responseHandler { return try responseHandler(request) }
         if request.method == "POST", request.url.path.contains("/events") {
             let body = Data(#"{"event":{"id":"event_cccccccccccccccccccccccccccccccc"}}"#.utf8)
             return MeshHTTPResponse(statusCode: 201, headers: [:], body: body, finalURL: request.url)

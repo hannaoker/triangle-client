@@ -123,10 +123,9 @@ def get_status(profile=DEFAULT_PROFILE, bin_path=DEFAULT_BIN):
 
 
 def get_room_history(room_id, limit=50, after_sequence=0, profile=DEFAULT_PROFILE):
-  fetch_limit = 100 if after_sequence == 0 else limit
   res = call_mcp("mesh.rooms.history", {
     "room_id": room_id,
-    "limit": fetch_limit,
+    "limit": limit,
     "after_sequence": after_sequence,
   }, profile=profile)
   if res and "result" in res and "structuredContent" in res["result"]:
@@ -334,6 +333,7 @@ def main():
   hist_parser = subparsers.add_parser("history", help="Get room message history")
   hist_parser.add_argument("room_id", help="Room ID")
   hist_parser.add_argument("--limit", "-n", type=int, default=20, help="Max messages to fetch")
+  hist_parser.add_argument("--after-sequence", "-s", type=int, default=0, help="Fetch messages after sequence number")
 
   reply_parser = subparsers.add_parser("reply", help="Atomically claim, reply, and ack a delivery")
   reply_parser.add_argument("--delivery", "-d", type=int, required=True, help="Delivery ID to reply to")
@@ -360,7 +360,7 @@ def main():
     res = poll_mailbox(wait_seconds=args.wait, interval=args.interval, profile=args.profile)
     print(json.dumps(res, indent=2))
   elif args.command == "history":
-    res = get_room_history(args.room_id, limit=args.limit, profile=args.profile)
+    res = get_room_history(args.room_id, limit=args.limit, after_sequence=args.after_sequence, profile=args.profile)
     print(json.dumps(res, indent=2))
   elif args.command == "reply":
     res = reply_atomic(args.delivery, args.text, reply_required=args.reply_required, profile=args.profile)

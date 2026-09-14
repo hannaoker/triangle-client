@@ -349,7 +349,8 @@ public struct MCPProxy: Sendable {
     ) -> MCPTransactionRewriter {
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
-            transport: transport
+            transport: transport,
+            actorID: credential.agentID
         ) { method, url in
             if let workloadAuth {
                 return try await workloadAuth.authorizationHeaders(method: method, url: url)

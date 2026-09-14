@@ -12,3 +12,8 @@ packages/macos-mailbox-helper/.build/
 *.pem
 *.key
 .DS_Store
+__pycache__/
+*.pyc
+artifacts/
+scripts/prototypes/*-dom.txt
+scripts/prototypes/*-screenshot.png

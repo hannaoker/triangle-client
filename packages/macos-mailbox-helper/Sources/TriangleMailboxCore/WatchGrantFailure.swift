@@ -420,7 +420,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             notes = ["Held poll for Node wake clients; credentials stay in the helper Keychain."]
         case .enroll, .status, .mcp, .runWorker, .runSupervisor, .preflightSupervisor,
              .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
-             .transactionAck, .transactionAbandon, .transactionRecordFailure:
+             .transactionReadInbound, .transactionAck, .transactionAbandon, .transactionRecordFailure:
             requires = []
             notes = []
         }

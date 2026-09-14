@@ -5,6 +5,18 @@ import TriangleMailboxTestSupport
 enum TriangleMailboxHostTests {
     static func main() async {
         do {
+            if ProcessInfo.processInfo.environment["TRIANGLE_CONTRACT_FILTER"] == "claimed-inbound-resume" {
+                try await MailboxTransactionContractCases.claimedInboundSurvivesResume()
+                print("PASS claimed inbound survives resume and is read exactly")
+                return
+            }
+            if ProcessInfo.processInfo.environment["TRIANGLE_CONTRACT_FILTER"] == "mailbox-transactions" {
+                for contractCase in MailboxTransactionContractCases.all {
+                    try await contractCase.run()
+                    print("PASS \(contractCase.name)")
+                }
+                return
+            }
             for contractCase in ModelContractCases.all {
                 try contractCase.run()
                 print("PASS \(contractCase.name)")
