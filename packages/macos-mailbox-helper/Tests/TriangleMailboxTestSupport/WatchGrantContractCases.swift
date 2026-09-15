@@ -294,7 +294,8 @@ public enum WatchGrantContractCases {
         do {
             _ = try await fixture.service.ensureGrant(
                 installationID: fixture.installationID,
-                actorProfile: fixture.actorProfile
+                actorProfile: fixture.actorProfile,
+                memberProfiles: [fixture.actorProfile]
             )
             throw ContractFailure("mcp-interactive actor was accepted")
         } catch WatchGrantServiceError.interactiveDeliveryExcluded {
@@ -358,6 +359,11 @@ public enum WatchGrantContractCases {
             try expect(
                 fixture.transport.createReplacementHeaderFlags == [true, false],
                 "\(rejectedCode): second create must omit replacement header"
+            )
+            try expect(
+                fixture.transport.createDPoPProofs.allSatisfy { !$0.isEmpty }
+                    && Set(fixture.transport.createDPoPProofs).count == 2,
+                "\(rejectedCode): stale recreate must mint a fresh DPoP proof"
             )
             let stored = try fixture.store.read(for: fixture.installationID)
             try expect(stored != stale, "\(rejectedCode): stale local credential was not replaced")
@@ -518,7 +524,7 @@ public enum WatchGrantContractCases {
             service = WatchGrantService(
                 store: store,
                 transport: transport,
-                auth: StaticWatchGrantAuthProvider(),
+                auth: SequencedWatchGrantAuthProvider(),
                 credentialGate: gate,
                 instanceStore: instances
             )
@@ -570,11 +576,18 @@ public enum WatchGrantContractCases {
     }
 }
 
-private struct StaticWatchGrantAuthProvider: WatchGrantAuthProviding {
+private final class SequencedWatchGrantAuthProvider: WatchGrantAuthProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sequence = 0
+
     func authorizationHeaders(for profile: ProfileName, method: String, url: URL) async throws -> [String: String] {
-        [
+        let proof = lock.withLock {
+            sequence += 1
+            return "dpop-test-proof-\(sequence)"
+        }
+        return [
             "Authorization": "Bearer workload-test-token",
-            "DPoP": "dpop-test-proof",
+            "DPoP": proof,
         ]
     }
 }
@@ -602,6 +615,7 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     private(set) var loggedBodies: [String] = []
     private(set) var createCallCount = 0
     private(set) var createReplacementHeaderFlags: [Bool] = []
+    private(set) var createDPoPProofs: [String] = []
     /// When set, the next create that includes Mesh-Watch-Credential returns this rejection once.
     var rejectCreateWithReplacementOnce: (statusCode: Int, code: String)?
     /// When set, the next create that omits Mesh-Watch-Credential returns this rejection once.
@@ -628,6 +642,7 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
                 createCallCount += 1
                 let hasReplacement = request.headers.keys.contains { $0.caseInsensitiveCompare("Mesh-Watch-Credential") == .orderedSame }
                 createReplacementHeaderFlags.append(hasReplacement)
+                createDPoPProofs.append(request.headers["DPoP"] ?? "")
                 if hasReplacement, let rejection = rejectCreateWithReplacementOnce {
                     rejectCreateWithReplacementOnce = nil
                     let body = Data("{\"error\":\"\(rejection.code)\"}".utf8)

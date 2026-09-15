@@ -48,9 +48,9 @@ struct WatchGrantTests {
         try await WatchGrantContractCases.revokeClearsBinding()
     }
 
-    @Test("excludes mcp-interactive members")
+    @Test("excludes mcp-interactive actors")
     func excludesInteractive() async throws {
-        try await WatchGrantContractCases.excludesInteractive()
+        try await WatchGrantContractCases.excludesInteractiveActor()
     }
 
     @Test("fails closed without keychain")

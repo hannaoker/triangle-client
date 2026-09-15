@@ -815,13 +815,13 @@ export function createSharedCodexSession({
 
   async function settleMeshTransaction(item, turn) {
     if (!transactionProxy) return;
-    const roomId = item.roomId;
     const text = extractAssistantText(turn);
+    const roomId = item.roomId;
     if (typeof roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(roomId)) {
       throw createCodedError("mesh_reply_context_missing", "roomId missing for MESH reply");
     }
-    if (!text) {
-      throw createCodedError("assistant_text_missing", "completed turn had no assistant text for MESH reply");
+    if (!text || text.trim() === "[NO_REPLY]") {
+      throw createCodedError("assistant_text_missing", "claimed work completed without a MESH reply");
     }
     assertNoSecretMaterial({ text }, "mesh reply");
     await transactionProxy.reply({

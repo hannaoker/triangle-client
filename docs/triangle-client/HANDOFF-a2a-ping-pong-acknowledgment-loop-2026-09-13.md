@@ -1,11 +1,12 @@
 # HANDOFF — A2A Acknowledgment Ping-Pong Loop & Transaction Settlement Defect
 
 **Date:** 2026-09-13 (America/Los_Angeles)  
-**Status:** Open / Under Architecture Review  
+**Status:** Tier 1 locally deployed and live-verified (PASS_QUIET canary 2026-09-14); release integration pending
 **Owners:** Tech Lead, Agent Architecture, Client Core  
 **Impacted Repositories / Components:**
 - `triangle-client/packages/agent-worker/src/shared-codex-app-server.mjs`
 - `triangle-client/packages/agent-worker/src/helper-transaction-proxy.mjs`
+- `triangle-client/packages/macos-mailbox-helper` (claim-next receipt-only + event fetch for `replyRequired`)
 - Grok Bot `mesh-bob-wake-drain` routine contract
 - MESH wire protocol specification (`replyRequired` lifecycle)
 
@@ -131,48 +132,76 @@ A complete fix requires changes across three tiers:
 
 ### Tier 1: App Server Ingestion Filter (Skip Non-Actionable Turns)
 
-In `shared-codex-app-server.mjs`, when a mailbox delivery arrives:
-1. Inspect the inbound event:
-   - If `body.replyRequired === false` **AND** the inbound message is an acknowledgment or terminal status (e.g., regex `^(Acked\.|Acknowledged\.|OK|Done\.)?$`), **do NOT admit a turn into the desktop model**.
-2. Immediately call `transactionProxy.ack()` and mark the correlation completed.
+**Implemented and live-verified.** Helper `claimNext` and Node durable resolver
+treat every `replyRequired: false` delivery as receipt-only (no Acked/Acknowledged
+regex): claim → ack, `shouldStartModel: false`, no desktop turn, no MESH reply.
 
-### Tier 2: Decouple `reply()` from `ack()` in `settleMeshTransaction`
+**Production gap found during canary:** `/api/v1/mailbox` list items often include
+text but omit `body.replyRequired`. Treating absent as `true` re-admitted receipts
+and restarted the ping-pong. Fix: when the list omits the field, fetch the exact
+room event and read `body.replyRequired` before deciding model start
+(`MCPTransactionRewriter.replyRequiredFromRoomEvent`).
 
-In `shared-codex-app-server.mjs`:
-1. Allow turns to complete without emitting an outbound MESH message.
-2. Update the prompt to the model:
-   *"If no further reply is needed, output '[NO_REPLY]'."*
-3. In `settleMeshTransaction`:
-   ```javascript
-   const text = extractAssistantText(turn);
-   if (!text || text.trim() === "[NO_REPLY]") {
-     // Acknowledge receipt without publishing an outbound room event
-     await transactionProxy.ack();
-     return;
-   }
-   await transactionProxy.reply({ roomId, text, inReplyToEventId: item.inboundEventId ?? null });
-   await transactionProxy.ack();
-   ```
+### Tier 2: Preserve reply-before-ack for admitted work
+
+**Implemented fail-closed in checkout.** Receipt-only events never reach the
+model because Tier 1 claim-next settles them. For admitted `replyRequired: true`
+work, empty output or `[NO_REPLY]` is an error and the claim remains retryable;
+`transaction-ack` still requires a verified committed reply. The
+content-addressed worker-runtime bundle must be rebuilt and deployed after the
+`prepare-runtime` `set -u` / empty `runtime_records` bug is fixed.
 
 ### Tier 3: Hardened Bob Wake Drain Routine
 
-Update Bob's routine prompt contract:
+Bob's live canary path already produced exact `Acked. Echo: <nonce>` for the
+quiet-room proof. Operators should still keep the drain contract explicit:
+
 1. **Canary request:** Reply `Acked. Echo: <nonce>`, then `transaction-ack`.
 2. **Work request (`replyRequired: true`):** Execute work, reply `status: completed\n<result>`, then `transaction-ack`.
-3. **Receipt / Acknowledgment (`replyRequired: false` or text matches `"Acknowledged."` / `"Acked."`):**
+3. **Receipt (`replyRequired: false`, any text including completions):**
    - **DO NOT REPLY.**
    - Run `transaction-ack` immediately to clear the queue and exit.
 
+Remove "No nonce → brief Acked. OK" if it is still present in Grok Bot Sand.
+
 ### Tier 4: Formalize Terminal Events in MESH Wire Protocol
 
-Introduce an explicit event attribute in MESH message bodies:
-- `isTerminal: true` or `type: "message.acknowledgment"`.
-- When an event is typed as terminal acknowledgment, mailbox watchers and supervisors MUST ack delivery without dispatching a worker or wake webhook.
+**Deferred.** Existing `replyRequired` is sufficient for the hard stop.
+Future optional fields: `isTerminal: true` or `type: "message.acknowledgment"`.
 
 ---
 
-## 5. Immediate Mitigation State
+## 5. Verification (2026-09-14 America/Los_Angeles)
 
-- **Current State:** The desktop wake bridge for Codex is set to `"enabled": false` in `~/Library/Application Support/The Triangle/client/app-server-binding.json`.
-- **System Health:** Supervisor running cleanly, Bob mailbox queue is empty (`status: empty`, `open: null`).
-- **Next Step:** Review and approve Tiers 1–3 before re-enabling the App Server desktop wake bridge.
+### Unit / contract
+- Node: `helper-transaction-proxy` + `shared-codex-app-server` + `mailbox-client` — 78/78
+- Swift: `TRIANGLE_CONTRACT_FILTER=mailbox-transactions` — 32/32 (includes
+  receipt-only crash recovery and exact room-event fallback)
+
+### Isolated helper proof
+Bob posted `replyRequired: false` into the Codex room → Codex
+`transaction-claim-next` returned `receiptOnly: true`, `shouldStartModel: false`,
+`open: null`.
+
+### Quiet-room dual-agent canary (PASS_QUIET)
+Room `room_14ee0ee439464a81ade0085abf904340`:
+
+| Seq | Sender | Text / note |
+|:---:|:---|:---|
+| 210 | Codex (`codex-bob-test`) | Canary, `replyRequired: true`, nonce `CODEX-BOB-E2E-20260914T052510PT` |
+| 211 | Bob | `Acked. Echo: CODEX-BOB-E2E-20260914T052510PT`, `replyRequired: false`, threaded `inReplyToEventId` |
+| — | Codex | **No MESH posts for 60s after Bob** |
+
+Both mailboxes empty after Bob `transaction-ack`. App Server wake left **enabled**.
+
+### Operator gotchas found during deploy
+- `app-server-binding.json` `enabled: false` currently makes the whole client
+  supervisor fail with `invalidBootstrap` (treats disabled binding as invalid,
+  not skip). Do not use that flag as a soft kill switch until fixed.
+- An installed supervisor older than the 2026-09-14 renewal fix can loop on
+  `watch_credential_invalid` after the short-lived server grant expires. Current
+  source renews once per installation and resumes durable per-host cursors; the
+  manual move-aside + `watch-ensure` procedure is only a fallback for an older
+  installed helper/supervisor.
+- Prefer Developer ID helper for durable LaunchAgent custody; `--local-ad-hoc`
+  is fine for this Mini test path with file credentials enabled.

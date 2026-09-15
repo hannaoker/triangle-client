@@ -72,6 +72,9 @@ struct MailboxTransactionTests {
     @Test("claimNext lists preflights and claims pending delivery")
     func claimNext() async throws { try await MailboxTransactionContractCases.claimNextFromPendingDelivery() }
 
+    @Test("claimNext receipt-only acks without starting model")
+    func claimNextReceiptOnly() async throws { try await MailboxTransactionContractCases.claimNextReceiptOnlyAcksWithoutModel() }
+
     @Test
     func claimedInboundResume() async throws { try await MailboxTransactionContractCases.claimedInboundSurvivesResume() }
 

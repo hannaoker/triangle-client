@@ -80,6 +80,32 @@ const BINDING_ROOM_SCOPE = /^[A-Za-z0-9._:-]{1,120}$/;
 const GROK_AGENT_ID = /^[A-Za-z0-9._:-]{8,120}$/;
 const GROK_BOT_PROFILE = /^[A-Za-z0-9._-]{1,64}$/;
 
+export function monitorParentProcess({
+  expectedParentPid,
+  getParentPid = () => process.ppid,
+  onOrphan,
+  intervalMs = 500,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+} = {}) {
+  if (!Number.isSafeInteger(expectedParentPid) || expectedParentPid <= 1) {
+    throw new TypeError("expectedParentPid must identify the supervisor host");
+  }
+  if (typeof getParentPid !== "function" || typeof onOrphan !== "function") {
+    throw new TypeError("parent monitor callbacks are required");
+  }
+  let orphanReported = false;
+  const timer = setIntervalImpl(() => {
+    if (orphanReported) return;
+    const currentParentPid = getParentPid();
+    if (currentParentPid === expectedParentPid && currentParentPid > 1) return;
+    orphanReported = true;
+    onOrphan();
+  }, intervalMs);
+  timer?.unref?.();
+  return () => clearIntervalImpl(timer);
+}
+
 function invalidBootstrap() {
   return new TypeError("Invalid Triangle Client bootstrap");
 }
@@ -667,6 +693,8 @@ export async function runClientSupervisorCLI({
   createSupervisor = createClientSupervisor,
   notifyReady,
   awaitActivation = async () => {},
+  parentPid = process.ppid,
+  startParentMonitor = monitorParentProcess,
 } = {}) {
   if (!Array.isArray(argv) || argv.length !== 0) {
     stderr.write("triangle-client: invalid invocation\n");
@@ -711,7 +739,6 @@ export async function runClientSupervisorCLI({
       });
       const configDigest = createHash("sha256").update(Buffer.from(bootstrapText, "utf8")).digest("hex");
       const generation = randomUUID();
-      const parentPid = process.ppid;
       try {
         notifyReady?.({
           type: "triangle-client-supervisor-ready",
@@ -721,7 +748,15 @@ export async function runClientSupervisorCLI({
         });
       } catch {}
       await awaitActivation({ generation, parentPid, configDigest, signal: controller.signal });
-      await supervisor.watch({ signal: controller.signal });
+      const stopParentMonitor = startParentMonitor({
+        expectedParentPid: parentPid,
+        onOrphan: onSignal,
+      });
+      try {
+        await supervisor.watch({ signal: controller.signal });
+      } finally {
+        stopParentMonitor();
+      }
       return 0;
     } catch {
       if (controller.signal.aborted) return 0;

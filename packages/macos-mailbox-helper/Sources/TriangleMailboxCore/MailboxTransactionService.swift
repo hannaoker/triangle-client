@@ -134,6 +134,13 @@ public struct MailboxTransactionService: Sendable {
             if open.isStuck {
                 throw MailboxTransactionServiceError.transactionStuck
             }
+            if open.replyRequired == false {
+                return try await settleReceiptOnly(
+                    instanceID: instanceID,
+                    open: open,
+                    quarantined: try store.listQuarantined(instanceID: instanceID)
+                )
+            }
             let quarantined = try store.listQuarantined(instanceID: instanceID)
             let evaluation = try MailboxPolicyEvaluator.evaluate(
                 protocolOwnership: protocolOwnership,
@@ -166,8 +173,20 @@ public struct MailboxTransactionService: Sendable {
             deliveryID: next.deliveryID,
             roomID: next.roomID,
             inboundEventID: next.eventID,
-            inboundRoomSequence: next.roomSequence
+            inboundRoomSequence: next.roomSequence,
+            replyRequired: next.replyRequired
         )
+
+        // Receipt-only: claim → ack without a model turn or MESH reply (mirrors mailbox-client).
+        if next.replyRequired == false {
+            return try await settleReceiptOnly(
+                instanceID: instanceID,
+                open: claimed,
+                quarantined: quarantined,
+                remainingCandidates: candidates.filter { $0.deliveryID != next.deliveryID }
+            )
+        }
+
         let afterClaim = try MailboxPolicyEvaluator.evaluate(
             protocolOwnership: protocolOwnership,
             candidates: candidates,
@@ -175,6 +194,7 @@ public struct MailboxTransactionService: Sendable {
             quarantined: quarantined
         )
         var payload = secretFreeStatus(evaluation: afterClaim, quarantined: quarantined)
+        payload["replyRequired"] = true
         if let admitText = next.admitText {
             payload["admitText"] = admitText
         }
@@ -188,6 +208,7 @@ public struct MailboxTransactionService: Sendable {
         roomID: MailboxRoomID,
         inboundEventID: MailboxEventID? = nil,
         inboundRoomSequence: Int? = nil,
+        replyRequired: Bool = true,
         modelSuppliedClaimID: String? = nil
     ) async throws -> MailboxOpenTransaction {
         _ = modelSuppliedClaimID // intentionally ignored / replaced
@@ -217,6 +238,7 @@ public struct MailboxTransactionService: Sendable {
             roomID: roomID,
             inboundEventID: inboundEventID,
             inboundRoomSequence: inboundRoomSequence,
+            replyRequired: replyRequired,
             state: .prepared
         )
         try store.prepare(prepared)
@@ -224,6 +246,39 @@ public struct MailboxTransactionService: Sendable {
             throw MailboxTransactionServiceError.upstreamUnavailable
         }
         return try await finishClaim(prepared)
+    }
+
+    private func settleReceiptOnly(
+        instanceID: ClientInstanceID,
+        open: MailboxOpenTransaction,
+        quarantined: [MailboxQuarantinedTransaction],
+        remainingCandidates: [MailboxDeliveryCandidate] = []
+    ) async throws -> [String: Any] {
+        guard open.state == .claimed, open.replyRequired == false else {
+            throw MailboxTransactionServiceError.invalidState
+        }
+        if simulatedCrashAt == .beforeAck {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        do {
+            try await transport.acknowledge(deliveryID: open.deliveryID, claimID: open.claimID.value)
+        } catch {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        try store.clear(instanceID: instanceID, expectedDeliveryID: open.deliveryID)
+        if simulatedCrashAt == .afterAck {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        let evaluation = try MailboxPolicyEvaluator.evaluate(
+            protocolOwnership: open.protocolOwnership,
+            candidates: remainingCandidates,
+            open: nil,
+            quarantined: quarantined
+        )
+        var payload = secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+        payload["replyRequired"] = false
+        payload["receiptOnly"] = true
+        return payload
     }
 
     /// Fetches peer text ephemerally for the exact event bound to the durable open claim.
@@ -362,8 +417,8 @@ public struct MailboxTransactionService: Sendable {
         if let deliveryID, deliveryID != open.deliveryID {
             throw MailboxTransactionServiceError.unrelatedAcknowledgement
         }
-        // Ack requires a verified reply (created or verified idempotency conflict)
-        // with a recovered reply event ID. Unverified 409s never reach .replied.
+        // Receipt-only deliveries are claimed and acknowledged atomically in
+        // claimNext. A general ack requires a verified committed reply.
         guard open.state == .replied, open.replyEventID != nil else {
             throw MailboxTransactionServiceError.invalidState
         }

@@ -400,9 +400,18 @@ enum TriangleMailboxCLI {
                 deliveryID: deliveryID,
                 roomID: roomID,
                 eventID: eventID,
-                roomSequence: roomSequence
+                roomSequence: roomSequence,
+                replyRequired: Self.parseReplyRequired(item["replyRequired"] ?? item["reply_required"])
             )
         }
+    }
+
+    private static func parseReplyRequired(_ value: Any?) -> Bool {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return number.boolValue
+        }
+        return true
     }
 
     private static func writeJSON(_ object: [String: Any]) {

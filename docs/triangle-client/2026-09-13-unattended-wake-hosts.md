@@ -1,6 +1,6 @@
 # Unattended wake hosts (2026-09-13)
 
-Updated: 2026-09-13 (America/Los_Angeles).
+Updated: 2026-09-14 (America/Los_Angeles).
 
 This is the current architecture note for unattended MESH inbound. It supersedes
 chat-era assumptions that “Bob event-driven” already meant Grok Bot Bob, or that
@@ -74,6 +74,17 @@ Watch grant custody notes:
 - Current `watch-ensure` discards a stale local binding on
   `replacement_unauthorized` / `watch_credential_invalid` and recreates once
   without a replacement header. Rebuild/reinstall the helper for that path.
+- Source now makes runtime poll rejection recoverable: the supervisor stops the
+  affected bridge, performs one installation-scoped `watch-ensure`, and resumes
+  every bridge from its own durable cursor. Concurrent App Server / Bob failures
+  share one renewal generation instead of racing grant replacements. This is
+  covered by an expiry → renew → two-cursor resume → exactly-once wake test.
+  The Mini was rebuilt/reinstalled on 2026-09-14; the supervisor remained live
+  after recreating the expired grant and both host cursors advanced.
+- The first live recreate exposed a second defect: the stale-replacement retry
+  reused the first request's DPoP proof, so MESH rejected the replay as
+  `agent_auth_required`. `WatchGrantService` now mints fresh authorization
+  headers for the retry. The regression requires two distinct DPoP proofs.
 
 - Interactive Codex stays `mcp-interactive` and is woken via `appServerWake`.
 - Bob flips to `grok-bot` and is woken via `grokBotWake` (webhook). Bob owns
@@ -118,18 +129,79 @@ Example Mini IDs (docs only, no secrets):
 | MESH bob agent | `agent_582567705a9348c38f18c91d2bac9dd8` |
 | Grok agent | `12aedccc-8662-4a7f-84da-3d35c9e97842` |
 
-Operator canary rules that matter:
+## Operator canary rules that matter
 
 - Event type must be `message.created`. Type `message` is skip-acked with no
   reply.
 - Room appends need workload JWT + DPoP. Permanent `mesh_` bearer alone 401s
+
+### Rebuilt-runtime canary (PARTIAL, 2026-09-14)
+
+- Codex sent sequence 214, event
+  `event_d27a3ea68f064484a5ef34096010ce5c`, nonce
+  `CODEX-BOB-LIVE-20260914T1910PT`.
+- The rebuilt supervisor stayed running and both Grok Bot / App Server durable
+  watch cursors advanced to 234, proving MESH watch receipt and local fan-out.
+- Bob's pending mailbox became empty, but no threaded room reply appeared in
+  more than two minutes. Therefore the watch-renewal fix is live, while the
+  downstream Grok routine claim/reason/reply/ack chain is **not yet proven**.
+  Do not report end-to-end unattended Bob communication as achieved from this
+  canary.
   on `/api/v1/rooms/{id}/events`.
 - Hermes runner under the supervisor sandbox is **not** a working Bob reasoner
   today (`No module named 'encodings'`). Isolated `CODEX_HOME` needs Codex
   `auth.json` provisioned; copying from the shared Codex model home was a local
   operator workaround, not a release installer behavior.
 
-## Binding files (Grok Bot)
+## A2A receipt-only contract (ping-pong hard stop)
+
+Autonomous A2A rooms must not turn polite closures into fresh work. Wire field
+`body.replyRequired` is the control plane (not Acked/Acknowledged text matching).
+
+### Codex App Server (triangle-client)
+
+- Helper `transaction-claim-next` parses `replyRequired` from mailbox list items.
+- When the list omits `replyRequired`, fetch the room event body before deciding
+  (absent must not default to work-required).
+- When `replyRequired: false`: claim → ack immediately, `shouldStartModel: false`,
+  no open model turn, no MESH reply (`receiptOnly: true`).
+- Node durable resolver skips admit for receipts. Older helpers that leave an open
+  claimed receipt fail closed and require upgrade; the general ack command cannot
+  prove that such a claim is receipt-only.
+- Admitted work remains reply-before-ack: empty assistant text or `[NO_REPLY]`
+  fails settlement and leaves the claim retryable. Redeploy the worker-runtime
+  bundle when `prepare-runtime` is fixed.
+
+### Live proof (2026-09-14)
+
+Quiet-room canary on `room_14ee0ee439464a81ade0085abf904340`: Codex seq 210
+(`replyRequired: true`) → Bob seq 211 exact nonce echo (`replyRequired: false`) →
+**zero** Codex MESH posts for 60s. Details:
+[HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md](HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md).
+
+### Bob Grok Bot routine `mesh-bob-wake-drain` (external — verify/apply in Grok Bot Sand)
+
+| Inbound | Action |
+| --- | --- |
+| Canary nonce present | Reply `Acked. Echo: <nonce>`, then `transaction-ack` |
+| `replyRequired: true` work | Do the work, reply `status: completed\n<result>`, then `transaction-ack` |
+| `replyRequired: false` (any text, including completions and "Acknowledged.") | **Do not reply.** Run `transaction-ack` only and exit |
+
+Remove any fallback rule like "No nonce → brief Acked. OK". That rule caused the
+Seq 169–192 ping-pong.
+
+### Re-enable checklist
+
+1. Rebuild/reinstall macOS helper so claim-next emits receipt-only behavior.
+2. Update Bob’s `mesh-bob-wake-drain` prompt per the table above.
+3. Set `app-server-binding.json` `enabled: true`.
+4. Canary: `replyRequired: true` work request → one substantive Bob result →
+   Codex must **not** post a MESH ack that re-wakes Bob → room goes quiet.
+
+See
+[HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md](HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md).
+
+## Next work (in order)
 
 Under `~/Library/Application Support/The Triangle/client/` (operator-local;
 never commit secrets):
@@ -147,8 +219,8 @@ Install helper: `scripts/macos/install-grok-bot-wake-binding.sh`.
 
 1. **Native Grok Bot wake for Bob (this track).** Operator flip on Mini:
    install binding → set `deliveryMode: grok-bot` → stop/start LaunchAgent →
-   `watch-ensure` → canary. Bob routine `mesh-bob-wake-drain` is already saved;
-   URL/key binding is operator-side.
+   `watch-ensure` → canary. Verify/update Bob routine `mesh-bob-wake-drain`
+   against the receipt-only table above; URL/key binding is operator-side.
 2. **Codex App Server ops.** Unattended loop is live; prefer Developer ID helper
    for long-term Keychain custody. Do not flip Codex to `event-driven`.
 3. Optional: installer-provision Codex/Hermes auth into instance `*_HOME`;

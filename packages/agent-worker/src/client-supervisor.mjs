@@ -73,6 +73,14 @@ const GROK_BOT_BINDING_KEYS = [
   "wakeMode",
 ];
 
+function isRenewableWatchCredentialError(error) {
+  const rejectedCode = typeof error?.rejectedCode === "string"
+    ? error.rejectedCode
+    : error?.diagnosis?.rejectedCode;
+  return rejectedCode === "watch_credential_invalid"
+    || rejectedCode === "replacement_unauthorized";
+}
+
 function positiveInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError(`${name} must be a positive integer`);
@@ -382,6 +390,33 @@ export function createClientSupervisor({
   // One MESH held poll per installation: App Server + Grok Bot (+ eventWake)
   // that share an installationId must coalesce onto a single watch-poll.
   const sharedWatchTransport = createInstallationWatchTransportFactory(createWatchTransport);
+  // A grant is installation-scoped too. Track its generation so listeners that
+  // fail together on one expired credential join (or observe) one renewal.
+  const watchGrantRenewals = new Map();
+
+  function watchGrantState(installationId) {
+    let state = watchGrantRenewals.get(installationId);
+    if (!state) {
+      state = { generation: 0, inFlight: null };
+      watchGrantRenewals.set(installationId, state);
+    }
+    return state;
+  }
+
+  async function renewWatchGrant({ helperPath, installationId, actorProfile, signal }, observedGeneration) {
+    const state = watchGrantState(installationId);
+    if (state.generation !== observedGeneration) return { renewed: false, reusedRenewal: true };
+    if (!state.inFlight) {
+      state.inFlight = Promise.resolve().then(async () => {
+        await ensureWatchGrant({ helperPath, installationId, actorProfile, signal });
+        state.generation += 1;
+        return { renewed: true };
+      }).finally(() => {
+        state.inFlight = null;
+      });
+    }
+    return state.inFlight;
+  }
 
   const entries = instances.map((instance) => {
     if (!instance || !INSTANCE_ID.test(instance.instanceId)) {
@@ -652,10 +687,14 @@ export function createClientSupervisor({
       async function runDurableWakeLoop({
         start,
         stop = null,
+        renewal = null,
         logEvent,
         logMessage,
       }) {
         while (!signal?.aborted) {
+          const observedGeneration = renewal
+            ? watchGrantState(renewal.installationId).generation
+            : null;
           try {
             return await start();
           } catch (error) {
@@ -676,6 +715,23 @@ export function createClientSupervisor({
                 /* ignore stop errors during restart */
               }
             }
+            if (renewal && isRenewableWatchCredentialError(error)) {
+              try {
+                await renewWatchGrant({ ...renewal, signal }, observedGeneration);
+              } catch (renewalError) {
+                if (signal?.aborted || renewalError?.name === "AbortError") return null;
+                logger.error?.("triangle_client_watch_grant_renewal_failed", {
+                  error: "Watch grant renewal failed",
+                  code: renewalError?.code,
+                  rejectedCode: typeof renewalError?.rejectedCode === "string"
+                    ? renewalError.rejectedCode
+                    : undefined,
+                  failureCode: typeof renewalError?.failureCode === "string"
+                    ? renewalError.failureCode
+                    : undefined,
+                });
+              }
+            }
             await sleepBeforeWakeRetry();
           }
         }
@@ -686,6 +742,11 @@ export function createClientSupervisor({
         ? runDurableWakeLoop({
           start: () => wakeRuntime.start({ signal }),
           stop: typeof wakeRuntime.stop === "function" ? () => wakeRuntime.stop() : null,
+          renewal: wakeConfig.ensureBeforeWatch ? {
+            helperPath: wakeConfig.helperPath,
+            installationId: wakeConfig.installationId,
+            actorProfile: wakeConfig.actorProfile,
+          } : null,
           logEvent: "triangle_client_event_wake_failed",
           logMessage: "Event-driven wake listener failed",
         })
@@ -695,6 +756,11 @@ export function createClientSupervisor({
         ? runDurableWakeLoop({
           start: () => appServerBridge.start({ signal }),
           stop: () => appServerBridge.stop(),
+          renewal: appServerConfig.ensureBeforeWatch && wakeConfig?.actorProfile ? {
+            helperPath: appServerConfig.helperPath,
+            installationId: appServerConfig.installationId,
+            actorProfile: wakeConfig.actorProfile,
+          } : null,
           logEvent: "triangle_client_app_server_wake_failed",
           logMessage: "App Server bound wake listener failed",
         })
@@ -704,6 +770,11 @@ export function createClientSupervisor({
         ? runDurableWakeLoop({
           start: () => grokBotBridge.start({ signal }),
           stop: () => grokBotBridge.stop(),
+          renewal: grokBotConfig.ensureBeforeWatch ? {
+            helperPath: grokBotConfig.helperPath,
+            installationId: grokBotConfig.installationId,
+            actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
+          } : null,
           logEvent: "triangle_client_grok_bot_wake_failed",
           logMessage: "Grok Bot wake listener failed",
         })

@@ -279,7 +279,8 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
         else {
             throw MailboxTransactionServiceError.invalidUpstreamResponse
         }
-        return try items.map { item in
+        var candidates: [MailboxDeliveryCandidate] = []
+        for item in items {
             guard let deliveryID = Self.intValue(item["deliveryId"] ?? item["delivery_id"]),
                   let roomRaw = item["roomId"] as? String ?? item["room_id"] as? String,
                   let roomID = MailboxRoomID(rawValue: roomRaw),
@@ -290,14 +291,32 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
                 throw MailboxTransactionServiceError.invalidUpstreamResponse
             }
             let admitText = Self.admitText(from: item)
-            return try MailboxDeliveryCandidate(
-                deliveryID: deliveryID,
-                roomID: roomID,
-                eventID: eventID,
-                roomSequence: roomSequence,
-                admitText: admitText
+            // Mailbox list often returns text without body.replyRequired. Absent must
+            // not default to true or receipt-only deliveries restart model turns.
+            var replyRequired = Self.replyRequired(from: item)
+            if replyRequired == nil {
+                replyRequired = try await Self.replyRequiredFromRoomEvent(
+                    roomID: roomID,
+                    eventID: eventID,
+                    roomSequence: roomSequence,
+                    origin: origin,
+                    transport: transport,
+                    actorID: actorID,
+                    authorizationHeaders: authorizationHeaders
+                )
+            }
+            candidates.append(
+                try MailboxDeliveryCandidate(
+                    deliveryID: deliveryID,
+                    roomID: roomID,
+                    eventID: eventID,
+                    roomSequence: roomSequence,
+                    admitText: admitText,
+                    replyRequired: replyRequired ?? true
+                )
             )
         }
+        return candidates
     }
 
     public func claim(deliveryID: Int, claimID: String) async throws -> MailboxClaimTransportResult {
@@ -454,6 +473,68 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
             {
                 return text
             }
+        }
+        return nil
+    }
+
+    /// Defaults to nil when absent so callers can fetch the room event before assuming work.
+    private static func replyRequired(from item: [String: Any]) -> Bool? {
+        if let value = boolValue(item["replyRequired"] ?? item["reply_required"]) {
+            return value
+        }
+        if let body = item["body"] as? [String: Any],
+           let value = boolValue(body["replyRequired"] ?? body["reply_required"])
+        {
+            return value
+        }
+        if let event = item["event"] as? [String: Any] {
+            if let value = boolValue(event["replyRequired"] ?? event["reply_required"]) {
+                return value
+            }
+            if let body = event["body"] as? [String: Any],
+               let value = boolValue(body["replyRequired"] ?? body["reply_required"])
+            {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func replyRequiredFromRoomEvent(
+        roomID: MailboxRoomID,
+        eventID: MailboxEventID,
+        roomSequence: Int,
+        origin: MeshOrigin,
+        transport: any MeshTransport,
+        actorID: AgentID,
+        authorizationHeaders: @Sendable (String, URL) async throws -> [String: String]
+    ) async throws -> Bool? {
+        let after = max(0, roomSequence - 1)
+        let url = URL(string: origin.value + "/api/v1/rooms/\(roomID.value)/events?after_sequence=\(after)&limit=1")!
+        var headers = ["Accept": "application/json"]
+        headers.merge(try await authorizationHeaders("GET", url)) { _, new in new }
+        let response = try await transport.send(MeshHTTPRequest(method: "GET", url: url, headers: headers, body: Data()))
+        guard response.statusCode == 200,
+              let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              (object["roomId"] as? String ?? object["room_id"] as? String) == roomID.value,
+              let items = object["items"] as? [[String: Any]],
+              items.count == 1,
+              let item = items.first,
+              item["type"] as? String == "message.created",
+              let senderAgentID = item["senderAgentId"] as? String ?? item["sender_agent_id"] as? String,
+              AgentID(rawValue: senderAgentID) != nil,
+              senderAgentID != actorID.value,
+              (item["id"] as? String ?? item["eventId"] as? String ?? item["event_id"] as? String) == eventID.value,
+              intValue(item["sequence"] ?? item["roomSequence"] ?? item["room_sequence"]) == roomSequence,
+              let body = item["body"] as? [String: Any]
+        else { throw MailboxTransactionServiceError.invalidUpstreamResponse }
+        return boolValue(body["replyRequired"] ?? body["reply_required"])
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return number.boolValue
         }
         return nil
     }

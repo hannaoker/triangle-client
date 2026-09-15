@@ -1,24 +1,52 @@
 # HANDOFF — Bob general work execution over MESH
 
 **Date:** 2026-09-13 (America/Los_Angeles)  
-**Status:** Verified / Closed  
+**Status:** Bob wake transport repaired; live Grok capacity currently blocks model turns
 **Owner next:** Tech Lead + Bob  
-**Repository:** `triangle-client` baseline `51a4df0`; nonce-read fix locally deployed from an uncommitted working tree  
+**Repository:** `triangle-client` HEAD `e09f11d`; reliability fixes remain in the current uncommitted working tree
 **Room:** `room_14ee0ee439464a81ade0085abf904340`
+
+## 2026-09-14 Bob-side root cause and repair
+
+The live Grok Bot routine was inspected rather than inferred from the wake
+cursor. Two independent Bob-side blockers were confirmed:
+
+1. An older `self-serve-drain` transaction for room sequence 212 was left in
+   `replied` state. Its reply existed at sequence 213, but the final
+   `transaction-ack` had never run. The completed transaction was acknowledged
+   through the trusted helper, restoring `open: null`.
+2. Stopping/restarting Triangle Client could leave its Node coordinator
+   reparented to PID 1. Multiple coordinators duplicated Grok webhook wakes and
+   could refill Sand's automation queue. `client-supervisor-cli.mjs` now watches
+   the exact Swift host PID and aborts if that parent disappears or changes.
+   The old orphan was terminated, the runtime was rebuilt, and a live stop test
+   left zero coordinator processes. The restarted service has one coordinator.
+
+The configured webhook independently returned HTTP 200 with a Sand run UUID,
+so URL, bearer binding, and webhook admission are healthy. The active
+`MESH Bob Wake Drain` routine contains the required status → one claim-next →
+read-inbound → reply → ack algorithm and the established `CODEX-BOB-E2E-`
+nonce rule.
+
+The remaining external blocker is Grok model capacity. Running the routine's
+own **Test** action displayed: `Your included Grok Bot usage limit has been
+reached. It resets in 6 days.` Wakes can therefore be accepted while no Bob
+model turn starts. Canaries through room sequence 217 received no Bob reply.
+Do not call this end-to-end complete until capacity is restored and a fresh
+contract-valid nonce completes reply plus acknowledgment unattended.
 
 ## Summary of Resolution
 
-The Codex-to-Bob MESH transport now reliably claims an inbound delivery, retrieves
-its exact text, preserves threading, and produces an exact nonce echo for canaries.
-It is not yet a complete general-purpose work channel.
+The live 2026-09-13 tests demonstrated unattended Codex-to-Bob general work through
+MESH: exact inbound read, deterministic tool execution, substantive threaded reply,
+reply-before-ack, and wake of the bound Codex task. The later 2026-09-14 PASS_QUIET
+canary demonstrated receipt-only settlement without another Codex MESH post.
 
-Bob's active `MESH Bob Wake Drain` routine still permits brief `Acked.` whenever the
-verified inbound text contains no canary nonce. For an ordinary request such as
-"inspect the current Grok Bot quota and report it," the routine may acknowledge and
-ack the delivery without performing the requested work or returning its result.
-
-This is a reasoning/execution contract gap after successful transport delivery. It
-is distinct from the fixed bare-ack-on-canary bug.
+Release integration remains pending: the receipt-only helper and fail-closed App
+Server changes are in the current working tree, the worker-runtime bundle still
+needs rebuilding/deployment, and Bob's external `mesh-bob-wake-drain` routine must
+be verified against the final receipt-only decision table before acceptance is
+repeated on final deployed artifacts.
 
 ## Operator mistake that exposed the gap
 
@@ -213,7 +241,9 @@ proof when quota UI/tool access is available.
   - Added `--after-sequence` flag and removed automatic expansion to 100 in `skills/triangle-mesh-a2a/scripts/mesh_client.py`.
 - **Acknowledgment Ping-Pong Mitigation:**
   - When non-work messages (`replyRequired: false`, e.g., "Acknowledged." or "Acked.") are posted into the two-member room, both Codex desktop App Server turn settlement and Bob's fallback routine attempt to acknowledge them, causing rapid sequential turns (Seqs 170-173).
-  - Terminal acknowledgment events (`replyRequired: false` without a task or question) must only be acknowledged via `transaction-ack` without calling `transaction-reply` or admitting an outbound assistant turn.
+  - **Tier 1 locally deployed and live-verified 2026-09-14:** helper claim-next receipt-only (with room-event fetch when list omits `replyRequired`) + App Server skip-admit. Quiet-room canary PASS (Codex seq 210 → Bob seq 211 nonce echo → zero Codex MESH posts). Final fail-closed App Server and helper changes still require bundle rebuild/deployment and a repeat acceptance run. See [HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md](HANDOFF-a2a-ping-pong-acknowledgment-loop-2026-09-13.md).
+  - **Rebuilt runtime check 2026-09-14:** expired watch-grant recovery and fresh-DPoP recreate were installed; the supervisor remained running and both host cursors advanced for Codex sequence 214. Bob produced no room reply within the bounded observation window even though its pending mailbox was empty. The remaining live failure is downstream of watch delivery, in or after the Grok routine's claim/processing path.
+  - Keep Bob `mesh-bob-wake-drain` ack-only on `replyRequired: false` (never `transaction-reply`).
 
 ## Related completed work
 
@@ -230,4 +260,3 @@ proof when quota UI/tool access is available.
   alone as proof that the requested work was performed.
 - This handoff does not relax separate soak, Darwin evidence, signing, or Phase 2
   promotion gates.
-

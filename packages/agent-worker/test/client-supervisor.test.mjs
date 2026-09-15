@@ -1037,3 +1037,122 @@ test("supervisor shares one watch transport poll across App Server and Grok Bot 
   assert.equal(appWakes[0].instanceId, id(3));
   assert.equal(grokWakes[0].instanceId, id(4));
 });
+
+test("supervisor renews one expired shared watch grant and resumes both wake cursors exactly once", async () => {
+  const { createWakeClient } = await import("../src/wake-client.mjs");
+  const appAgent = "agent_codex_desktop_001";
+  const grokAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
+  const ensureCalls = [];
+  const observedCursors = [];
+  const appWakes = [];
+  const grokWakes = [];
+  let polls = 0;
+  let credentialValid = false;
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    grokBotWake: grokBotWakeFixture(4),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWatchTransport: () => ({
+      async poll({ cursor }) {
+        polls += 1;
+        observedCursors.push(cursor);
+        if (!credentialValid) {
+          const error = new Error("watch helper poll failed (watch_credential_invalid)");
+          error.code = "helper_unavailable";
+          error.rejectedCode = "watch_credential_invalid";
+          throw error;
+        }
+        return {
+          cursor: 42,
+          events: [
+            { agent_id: appAgent, high_watermark: 42 },
+            { agent_id: grokAgent, high_watermark: 42 },
+          ],
+        };
+      },
+    }),
+    ensureWatchGrant: async (options) => {
+      ensureCalls.push(options.actorProfile);
+      if (ensureCalls.length > 1) credentialValid = true;
+      return { ensured: true };
+    },
+    createAuthResolver: () => ({
+      async resolveAuth() {
+        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
+      },
+    }),
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: ({ filePath }) => {
+      let cursor = filePath.includes("app-server") ? 40 : 41;
+      return {
+        async read() { return cursor; },
+        async write(next) { cursor = next; return cursor; },
+      };
+    },
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge({ binding, watchTransport, cursorStore }) {
+      let client = null;
+      return {
+        async start({ signal }) {
+          client = createWakeClient({
+            profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
+            transport: watchTransport,
+            cursorStore,
+            coalesceMs: 1,
+            onWake: async (wake) => { appWakes.push(wake); return { status: "empty" }; },
+          });
+          return client.watch({ signal, maxCycles: 1 });
+        },
+        async stop() { await client?.stop(); client = null; },
+      };
+    },
+    createGrokBotBridge({ binding, watchTransport, cursorStore }) {
+      let client = null;
+      return {
+        async start({ signal }) {
+          client = createWakeClient({
+            profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
+            transport: watchTransport,
+            cursorStore,
+            coalesceMs: 1,
+            onWake: async (wake) => { grokWakes.push(wake); return { status: "accepted" }; },
+          });
+          return client.watch({ signal, maxCycles: 1 });
+        },
+        async stop() { await client?.stop(); client = null; },
+      };
+    },
+    logger: { error() {} },
+  });
+
+  const result = await supervisor.watch({
+    signal: AbortSignal.timeout(2_000),
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(ensureCalls, ["bob", "bob"]);
+  assert.ok(observedCursors.includes(40));
+  assert.ok(observedCursors.includes(41));
+  assert.equal(observedCursors.every((cursor) => cursor === 40 || cursor === 41), true);
+  assert.equal(appWakes.length, 1);
+  assert.equal(grokWakes.length, 1);
+  assert.equal(appWakes[0].highWatermark, 42);
+  assert.equal(grokWakes[0].highWatermark, 42);
+  assert.equal(result.appServerWake?.cursor, 42);
+  assert.equal(result.grokBotWake?.cursor, 42);
+});

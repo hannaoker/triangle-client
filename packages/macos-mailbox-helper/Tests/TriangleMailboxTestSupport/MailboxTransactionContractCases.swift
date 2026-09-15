@@ -32,8 +32,11 @@ public enum MailboxTransactionContractCases {
         .init(name: "crash after ack", run: crashAfterAck),
         .init(name: "policy evaluator filters list and preflight", run: policyEvaluatorShared),
         .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
+        .init(name: "claimNext receipt-only acks without starting model", run: claimNextReceiptOnlyAcksWithoutModel),
+        .init(name: "claimNext resumes receipt-only ack after crash", run: claimNextReceiptOnlyResumesAfterCrash),
         .init(name: "claimed inbound survives resume and is read exactly", run: claimedInboundSurvivesResume),
         .init(name: "authenticated inbound read validates exact event contract", run: authenticatedInboundReadContract),
+        .init(name: "mailbox list resolves omitted replyRequired from exact room event", run: mailboxListReplyRequiredFallback),
         .init(name: "authenticated reply body includes threading fields", run: authenticatedReplyBodyThreadingFields),
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
@@ -77,7 +80,7 @@ public enum MailboxTransactionContractCases {
             try expect(object?["protocol"] as? String == "coordinator-delivery-v1", "protocol missing")
             try expect(Set(Array((object ?? [:]).keys)) == Set([
                 "version", "instanceId", "protocol", "deliveryId", "roomId", "claimId",
-                "inboundEventId", "inboundRoomSequence",
+                "inboundEventId", "inboundRoomSequence", "replyRequired",
                 "replyIdempotencyKey", "state", "replyEventId", "replyResolution",
                 "failureCount", "lastFailureReason", "createdAt",
             ]), "open.json schema keys drifted")
@@ -304,6 +307,7 @@ public enum MailboxTransactionContractCases {
             )
             throw ContractFailure("ack was allowed after lookup failure")
         } catch MailboxTransactionServiceError.invalidState {}
+        try expect(try store.readOpen(instanceID: instanceID)?.state == .claimed, "ack cleared lookup-failed open txn")
         try expect(transport.acks.isEmpty, "server ack issued after lookup failure")
     }
 
@@ -765,6 +769,78 @@ public enum MailboxTransactionContractCases {
         try expect(transport.listCalls == 1, "resume listed mailbox again")
         try expect(transport.claims.count == 1, "resume reclaimed delivery")
         try expect(resumed["shouldStartModel"] as? Bool == true, "resume shouldStartModel false")
+        try expect(payload["replyRequired"] as? Bool == true, "work claim missing replyRequired")
+    }
+
+    public static func claimNextReceiptOnlyAcksWithoutModel() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 61,
+                roomID: room,
+                eventID: event,
+                roomSequence: 4,
+                admitText: "status: completed\nquota ok",
+                replyRequired: false
+            ),
+        ]
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let instanceID = ClientInstanceID.derive(profile: profile)
+
+        let payload = try await service.claimNext(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport.listCalls == 1, "receipt claimNext did not list mailbox")
+        try expect(transport.claims.map(\.0) == [61], "receipt claimNext did not claim")
+        try expect(transport.acks == [61], "receipt claimNext did not ack")
+        try expect(payload["shouldStartModel"] as? Bool == false, "receipt shouldStartModel true")
+        try expect(payload["replyRequired"] as? Bool == false, "receipt replyRequired missing")
+        try expect(payload["receiptOnly"] as? Bool == true, "receiptOnly flag missing")
+        try expect(payload["open"] is NSNull, "receipt left open transaction")
+        try expect(try store.readOpen(instanceID: instanceID) == nil, "receipt left local open.json")
+        try expect(payload["admitText"] == nil, "receipt returned admitText")
+    }
+
+    public static func claimNextReceiptOnlyResumesAfterCrash() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 62,
+                roomID: room,
+                eventID: event,
+                roomSequence: 5,
+                replyRequired: false
+            ),
+        ]
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        let crashing = MailboxTransactionService(
+            store: store,
+            transport: transport,
+            simulatedCrashAt: .beforeAck
+        )
+        do {
+            _ = try await crashing.claimNext(instanceID: instanceID, protocolOwnership: .selfServeDrain)
+            throw ContractFailure("receipt claim did not stop before ack")
+        } catch MailboxTransactionServiceError.upstreamUnavailable {}
+
+        let open = try store.readOpen(instanceID: instanceID)
+        try expect(open?.state == .claimed, "receipt claim was not durable")
+        try expect(open?.replyRequired == false, "receipt-only intent was not durable")
+        try expect(transport.acks.isEmpty, "crash-before-ack issued an ack")
+
+        let resumedService = MailboxTransactionService(store: store, transport: transport)
+        let payload = try await resumedService.claimNext(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(payload["receiptOnly"] as? Bool == true, "resumed receipt lost receiptOnly")
+        try expect(payload["shouldStartModel"] as? Bool == false, "resumed receipt started model")
+        try expect(transport.acks == [62], "resumed receipt was not acked exactly once")
+        try expect(try store.readOpen(instanceID: instanceID) == nil, "resumed receipt left open transaction")
+        try expect(transport.listCalls == 1, "resume relisted instead of settling durable receipt")
     }
 
     public static func claimedInboundSurvivesResume() async throws {
@@ -866,6 +942,34 @@ public enum MailboxTransactionContractCases {
             _ = try await transport.readInboundEvent(roomID: room.value, eventID: event.value, roomSequence: 17)
             throw ContractFailure("self-sent inbound event was accepted")
         } catch MailboxTransactionServiceError.invalidUpstreamResponse {}
+    }
+
+    public static func mailboxListReplyRequiredFallback() async throws {
+        let origin = try MeshOrigin("https://thetriangle.dev")
+        let mesh = RecordingAuthenticatedMeshTransport()
+        let actor = AgentID(rawValue: "agent_" + String(repeating: "d", count: 32))!
+        let sender = "agent_" + String(repeating: "e", count: 32)
+        mesh.responseHandler = { request in
+            if request.url.path == "/api/v1/mailbox" {
+                let body = Data(#"{"items":[{"deliveryId":73,"roomId":"\#(room.value)","eventId":"\#(event.value)","roomSequence":17,"text":"Acked."}]}"#.utf8)
+                return MeshHTTPResponse(statusCode: 200, headers: [:], body: body, finalURL: request.url)
+            }
+            let body = Data(#"{"roomId":"\#(room.value)","items":[{"id":"\#(event.value)","sequence":17,"senderAgentId":"\#(sender)","type":"message.created","body":{"text":"Acked.","replyRequired":false}}]}"#.utf8)
+            return MeshHTTPResponse(statusCode: 200, headers: [:], body: body, finalURL: request.url)
+        }
+        let transport = AuthenticatedMailboxTransactionTransport(
+            origin: origin,
+            transport: mesh,
+            actorID: actor
+        ) { _, _ in ["Authorization": "Bearer test"] }
+
+        let candidates = try await transport.listPendingCandidates()
+        try expect(candidates.count == 1, "mailbox candidate missing")
+        try expect(candidates[0].replyRequired == false, "room event replyRequired was not applied")
+        try expect(mesh.requests.count == 2, "missing exact room-event fallback request")
+        let components = URLComponents(url: mesh.requests[1].url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        try expect(query == ["after_sequence": "16", "limit": "1"], "fallback query did not target exact sequence")
     }
 
     public static func mcpRewriterIgnoresModelIDs() async throws {

@@ -622,6 +622,172 @@ test("admit settles MESH reply then ack after completed turn", async () => {
   await session.shutdown();
 });
 
+test("admit refuses to ack claimed work when assistant outputs [NO_REPLY]", async () => {
+  const binding = validateBinding(sampleBinding());
+  const roomId = "room_" + "e".repeat(32);
+  const replies = [];
+  const acks = [];
+  const transport = matchingTransport(binding, {
+    async onCall(method, _params, { emit, setStatus }) {
+      if (method !== "turn/start") return undefined;
+      const turnId = "turn_noreply_0001";
+      setStatus({ type: "busy", turnId });
+      emit("turn/started", { threadId: binding.threadId, turn: { id: turnId, status: "in_progress" } });
+      queueMicrotask(() => {
+        setStatus({ type: "idle" });
+        emit("turn/completed", {
+          threadId: binding.threadId,
+          turn: {
+            id: turnId,
+            status: "completed",
+            assistantMessage: { content: [{ type: "text", text: "[NO_REPLY]" }] },
+          },
+        });
+      });
+      return { turn: { id: turnId, status: "in_progress" } };
+    },
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    transactionProxy: {
+      async reply(args) {
+        replies.push(args);
+        return { ok: true };
+      },
+      async ack() {
+        acks.push(true);
+        return { ok: true };
+      },
+    },
+  });
+  await session.connect();
+  await assert.rejects(
+    session.admit({
+      deliveryId: "delivery_noreply",
+      text: "Bob inbound",
+      roomId,
+      inboundEventId: "event_" + "f".repeat(32),
+    }),
+    (error) => error?.code === "assistant_text_missing",
+  );
+  assert.equal(replies.length, 0);
+  assert.equal(acks.length, 0);
+  await session.shutdown();
+});
+
+test("admit refuses to ack claimed work when assistant text is empty", async () => {
+  const binding = validateBinding(sampleBinding());
+  const replies = [];
+  const acks = [];
+  const transport = matchingTransport(binding, {
+    async onCall(method, _params, { emit, setStatus }) {
+      if (method !== "turn/start") return undefined;
+      const turnId = "turn_empty_0001";
+      setStatus({ type: "busy", turnId });
+      emit("turn/started", { threadId: binding.threadId, turn: { id: turnId, status: "in_progress" } });
+      queueMicrotask(() => {
+        setStatus({ type: "idle" });
+        emit("turn/completed", {
+          threadId: binding.threadId,
+          turn: {
+            id: turnId,
+            status: "completed",
+            assistantMessage: { content: [] },
+          },
+        });
+      });
+      return { turn: { id: turnId, status: "in_progress" } };
+    },
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    transactionProxy: {
+      async reply(args) {
+        replies.push(args);
+        return { ok: true };
+      },
+      async ack() {
+        acks.push(true);
+        return { ok: true };
+      },
+    },
+  });
+  await session.connect();
+  await assert.rejects(
+    session.admit({
+      deliveryId: "delivery_empty",
+      text: "Bob inbound",
+      roomId: "room_" + "1".repeat(32),
+    }),
+    (error) => error?.code === "assistant_text_missing",
+  );
+  assert.equal(replies.length, 0);
+  assert.equal(acks.length, 0);
+  await session.shutdown();
+});
+
+test("receipt-only resolveDelivery causes zero model turns and no MESH reply", async () => {
+  const binding = validateBinding(sampleBinding());
+  const transport = matchingTransport(binding);
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    transactionProxy: {
+      async reply() {
+        throw new Error("reply must not run for receipt-only");
+      },
+      async ack() {
+        throw new Error("ack must not run when helper already cleared receipt");
+      },
+    },
+  });
+  const resolveDelivery = createProductionAppServerDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    async run(_file, args) {
+      assert.equal(args[0], "transaction-claim-next");
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: false,
+          transactionStuck: false,
+          replyRequired: false,
+          receiptOnly: true,
+          open: null,
+          status: "empty",
+        }),
+        stderr: "",
+      };
+    },
+  });
+  const watchTransport = createFakeWatchTransport({
+    polls: [
+      { cursor: 1, events: [] },
+      {
+        cursor: 6,
+        events: [{ agent_id: agentId, high_watermark: 6 }],
+      },
+    ],
+  });
+  const bridge = createAppServerWakeBridge({
+    binding,
+    session,
+    watchTransport,
+    coalesceMs: 5,
+    async resolveDelivery(input) {
+      if (input.reason === "startup_reconcile") return null;
+      return resolveDelivery(input);
+    },
+  });
+
+  await bridge.start({ maxCycles: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(transport.calls.filter((call) => call.method === "turn/start").length, 0);
+  await bridge.stop();
+});
+
 test("admit marks correlation failed when MESH reply cannot settle", async () => {
   const binding = validateBinding(sampleBinding());
   const correlationStore = createMemoryCorrelationStore();

@@ -152,6 +152,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
     public let roomID: MailboxRoomID
     public let inboundEventID: MailboxEventID?
     public let inboundRoomSequence: Int?
+    public let replyRequired: Bool
     public let claimID: MailboxClaimID
     public let replyIdempotencyKey: MailboxReplyIdempotencyKey
     public let state: MailboxTransactionState
@@ -171,6 +172,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         case roomID = "roomId"
         case inboundEventID = "inboundEventId"
         case inboundRoomSequence
+        case replyRequired
         case claimID = "claimId"
         case replyIdempotencyKey
         case state
@@ -195,6 +197,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         roomID: MailboxRoomID,
         inboundEventID: MailboxEventID? = nil,
         inboundRoomSequence: Int? = nil,
+        replyRequired: Bool = true,
         state: MailboxTransactionState = .prepared,
         replyEventID: MailboxEventID? = nil,
         replyResolution: MailboxReplyResolution = .none,
@@ -229,6 +232,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         self.roomID = roomID
         self.inboundEventID = inboundEventID
         self.inboundRoomSequence = inboundRoomSequence
+        self.replyRequired = replyRequired
         self.claimID = claimID
         self.replyIdempotencyKey = replyKey
         self.state = state
@@ -243,7 +247,11 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         let all = try decoder.container(keyedBy: AnyKey.self)
         let present = Set(all.allKeys.map(\.stringValue))
         let allowed = Set(CodingKeys.allCases.map(\.rawValue))
-        let legacyOptional = Set([CodingKeys.inboundEventID.rawValue, CodingKeys.inboundRoomSequence.rawValue])
+        let legacyOptional = Set([
+            CodingKeys.inboundEventID.rawValue,
+            CodingKeys.inboundRoomSequence.rawValue,
+            CodingKeys.replyRequired.rawValue,
+        ])
         guard present.isSubset(of: allowed), allowed.subtracting(legacyOptional).isSubset(of: present) else {
             throw MailboxTransactionStoreError.invalidRecord
         }
@@ -258,6 +266,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         roomID = try values.decode(MailboxRoomID.self, forKey: .roomID)
         inboundEventID = try values.decodeIfPresent(MailboxEventID.self, forKey: .inboundEventID)
         inboundRoomSequence = try values.decodeIfPresent(Int.self, forKey: .inboundRoomSequence)
+        replyRequired = try values.decodeIfPresent(Bool.self, forKey: .replyRequired) ?? true
         guard (inboundEventID == nil) == (inboundRoomSequence == nil),
               inboundRoomSequence.map({ $0 > 0 }) ?? true
         else { throw MailboxTransactionStoreError.invalidRecord }
@@ -302,6 +311,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
         try container.encode(roomID, forKey: .roomID)
         try container.encode(inboundEventID, forKey: .inboundEventID)
         try container.encode(inboundRoomSequence, forKey: .inboundRoomSequence)
+        try container.encode(replyRequired, forKey: .replyRequired)
         try container.encode(claimID, forKey: .claimID)
         try container.encode(replyIdempotencyKey, forKey: .replyIdempotencyKey)
         try container.encode(state, forKey: .state)
@@ -321,6 +331,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
             roomID: roomID,
             inboundEventID: inboundEventID,
             inboundRoomSequence: inboundRoomSequence,
+            replyRequired: replyRequired,
             state: .claimed,
             replyEventID: nil,
             replyResolution: .none,
@@ -345,6 +356,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
             roomID: roomID,
             inboundEventID: inboundEventID,
             inboundRoomSequence: inboundRoomSequence,
+            replyRequired: replyRequired,
             state: .replied,
             replyEventID: eventID,
             replyResolution: resolution,
@@ -366,6 +378,7 @@ public struct MailboxOpenTransaction: Codable, Equatable, Sendable {
             roomID: roomID,
             inboundEventID: inboundEventID,
             inboundRoomSequence: inboundRoomSequence,
+            replyRequired: replyRequired,
             state: state,
             replyEventID: replyEventID,
             replyResolution: replyResolution,
@@ -384,13 +397,16 @@ public struct MailboxDeliveryCandidate: Equatable, Sendable {
     public let roomSequence: Int
     /// Ephemeral admit prompt from mailbox list; never written to open.json.
     public let admitText: String?
+    /// Wire `body.replyRequired`. Absent → true (work required). False → receipt-only.
+    public let replyRequired: Bool
 
     public init(
         deliveryID: Int,
         roomID: MailboxRoomID,
         eventID: MailboxEventID,
         roomSequence: Int,
-        admitText: String? = nil
+        admitText: String? = nil,
+        replyRequired: Bool = true
     ) throws {
         guard deliveryID > 0, roomSequence > 0 else { throw MailboxTransactionStoreError.invalidRecord }
         if let admitText {
@@ -403,6 +419,7 @@ public struct MailboxDeliveryCandidate: Equatable, Sendable {
         self.eventID = eventID
         self.roomSequence = roomSequence
         self.admitText = admitText
+        self.replyRequired = replyRequired
     }
 }
 

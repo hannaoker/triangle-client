@@ -80,14 +80,14 @@ public struct WatchGrantService: Sendable {
         }
 
         let createURL = URL(string: origin.value + "/api/v1/mailbox/watch/grants")!
-        let createHeaders = try await auth.authorizationHeaders(for: actorProfile, method: "POST", url: createURL)
         let staged: StagedWatchGrant
         do {
             staged = try await createGrantRecoveringStaleLocalBinding(
                 installationID: installationID,
                 origin: origin,
                 agentIDs: agentIDs,
-                authorizationHeaders: createHeaders,
+                actorProfile: actorProfile,
+                createURL: createURL,
                 replacementCredential: replacement
             )
         } catch let error as WatchGrantServiceError {
@@ -318,10 +318,16 @@ public struct WatchGrantService: Sendable {
         installationID: InstallationID,
         origin: MeshOrigin,
         agentIDs: [AgentID],
-        authorizationHeaders: [String: String],
+        actorProfile: ProfileName,
+        createURL: URL,
         replacementCredential: WatchCredential?
     ) async throws -> StagedWatchGrant {
         do {
+            let authorizationHeaders = try await auth.authorizationHeaders(
+                for: actorProfile,
+                method: "POST",
+                url: createURL
+            )
             return try await client.createGrant(
                 origin: origin,
                 installationID: installationID,
@@ -340,11 +346,16 @@ public struct WatchGrantService: Sendable {
             // contention during member gate verify) would otherwise leave pollers
             // with credential_missing while operators still see finalized status.
             do {
+                let retryAuthorizationHeaders = try await auth.authorizationHeaders(
+                    for: actorProfile,
+                    method: "POST",
+                    url: createURL
+                )
                 return try await client.createGrant(
                     origin: origin,
                     installationID: installationID,
                     agentIDs: agentIDs,
-                    authorizationHeaders: authorizationHeaders,
+                    authorizationHeaders: retryAuthorizationHeaders,
                     replacementCredential: nil
                 )
             } catch let retryError as MeshWatchClientError {

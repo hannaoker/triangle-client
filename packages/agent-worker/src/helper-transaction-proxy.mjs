@@ -394,7 +394,7 @@ export function resolveTrustedTransactionProxy({
  * Calls `transaction-claim-next` so a pending mailbox delivery can be listed,
  * preflighted, selected, and claimed before the App Server bridge starts a turn.
  * Returns `{ deliveryId, text }` when the helper reports `shouldStartModel` with
- * an open claim; otherwise `null` (empty → skip turn).
+ * an open claim that requires a reply; otherwise `null` (empty / receipt-only → skip turn).
  */
 export function createHelperDurableDeliveryResolver({
   helperPath,
@@ -423,16 +423,41 @@ export function createHelperDurableDeliveryResolver({
       }
       throw error;
     }
-    if (!status || typeof status !== "object" || status.shouldStartModel !== true) {
+    if (!status || typeof status !== "object") {
       return null;
     }
     if (status.transactionStuck === true) {
       throw createCodedError("transaction_stuck", "transaction is stuck");
     }
+
+    // Absent replyRequired → true (older helpers). False / receiptOnly → never admit.
+    const replyRequired = status.replyRequired !== false && status.receiptOnly !== true;
     const open = status.open;
-    if (!open || typeof open !== "object" || Array.isArray(open)) return null;
-    if (open.state === "replied") return null;
-    if (!Number.isSafeInteger(open.deliveryId) || open.deliveryId <= 0) return null;
+    const hasOpenClaim =
+      open &&
+      typeof open === "object" &&
+      !Array.isArray(open) &&
+      open.state !== "replied" &&
+      Number.isSafeInteger(open.deliveryId) &&
+      open.deliveryId > 0;
+
+    if (!replyRequired) {
+      // New helpers claim→ack receipts inside claim-next (open already null).
+      // Do not use the general ack command for an older helper's open claim:
+      // its durable record cannot prove that the claim is receipt-only.
+      if (hasOpenClaim) {
+        throw createCodedError(
+          "receipt_only_helper_upgrade_required",
+          "helper must settle receipt-only claims inside transaction-claim-next",
+        );
+      }
+      return null;
+    }
+
+    if (status.shouldStartModel !== true) {
+      return null;
+    }
+    if (!hasOpenClaim) return null;
     if (typeof open.roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(open.roomId)) {
       return null;
     }
@@ -460,6 +485,7 @@ export function createHelperDurableDeliveryResolver({
       roomId: open.roomId,
       inboundEventId,
       numericDeliveryId: open.deliveryId,
+      replyRequired: true,
     };
   });
 }

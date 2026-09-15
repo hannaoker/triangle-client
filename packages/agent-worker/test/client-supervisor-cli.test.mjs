@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  monitorParentProcess,
   parseClientSupervisorBootstrap,
   runClientSupervisorCLI,
 } from "../src/client-supervisor-cli.mjs";
@@ -402,6 +403,34 @@ test("runtime errors are sanitized and SIGINT or SIGTERM aborts with determinist
     assert.equal(events.listenerCount("SIGINT"), 0);
     assert.equal(events.listenerCount("SIGTERM"), 0);
   }
+});
+
+test("parent monitor aborts an orphaned coordinator and releases its timer", () => {
+  let currentParentPid = 4242;
+  let scheduled;
+  let cleared = null;
+  let orphaned = 0;
+  const stop = monitorParentProcess({
+    expectedParentPid: 4242,
+    getParentPid: () => currentParentPid,
+    onOrphan() { orphaned += 1; },
+    setIntervalImpl(callback, milliseconds) {
+      assert.equal(milliseconds, 500);
+      scheduled = callback;
+      return { unref() {} };
+    },
+    clearIntervalImpl(timer) { cleared = timer; },
+  });
+
+  scheduled();
+  assert.equal(orphaned, 0);
+  currentParentPid = 1;
+  scheduled();
+  assert.equal(orphaned, 1);
+  scheduled();
+  assert.equal(orphaned, 1, "orphan termination must be requested once");
+  stop();
+  assert.ok(cleared);
 });
 
 test("sanitized logger may include a short secret-free error code", async () => {

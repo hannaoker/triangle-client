@@ -337,3 +337,62 @@ test("durable delivery resolver prefers admitText and inboundEventId from claim-
   assert.doesNotMatch(delivery.text, /mesh_/);
 });
 
+test("durable delivery resolver skips admit for helper receipt-only claim-next", async () => {
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      assert.equal(args[0], "transaction-claim-next");
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: false,
+          transactionStuck: false,
+          replyRequired: false,
+          receiptOnly: true,
+          open: null,
+          status: "empty",
+        }),
+        stderr: "",
+      };
+    },
+  });
+  assert.equal(await resolveDelivery({ reason: "wake" }), null);
+});
+
+test("durable delivery resolver fails closed when an older helper leaves a receipt claim open", async () => {
+  const calls = [];
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (args[0] === "transaction-claim-next") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            shouldStartModel: true,
+            transactionStuck: false,
+            replyRequired: false,
+            open: {
+              deliveryId: 77,
+              roomId,
+              state: "claimed",
+            },
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected helper command ${args[0]}`);
+    },
+  });
+  await assert.rejects(
+    resolveDelivery({ reason: "wake" }),
+    (error) => error?.code === "receipt_only_helper_upgrade_required",
+  );
+  assert.deepEqual(calls, ["transaction-claim-next"]);
+});
