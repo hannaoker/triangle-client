@@ -124,6 +124,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "agents/codex/worker/agent-worker.json",
     "packages/agent-worker/runners/codex-runner.mjs",
     "packages/agent-worker/runners/runner-common.mjs",
+    "packages/agent-worker/src/app-server-bind-cli.mjs",
     "packages/agent-worker/src/authenticated-app-server-transport.mjs",
     "packages/agent-worker/src/cli.mjs",
     "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -166,6 +167,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const removed = [
+    "packages/agent-worker/src/app-server-bind-cli.mjs",
     "packages/agent-worker/src/authenticated-app-server-transport.mjs",
     "packages/agent-worker/src/client-supervisor-cli.mjs",
     "packages/agent-worker/src/client-supervisor.mjs",

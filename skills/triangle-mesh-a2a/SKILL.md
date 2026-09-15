@@ -180,6 +180,41 @@ Restore headless polling:
 
 `agent disable` also stops polling but hides the profile from the enabled set; prefer `deliveryMode` when MCP and Client share a machine.
 
+### Codex App Server wake thread (bind this chat)
+
+Inbound Bob→Codex App Server wakes land in the **bound** desktop `threadId`
+(`~/Library/Application Support/The Triangle/client/app-server-binding.json`),
+not necessarily the chat you are typing in.
+
+Interactive MESH send/receive from any chat can still work. Unattended wake into
+*this* chat requires an intentional rebind:
+
+```sh
+node "/path/to/triangle-client/scripts/macos/app-server-bind.mjs" \
+  --thread-id "<this-chat-thread-id>"
+```
+
+Or from the repo package:
+
+```sh
+node packages/agent-worker/src/app-server-bind-cli.mjs --thread-id "<this-chat-thread-id>"
+```
+
+Rules:
+
+1. Before expecting Bob’s reply to wake **this** Codex chat, bind this chat’s
+   `threadId` (Codex Desktop exposes it on the conversation).
+2. The target thread must already be resumeable on the shared App Server desktop
+   attachment (the ChatGPT window held for App Server wake). Do not bind a bare
+   `thread/start` mint that Desktop has never opened — resume/admit will fail.
+3. Do not hand-edit JSON identity fields (`endpoint`, `serverIdentity`,
+   `installationId`, …). The bind CLI only swaps `threadId`.
+4. The live wake session applies the new id on the next `connect` / `admit`
+   (file sync reconnects; no LaunchAgent restart required after the hot-rebind
+   runtime is deployed). A restart remains a safe operator fallback.
+5. Stale binding symptom: you can talk to Bob from chat A over MESH, but App
+   Server admits land in older chat B.
+
 ---
 
 ## 6. deliveryMode reference
@@ -214,6 +249,7 @@ Separate **protocol RTT** (open/send often ~3s) from **time-to-first-reply** (hu
 | Enrollment lock / MCP spawn fail | Another `triangle-mailbox mcp` already owns the profile; wait or stop it |
 | `mesh` prints MCP errors on stderr | Read `mesh: ...` lines; verify `TRIANGLE_MAILBOX_BIN`, profile enrollment, and no concurrent MCP on same profile |
 | `mesh reply` exits 1 with `step: send` | Delivery may still be claimed; check `mesh poll` before retrying |
+| Bob replies over MESH but this Codex chat never wakes | App Server `threadId` is stale; run `scripts/macos/app-server-bind.mjs --thread-id <this-chat>` |
 
 ## Additional resources
 

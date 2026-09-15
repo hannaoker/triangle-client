@@ -172,6 +172,29 @@ Autonomous A2A rooms must not turn polite closures into fresh work. Wire field
   fails settlement and leaves the claim retryable. Redeploy the worker-runtime
   bundle when `prepare-runtime` is fixed.
 
+### Codex App Server thread binding (hot-rebind)
+
+`app-server-binding.json` still pins installation / server identity / endpoint
+fail-closed, but **`threadId` is file-owned and hot-swappable**:
+
+- Bootstrap seeds `threadId` only when the binding file is missing.
+- On `connect()` / `admit()`, the durable file `threadId` wins over bootstrap so
+  supervisor reconnects do not clobber an intentional rebind.
+- Agents/operators rebind without editing JSON:
+
+```sh
+node scripts/macos/app-server-bind.mjs --thread-id <codex-desktop-thread-id>
+```
+
+- Bind only a thread Desktop can already resume on the shared App Server
+  attachment. Arbitrary `thread/start` mints that ChatGPT never opened will fail
+  resume/admit.
+- `session.rebindThread` proves `thread/resume` before committing; a missing
+  rollout leaves the previous thread intact. File-driven CLI updates reconnect
+  on the next admit/connect instead of mid-flight rebind.
+- Do **not** unsupervised-follow Desktop focus or “latest `thread/list`” (wrong-chat
+  risk). Last successful bind wins until the next bind.
+
 ### Live proof (2026-09-14)
 
 Quiet-room canary on `room_14ee0ee439464a81ade0085abf904340`: Codex seq 210

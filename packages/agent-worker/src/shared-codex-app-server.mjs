@@ -154,6 +154,9 @@ export function validateBinding(input) {
 /**
  * Refuse silent resume when the shared server identity or endpoint changes.
  * Never treat a newly spawned SDK process as the same attachment.
+ *
+ * `threadId` is intentionally omitted: the binding file owns the wake target and
+ * may hot-rebind without changing installation / server identity.
  */
 export function assertCompatibleBinding(previous, next) {
   const left = validateBinding(previous);
@@ -170,10 +173,19 @@ export function assertCompatibleBinding(previous, next) {
   if (left.endpoint !== right.endpoint) {
     throw createCodedError("binding_endpoint_changed", "endpoint changed; fail closed");
   }
-  if (left.threadId !== right.threadId) {
-    throw createCodedError("binding_thread_changed", "threadId changed; fail closed");
-  }
   return right;
+}
+
+/**
+ * Merge bootstrap identity with a durable binding-file `threadId`.
+ * File threadId wins when the store is present and identity-compatible.
+ */
+export function mergeBindingThreadId(bootstrapBinding, storedBinding) {
+  const bootstrap = validateBinding(bootstrapBinding);
+  if (storedBinding == null) return bootstrap;
+  const stored = validateBinding(storedBinding);
+  assertCompatibleBinding(stored, bootstrap);
+  return validateBinding({ ...bootstrap, threadId: stored.threadId });
 }
 
 export function createMemoryBindingStore(initial = null) {
@@ -205,23 +217,6 @@ export function createAtomicFileBindingStore({ filePath, initial = null } = {}) 
   const directory = path.dirname(resolvedPath);
   let binding = null;
   let loaded = false;
-
-  async function ensureLoaded() {
-    if (loaded) return;
-    try {
-      const raw = await readFile(resolvedPath, "utf8");
-      binding = validateBinding(JSON.parse(raw));
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        binding = initial == null ? null : validateBinding(initial);
-      } else if (error instanceof SyntaxError) {
-        throw new TypeError("app server binding file is invalid");
-      } else {
-        throw error;
-      }
-    }
-    loaded = true;
-  }
 
   async function syncDirectory() {
     try {
@@ -269,17 +264,34 @@ export function createAtomicFileBindingStore({ filePath, initial = null } = {}) 
   return Object.freeze({
     filePath: resolvedPath,
     async read() {
-      await ensureLoaded();
-      return binding;
+      try {
+        const raw = await readFile(resolvedPath, "utf8");
+        binding = validateBinding(JSON.parse(raw));
+        loaded = true;
+        return binding;
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          if (!loaded) {
+            binding = initial == null ? null : validateBinding(initial);
+            loaded = true;
+          }
+          return binding;
+        }
+        if (error instanceof SyntaxError) {
+          throw new TypeError("app server binding file is invalid");
+        }
+        throw error;
+      }
     },
     async write(next) {
-      await ensureLoaded();
+      await this.read();
       const validated = validateBinding(next);
       if (binding != null && binding.enabled) {
         assertCompatibleBinding(binding, validated);
       }
       await atomicWrite(validated);
       binding = validated;
+      loaded = true;
       return binding;
     },
   });
@@ -397,12 +409,23 @@ export function createTrustedTransactionProxy(options = {}) {
  */
 export function createFakeAppServerTransport({
   threadId,
+  knownThreadIds = null,
   serverIdentity = "fake-codex-app-server",
   initialStatus = { type: "idle" },
   onCall,
 } = {}) {
   if (typeof threadId !== "string" || !THREAD_ID.test(threadId)) {
     throw new TypeError("threadId is invalid");
+  }
+  const allowedThreadIds = new Set(
+    Array.isArray(knownThreadIds) && knownThreadIds.length > 0
+      ? knownThreadIds
+      : [threadId],
+  );
+  for (const id of allowedThreadIds) {
+    if (typeof id !== "string" || !THREAD_ID.test(id)) {
+      throw new TypeError("knownThreadIds contains an invalid threadId");
+    }
   }
   let connected = false;
   let turnCounter = 0;
@@ -417,10 +440,22 @@ export function createFakeAppServerTransport({
     for (const listener of listeners) listener(event);
   }
 
+  function assertAllowedThread(candidate) {
+    if (!allowedThreadIds.has(candidate)) {
+      throw createCodedError("thread_not_found", "threadId does not match binding");
+    }
+  }
+
   return Object.freeze({
     serverIdentity,
     events,
     calls,
+    allowThread(id) {
+      if (typeof id !== "string" || !THREAD_ID.test(id)) {
+        throw new TypeError("threadId is invalid");
+      }
+      allowedThreadIds.add(id);
+    },
     onEvent(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -443,31 +478,25 @@ export function createFakeAppServerTransport({
           // Mint path for desktop experiments: reuse the fake's bound thread id.
           return { thread: { id: threadId, status } };
         case "thread/resume": {
-          if (params.threadId !== threadId) {
-            throw createCodedError("thread_not_found", "threadId does not match binding");
-          }
-          return { thread: { id: threadId, status } };
+          assertAllowedThread(params.threadId);
+          return { thread: { id: params.threadId, status } };
         }
         case "thread/read": {
-          if (params.threadId !== threadId) {
-            throw createCodedError("thread_not_found", "threadId does not match binding");
-          }
-          return { thread: { id: threadId, status, turns: [] } };
+          assertAllowedThread(params.threadId);
+          return { thread: { id: params.threadId, status, turns: [] } };
         }
         case "turn/start": {
-          if (params.threadId !== threadId) {
-            throw createCodedError("thread_not_found", "threadId does not match binding");
-          }
+          assertAllowedThread(params.threadId);
           if (status?.type === "busy" || status?.type === "running") {
             throw createCodedError("thread_busy", "thread is busy");
           }
           turnCounter += 1;
           const turnId = `turn_fake_${String(turnCounter).padStart(4, "0")}`;
           status = { type: "busy", turnId };
-          emit("turn/started", { threadId, turn: { id: turnId, status: "in_progress" } });
+          emit("turn/started", { threadId: params.threadId, turn: { id: turnId, status: "in_progress" } });
           queueMicrotask(() => {
             status = { type: "idle" };
-            emit("turn/completed", { threadId, turn: { id: turnId, status: "completed" } });
+            emit("turn/completed", { threadId: params.threadId, turn: { id: turnId, status: "completed" } });
           });
           return { turn: { id: turnId, status: "in_progress" } };
         }
@@ -497,7 +526,7 @@ export function createSharedCodexSession({
   now = () => Date.now(),
   logger = console,
 } = {}) {
-  const validated = validateBinding(binding);
+  let validated = validateBinding(binding);
   if (!transport || typeof transport.call !== "function" || typeof transport.connect !== "function") {
     throw new TypeError("transport.connect and transport.call are required");
   }
@@ -525,6 +554,8 @@ export function createSharedCodexSession({
   const queue = [];
   let draining = false;
   let stopped = false;
+  /** Bootstrap seed; file threadId wins on connect / sync. */
+  const bootstrapBinding = validated;
 
   function setPhase(next) {
     if (!STATUS_VALUES.includes(next)) {
@@ -633,7 +664,7 @@ export function createSharedCodexSession({
     }
     if (bindingStore) {
       const stored = await bindingStore.read();
-      if (stored != null) assertCompatibleBinding(stored, validated);
+      validated = mergeBindingThreadId(bootstrapBinding, stored);
       await bindingStore.write(validated);
     }
     setPhase("reconnecting");
@@ -676,6 +707,78 @@ export function createSharedCodexSession({
     setPhase("subscribed");
     lastError = null;
     return doctorStatus();
+  }
+
+  /**
+   * Intentional hot-rebind of the wake target. Proves resume before committing
+   * the binding file so a missing rollout leaves the previous thread intact.
+   */
+  async function rebindThread(threadId, { reason = "operator_rebind" } = {}) {
+    if (typeof threadId !== "string" || !THREAD_ID.test(threadId)) {
+      throw new TypeError("threadId is invalid");
+    }
+    if (typeof reason !== "string" || reason.length === 0 || reason.includes("\0")) {
+      throw new TypeError("reason is invalid");
+    }
+    if (!validated.enabled) {
+      throw createCodedError("binding_disabled", "cannot rebind a disabled App Server binding");
+    }
+    if (threadId === validated.threadId) {
+      return doctorStatus();
+    }
+    if (!initialized) {
+      throw createCodedError("not_connected", "session must be connected before rebindThread");
+    }
+    const previous = validated;
+    try {
+      await call("thread/resume", { threadId });
+    } catch (error) {
+      lastError = createCodedError(
+        "thread_rebind_failed",
+        error?.message ?? "thread resume failed during rebind",
+        { cause: error, threadId, previousThreadId: previous.threadId },
+      );
+      throw lastError;
+    }
+    const next = validateBinding({ ...previous, threadId });
+    assertCompatibleBinding(previous, next);
+    if (bindingStore) {
+      await bindingStore.write(next);
+    }
+    validated = next;
+    setPhase("subscribed");
+    lastError = null;
+    logger.info?.("triangle_app_server_thread_rebound", {
+      threadId,
+      previousThreadId: previous.threadId,
+      reason,
+    });
+    return doctorStatus();
+  }
+
+  /**
+   * Apply a binding-file threadId change written by the bind CLI without a full
+   * supervisor restart. Prefers reconnect over mid-flight rebindThread so a
+   * failed resume cannot poison an in-progress admit path.
+   */
+  async function syncThreadFromStore() {
+    if (!bindingStore || !validated.enabled) return doctorStatus();
+    const stored = await bindingStore.read();
+    if (stored == null) return doctorStatus();
+    const merged = mergeBindingThreadId(bootstrapBinding, stored);
+    if (merged.threadId === validated.threadId) {
+      validated = merged;
+      return doctorStatus();
+    }
+    logger.info?.("triangle_app_server_binding_file_changed", {
+      previousThreadId: validated.threadId,
+      threadId: merged.threadId,
+    });
+    if (!initialized) {
+      validated = merged;
+      return doctorStatus();
+    }
+    return reconnect();
   }
 
   async function readThread({ includeTurns = false } = {}) {
@@ -904,6 +1007,7 @@ export function createSharedCodexSession({
       setPhase("disabled");
       return { status: "disabled" };
     }
+    await syncThreadFromStore();
     if (phase === "transaction_stuck") {
       throw createCodedError("transaction_stuck", "session is stuck after repeated turn failures");
     }
@@ -996,9 +1100,13 @@ export function createSharedCodexSession({
   }
 
   return Object.freeze({
-    binding: validated,
+    get binding() {
+      return validated;
+    },
     status: doctorStatus,
     connect,
+    rebindThread,
+    syncThreadFromStore,
     readThread,
     startTurn,
     waitForTurn,

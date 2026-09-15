@@ -18,8 +18,13 @@ import {
   createSharedCodexSession,
   createTrustedTransactionProxy,
   createTrustedTransactionProxyStub,
+  mergeBindingThreadId,
   validateBinding,
 } from "../src/shared-codex-app-server.mjs";
+import {
+  parseAppServerBindArgs,
+  rebindAppServerBindingFile,
+} from "../src/app-server-bind-cli.mjs";
 
 const instanceId = "a".repeat(64);
 const agentId = "agent_codex_desktop_001";
@@ -138,6 +143,13 @@ test("assertCompatibleBinding fails closed on endpoint or server identity change
   assert.equal(
     assertCompatibleBinding(previous, sampleBinding({ enabled: false })).enabled,
     false,
+  );
+  assert.equal(
+    assertCompatibleBinding(
+      previous,
+      sampleBinding({ threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7990" }),
+    ).threadId,
+    "01a06f9f-2db1-7143-b8b9-08c634cc7990",
   );
 });
 
@@ -869,4 +881,125 @@ test("correlation store records delivery-to-turn mapping before completion", asy
     status: "running",
     recordedAt: (await store.get("d1")).recordedAt,
   });
+});
+
+test("mergeBindingThreadId prefers durable file threadId over bootstrap", () => {
+  const bootstrap = sampleBinding({ threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7999" });
+  const stored = sampleBinding({ threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7001" });
+  assert.equal(mergeBindingThreadId(bootstrap, stored).threadId, stored.threadId);
+  assert.equal(mergeBindingThreadId(bootstrap, null).threadId, bootstrap.threadId);
+  assert.throws(
+    () => mergeBindingThreadId(bootstrap, sampleBinding({ endpoint: "ws://127.0.0.1:1/rpc" })),
+    (error) => error.code === "binding_endpoint_changed",
+  );
+});
+
+test("connect keeps file threadId instead of clobbering with bootstrap", async () => {
+  const bootstrap = validateBinding(sampleBinding({
+    threadId: "01a06f9f-2db1-7143-b8b9-08c634cc7999",
+  }));
+  const fileThreadId = "01a06f9f-2db1-7143-b8b9-08c634cc7002";
+  const store = createMemoryBindingStore(sampleBinding({ threadId: fileThreadId }));
+  const transport = createFakeAppServerTransport({
+    threadId: bootstrap.threadId,
+    knownThreadIds: [bootstrap.threadId, fileThreadId],
+    serverIdentity: bootstrap.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding: bootstrap,
+    transport,
+    bindingStore: store,
+  });
+  const status = await session.connect();
+  assert.equal(status.threadId, fileThreadId);
+  assert.equal(session.binding.threadId, fileThreadId);
+  assert.equal((await store.read()).threadId, fileThreadId);
+  const resume = transport.calls.find((call) => call.method === "thread/resume");
+  assert.equal(resume.params.threadId, fileThreadId);
+});
+
+test("rebindThread updates admit target and persists binding file", async () => {
+  const original = "01a06f9f-2db1-7143-b8b9-08c634cc7999";
+  const next = "01a06f9f-2db1-7143-b8b9-08c634cc7003";
+  const binding = validateBinding(sampleBinding({ threadId: original }));
+  const store = createMemoryBindingStore(binding);
+  const transport = createFakeAppServerTransport({
+    threadId: original,
+    knownThreadIds: [original, next],
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    bindingStore: store,
+  });
+  await session.connect();
+  const rebound = await session.rebindThread(next, { reason: "test" });
+  assert.equal(rebound.threadId, next);
+  assert.equal((await store.read()).threadId, next);
+
+  await session.admit({
+    deliveryId: "delivery_rebind_1",
+    text: "wake after rebind",
+  });
+  const start = transport.calls.filter((call) => call.method === "turn/start").at(-1);
+  assert.equal(start.params.threadId, next);
+});
+
+test("failed rebind leaves previous thread intact", async () => {
+  const original = "01a06f9f-2db1-7143-b8b9-08c634cc7999";
+  const missing = "01a06f9f-2db1-7143-b8b9-08c634cc7004";
+  const binding = validateBinding(sampleBinding({ threadId: original }));
+  const store = createMemoryBindingStore(binding);
+  const transport = createFakeAppServerTransport({
+    threadId: original,
+    knownThreadIds: [original],
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({ binding, transport, bindingStore: store });
+  await session.connect();
+  await assert.rejects(
+    () => session.rebindThread(missing, { reason: "test_missing" }),
+    (error) => error.code === "thread_rebind_failed",
+  );
+  assert.equal(session.binding.threadId, original);
+  assert.equal((await store.read()).threadId, original);
+});
+
+test("admit syncs threadId from binding file written by bind CLI", async () => {
+  const original = "01a06f9f-2db1-7143-b8b9-08c634cc7999";
+  const next = "01a06f9f-2db1-7143-b8b9-08c634cc7005";
+  const binding = validateBinding(sampleBinding({ threadId: original }));
+  const root = await mkdtemp(path.join(tmpdir(), "triangle-app-server-bind-"));
+  const filePath = path.join(root, "binding.json");
+  const store = createAtomicFileBindingStore({ filePath, initial: binding });
+  await store.write(binding);
+  const transport = createFakeAppServerTransport({
+    threadId: original,
+    knownThreadIds: [original, next],
+    serverIdentity: binding.serverIdentity,
+  });
+  const session = createSharedCodexSession({
+    binding,
+    transport,
+    bindingStore: store,
+  });
+  await session.connect();
+  const result = await rebindAppServerBindingFile({
+    threadId: next,
+    bindingPath: filePath,
+  });
+  assert.equal(result.threadId, next);
+  await session.admit({ deliveryId: "delivery_cli_sync", text: "sync please" });
+  const start = transport.calls.filter((call) => call.method === "turn/start").at(-1);
+  assert.equal(start.params.threadId, next);
+  assert.equal(session.binding.threadId, next);
+});
+
+test("parseAppServerBindArgs requires thread id", () => {
+  assert.equal(parseAppServerBindArgs(["--help"]).help, true);
+  assert.equal(
+    parseAppServerBindArgs(["--thread-id", "01a06f9f-2db1-7143-b8b9-08c634cc7006"]).threadId,
+    "01a06f9f-2db1-7143-b8b9-08c634cc7006",
+  );
 });
