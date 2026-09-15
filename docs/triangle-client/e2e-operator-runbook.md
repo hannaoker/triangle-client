@@ -223,6 +223,8 @@ See [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md).
 Desktop App Server attach and the Bob→Codex **session** canary remain **Mac
 operator** work:
 
+- Durable Shared App Server launch / bind / restart:
+  [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md)
 - Product path and Gate A runbook:
   [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md)
 - Shared server prototype notes:

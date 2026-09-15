@@ -182,6 +182,9 @@ Restore headless polling:
 
 ### Codex App Server wake thread (bind this chat)
 
+Full launch / verify / restart checklist:
+[`docs/triangle-client/shared-codex-app-server-runbook.md`](../../docs/triangle-client/shared-codex-app-server-runbook.md).
+
 Inbound Bob→Codex App Server wakes land in the **bound** desktop `threadId`
 (`~/Library/Application Support/The Triangle/client/app-server-binding.json`),
 not necessarily the chat you are typing in.

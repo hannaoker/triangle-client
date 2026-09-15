@@ -66,6 +66,11 @@ Do **not**:
 - Shared App Server LaunchAgent: `dev.thetriangle.shared-app-server`
 - MCP bridge: `dev.thetriangle.mcp-bridge` (`codex-bob-test` port `17387`)
 
+## Operator launch
+
+Day-to-day start / verify / bind / restart:
+[shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md).
+
 ## Remaining
 
 1. Bob native event-driven drain still logs `instance cycle failed` (event-driven + `runtimeAdapter: codex`); does not block appServerWake.

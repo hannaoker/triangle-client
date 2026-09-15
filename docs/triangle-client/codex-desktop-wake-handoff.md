@@ -241,6 +241,10 @@ experiment script + Mac runbook landed. **Mac Gate A visual/desktop proof remain
 
 ### Gate A — Mac operator runbook (native-desktop nonce wake)
 
+For the **durable** LaunchAgent path (production Mini hold), use
+[shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md) instead.
+Gate A below is the disposable experiment proof.
+
 Environment: **macOS with ChatGPT.app** (bundled Codex; pin/detect version; do not
 silently substitute an older PATH `codex`). This Cloud/Linux agent does **not** run
 ChatGPT.app and must not claim Gate A complete.

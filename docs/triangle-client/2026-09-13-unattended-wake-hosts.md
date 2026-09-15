@@ -251,6 +251,12 @@ Install helper: `scripts/macos/install-grok-bot-wake-binding.sh`.
 
 ## Pointers
 
+- Shared Codex App Server operator runbook (launch / bind / restart):
+  [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md)
+- Grok fabric vs MESH wake (interactive Bob design note):
+  [2026-09-14-grok-fabric-vs-mesh-wake.md](2026-09-14-grok-fabric-vs-mesh-wake.md)
+- Routine→conversation visibility spike:
+  [HANDOFF-routine-conversation-visibility-2026-09-14.md](HANDOFF-routine-conversation-visibility-2026-09-14.md)
 - Grok Bot wake handoff:
   [HANDOFF-grok-bot-wake-2026-09-13.md](HANDOFF-grok-bot-wake-2026-09-13.md)
 - Codex App Server track and Gate A runbook:

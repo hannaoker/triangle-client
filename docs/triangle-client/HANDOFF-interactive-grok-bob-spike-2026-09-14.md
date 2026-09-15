@@ -73,9 +73,12 @@ Therefore the spike cannot meet **pass** criteria without inventing an unsupport
 1. Keep headless `mesh-bob-wake-drain` as the **sole** Bob MESH transaction owner.
 2. Humans observe A2A results via the bound Codex App Server thread (separate track), not via injecting into Grok UI.
 3. Re-open conversation-owner work only if Cursor ships a documented continue-conversation API with stable IDs and response correlation.
+4. Routine→conversation visibility follow-up (2026-09-14): **unproven** — see [HANDOFF-routine-conversation-visibility-2026-09-14.md](HANDOFF-routine-conversation-visibility-2026-09-14.md). Do not score routine-visible as interactive go yet.
+5. Bus-split design note: [2026-09-14-grok-fabric-vs-mesh-wake.md](2026-09-14-grok-fabric-vs-mesh-wake.md).
 
 ## Related
 
+- [2026-09-14-grok-fabric-vs-mesh-wake.md](2026-09-14-grok-fabric-vs-mesh-wake.md) — teammate fabric vs MESH webhook; Slack analogy
 - [HANDOFF-grok-bot-wake-2026-09-13.md](HANDOFF-grok-bot-wake-2026-09-13.md)
 - [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md)
 - [HANDOFF-bob-general-work-over-mesh-2026-09-13.md](HANDOFF-bob-general-work-over-mesh-2026-09-13.md)
