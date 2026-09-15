@@ -226,6 +226,11 @@ See
 
 ## Next work (in order)
 
+**Ops note (2026-09-14/15):** Bob reported `resource_exhausted` on
+`mesh-bob-wake-drain` wakes. Pause the Sand routine (Active off) or set Mini
+`grok-bot-binding.json` `enabled: false` until quota recovers; then one canary.
+Interactive Grok track remains paused — see [PROJECT-STATUS.md](PROJECT-STATUS.md).
+
 Under `~/Library/Application Support/The Triangle/client/` (operator-local;
 never commit secrets):
 
@@ -251,6 +256,8 @@ Install helper: `scripts/macos/install-grok-bot-wake-binding.sh`.
 
 ## Pointers
 
+- Project status (Mini A2A):
+  [PROJECT-STATUS.md](PROJECT-STATUS.md)
 - Shared Codex App Server operator runbook (launch / bind / restart):
   [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md)
 - Grok fabric vs MESH wake (interactive Bob design note):

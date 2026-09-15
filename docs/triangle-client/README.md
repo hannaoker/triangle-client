@@ -59,6 +59,7 @@ chatbot transcripts are not credential stores.
 
 ## Release package and E2E runbook
 
+- [**Project status (Mini A2A)**](PROJECT-STATUS.md) — current lanes, ops pause, docs map
 - [Release bundle](release-bundle.md) — what is installed where, signing vs
   ad-hoc, first-start, upgrade, uninstall, and security boundaries
 - [E2E operator runbook](e2e-operator-runbook.md) — clean-Mac path from install
@@ -66,9 +67,11 @@ chatbot transcripts are not credential stores.
 - [Release workflow](release-workflow.md) — risk-based gates and the release
   readiness checklist (`scripts/release/check-release-readiness.sh`)
 - [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —
-  one watch→claim→reply→ack workflow; Codex uses App Server, Grok Bot Bob
-  needs a native wake adapter (headless `codex exec` under Bob is only a
-  mailbox-identity proof)
+  one watch→claim→reply→ack workflow; Codex App Server + Bob Grok Bot webhook
+- [Shared Codex App Server runbook](shared-codex-app-server-runbook.md) —
+  launch / bind / restart
+- [Grok fabric vs MESH wake](2026-09-14-grok-fabric-vs-mesh-wake.md) —
+  interactive Grok paused; headless Bob is the MESH owner
 
 
 ## Install
