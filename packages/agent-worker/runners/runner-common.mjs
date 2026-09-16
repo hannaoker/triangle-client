@@ -94,6 +94,16 @@ function runtimeFamilies(env, activeWorker) {
     const interpreterPrefix = path.dirname(path.dirname(resolveSymlinkChain(interpreterPath)));
     const agentRoot = path.dirname(venv);
     families.push(venv, interpreterPrefix, agentRoot);
+    // Pitfall 20: uv-managed Python keeps encodings under pyvenv.cfg `home = ...`.
+    const pyvenvCfg = path.join(venv, "pyvenv.cfg");
+    if (existsSync(pyvenvCfg)) {
+      const homeMatch = readFileSync(pyvenvCfg, "utf8").match(/^home\s*=\s*(.+)$/m);
+      const pythonHome = homeMatch?.[1]?.trim();
+      if (!pythonHome || !path.isAbsolute(pythonHome) || !existsSync(pythonHome)) {
+        throw new Error("Hermes pyvenv.cfg home is unavailable");
+      }
+      families.push(realpathSync(pythonHome));
+    }
     for (const finder of globSync(path.join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py"))) {
       const mappingLine = readFileSync(finder, "utf8").match(/^MAPPING:.*$/m)?.[0] || "";
       for (const match of mappingLine.matchAll(/'([^']+)'/g)) {
