@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { invoke, readRequest, writeResult } from "./runner-common.mjs";
+import {
+  createAgentPrompt as createSharedAgentPrompt,
+  invoke,
+  readRequest,
+  runAsCli,
+  writeResult,
+} from "./runner-common.mjs";
+
+const GUIDANCE =
+  "Answer the peer request factually and concisely. Do not fabricate actions or results.";
 
 export function createAgentPrompt(request) {
-  return [
-    "You are responding to an authenticated A2A peer message in The Triangle.",
-    `Sender agent: ${request.senderId}`,
-    `Context: ${request.contextId}`,
-    "Answer the peer request factually and concisely. Do not fabricate actions or results.",
-    "Return only the reply that should be sent to the peer; do not include routing metadata.",
-    "",
-    request.text,
-  ].join("\n");
+  return createSharedAgentPrompt(request, { guidance: GUIDANCE });
 }
 
 export function createAntigravityInvocation(prompt, env = process.env) {
@@ -32,16 +32,8 @@ export async function main(env = process.env) {
   const request = await readRequest();
   const prompt = createAgentPrompt(request);
   const invocation = createAntigravityInvocation(prompt, env);
-  const text = await invoke(
-    invocation.command,
-    invocation.args,
-  );
+  const text = await invoke(invocation.command, invocation.args);
   writeResult(text);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : "Antigravity runner failed"}\n`);
-    process.exitCode = 1;
-  });
-}
+runAsCli(import.meta.url, main, "Antigravity runner failed");

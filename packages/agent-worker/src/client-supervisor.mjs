@@ -29,7 +29,7 @@ const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const RUNNER_KEYS = new Set(["command", "args", "timeoutMs"]);
 const DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
-const APP_SERVER_WAKE_KEYS = [
+export const APP_SERVER_WAKE_KEYS = Object.freeze([
   "actorProfile",
   "authTokenEnv",
   "authTokenFile",
@@ -39,8 +39,8 @@ const APP_SERVER_WAKE_KEYS = [
   "ensureBeforeWatch",
   "helperPath",
   "installationId",
-];
-const APP_SERVER_BINDING_KEYS = [
+]);
+export const APP_SERVER_BINDING_KEYS = Object.freeze([
   "adapterVersion",
   "agentId",
   "enabled",
@@ -50,8 +50,8 @@ const APP_SERVER_BINDING_KEYS = [
   "roomScope",
   "serverIdentity",
   "threadId",
-];
-const GROK_BOT_WAKE_KEYS = [
+]);
+export const GROK_BOT_WAKE_KEYS = Object.freeze([
   "actorProfile",
   "binding",
   "bindingPath",
@@ -61,8 +61,8 @@ const GROK_BOT_WAKE_KEYS = [
   "installationId",
   "webhookKeyPath",
   "webhookUrlPath",
-];
-const GROK_BOT_BINDING_KEYS = [
+]);
+export const GROK_BOT_BINDING_KEYS = Object.freeze([
   "adapterVersion",
   "agentId",
   "enabled",
@@ -71,7 +71,7 @@ const GROK_BOT_BINDING_KEYS = [
   "instanceId",
   "profile",
   "wakeMode",
-];
+]);
 
 function isRenewableWatchCredentialError(error) {
   const rejectedCode = typeof error?.rejectedCode === "string"

@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 
-import { pathToFileURL } from "node:url";
+import {
+  createAgentPrompt as createSharedAgentPrompt,
+  invoke,
+  readRequest,
+  runAsCli,
+  writeResult,
+} from "./runner-common.mjs";
 
-import { invoke, readRequest, writeResult } from "./runner-common.mjs";
+const GUIDANCE =
+  "Answer the peer request factually and concisely. Use read-only inspection when needed.";
 
 export function createAgentPrompt(request) {
-  return [
-    "You are responding to an authenticated A2A peer message in The Triangle.",
-    `Sender agent: ${request.senderId}`,
-    `Context: ${request.contextId}`,
-    "Answer the peer request factually and concisely. Use read-only inspection when needed.",
-    "Return only the reply that should be sent to the peer; do not include routing metadata.",
-    "",
-    request.text,
-  ].join("\n");
+  return createSharedAgentPrompt(request, { guidance: GUIDANCE });
 }
 
 export async function main(env = process.env) {
@@ -35,10 +34,4 @@ export async function main(env = process.env) {
   writeResult(text);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : "Codex runner failed"}\n`);
-    process.exitCode = 1;
-  });
-}
-
+runAsCli(import.meta.url, main, "Codex runner failed");

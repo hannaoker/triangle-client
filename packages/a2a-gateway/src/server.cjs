@@ -7,13 +7,13 @@ const {
   createMeshPeerIntrospector,
   createProtocolHandler,
 } = require("./protocol.cjs");
+const { RETIRED_PATHS } = require("./retired-paths.cjs");
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3002;
 const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_WAIT_POLL_MS = 50;
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const RETIRED_PATHS = new Set(["/inbox", "/inbox/ack", "/internal/tasks/update"]);
 
 class ParseBodyError extends Error {}
 class BodyTooLargeError extends Error {}

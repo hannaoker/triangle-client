@@ -5,7 +5,13 @@ import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
-import { createClientSupervisor } from "./client-supervisor.mjs";
+import {
+  APP_SERVER_BINDING_KEYS as EXACT_APP_SERVER_BINDING_KEYS,
+  APP_SERVER_WAKE_KEYS as EXACT_APP_SERVER_WAKE_KEYS,
+  createClientSupervisor,
+  GROK_BOT_BINDING_KEYS as EXACT_GROK_BOT_BINDING_KEYS,
+  GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
+} from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
@@ -29,49 +35,6 @@ const EXACT_EVENT_WAKE_KEYS = [
 ];
 const EXACT_EVENT_WAKE_PROFILE_KEYS = ["agentId", "instanceId"];
 const EXACT_EVENT_WAKE_DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
-const EXACT_APP_SERVER_WAKE_KEYS = [
-  "actorProfile",
-  "authTokenEnv",
-  "authTokenFile",
-  "binding",
-  "bindingPath",
-  "cursorPath",
-  "ensureBeforeWatch",
-  "helperPath",
-  "installationId",
-];
-const EXACT_APP_SERVER_BINDING_KEYS = [
-  "adapterVersion",
-  "agentId",
-  "enabled",
-  "endpoint",
-  "installationId",
-  "instanceId",
-  "roomScope",
-  "serverIdentity",
-  "threadId",
-];
-const EXACT_GROK_BOT_WAKE_KEYS = [
-  "actorProfile",
-  "binding",
-  "bindingPath",
-  "cursorPath",
-  "ensureBeforeWatch",
-  "helperPath",
-  "installationId",
-  "webhookKeyPath",
-  "webhookUrlPath",
-];
-const EXACT_GROK_BOT_BINDING_KEYS = [
-  "adapterVersion",
-  "agentId",
-  "enabled",
-  "grokAgentId",
-  "installationId",
-  "instanceId",
-  "profile",
-  "wakeMode",
-];
 const ACTIVATION_TIMEOUT_MS = 30_000;
 const BINDING_ENDPOINT = /^wss?:\/\/[^\s\0]{1,500}$/i;
 const BINDING_SERVER_IDENTITY = /^[A-Za-z0-9._:/+=-]{1,200}$/;

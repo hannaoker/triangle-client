@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -115,4 +116,8 @@ test("production handlers contain no legacy mutable projection path", async () =
     assert.doesNotMatch(source, /legacyStateMode|stateStoreFactory|createStateStore/);
     assert.doesNotMatch(source, /url\.pathname === "\/(?:inbox|inbox\/ack|internal\/tasks\/update)"/);
   }
+  assert.equal(
+    existsSync(new URL("../src/state-store.cjs", import.meta.url)),
+    false,
+  );
 });
