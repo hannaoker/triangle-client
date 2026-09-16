@@ -13,7 +13,8 @@
     "./protocol": "./src/protocol.cjs",
     "./outbound-a2a": "./src/outbound-a2a.mjs",
     "./mesh-mailbox-bridge": "./src/mesh-mailbox-bridge.mjs",
-    "./vercel-handler": "./src/vercel-handler.mjs"
+    "./vercel-handler": "./src/vercel-handler.mjs",
+    "./next": "./src/next.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.cjs test/*.test.mjs"
