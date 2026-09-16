@@ -246,8 +246,10 @@ export function createGrokBotWakeDispatcher({
  * Does not claim, reply, or ack — Bob's Grok session owns that after wake.
  *
  * Quota circuit breaker: after webhook 429 / resource_exhausted, suppress
- * further POSTs for a temporary window keyed by binding.instanceId. Success
- * clears the window; skipped wakes do not re-alert.
+ * further POSTs for a temporary window keyed by binding.instanceId. The
+ * latest skipped watermark is retained and an autonomous retry is scheduled
+ * for `untilMs` so Bob still wakes after quota recovery without another
+ * MESH event. Success clears the window; skipped wakes do not re-alert.
  */
 export function createGrokBotWakeBridge({
   binding,
@@ -269,6 +271,8 @@ export function createGrokBotWakeBridge({
   now = Date.now,
   initialQuotaBackoffMs = DEFAULT_QUOTA_BACKOFF_MS,
   maxQuotaBackoffMs = MAX_QUOTA_BACKOFF_MS,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   const validated = validateGrokBotBinding(binding);
   if (!watchTransport || typeof watchTransport.poll !== "function") {
@@ -276,6 +280,12 @@ export function createGrokBotWakeBridge({
   }
   if (typeof now !== "function") {
     throw new TypeError("now must be a function");
+  }
+  if (typeof setTimeoutImpl !== "function") {
+    throw new TypeError("setTimeoutImpl must be a function");
+  }
+  if (typeof clearTimeoutImpl !== "function") {
+    throw new TypeError("clearTimeoutImpl must be a function");
   }
   const initialBackoff = positiveBackoffMs(initialQuotaBackoffMs, "initialQuotaBackoffMs");
   const maxBackoff = positiveBackoffMs(maxQuotaBackoffMs, "maxQuotaBackoffMs");
@@ -300,9 +310,29 @@ export function createGrokBotWakeBridge({
   // Keyed by binding.instanceId (one bridge owns one Bob profile binding).
   /** @type {{ instanceId: string, untilMs: number, backoffMs: number, alertLogged: boolean } | null} */
   let quotaBackoff = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let retryTimer = null;
+  /** Highest watermark that still needs a wake after the circuit opens. */
+  let pendingRetryWatermark = null;
+  /** Circuit expiry the current retry timer is armed for. */
+  let pendingRetryUntilMs = null;
+
+  function clearPendingRetryTimer() {
+    if (retryTimer != null) {
+      clearTimeoutImpl(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function cancelPendingRetry() {
+    clearPendingRetryTimer();
+    pendingRetryWatermark = null;
+    pendingRetryUntilMs = null;
+  }
 
   function clearQuotaBackoff() {
     quotaBackoff = null;
+    cancelPendingRetry();
   }
 
   function openQuotaBackoff({ retryAfterMs = null } = {}) {
@@ -339,6 +369,50 @@ export function createGrokBotWakeBridge({
     return quotaBackoff;
   }
 
+  async function flushQuotaRetry() {
+    const highWatermark = pendingRetryWatermark;
+    pendingRetryWatermark = null;
+    pendingRetryUntilMs = null;
+    if (!Number.isSafeInteger(highWatermark) || highWatermark < 0) return;
+    const open = activeQuotaBackoff();
+    if (open) {
+      // Clock has not reached untilMs yet (or backoff was extended) — re-arm.
+      scheduleQuotaRetry(highWatermark, open.untilMs);
+      return;
+    }
+    try {
+      await handleWake({
+        instanceId: validated.instanceId,
+        highWatermark,
+        reason: "quota_backoff_retry",
+      });
+    } catch (error) {
+      logger.error?.("triangle_grok_bot_wake_failed", {
+        code: error?.code,
+        message: error?.message,
+        instanceId: validated.instanceId,
+        httpStatus: error?.status ?? null,
+        reason: "quota_backoff_retry",
+      });
+    }
+  }
+
+  function scheduleQuotaRetry(highWatermark, untilMs) {
+    if (!Number.isSafeInteger(highWatermark) || highWatermark < 0) return;
+    if (!Number.isSafeInteger(untilMs)) return;
+    pendingRetryWatermark = Math.max(pendingRetryWatermark ?? 0, highWatermark);
+    if (retryTimer != null && pendingRetryUntilMs === untilMs) {
+      return;
+    }
+    clearPendingRetryTimer();
+    pendingRetryUntilMs = untilMs;
+    const delayMs = Math.max(0, untilMs - now());
+    retryTimer = setTimeoutImpl(() => {
+      retryTimer = null;
+      return flushQuotaRetry();
+    }, delayMs);
+  }
+
   async function handleWake(wake) {
     if (wake?.instanceId !== validated.instanceId) return { status: "ignored_profile" };
     const highWatermark = wake.highWatermark;
@@ -348,12 +422,14 @@ export function createGrokBotWakeBridge({
 
     const open = activeQuotaBackoff();
     if (open) {
+      scheduleQuotaRetry(highWatermark, open.untilMs);
       return {
         status: "skipped_backoff",
         code: "webhook_quota_exhausted",
         instanceId: validated.instanceId,
         untilMs: open.untilMs,
         backoffMs: open.backoffMs,
+        pendingRetryWatermark,
       };
     }
 
@@ -370,7 +446,7 @@ export function createGrokBotWakeBridge({
 
     try {
       const result = await wakeDispatcher.deliver(payload);
-      // Successful delivery clears circuit + alert/logging state.
+      // Successful delivery clears circuit + alert/logging state + armed retry.
       clearQuotaBackoff();
       return result;
     } catch (error) {
@@ -380,6 +456,7 @@ export function createGrokBotWakeBridge({
       if (!quotaExhausted) throw error;
 
       const state = openQuotaBackoff({ retryAfterMs: error?.retryAfterMs ?? null });
+      scheduleQuotaRetry(highWatermark, state.untilMs);
       if (!state.alertLogged) {
         logger.error?.("triangle_grok_bot_quota_backoff", {
           code: "webhook_quota_exhausted",
@@ -399,6 +476,7 @@ export function createGrokBotWakeBridge({
         instanceId: validated.instanceId,
         untilMs: state.untilMs,
         backoffMs: state.backoffMs,
+        pendingRetryWatermark,
       };
     }
   }
@@ -416,12 +494,13 @@ export function createGrokBotWakeBridge({
 
     getQuotaBackoffState() {
       const open = activeQuotaBackoff();
-      if (!open) return null;
+      if (!open && pendingRetryWatermark == null) return null;
       return Object.freeze({
-        instanceId: open.instanceId,
-        untilMs: open.untilMs,
-        backoffMs: open.backoffMs,
-        alertLogged: open.alertLogged,
+        instanceId: validated.instanceId,
+        untilMs: open?.untilMs ?? pendingRetryUntilMs,
+        backoffMs: open?.backoffMs ?? null,
+        alertLogged: open?.alertLogged ?? false,
+        pendingRetryWatermark,
       });
     },
 
@@ -443,6 +522,10 @@ export function createGrokBotWakeBridge({
           signal,
         });
       }
+      const onAbort = () => {
+        cancelPendingRetry();
+      };
+      signal?.addEventListener?.("abort", onAbort, { once: true });
       wakeClient = wakeClientFactory({
         profiles: wakeProfiles,
         transport: watchTransport,
@@ -480,11 +563,14 @@ export function createGrokBotWakeBridge({
         }
         wakeClient = null;
         started = false;
+        cancelPendingRetry();
+        signal?.removeEventListener?.("abort", onAbort);
         throw error;
       }
     },
 
     async stop() {
+      cancelPendingRetry();
       await wakeClient?.stop();
       wakeClient = null;
       started = false;
