@@ -1,5 +1,4 @@
 import { forwardGatewayRequest } from "../../_gateway-route.mjs";
+import { createGatewayRouteHandlers } from "@the-triangle/a2a-gateway/next";
 
-export function POST(request) {
-  return forwardGatewayRequest(request);
-}
+export const { POST } = createGatewayRouteHandlers(forwardGatewayRequest, ["POST"]);
