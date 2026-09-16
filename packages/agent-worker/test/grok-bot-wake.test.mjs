@@ -10,6 +10,8 @@ import {
   createGrokBotWakeBridge,
   createGrokBotWakeDispatcher,
   createMemoryCursorStore,
+  isWebhookQuotaExhaustion,
+  parseRetryAfterMs,
   readWebhookCredentials,
   validateGrokBotBinding,
 } from "../src/grok-bot-wake.mjs";
@@ -272,4 +274,405 @@ test("atomic cursor file uses {\"cursor\":N} shape", async () => {
     assert.deepEqual(JSON.parse(raw), { cursor: 17 });
     assert.equal(await store.read(), 17);
   });
+});
+
+test("parseRetryAfterMs and isWebhookQuotaExhaustion classify quota signals", () => {
+  assert.equal(parseRetryAfterMs("120"), 120_000);
+  assert.equal(parseRetryAfterMs(""), null);
+  assert.equal(parseRetryAfterMs("not-a-date"), null);
+  const now = Date.parse("Thu, 01 Jan 2026 00:00:00 GMT");
+  assert.equal(
+    parseRetryAfterMs("Thu, 01 Jan 2026 00:00:30 GMT", { now }),
+    30_000,
+  );
+  assert.equal(isWebhookQuotaExhaustion({ status: 429 }), true);
+  assert.equal(isWebhookQuotaExhaustion({ status: 503, bodyText: "busy" }), false);
+  assert.equal(
+    isWebhookQuotaExhaustion({ status: 503, bodyText: '{"error":"resource_exhausted"}' }),
+    true,
+  );
+});
+
+test("dispatcher marks 429 as webhook_quota_exhausted and honors Retry-After", async () => {
+  await withWebhookServer(({ res }) => {
+    res.writeHead(429, {
+      "Content-Type": "application/json",
+      "Retry-After": "90",
+    });
+    res.end(JSON.stringify({ error: "resource_exhausted" }));
+  }, async (httpUrl) => {
+    const dispatcher = createGrokBotWakeDispatcher({
+      async readCredentials() {
+        return { url: httpUrl, key: "test-webhook-key-value" };
+      },
+      webhookUrlPath: "/private/grok-bot-webhook.url",
+      webhookKeyPath: "/private/grok-bot-webhook.key",
+    });
+    await assert.rejects(
+      () => dispatcher.deliver({
+        source: "triangle-client",
+        type: "mesh.mailbox.wake",
+        installationId,
+        instanceId,
+        agentId,
+        profile,
+        highWatermark: 1,
+        reason: "wake",
+      }),
+      (error) =>
+        error.code === "webhook_quota_exhausted"
+        && error.status === 429
+        && error.quotaExhausted === true
+        && error.retryAfterMs === 90_000,
+    );
+  });
+});
+
+test("wake bridge opens instance-keyed backoff on 429 and skips POSTs until reset", async () => {
+  let calls = 0;
+  let clock = 1_000_000;
+  const logs = [];
+  const timers = new Map();
+  let nextTimerId = 1;
+  await withWebhookServer(({ res }) => {
+    calls += 1;
+    if (calls === 1) {
+      res.writeHead(429, {
+        "Content-Type": "application/json",
+        "Retry-After": "30",
+      });
+      res.end(JSON.stringify({ error: "resource_exhausted" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  }, async (httpUrl) => {
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({ polls: [] }),
+      initialQuotaBackoffMs: 10_000,
+      maxQuotaBackoffMs: 60_000,
+      now: () => clock,
+      setTimeoutImpl(fn, ms) {
+        const id = nextTimerId++;
+        timers.set(id, { fn, fireAt: clock + ms });
+        return id;
+      },
+      clearTimeoutImpl(id) {
+        timers.delete(id);
+      },
+      dispatcher: createGrokBotWakeDispatcher({
+        async readCredentials() {
+          return { url: httpUrl, key: "test-webhook-key-value" };
+        },
+        webhookUrlPath: "/private/grok-bot-webhook.url",
+        webhookKeyPath: "/private/grok-bot-webhook.key",
+        now: () => clock,
+      }),
+      logger: {
+        error(event, detail) {
+          logs.push({ event, detail });
+        },
+      },
+    });
+
+    const first = await bridge.handleWake({
+      instanceId,
+      highWatermark: 3,
+      reason: "wake",
+    });
+    assert.equal(first.status, "backoff");
+    assert.equal(first.code, "webhook_quota_exhausted");
+    assert.equal(first.httpStatus, 429);
+    assert.equal(first.backoffMs, 30_000); // Retry-After wins over initial 10s
+    assert.equal(first.untilMs, clock + 30_000);
+    assert.equal(first.pendingRetryWatermark, 3);
+    assert.equal(calls, 1);
+    assert.equal(bridge.getQuotaBackoffState()?.instanceId, instanceId);
+    assert.equal(timers.size, 1);
+    assert.equal(
+      logs.filter((entry) => entry.event === "triangle_grok_bot_quota_backoff").length,
+      1,
+    );
+    assert.equal(
+      logs.filter((entry) => entry.event === "triangle_grok_bot_wake_failed").length,
+      0,
+    );
+
+    // Subsequent hints during the window must not POST or re-alert.
+    const skipped = await bridge.handleWake({
+      instanceId,
+      highWatermark: 4,
+      reason: "wake",
+    });
+    assert.equal(skipped.status, "skipped_backoff");
+    assert.equal(skipped.untilMs, clock + 30_000);
+    assert.equal(skipped.pendingRetryWatermark, 4);
+    assert.equal(calls, 1);
+    assert.equal(timers.size, 1); // same untilMs — do not double-arm
+    assert.equal(
+      logs.filter((entry) => entry.event === "triangle_grok_bot_quota_backoff").length,
+      1,
+    );
+
+    // After the window expires, delivery resumes and clears alert/backoff state.
+    clock += 30_000;
+    assert.equal(bridge.getQuotaBackoffState()?.pendingRetryWatermark, 4);
+    const recovered = await bridge.handleWake({
+      instanceId,
+      highWatermark: 5,
+      reason: "wake",
+    });
+    assert.equal(recovered.status, "accepted");
+    assert.equal(calls, 2);
+    assert.equal(bridge.getQuotaBackoffState(), null);
+    assert.equal(timers.size, 0);
+    assert.ok(logs.every((entry) => !JSON.stringify(entry).includes("test-webhook-key-value")));
+    assert.ok(logs.every((entry) => !JSON.stringify(entry).includes(httpUrl)));
+  });
+});
+
+test("wake bridge does not open backoff on non-quota webhook failures", async () => {
+  let calls = 0;
+  const logs = [];
+  await withWebhookServer(({ res }) => {
+    calls += 1;
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "busy" }));
+  }, async (httpUrl) => {
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({ polls: [] }),
+      dispatcher: createGrokBotWakeDispatcher({
+        async readCredentials() {
+          return { url: httpUrl, key: "test-webhook-key-value" };
+        },
+        webhookUrlPath: "/private/grok-bot-webhook.url",
+        webhookKeyPath: "/private/grok-bot-webhook.key",
+      }),
+      logger: {
+        error(event, detail) {
+          logs.push({ event, detail });
+        },
+      },
+    });
+
+    await assert.rejects(
+      () => bridge.handleWake({ instanceId, highWatermark: 1, reason: "wake" }),
+      (error) => error.code === "webhook_rejected" && error.status === 503,
+    );
+    assert.equal(bridge.getQuotaBackoffState(), null);
+
+    await assert.rejects(
+      () => bridge.handleWake({ instanceId, highWatermark: 2, reason: "wake" }),
+      (error) => error.code === "webhook_rejected",
+    );
+    assert.equal(calls, 2);
+    assert.equal(logs.length, 0); // handleWake rethrows; start()/onWake owns wake_failed logs
+  });
+});
+
+test("watch loop skips webhook POSTs while quota backoff is open", async () => {
+  let calls = 0;
+  let clock = 5_000_000;
+  const logs = [];
+  const timers = new Map();
+  let nextTimerId = 1;
+  await withWebhookServer(({ res }) => {
+    calls += 1;
+    res.writeHead(429, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "resource_exhausted" }));
+  }, async (httpUrl) => {
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({
+        polls: [
+          { cursor: 1, events: [] },
+          { cursor: 5, events: [{ agent_id: agentId, high_watermark: 5 }] },
+          { cursor: 8, events: [{ agent_id: agentId, high_watermark: 8 }] },
+        ],
+      }),
+      cursorStore: createMemoryCursorStore(0),
+      coalesceMs: 5,
+      initialQuotaBackoffMs: 60_000,
+      maxQuotaBackoffMs: 60_000,
+      now: () => clock,
+      setTimeoutImpl(fn, ms) {
+        const id = nextTimerId++;
+        timers.set(id, { fn, fireAt: clock + ms });
+        return id;
+      },
+      clearTimeoutImpl(id) {
+        timers.delete(id);
+      },
+      dispatcher: createGrokBotWakeDispatcher({
+        async readCredentials() {
+          return { url: httpUrl, key: "test-webhook-key-value" };
+        },
+        webhookUrlPath: "/private/grok-bot-webhook.url",
+        webhookKeyPath: "/private/grok-bot-webhook.key",
+        now: () => clock,
+      }),
+      logger: {
+        error(event, detail) {
+          logs.push({ event, detail });
+        },
+      },
+    });
+
+    const result = await bridge.start({ maxCycles: 3 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(result.cycles, 3);
+    // startup_reconcile opens backoff; later wakes are skipped without POSTs.
+    assert.equal(calls, 1);
+    assert.equal(timers.size, 1);
+    assert.equal(
+      logs.filter((entry) => entry.event === "triangle_grok_bot_quota_backoff").length,
+      1,
+    );
+    assert.equal(
+      logs.filter((entry) => entry.event === "triangle_grok_bot_wake_failed").length,
+      0,
+    );
+    assert.equal(bridge.getQuotaBackoffState()?.backoffMs, 60_000);
+    await bridge.stop();
+    assert.equal(timers.size, 0);
+  });
+});
+
+test("quota backoff schedules autonomous retry without a new MESH event", async () => {
+  let calls = 0;
+  let clock = 2_000_000;
+  const posted = [];
+  const timers = new Map();
+  let nextTimerId = 1;
+
+  async function runDueTimers() {
+    const due = [...timers.entries()]
+      .filter(([, timer]) => timer.fireAt <= clock)
+      .sort((a, b) => a[1].fireAt - b[1].fireAt);
+    for (const [id, timer] of due) {
+      timers.delete(id);
+      await timer.fn();
+    }
+  }
+
+  await withWebhookServer(({ req, body, res }) => {
+    calls += 1;
+    posted.push({
+      auth: req.headers.authorization,
+      payload: JSON.parse(body),
+    });
+    if (calls === 1) {
+      res.writeHead(429, {
+        "Content-Type": "application/json",
+        "Retry-After": "15",
+      });
+      res.end(JSON.stringify({ error: "resource_exhausted" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  }, async (httpUrl) => {
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({ polls: [] }),
+      initialQuotaBackoffMs: 10_000,
+      maxQuotaBackoffMs: 60_000,
+      now: () => clock,
+      setTimeoutImpl(fn, ms) {
+        const id = nextTimerId++;
+        timers.set(id, { fn, fireAt: clock + ms });
+        return id;
+      },
+      clearTimeoutImpl(id) {
+        timers.delete(id);
+      },
+      dispatcher: createGrokBotWakeDispatcher({
+        async readCredentials() {
+          return { url: httpUrl, key: "test-webhook-key-value" };
+        },
+        webhookUrlPath: "/private/grok-bot-webhook.url",
+        webhookKeyPath: "/private/grok-bot-webhook.key",
+        now: () => clock,
+      }),
+      logger: { error() {} },
+    });
+
+    const first = await bridge.handleWake({
+      instanceId,
+      highWatermark: 7,
+      reason: "wake",
+    });
+    assert.equal(first.status, "backoff");
+    assert.equal(calls, 1);
+    assert.equal(timers.size, 1);
+    assert.equal(bridge.getQuotaBackoffState()?.pendingRetryWatermark, 7);
+
+    // No additional MESH event — only the armed untilMs retry may POST again.
+    clock += 15_000;
+    await runDueTimers();
+    assert.equal(calls, 2);
+    assert.equal(posted[1].payload.highWatermark, 7);
+    assert.equal(posted[1].payload.reason, "quota_backoff_retry");
+    assert.equal(posted[1].auth, "Bearer test-webhook-key-value");
+    assert.equal(bridge.getQuotaBackoffState(), null);
+    assert.equal(timers.size, 0);
+    assert.ok(posted.every((entry) => !JSON.stringify(entry).includes(httpUrl)));
+  });
+});
+
+test("an in-flight quota retry cannot re-arm after bridge stop", async () => {
+  let clock = 3_000_000;
+  let calls = 0;
+  let releaseRetry;
+  const timers = new Map();
+  let nextTimerId = 1;
+  const quotaError = () => Object.assign(new Error("quota exhausted"), {
+    code: "webhook_quota_exhausted",
+    quotaExhausted: true,
+    status: 429,
+  });
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    initialQuotaBackoffMs: 10_000,
+    maxQuotaBackoffMs: 60_000,
+    now: () => clock,
+    setTimeoutImpl(fn, ms) {
+      const id = nextTimerId++;
+      timers.set(id, { fn, fireAt: clock + ms });
+      return id;
+    },
+    clearTimeoutImpl(id) {
+      timers.delete(id);
+    },
+    dispatcher: {
+      async deliver() {
+        calls += 1;
+        if (calls === 1) throw quotaError();
+        return new Promise((resolve, reject) => {
+          releaseRetry = () => reject(quotaError());
+        });
+      },
+    },
+    logger: { error() {} },
+  });
+
+  const first = await bridge.handleWake({ instanceId, highWatermark: 9, reason: "wake" });
+  assert.equal(first.status, "backoff");
+  clock += 10_000;
+  const [[timerId, timer]] = timers;
+  timers.delete(timerId);
+  const retry = timer.fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+
+  await bridge.stop();
+  releaseRetry();
+  await retry;
+
+  assert.equal(timers.size, 0);
+  assert.equal(bridge.getQuotaBackoffState(), null);
 });
