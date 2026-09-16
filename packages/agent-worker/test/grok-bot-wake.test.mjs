@@ -621,3 +621,58 @@ test("quota backoff schedules autonomous retry without a new MESH event", async 
     assert.ok(posted.every((entry) => !JSON.stringify(entry).includes(httpUrl)));
   });
 });
+
+test("an in-flight quota retry cannot re-arm after bridge stop", async () => {
+  let clock = 3_000_000;
+  let calls = 0;
+  let releaseRetry;
+  const timers = new Map();
+  let nextTimerId = 1;
+  const quotaError = () => Object.assign(new Error("quota exhausted"), {
+    code: "webhook_quota_exhausted",
+    quotaExhausted: true,
+    status: 429,
+  });
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    initialQuotaBackoffMs: 10_000,
+    maxQuotaBackoffMs: 60_000,
+    now: () => clock,
+    setTimeoutImpl(fn, ms) {
+      const id = nextTimerId++;
+      timers.set(id, { fn, fireAt: clock + ms });
+      return id;
+    },
+    clearTimeoutImpl(id) {
+      timers.delete(id);
+    },
+    dispatcher: {
+      async deliver() {
+        calls += 1;
+        if (calls === 1) throw quotaError();
+        return new Promise((resolve, reject) => {
+          releaseRetry = () => reject(quotaError());
+        });
+      },
+    },
+    logger: { error() {} },
+  });
+
+  const first = await bridge.handleWake({ instanceId, highWatermark: 9, reason: "wake" });
+  assert.equal(first.status, "backoff");
+  clock += 10_000;
+  const [[timerId, timer]] = timers;
+  timers.delete(timerId);
+  const retry = timer.fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+
+  await bridge.stop();
+  releaseRetry();
+  await retry;
+
+  assert.equal(timers.size, 0);
+  assert.equal(bridge.getQuotaBackoffState(), null);
+});

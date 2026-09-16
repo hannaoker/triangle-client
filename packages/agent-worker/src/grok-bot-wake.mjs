@@ -316,6 +316,9 @@ export function createGrokBotWakeBridge({
   let pendingRetryWatermark = null;
   /** Circuit expiry the current retry timer is armed for. */
   let pendingRetryUntilMs = null;
+  /** Invalidates webhook attempts that outlive stop/abort. */
+  let retryGeneration = 0;
+  let retriesEnabled = true;
 
   function clearPendingRetryTimer() {
     if (retryTimer != null) {
@@ -333,6 +336,12 @@ export function createGrokBotWakeBridge({
   function clearQuotaBackoff() {
     quotaBackoff = null;
     cancelPendingRetry();
+  }
+
+  function deactivateRetries() {
+    retriesEnabled = false;
+    retryGeneration += 1;
+    clearQuotaBackoff();
   }
 
   function openQuotaBackoff({ retryAfterMs = null } = {}) {
@@ -369,7 +378,8 @@ export function createGrokBotWakeBridge({
     return quotaBackoff;
   }
 
-  async function flushQuotaRetry() {
+  async function flushQuotaRetry(generation) {
+    if (!retriesEnabled || generation !== retryGeneration) return;
     const highWatermark = pendingRetryWatermark;
     pendingRetryWatermark = null;
     pendingRetryUntilMs = null;
@@ -398,6 +408,7 @@ export function createGrokBotWakeBridge({
   }
 
   function scheduleQuotaRetry(highWatermark, untilMs) {
+    if (!retriesEnabled) return;
     if (!Number.isSafeInteger(highWatermark) || highWatermark < 0) return;
     if (!Number.isSafeInteger(untilMs)) return;
     pendingRetryWatermark = Math.max(pendingRetryWatermark ?? 0, highWatermark);
@@ -407,13 +418,16 @@ export function createGrokBotWakeBridge({
     clearPendingRetryTimer();
     pendingRetryUntilMs = untilMs;
     const delayMs = Math.max(0, untilMs - now());
+    const generation = retryGeneration;
     retryTimer = setTimeoutImpl(() => {
       retryTimer = null;
-      return flushQuotaRetry();
+      return flushQuotaRetry(generation);
     }, delayMs);
   }
 
   async function handleWake(wake) {
+    if (!retriesEnabled) return { status: "stopped" };
+    const generation = retryGeneration;
     if (wake?.instanceId !== validated.instanceId) return { status: "ignored_profile" };
     const highWatermark = wake.highWatermark;
     if (!Number.isSafeInteger(highWatermark) || highWatermark < 0) {
@@ -446,10 +460,12 @@ export function createGrokBotWakeBridge({
 
     try {
       const result = await wakeDispatcher.deliver(payload);
+      if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
       // Successful delivery clears circuit + alert/logging state + armed retry.
       clearQuotaBackoff();
       return result;
     } catch (error) {
+      if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
       const quotaExhausted = error?.code === "webhook_quota_exhausted"
         || error?.quotaExhausted === true
         || error?.status === 429;
@@ -509,6 +525,10 @@ export function createGrokBotWakeBridge({
       if (!validated.enabled) {
         return { status: "disabled" };
       }
+      if (!retriesEnabled) {
+        retriesEnabled = true;
+        retryGeneration += 1;
+      }
       if (ensureBeforeWatch) {
         const id = installationId ?? validated.installationId;
         const profile = actorProfile ?? validated.profile;
@@ -523,7 +543,7 @@ export function createGrokBotWakeBridge({
         });
       }
       const onAbort = () => {
-        cancelPendingRetry();
+        deactivateRetries();
       };
       signal?.addEventListener?.("abort", onAbort, { once: true });
       wakeClient = wakeClientFactory({
@@ -563,14 +583,14 @@ export function createGrokBotWakeBridge({
         }
         wakeClient = null;
         started = false;
-        cancelPendingRetry();
+        deactivateRetries();
         signal?.removeEventListener?.("abort", onAbort);
         throw error;
       }
     },
 
     async stop() {
-      cancelPendingRetry();
+      deactivateRetries();
       await wakeClient?.stop();
       wakeClient = null;
       started = false;
