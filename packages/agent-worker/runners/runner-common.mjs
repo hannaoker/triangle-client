@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, globSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
 
 const MAX_BYTES = 1024 * 1024;
@@ -320,4 +321,25 @@ export function invoke(command, args, { input, sandbox = sandboxCommand, env = p
 
 export function writeResult(text, stream = process.stdout) {
   stream.write(`${JSON.stringify({ status: "completed", text })}\n`);
+}
+
+export function createAgentPrompt(request, { guidance }) {
+  return [
+    "You are responding to an authenticated A2A peer message in The Triangle.",
+    `Sender agent: ${request.senderId}`,
+    `Context: ${request.contextId}`,
+    guidance,
+    "Return only the reply that should be sent to the peer; do not include routing metadata.",
+    "",
+    request.text,
+  ].join("\n");
+}
+
+export function runAsCli(moduleUrl, main, failureLabel) {
+  if (process.argv[1] && moduleUrl === pathToFileURL(process.argv[1]).href) {
+    main().catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.message : failureLabel}\n`);
+      process.exitCode = 1;
+    });
+  }
 }

@@ -3,13 +3,12 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { buildAgentCard, createProtocolHandler, preflightProtocolRequest } = require("./protocol.cjs");
+const { RETIRED_PATHS } = require("./retired-paths.cjs");
 
 export const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024;
 export const MAX_INBOX_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_INBOX_PAGE_LIMIT = 50;
 export const MAX_INBOX_PAGE_LIMIT = 100;
-
-const RETIRED_PATHS = new Set(["/inbox", "/inbox/ack", "/internal/tasks/update"]);
 class InvalidJsonError extends Error {}
 class RequestTooLargeError extends Error {}
 

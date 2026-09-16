@@ -2,7 +2,6 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -27,21 +26,11 @@ test("protocol exposes only the bridge projection surface", () => {
   ]);
 });
 
-test("local file-state compatibility validates without importing protocol internals", () => {
-  const source = fs.readFileSync(
-    path.join(__dirname, "../src/state-store.cjs"),
-    "utf8",
+test("local file-state store is removed from the gateway package", () => {
+  assert.equal(
+    fs.existsSync(path.join(__dirname, "../src/state-store.cjs")),
+    false,
   );
-  assert.doesNotMatch(source, /require\(["']\.\/protocol\.cjs["']\)/);
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "triangle-state-"));
-  try {
-    const { createStateStore } = require("../src/state-store.cjs");
-    const store = createStateStore({ directory });
-    assert.deepEqual(store.state, { inbox: [], tasks: {} });
-    assert.doesNotThrow(() => store.save(store.state));
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
 });
 
 const origin = "http://localhost:3002";
