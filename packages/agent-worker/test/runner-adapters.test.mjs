@@ -372,6 +372,15 @@ test("installed Hermes and Codex help run under Keychain-launched deny-default s
   const interpreterPath = readFileSync(entry, "utf8").split(/\r?\n/, 1)[0]?.replace(/^#!/, "").split(/\s+/, 1)[0];
   assert.equal(typeof interpreterPath, "string", "installed Hermes entrypoint lacks an interpreter");
   hermesRuntimeRoots.add(dirname(dirname(realpathSync(interpreterPath))));
+  // Pitfall 20 / mesh-a2a-interop: uv-managed venvs keep stdlib (encodings) under pyvenv.cfg home=.
+  const pyvenvCfg = join(venv, "pyvenv.cfg");
+  if (existsSync(pyvenvCfg)) {
+    const homeMatch = readFileSync(pyvenvCfg, "utf8").match(/^home\s*=\s*(.+)$/m);
+    const pythonHome = homeMatch?.[1]?.trim();
+    assert.equal(typeof pythonHome, "string", "Hermes pyvenv.cfg lacks an absolute home path");
+    assert.ok(pythonHome.startsWith("/") && existsSync(pythonHome), "Hermes pyvenv.cfg home must exist");
+    hermesRuntimeRoots.add(realpathSync(pythonHome));
+  }
   for (const finder of globSync(join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py"))) {
     const mapping = readFileSync(finder, "utf8").match(/^MAPPING:.*$/m)?.[0] || "";
     for (const match of mapping.matchAll(/'([^']+)'/g)) {
