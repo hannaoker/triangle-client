@@ -45,7 +45,7 @@ dedicated `TRIANGLE_CODEX_HOME`; never fall back to `~/.codex`.
 | Circuit breaker | Per-slot exponential backoff + jitter; `pool_circuit_open` when all open |
 | Cancel / timeout with multi-slot | Owning handle / `getActiveHandle({ slotId })`; restart owning slot only |
 | Global `featureFlags.headlessRuntime` | **`false`** |
-| Desktop handoff | **Still disabled** |
+| Desktop handoff | **Still disabled in Phase 3** (see Phase 4) |
 
 Phase 3 raises the pool **only** for shadow/test profiles behind the existing
 opt-in. Production desktop / mcp-interactive paths must not flip to multi-slot.
@@ -71,7 +71,42 @@ opt-in. Production desktop / mcp-interactive paths must not flip to multi-slot.
 
 3. Keep dedicated `TRIANGLE_CODEX_HOME` (never `~/.codex`). Leave desktop
    `appServerWake` / mcp-interactive profiles untouched.
-4. Phase 3 does **not** enable desktop handoff or production multi-slot.
+4. Phase 3 does **not** enable desktop handoff or production multi-slot; see
+   Phase 4 for the optional handoff opt-in.
+
+## Phase 4 status (optional desktop handoff, shadow / test only)
+
+| Item | Status |
+| --- | --- |
+| Idle-only CAS ownership transfer | **Shipped** (`execution-lease.mjs` transfer primitives) |
+| Headless→desktop + desktop→headless | **Shipped** (`desktop-handoff.mjs`) |
+| Pre-commit rollback / post-commit freeze | **Shipped** |
+| `recover-desktop` / `rollback-headless` | **Shipped** (synthetic desktop; no live ChatGPT.app in CI) |
+| Global `featureFlags.desktopHandoff` | **`false`** |
+| Manifest `sharedHomeConcurrency.desktopHandoffEnabled` | **`false`** |
+| Production Shared App Server / `appServerWake` | **Unchanged** (runbook retained) |
+
+Phase 4 does **not** flip production defaults or make handoff automatic on wake.
+Dedicated `TRIANGLE_CODEX_HOME` remains required; never fall back to `~/.codex`.
+
+### Operator: enable Phase 4 handoff for shadow experiments only
+
+1. Use an isolated shadow test profile (same shape as Phase 1–3).
+2. Opt in explicitly:
+
+   ```sh
+   export TRIANGLE_HEADLESS_SHADOW_ENABLE=1
+   export TRIANGLE_DESKTOP_HANDOFF_ENABLE=1
+   ```
+
+   Or in tests: `resolvePhase4DesktopHandoffConfig(profile, { enableHandoff: true })`.
+
+3. Do **not** set `sharedHomeConcurrency.desktopHandoffEnabled` / 
+   `featureFlags.desktopHandoff` true in the default immutable manifest until
+   Phase 5 gates pass. Production desktop wake stays on Shared App Server —
+   see `docs/triangle-client/shared-codex-app-server-runbook.md`.
+4. Handoff is explicit API/operator only (`handoffToDesktop` /
+   `handoffToHeadless` / `recoverDesktop` / `rollbackHeadless`); never on wake.
 
 ## Gap
 
@@ -139,7 +174,9 @@ ordering is regression-covered without ChatGPT.app.
 
 **Update:** Mini live probe later **passed**; manifest `sharedHomeConcurrency.status`
 is now `passed`. Phase 3 raises `forcedPoolSize` to **4** (absolute cap) while
-shadow preferred size defaults to **2**. Desktop handoff remains disabled.
+shadow preferred size defaults to **2**. Phase 4 ships idle-only desktop handoff
+behind an explicit shadow opt-in; default `desktopHandoffEnabled` /
+`featureFlags.desktopHandoff` remain **false**.
 
 ### Mini live re-run steps (historical; probe already passed)
 

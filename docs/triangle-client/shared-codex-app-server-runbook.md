@@ -227,6 +227,7 @@ Durable files (operator-local; never commit secrets):
 | [HANDOFF-appserver-wake-2026-09-13.md](HANDOFF-appserver-wake-2026-09-13.md) | Unattended loop status and Mini incident notes |
 | [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md) | Bob vs Codex host split; bind semantics |
 | [skills/triangle-mesh-a2a/SKILL.md](../../skills/triangle-mesh-a2a/SKILL.md) | In-session bind instructions for agents |
+| [2026-09-20-headless-codex-worker-runtime-design.md](2026-09-20-headless-codex-worker-runtime-design.md) | Headless pool + optional Phase 4 idle handoff (does **not** replace this runbook) |
 | [e2e-operator-runbook.md](e2e-operator-runbook.md) | Clean-Mac install → enroll → watch |
 | [shared-codex-server-prototype.md](shared-codex-server-prototype.md) | Early prototype notes (not the LaunchAgent path) |
 

@@ -1,6 +1,6 @@
 # Headless Codex worker runtime with optional desktop handoff
 
-Status: **Phase 0–3 complete for shadow/test (preferred pool 2, cap 4); Phase 4 desktop handoff next**  
+Status: **Phase 0–4 complete for shadow/test (preferred pool 2, cap 4; desktop handoff opt-in only); Phase 5 default migration not started**  
 Date: 2026-09-20  
 Owner: Triangle Client  
 Target repository: `triangle-client`
@@ -913,8 +913,8 @@ interrupts via the owning delivery handle or
 returns null / fail closed). Quarantine / timeout restarts **only** the owning
 `slotId` so sibling healthy slots keep serving.
 
-**Not in Phase 3:** desktop handoff (Phase 4), default migration / production
-flip (Phase 5).
+**Not in Phase 3:** desktop handoff (Phase 4 — **shipped**, opt-in only), default
+migration / production flip (Phase 5).
 
 ##### Focused verification
 
@@ -937,6 +937,68 @@ bounded backoff; do not claim or busy-loop.
 - Add explicit idle-only ownership transfer.
 - Prove both directions and rollback behavior.
 - Retain the existing Shared App Server runbook.
+
+#### Phase 4 implementation status (2026-09-20)
+
+Shipped under `packages/agent-worker/src/codex-runtime/` behind an **explicit**
+shadow / test opt-in. Global `featureFlags.desktopHandoff` and
+`sharedHomeConcurrency.desktopHandoffEnabled` stay **false**. Production
+`appServerWake` / mcp-interactive Shared App Server remains the production path
+(see [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md)).
+
+| Piece | Module |
+| --- | --- |
+| Idle-only CAS transfer (`owned` → `transferring` → `owned`) | `execution-lease.mjs` (`beginTransfer` / `commitTransfer` / `rollbackTransfer` / `freezeAdmissionAfterCommit`) |
+| Handoff controller + operator recover/rollback | `desktop-handoff.mjs` |
+| Synthetic desktop owner (fake App Server; no ChatGPT.app) | `createFakeDesktopOwner` |
+| Shadow opt-in resolver | `resolvePhase4DesktopHandoffConfig` |
+| Focused suite | `desktop-handoff.test.mjs` |
+
+**Gates (fail closed):**
+
+- Reject handoff while any conversation is non-idle, an open delivery exists, or
+  desktop approval/turn is outstanding.
+- Failure **before** commit rolls ownership back to the prior owner/mode.
+- Failure **after** commit retains desktop ownership and freezes admission until
+  `recover-desktop` or `rollback-headless`.
+- Transfer generations cannot `acquire` / `renew` (no admit / `turn/start`).
+- Handoff is never automatic on wake — explicit controller API only.
+
+**Not in Phase 4:** default migration / production profile flip (Phase 5). Do
+not make handoff the production path; keep Shared App Server runbook current.
+
+##### Operator enablement (shadow / test only)
+
+Manifest defaults keep handoff **off**. For a local shadow experiment only:
+
+1. Keep an isolated shadow test profile (`shadowTestProfile: true`, dedicated
+   `TRIANGLE_CODEX_HOME`, never `~/.codex`).
+2. Opt in without rewriting production defaults, either:
+
+   ```sh
+   export TRIANGLE_HEADLESS_SHADOW_ENABLE=1
+   export TRIANGLE_DESKTOP_HANDOFF_ENABLE=1
+   ```
+
+   or inject `enableHandoff: true` into `resolvePhase4DesktopHandoffConfig` in
+   tests.
+
+3. Optional later: set both `featureFlags.desktopHandoff` and
+   `sharedHomeConcurrency.desktopHandoffEnabled` true in a **local override**
+   after soak — not in the default immutable manifest until Phase 5 gates pass.
+
+4. Leave production `appServerWake` / mcp-interactive bindings untouched. Use
+   the Shared App Server runbook for desktop wake canaries.
+
+##### Focused verification
+
+```sh
+node --test packages/agent-worker/test/codex-runtime/*.test.mjs
+```
+
+Covers headless→desktop and desktop→headless idle success, reject while
+running/mid-approval, pre-commit rollback, post-commit freeze, `recover-desktop`,
+and `rollback-headless` against a synthetic desktop owner.
 
 ### Phase 5 — default migration
 
