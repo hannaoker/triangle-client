@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,7 +46,7 @@ test("stdio wrapper initialize / thread / turn against fake App Server", async (
 
   try {
     const started = await processHandle.start();
-    assert.equal(started.codexHome, home);
+    assert.equal(started.codexHome, realpathSync(home));
     assert.ok(!JSON.stringify(processHandle.status()).includes("mesh_"));
 
     const init = await processHandle.initialize({ name: "triangle-test", version: "0.0.0" });

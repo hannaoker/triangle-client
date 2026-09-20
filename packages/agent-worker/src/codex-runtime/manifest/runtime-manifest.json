@@ -1,15 +1,16 @@
 {
   "manifestVersion": 1,
   "immutable": true,
-  "generatedAt": "2026-09-20T20:45:00.000Z",
+  "generatedAt": "2026-09-20T20:54:03.560Z",
   "provenance": {
-    "source": "openai/codex app-server-protocol schema artifact",
-    "artifact": "codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
-    "sourceCommit": "2f34d236f533f5248263628e44d474616e545494",
-    "sourceUrl": "https://raw.githubusercontent.com/openai/codex/2f34d236f533f5248263628e44d474616e545494/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
-    "bundledCodexBinary": null,
-    "generationMode": "pinned-schema-artifact",
-    "gap": "This Linux Cloud Agent environment does not ship the Darwin ChatGPT.app / bundled Codex binary used on Mini. Enum allowlists were extracted from the upstream App Server v2 JSON Schema at the pinned commit above. Mini must re-pin from the exact local bundled binary before Phase 1 (see REPIN.md)."
+    "source": "bundled-codex-binary + schema artifact",
+    "artifact": "https://raw.githubusercontent.com/openai/codex/4607249e430dac1c961df4dc615beae88e33cec8/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
+    "sourceCommit": "4607249e430dac1c961df4dc615beae88e33cec8",
+    "sourceUrl": "https://raw.githubusercontent.com/openai/codex/4607249e430dac1c961df4dc615beae88e33cec8/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
+    "bundledCodexBinary": "codex-cli 0.155.0-alpha.9.2",
+    "generationMode": "mini-darwin-repin-with-schema-artifact",
+    "gap": "Bundled Codex binary does not emit App Server v2 JSON Schema; enums re-pinned from matching/proximate upstream schema artifact while recording local binary version 0.155.0-alpha.9.2. Live shared-home + clientUserMessageId survival still required.",
+    "bundledCodexBinaryPath": "/Applications/ChatGPT.app/Contents/Resources/codex"
   },
   "protocol": {
     "transport": "stdio-ndjson",
