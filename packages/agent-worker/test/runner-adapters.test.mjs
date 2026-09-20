@@ -368,6 +368,29 @@ test("uv-style pyvenv.cfg base prefix covers encodings (not just bin home)", () 
   }
 });
 
+test("pyvenv base-prefix resolution reports lexical symlink aliases needed by sandbox-exec", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "triangle-pyvenv-alias-")));
+  try {
+    const versionedPrefix = join(root, "uv", "python", "cpython-3.11.15-macos-aarch64-none");
+    const aliasPrefix = join(root, "uv", "python", "cpython-3.11-macos-aarch64-none");
+    mkdirSync(join(versionedPrefix, "bin"), { recursive: true });
+    symlinkSync(versionedPrefix, aliasPrefix);
+    const venv = join(root, "agent", ".venv");
+    mkdirSync(venv, { recursive: true });
+    writeFileSync(join(venv, "pyvenv.cfg"), `home = ${aliasPrefix}/bin\n`);
+    const aliases = [];
+    const basePrefix = resolvePyvenvBasePrefix(venv, {
+      onSymlinkAlias(alias) {
+        aliases.push(alias);
+      },
+    });
+    assert.equal(basePrefix, realpathSync(versionedPrefix));
+    assert.deepEqual(aliases, [aliasPrefix]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("installed Hermes and Codex help run under Keychain-launched deny-default sandboxes without provider calls", async (t) => {
   if (process.platform !== "darwin") return t.skip("Darwin sandbox profile");
   const availability = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1) (allow default)", "/usr/bin/true"]);
