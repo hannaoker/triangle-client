@@ -1,0 +1,91 @@
+{
+  "manifestVersion": 1,
+  "immutable": true,
+  "generatedAt": "2026-09-20T20:45:00.000Z",
+  "provenance": {
+    "source": "openai/codex app-server-protocol schema artifact",
+    "artifact": "codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
+    "sourceCommit": "2f34d236f533f5248263628e44d474616e545494",
+    "sourceUrl": "https://raw.githubusercontent.com/openai/codex/2f34d236f533f5248263628e44d474616e545494/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json",
+    "bundledCodexBinary": null,
+    "generationMode": "pinned-schema-artifact",
+    "gap": "This Linux Cloud Agent environment does not ship the Darwin ChatGPT.app / bundled Codex binary used on Mini. Enum allowlists were extracted from the upstream App Server v2 JSON Schema at the pinned commit above. Mini must re-pin from the exact local bundled binary before Phase 1 (see REPIN.md)."
+  },
+  "protocol": {
+    "transport": "stdio-ndjson",
+    "listenDefault": "stdio://",
+    "jsonrpcVersion": "2.0",
+    "methods": [
+      "initialize",
+      "initialized",
+      "thread/start",
+      "thread/resume",
+      "thread/read",
+      "turn/start",
+      "turn/interrupt"
+    ]
+  },
+  "approvalPolicy": {
+    "schemaDefinition": "AskForApproval",
+    "threadStartField": "approvalPolicy",
+    "stringEnumAllowlist": [
+      "untrusted",
+      "on-request",
+      "never"
+    ],
+    "objectFormsAllowed": [
+      "granular"
+    ],
+    "headlessDefault": "never",
+    "headlessAllowlist": [
+      "never"
+    ]
+  },
+  "sandboxMode": {
+    "schemaDefinition": "SandboxMode",
+    "threadStartField": "sandbox",
+    "stringEnumAllowlist": [
+      "read-only",
+      "workspace-write",
+      "danger-full-access"
+    ],
+    "headlessDefault": "workspace-write",
+    "headlessAllowlist": [
+      "read-only",
+      "workspace-write"
+    ]
+  },
+  "sandboxPolicy": {
+    "schemaDefinition": "SandboxPolicy",
+    "turnStartField": "sandboxPolicy",
+    "typeAllowlist": [
+      "dangerFullAccess",
+      "readOnly",
+      "externalSandbox",
+      "workspaceWrite"
+    ],
+    "headlessTypeAllowlist": [
+      "readOnly",
+      "workspaceWrite"
+    ]
+  },
+  "correlation": {
+    "preferredField": "clientUserMessageId",
+    "preferredFieldLocation": "turn/start params",
+    "survivesThreadReadAs": "thread.turns[].items[] userMessage.clientId (schema-supported; live survival unproved on Mini)",
+    "fallback": "input-preamble",
+    "preamblePattern": "^\\[\\[triangle-corr:([A-Za-z0-9._:-]{8,128})\\]\\]\\n",
+    "liveSurvivalStatus": "blocked-needs-mini-darwin"
+  },
+  "sharedHomeConcurrency": {
+    "status": "unproved",
+    "forcedPoolSize": 1,
+    "desktopHandoffEnabled": false,
+    "fallbackToUserCodexHomeForbidden": true
+  },
+  "featureFlags": {
+    "helperConversationStore": false,
+    "headlessRuntime": false,
+    "desktopHandoff": false
+  }
+}
