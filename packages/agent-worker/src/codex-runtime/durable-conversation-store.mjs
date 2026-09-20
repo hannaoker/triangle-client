@@ -240,6 +240,71 @@ export function createDurableConversationStore({
       active_mesh_room_id: record.active_mesh_room_id ?? null,
       updated_at: isoNow(now),
     };
+    // Phase 4 optional handoff metadata (identifiers only; never message text).
+    if (record.desktop_server_identity !== undefined) {
+      if (
+        record.desktop_server_identity != null &&
+        (typeof record.desktop_server_identity !== "string" ||
+          record.desktop_server_identity.length === 0 ||
+          record.desktop_server_identity.length > 200)
+      ) {
+        throw createCodedError("durable_store_invalid", "desktop_server_identity is invalid");
+      }
+      next.desktop_server_identity = record.desktop_server_identity;
+    }
+    if (record.chatgpt_attachment_state !== undefined) {
+      const allowed = new Set(["attached", "absent", "unknown", null]);
+      if (!allowed.has(record.chatgpt_attachment_state)) {
+        throw createCodedError("durable_store_invalid", "chatgpt_attachment_state is invalid");
+      }
+      next.chatgpt_attachment_state = record.chatgpt_attachment_state;
+    }
+    if (record.admission_frozen !== undefined) {
+      if (typeof record.admission_frozen !== "boolean") {
+        throw createCodedError("durable_store_invalid", "admission_frozen must be boolean");
+      }
+      next.admission_frozen = record.admission_frozen;
+    }
+    if (record.bound_codex_thread_id !== undefined) {
+      if (
+        record.bound_codex_thread_id != null &&
+        (typeof record.bound_codex_thread_id !== "string" ||
+          record.bound_codex_thread_id.length === 0)
+      ) {
+        throw createCodedError("durable_store_invalid", "bound_codex_thread_id is invalid");
+      }
+      next.bound_codex_thread_id = record.bound_codex_thread_id;
+    }
+    if (record.transfer_from_owner_instance_id !== undefined) {
+      if (
+        record.transfer_from_owner_instance_id != null &&
+        (typeof record.transfer_from_owner_instance_id !== "string" ||
+          !OWNER_ID.test(record.transfer_from_owner_instance_id))
+      ) {
+        throw createCodedError("durable_store_invalid", "transfer_from_owner_instance_id is invalid");
+      }
+      next.transfer_from_owner_instance_id = record.transfer_from_owner_instance_id;
+    }
+    if (record.transfer_from_runtime_mode !== undefined) {
+      if (
+        record.transfer_from_runtime_mode != null &&
+        record.transfer_from_runtime_mode !== "headless" &&
+        record.transfer_from_runtime_mode !== "desktop"
+      ) {
+        throw createCodedError("durable_store_invalid", "transfer_from_runtime_mode is invalid");
+      }
+      next.transfer_from_runtime_mode = record.transfer_from_runtime_mode;
+    }
+    if (record.transfer_from_generation !== undefined) {
+      if (
+        record.transfer_from_generation != null &&
+        (!Number.isSafeInteger(record.transfer_from_generation) ||
+          record.transfer_from_generation < 1)
+      ) {
+        throw createCodedError("durable_store_invalid", "transfer_from_generation is invalid");
+      }
+      next.transfer_from_generation = record.transfer_from_generation;
+    }
     if (typeof next.lease_expires_at !== "string" || next.lease_expires_at.length === 0) {
       throw createCodedError("durable_store_invalid", "lease_expires_at is required");
     }

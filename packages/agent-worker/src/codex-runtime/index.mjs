@@ -1,9 +1,10 @@
 /**
- * Headless Codex worker runtime surface (Phase 0–3).
+ * Headless Codex worker runtime surface (Phase 0–4).
  *
- * Phase 3 adds a bounded multi-slot pool (preferred 2, cap 4) for shadow test
- * profiles only. Production mcp-interactive / desktop profiles stay unchanged.
- * Global featureFlags.headlessRuntime and helperConversationStore remain false.
+ * Phase 4 adds optional idle-only desktop handoff behind an explicit shadow
+ * opt-in. Production mcp-interactive / desktop Shared App Server stays the
+ * default path. Global featureFlags.headlessRuntime, helperConversationStore,
+ * and desktopHandoff remain false.
  */
 
 export {
@@ -101,3 +102,9 @@ export {
 export { createCodexWorkerPool } from "./worker-pool.mjs";
 
 export { createHeadlessCodexRuntime } from "./headless-runtime.mjs";
+
+export {
+  createDesktopHandoffController,
+  createFakeDesktopOwner,
+  resolvePhase4DesktopHandoffConfig,
+} from "./desktop-handoff.mjs";

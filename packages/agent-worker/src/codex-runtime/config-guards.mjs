@@ -4,6 +4,8 @@
  * Phase 0 flags stay inactive for production.
  * Phase 1 adds an explicit shadow test-profile opt-in that never flips
  * production desktop / mcp-interactive profiles by default.
+ * Phase 4 desktop handoff stays off unless resolvePhase4DesktopHandoffConfig
+ * (or isDesktopHandoffEnabled) is explicitly opted in for shadow experiments.
  */
 
 import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
@@ -115,6 +117,8 @@ export function resolvePhase1ShadowRuntimeConfig(
     runtimeAdapter: profileConfig.runtimeAdapter ?? null,
     headlessRuntimeEnabled: isHeadlessRuntimeEnabled(manifest),
     helperConversationStoreEnabled: isHelperConversationStoreEnabled(manifest),
+    // Phase 4 handoff stays false on the Phase 1–3 shadow path unless the
+    // operator uses resolvePhase4DesktopHandoffConfig / TRIANGLE_DESKTOP_HANDOFF_ENABLE.
     desktopHandoffEnabled: false,
     pool,
     featureFlags: getFeatureFlags(manifest),
@@ -140,7 +144,7 @@ export function resolvePhase0RuntimeConfig(profileConfig = {}, { manifest = load
     runtimeMode: profileConfig.runtimeMode ?? "unchanged",
     headlessRuntimeEnabled: isHeadlessRuntimeEnabled(manifest),
     helperConversationStoreEnabled: isHelperConversationStoreEnabled(manifest),
-    desktopHandoffEnabled: false,
+    desktopHandoffEnabled: isDesktopHandoffEnabled(manifest),
     pool,
     featureFlags: getFeatureFlags(manifest),
     shadow: resolvePhase1ShadowRuntimeConfig(profileConfig, { manifest }),
