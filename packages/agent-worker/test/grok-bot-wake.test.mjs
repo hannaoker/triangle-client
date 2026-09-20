@@ -622,6 +622,55 @@ test("quota backoff schedules autonomous retry without a new MESH event", async 
   });
 });
 
+test("quota-expiry timer and simultaneous MESH wake share one webhook attempt", async () => {
+  let clock = 10_000;
+  let timerCallback = null;
+  const delivered = [];
+  let releaseDelivery;
+  const deliveryGate = new Promise((resolve) => {
+    releaseDelivery = resolve;
+  });
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    initialQuotaBackoffMs: 1_000,
+    maxQuotaBackoffMs: 1_000,
+    now: () => clock,
+    setTimeoutImpl(fn) {
+      timerCallback = fn;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+    dispatcher: {
+      async deliver(payload) {
+        delivered.push(payload);
+        if (delivered.length === 1) {
+          const error = new Error("quota exhausted");
+          error.code = "webhook_quota_exhausted";
+          error.status = 429;
+          throw error;
+        }
+        await deliveryGate;
+        return { status: "accepted" };
+      },
+    },
+    logger: { error() {} },
+  });
+
+  await bridge.handleWake({ instanceId, highWatermark: 1, reason: "wake" });
+  assert.equal(delivered.length, 1);
+  clock += 1_000;
+  const retry = timerCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  const concurrentWake = bridge.handleWake({ instanceId, highWatermark: 2, reason: "wake" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(delivered.length, 2, "concurrent expiry paths must not duplicate the webhook POST");
+
+  releaseDelivery();
+  await Promise.all([retry, concurrentWake]);
+  assert.equal(delivered.length, 2);
+});
+
 test("an in-flight quota retry cannot re-arm after bridge stop", async () => {
   let clock = 3_000_000;
   let calls = 0;

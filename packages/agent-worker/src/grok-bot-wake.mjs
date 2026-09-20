@@ -319,6 +319,8 @@ export function createGrokBotWakeBridge({
   /** Invalidates webhook attempts that outlive stop/abort. */
   let retryGeneration = 0;
   let retriesEnabled = true;
+  /** One webhook attempt at a time across timer and MESH wake paths. */
+  let wakeAttempt = null;
 
   function clearPendingRetryTimer() {
     if (retryTimer != null) {
@@ -425,14 +427,9 @@ export function createGrokBotWakeBridge({
     }, delayMs);
   }
 
-  async function handleWake(wake) {
-    if (!retriesEnabled) return { status: "stopped" };
+  async function performWake(wake) {
     const generation = retryGeneration;
-    if (wake?.instanceId !== validated.instanceId) return { status: "ignored_profile" };
     const highWatermark = wake.highWatermark;
-    if (!Number.isSafeInteger(highWatermark) || highWatermark < 0) {
-      throw new TypeError("wake.highWatermark is invalid");
-    }
 
     const open = activeQuotaBackoff();
     if (open) {
@@ -495,6 +492,23 @@ export function createGrokBotWakeBridge({
         pendingRetryWatermark,
       };
     }
+  }
+
+  function handleWake(wake) {
+    if (!retriesEnabled) return Promise.resolve({ status: "stopped" });
+    if (wake?.instanceId !== validated.instanceId) {
+      return Promise.resolve({ status: "ignored_profile" });
+    }
+    if (!Number.isSafeInteger(wake.highWatermark) || wake.highWatermark < 0) {
+      return Promise.reject(new TypeError("wake.highWatermark is invalid"));
+    }
+    if (wakeAttempt != null) return wakeAttempt;
+    const attempt = performWake(wake);
+    const tracked = attempt.finally(() => {
+      if (wakeAttempt === tracked) wakeAttempt = null;
+    });
+    wakeAttempt = tracked;
+    return tracked;
   }
 
   return Object.freeze({
