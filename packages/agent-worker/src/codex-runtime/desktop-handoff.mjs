@@ -484,7 +484,6 @@ export function createDesktopHandoffController({
         leaseManager.freezeAdmissionAfterCommit({
           profileInstanceId,
           expectedGeneration: committed.owner_generation,
-          reason: error?.code ?? "post_commit_failure",
         });
         admissionPaused = true;
         throw error;
