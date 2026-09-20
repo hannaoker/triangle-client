@@ -94,6 +94,13 @@ function runtimeFamilies(env, activeWorker) {
     const interpreterPrefix = path.dirname(path.dirname(resolveSymlinkChain(interpreterPath)));
     const agentRoot = path.dirname(venv);
     families.push(venv, interpreterPrefix, agentRoot);
+    // Pitfall 20: uv-managed Python keeps encodings under dirname(pyvenv.cfg home), not home/bin.
+    const basePrefix = resolvePyvenvBasePrefix(venv, {
+      onSymlinkAlias(alias) {
+        aliases.push(alias);
+      },
+    });
+    if (basePrefix) families.push(basePrefix);
     for (const finder of globSync(path.join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py"))) {
       const mappingLine = readFileSync(finder, "utf8").match(/^MAPPING:.*$/m)?.[0] || "";
       for (const match of mappingLine.matchAll(/'([^']+)'/g)) {
@@ -111,6 +118,31 @@ function runtimeFamilies(env, activeWorker) {
 
 function collapseToOuterRoots(roots) {
   return roots.filter((root) => !roots.some((other) => other !== root && root.startsWith(`${other}${path.sep}`)));
+}
+
+/** Base prefix from pyvenv.cfg `home` (usually the bin dir). Stdlib lives under sibling lib/. */
+export function resolvePyvenvBasePrefix(venv, { onSymlinkAlias = null } = {}) {
+  const pyvenvCfg = path.join(venv, "pyvenv.cfg");
+  if (!existsSync(pyvenvCfg)) return null;
+  const homeMatch = readFileSync(pyvenvCfg, "utf8").match(/^home\s*=\s*(.+)$/m);
+  const pythonHome = homeMatch?.[1]?.trim();
+  if (!pythonHome || !path.isAbsolute(pythonHome) || !existsSync(pythonHome)) {
+    throw new Error("Hermes pyvenv.cfg home is unavailable");
+  }
+  if (onSymlinkAlias != null && typeof onSymlinkAlias !== "function") {
+    throw new TypeError("onSymlinkAlias must be a function");
+  }
+  let current = path.parse(pythonHome).root;
+  for (const component of path.relative(current, pythonHome).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    if (lstatSync(current).isSymbolicLink()) onSymlinkAlias?.(current);
+  }
+  return realpathSync(path.dirname(pythonHome));
+}
+
+export function runtimeRootCovers(roots, target) {
+  const canonical = realpathSync(target);
+  return [...roots].some((root) => canonical === root || canonical.startsWith(`${root}${path.sep}`));
 }
 
 function sandboxRegex(value) {

@@ -187,6 +187,21 @@ def discover_runtime_roots(agent, cli):
         venv = os.path.dirname(os.path.dirname(entry))
         agent_root = os.path.dirname(venv)
         roots.extend([venv, os.path.dirname(os.path.dirname(interpreter)), agent_root])
+        pyvenv_config = os.path.join(venv, "pyvenv.cfg")
+        if os.path.exists(pyvenv_config):
+            checked_file(pyvenv_config, owners={os.getuid(), 0})
+            raw_config = open(pyvenv_config, "rb").read(32769)
+            if len(raw_config) > 32768:
+                fail("Hermes pyvenv.cfg is too large")
+            config = raw_config.decode("utf-8")
+            home_match = re.search(r"^\s*home\s*=\s*(.+?)\s*$", config, re.MULTILINE | re.IGNORECASE)
+            if home_match:
+                base_bin = home_match.group(1)
+                if not os.path.isabs(base_bin) or "\x00" in base_bin:
+                    fail("Hermes pyvenv.cfg home must be absolute")
+                base_bin = checked_dir(os.path.realpath(base_bin), safe_mode=True)
+                base_prefix = checked_dir(os.path.dirname(base_bin), safe_mode=True)
+                roots.append(base_prefix)
         for finder in glob.glob(os.path.join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py")):
             tree = ast.parse(open(finder, encoding="utf-8").read(), filename=finder)
             for node_value in tree.body:

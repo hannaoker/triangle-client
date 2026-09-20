@@ -17,6 +17,7 @@ import {
   createAntigravityInvocation,
 } from "../runners/antigravity-runner.mjs";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
+import { resolvePyvenvBasePrefix, runtimeRootCovers } from "../runners/runner-common.mjs";
 
 const request = {
   messageId: "message_1",
@@ -346,6 +347,50 @@ test("installed Hermes CLI documents the stdin query-file transport without cont
   });
 });
 
+test("uv-style pyvenv.cfg base prefix covers encodings (not just bin home)", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "triangle-pyvenv-prefix-")));
+  try {
+    const prefix = join(root, "uv", "python", "cpython-3.11-macos-aarch64-none");
+    const binHome = join(prefix, "bin");
+    const encodings = join(prefix, "lib", "python3.11", "encodings");
+    mkdirSync(binHome, { recursive: true });
+    mkdirSync(encodings, { recursive: true });
+    writeFileSync(join(encodings, "__init__.py"), "");
+    const venv = join(root, "agent", ".venv");
+    mkdirSync(venv, { recursive: true });
+    writeFileSync(join(venv, "pyvenv.cfg"), `home = ${binHome}\ninclude-system-site-packages = false\n`);
+    const basePrefix = resolvePyvenvBasePrefix(venv);
+    assert.equal(basePrefix, realpathSync(prefix));
+    assert.equal(runtimeRootCovers([realpathSync(binHome)], encodings), false, "bin home alone must not cover encodings");
+    assert.ok(runtimeRootCovers([basePrefix], encodings), "dirname(home) base prefix must cover encodings");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pyvenv base-prefix resolution reports lexical symlink aliases needed by sandbox-exec", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "triangle-pyvenv-alias-")));
+  try {
+    const versionedPrefix = join(root, "uv", "python", "cpython-3.11.15-macos-aarch64-none");
+    const aliasPrefix = join(root, "uv", "python", "cpython-3.11-macos-aarch64-none");
+    mkdirSync(join(versionedPrefix, "bin"), { recursive: true });
+    symlinkSync(versionedPrefix, aliasPrefix);
+    const venv = join(root, "agent", ".venv");
+    mkdirSync(venv, { recursive: true });
+    writeFileSync(join(venv, "pyvenv.cfg"), `home = ${aliasPrefix}/bin\n`);
+    const aliases = [];
+    const basePrefix = resolvePyvenvBasePrefix(venv, {
+      onSymlinkAlias(alias) {
+        aliases.push(alias);
+      },
+    });
+    assert.equal(basePrefix, realpathSync(versionedPrefix));
+    assert.deepEqual(aliases, [aliasPrefix]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("installed Hermes and Codex help run under Keychain-launched deny-default sandboxes without provider calls", async (t) => {
   if (process.platform !== "darwin") return t.skip("Darwin sandbox profile");
   const availability = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1) (allow default)", "/usr/bin/true"]);
@@ -372,6 +417,19 @@ test("installed Hermes and Codex help run under Keychain-launched deny-default s
   const interpreterPath = readFileSync(entry, "utf8").split(/\r?\n/, 1)[0]?.replace(/^#!/, "").split(/\s+/, 1)[0];
   assert.equal(typeof interpreterPath, "string", "installed Hermes entrypoint lacks an interpreter");
   hermesRuntimeRoots.add(dirname(dirname(realpathSync(interpreterPath))));
+  // Pitfall 20 / mesh-a2a-interop: allowlist dirname(home), not bin home — encodings is under lib/.
+  const basePrefix = resolvePyvenvBasePrefix(venv);
+  if (basePrefix) {
+    hermesRuntimeRoots.add(basePrefix);
+    const encodingsDirs = globSync(join(basePrefix, "lib", "python*", "encodings"));
+    assert.ok(encodingsDirs.length > 0, `expected encodings under ${basePrefix}/lib/python*/encodings`);
+    for (const encodingsDir of encodingsDirs) {
+      assert.ok(
+        runtimeRootCovers(hermesRuntimeRoots, encodingsDir),
+        `encodings ${encodingsDir} must be covered by TRIANGLE_RUNTIME_ROOTS`,
+      );
+    }
+  }
   for (const finder of globSync(join(venv, "lib", "python*", "site-packages", "__editable___*_finder.py"))) {
     const mapping = readFileSync(finder, "utf8").match(/^MAPPING:.*$/m)?.[0] || "";
     for (const match of mapping.matchAll(/'([^']+)'/g)) {

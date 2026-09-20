@@ -42,6 +42,12 @@ function makeFixture(t, prefix = "triangle-worker-contract-") {
   const hermesVenv = path.join(home, "hermes-agent", "venv");
   const hermesBin = path.join(hermesVenv, "bin");
   fs.mkdirSync(hermesBin, { recursive: true, mode: 0o700 });
+  const hermesBasePrefix = path.join(home, "uv-python");
+  const hermesBaseBin = path.join(hermesBasePrefix, "bin");
+  const hermesEncodings = path.join(hermesBasePrefix, "lib", "python3.11", "encodings");
+  fs.mkdirSync(hermesBaseBin, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(hermesEncodings, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(hermesVenv, "pyvenv.cfg"), `home = ${hermesBaseBin}\n`, { mode: 0o600 });
   const hermesEntry = path.join(hermesBin, "hermes");
   fs.writeFileSync(hermesEntry, `#!${fs.realpathSync(process.execPath)}\nprocess.exit(0);\n`, { mode: 0o700 });
   fs.chmodSync(hermesEntry, 0o700);
@@ -65,7 +71,7 @@ function makeFixture(t, prefix = "triangle-worker-contract-") {
     TRIANGLE_LAUNCHCTL: launchctl,
     LAUNCHCTL_LOG: launchctlLog,
   };
-  return { home, applicationRoot, helper, env, launchctlLog, codexCLI, hermesCLI };
+  return { home, applicationRoot, helper, env, launchctlLog, codexCLI, hermesCLI, hermesBasePrefix, hermesEncodings };
 }
 
 function run(action, agent, env) {
@@ -185,6 +191,12 @@ test("Hermes runtime preparation records its verified wrapper chain without ambi
     assert.equal(manifest.environment[mutableName], undefined, `shared runtime manifest contains ${mutableName}`);
   }
   assert.match(manifest.environment.TRIANGLE_RUNTIME_ROOTS, /hermes-agent/);
+  const runtimeRoots = manifest.environment.TRIANGLE_RUNTIME_ROOTS.split(path.delimiter);
+  assert.ok(runtimeRoots.includes(fs.realpathSync(fixture.hermesBasePrefix)));
+  assert.ok(
+    runtimeRoots.some((root) => fixture.hermesEncodings === root || fixture.hermesEncodings.startsWith(`${root}${path.sep}`)),
+    `encodings ${fixture.hermesEncodings} must be covered by TRIANGLE_RUNTIME_ROOTS`,
+  );
   assert.doesNotMatch(JSON.stringify(manifest.environment), /ambient-python/);
 });
 
