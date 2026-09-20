@@ -4,13 +4,44 @@ Phase 0 pinned sandbox and approval enum allowlists from the upstream App Server
 v2 JSON Schema artifact because this Linux environment has no bundled Codex
 binary (`ChatGPT.app` Resources `codex`).
 
+## Phase 1 status (shadow single-slot)
+
+| Item | Status |
+| --- | --- |
+| `sharedHomeConcurrency.status` | **`passed`** (Mini live) |
+| `forcedPoolSize` | **`1`** (Phase 1 single-slot cap — do not raise until Phase 3) |
+| `fallbackToUserCodexHomeForbidden` | **`true`** |
+| Global `featureFlags.headlessRuntime` | **`false`** (production unchanged) |
+| Shadow test profile opt-in | See design doc Phase 1 operator note |
+
+### Operator: enable Phase 1 shadow test profile only
+
+1. Create an **isolated** test profile (never production Bob / mcp-interactive):
+   - `runtimeAdapter: "codex-app-server"`
+   - `runtimeMode: "headless"`
+   - `shadowTestProfile: true`
+   - `profileId: "<your-test-profile-id>"`
+2. Enable the shadow path without flipping the global flag:
+
+   ```sh
+   # all shadow-shaped profiles on this host
+   export TRIANGLE_HEADLESS_SHADOW_ENABLE=1
+
+   # or allowlist one profile id
+   export TRIANGLE_HEADLESS_SHADOW_PROFILES=codex-shadow-test
+   ```
+
+3. Keep dedicated `TRIANGLE_CODEX_HOME` (never `~/.codex`). Leave desktop
+   `appServerWake` / mcp-interactive profiles untouched.
+4. Phase 1 does **not** enable desktop handoff or multi-slot pools.
+
 ## Gap
 
 | Item | Status |
 | --- | --- |
 | Upstream schema commit | Pinned in `runtime-manifest.json` → `provenance.sourceCommit` |
-| Bundled Codex binary version | **Missing here** — set on Mini |
-| Live `clientUserMessageId` survival through `thread/read` | **Blocked** — prove on Mini |
+| Bundled Codex binary version | **Set on Mini** — `codex-cli 0.155.0-alpha.9.2` |
+| Live `clientUserMessageId` survival through `thread/read` | **Blocked** — still open on Mini |
 | Dual App Server shared `CODEX_HOME` concurrency | **Passed** — Mini live 2026-09-20 (seed turns then resume/restart) |
 
 ## Mini re-pin procedure
@@ -68,10 +99,11 @@ desktop mint path in `native-desktop-wake-experiment.mjs`. Synthetic fakes use
 `requireMaterializedRollout: true` plus a shared materialized-id store so this
 ordering is regression-covered without ChatGPT.app.
 
-**Do not** set `sharedHomeConcurrency.status` to `passed` until Mini re-runs the
-live probe successfully. Pool size remains forced to `1`.
+**Update:** Mini live probe later **passed**; manifest `sharedHomeConcurrency.status`
+is now `passed`. Phase 1 still keeps `forcedPoolSize: 1` (single-slot shadow).
+Do **not** raise `forcedPoolSize` until Phase 3. Desktop handoff remains disabled.
 
-### Mini live re-run steps (after this fix)
+### Mini live re-run steps (historical; probe already passed)
 
 Prerequisites:
 
@@ -97,8 +129,8 @@ Promotion rules (Mini operator only):
 
 - If `status === "passed"`: update `runtime-manifest.json`
   `sharedHomeConcurrency.status` to `"passed"` and keep
-  `fallbackToUserCodexHomeForbidden: true`. Only then may
-  `forcedPoolSize` leave `1`.
+  `fallbackToUserCodexHomeForbidden: true`. **Phase 1 still keeps
+  `forcedPoolSize: 1`**; only Phase 3 may raise the pool cap.
 - If seed turns fail (auth / network): leave status `unproved` / `failed`; fix
   dedicated-home login; do **not** point `CODEX_HOME` at `~/.codex`.
 - If resume still fails after successful seeds: capture stderr (redacted) and

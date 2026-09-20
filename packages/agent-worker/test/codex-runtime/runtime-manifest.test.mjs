@@ -25,9 +25,10 @@ test("runtime manifest pins sandbox and approval allowlists from schema artifact
   assert.equal(manifest.approvalPolicy.headlessDefault, "never");
   assert.ok(manifest.provenance.sourceCommit);
   assert.equal(manifest.provenance.bundledCodexBinary, "codex-cli 0.155.0-alpha.9.2");
-  assert.equal(manifest.sharedHomeConcurrency.status, "unproved");
+  assert.equal(manifest.sharedHomeConcurrency.status, "passed");
   assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
-  assert.match(manifest.provenance.gap, /Live shared-home|clientUserMessageId/i);
+  assert.equal(manifest.sharedHomeConcurrency.fallbackToUserCodexHomeForbidden, true);
+  assert.match(manifest.provenance.gap, /clientUserMessageId/i);
 });
 
 test("configuration validation rejects values outside the pinned allowlists", () => {
