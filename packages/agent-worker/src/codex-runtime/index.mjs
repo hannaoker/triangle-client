@@ -1,8 +1,8 @@
 /**
- * Headless Codex worker runtime surface (Phase 0 + Phase 1 shadow + Phase 2 durable recovery).
+ * Headless Codex worker runtime surface (Phase 0–3).
  *
- * Phase 2 adds lease/epoch/completion reconciliation and receipt-only behind the
- * same shadow opt-in. Production mcp-interactive / desktop profiles stay unchanged.
+ * Phase 3 adds a bounded multi-slot pool (preferred 2, cap 4) for shadow test
+ * profiles only. Production mcp-interactive / desktop profiles stay unchanged.
  * Global featureFlags.headlessRuntime and helperConversationStore remain false.
  */
 

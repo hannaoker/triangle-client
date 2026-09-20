@@ -1,6 +1,6 @@
 # Headless Codex worker runtime with optional desktop handoff
 
-Status: **Phase 0 complete (Mini proved); Phase 1 shadow single-slot in progress**  
+Status: **Phase 0–3 complete for shadow/test (preferred pool 2, cap 4); Phase 4 desktop handoff next**  
 Date: 2026-09-20  
 Owner: Triangle Client  
 Target repository: `triangle-client`
@@ -779,7 +779,7 @@ Shipped under `packages/agent-worker/src/codex-runtime/`:
 
 | Piece | Module |
 | --- | --- |
-| Single-slot pool (`forcedPoolSize: 1`) | `worker-pool.mjs` |
+| Single-slot pool (Phase 1; Phase 3 raises preferred to 2) | `worker-pool.mjs` |
 | In-memory room→thread registry (slot-restart durable) | `conversation-registry.mjs` |
 | Reply-before-ack execution stages | `execution-state.mjs` |
 | Shadow runtime (test profile only) | `headless-runtime.mjs` |
@@ -814,7 +814,8 @@ export TRIANGLE_HEADLESS_SHADOW_PROFILES=codex-shadow-test
 ```
 
 3. Dedicated Triangle `CODEX_HOME` only; never fall back to `~/.codex`.
-   `forcedPoolSize` remains **1**. See
+   Phase 1 historically kept `forcedPoolSize: 1`; Phase 3 raises the absolute
+   cap to **4** with shadow preferred size **2**. See
    `packages/agent-worker/src/codex-runtime/manifest/REPIN.md`.
 
 ### Phase 2 — durable recovery
@@ -828,7 +829,8 @@ export TRIANGLE_HEADLESS_SHADOW_PROFILES=codex-shadow-test
 Shipped under `packages/agent-worker/src/codex-runtime/` behind the **same**
 Phase 1 shadow opt-in (`shadowTestProfile` + operator enablement). Global
 `featureFlags.headlessRuntime` / `helperConversationStore` stay **false**.
-`forcedPoolSize` remains **1**.
+Phase 2 itself did not raise the pool; Phase 3 sets `forcedPoolSize` to **4**
+(preferred shadow size **2**).
 
 | Piece | Module |
 | --- | --- |
@@ -861,9 +863,8 @@ passes `durableStore: { enabled: true, root }`. Production helper
 `CodexRuntimeFeatureFlags.conversationStoreEnabled` stays inactive. Records are
 identifiers only — no MESH credentials.
 
-**Not in Phase 2:** multi-slot pool (Phase 3), desktop handoff (Phase 4),
-default migration / production profile flip (Phase 5). Do **not** start Phase 3
-until these P1 fixes remain green on the focused suite.
+**Not in Phase 2:** multi-slot pool (Phase 3 — **shipped**), desktop handoff
+(Phase 4), default migration / production profile flip (Phase 5).
 
 ##### Focused verification
 
@@ -883,6 +884,53 @@ replyEventId fail-closed.
 - Prove concurrency, fairness, sticky assignment, overload behavior, and circuit
   breaking.
 - Keep maximum four but do not use four by default.
+
+#### Phase 3 implementation status (2026-09-20)
+
+Shipped under `packages/agent-worker/src/codex-runtime/` behind the **same**
+Phase 1 shadow opt-in. Global `featureFlags.headlessRuntime` /
+`helperConversationStore` stay **false**. Production desktop / mcp-interactive
+profiles are unchanged.
+
+| Piece | Module |
+| --- | --- |
+| Bounded pool (preferred 2, cap 4) | `worker-pool.mjs` |
+| Sticky prefer + healthy failover | `acquire({ stickySlotId, conversationKey })` + registry `lastWorkerSlotId` |
+| FIFO waiters + overload fail-closed | `waitMs: 0` → `pool_overloaded` (leave MESH unclaimed) |
+| Per-slot crash backoff + circuit-open | `noteCrash` / `pool_circuit_open` |
+| Pool guards (probe gate + cap) | `runtime-home.mjs` → `resolveCodexPoolGuards` |
+| Shadow preferredSize default 2 | `config-guards.mjs` → `resolvePhase1ShadowRuntimeConfig` |
+
+**Manifest policy:** `sharedHomeConcurrency.forcedPoolSize` is the absolute
+cap (**4** after Phase 3). Shadow defaults to **preferredSize 2** (never
+default to 4). Operators may keep a shadow profile on a single slot with
+`codexPool.preferredSize: 1` without lowering the manifest cap. An unproved /
+failed shared-home probe still forces size 1.
+
+**P1 cancel/timeout preserved with multiple slots:** `cancelDelivery` still
+interrupts via the owning delivery handle or
+`pool.getActiveHandle({ slotId })` (ambiguous multi-busy without `slotId`
+returns null / fail closed). Quarantine / timeout restarts **only** the owning
+`slotId` so sibling healthy slots keep serving.
+
+**Not in Phase 3:** desktop handoff (Phase 4), default migration / production
+flip (Phase 5).
+
+##### Focused verification
+
+```sh
+node --test packages/agent-worker/test/codex-runtime/*.test.mjs
+```
+
+##### Overload / wait policy
+
+| `poolAcquireWaitMs` | Behavior |
+| --- | --- |
+| `0` (default) | Fail closed (`pool_overloaded`); leave delivery durable in MESH. |
+| `> 0` | FIFO bounded wait inside the pool; timeout → `pool_slot_busy`. |
+
+Circuit-open (all slots): `pool_circuit_open` — coalesce wake watermarks with
+bounded backoff; do not claim or busy-loop.
 
 ### Phase 4 — optional desktop handoff
 

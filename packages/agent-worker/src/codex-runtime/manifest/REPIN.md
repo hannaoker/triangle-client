@@ -4,12 +4,12 @@ Phase 0 pinned sandbox and approval enum allowlists from the upstream App Server
 v2 JSON Schema artifact because this Linux environment has no bundled Codex
 binary (`ChatGPT.app` Resources `codex`).
 
-## Phase 1 status (shadow single-slot)
+## Phase 1 status (shadow single-slot → Phase 3 supersedes pool size)
 
 | Item | Status |
 | --- | --- |
 | `sharedHomeConcurrency.status` | **`passed`** (Mini live) |
-| `forcedPoolSize` | **`1`** (Phase 1/2 single-slot cap — do not raise until Phase 3) |
+| `forcedPoolSize` | **`4`** (Phase 3 absolute cap; shadow **preferred** stays **2**) |
 | `fallbackToUserCodexHomeForbidden` | **`true`** |
 | Global `featureFlags.headlessRuntime` | **`false`** (production unchanged) |
 | Shadow test profile opt-in | See design doc Phase 1 operator note |
@@ -30,18 +30,35 @@ binary (`ChatGPT.app` Resources `codex`).
 | Helper `conversationStoreEnabled` | **Still false** (production inactive) |
 | Node durable store for shadow/CI | **Opt-in** via `createDurableConversationStore({ enabled: true })` — mirrors helper schema; no MESH secrets |
 
-Phase 2 does **not** flip production defaults, raise pool size, or enable
-desktop handoff. Keep dedicated `TRIANGLE_CODEX_HOME`; never fall back to
-`~/.codex`. Phase 1/2 P1 ownership/cancel/timeout/completion gaps above are
-fixed; do **not** start Phase 3 until the focused suite stays green.
+Phase 2 does **not** flip production defaults or enable desktop handoff. Keep
+dedicated `TRIANGLE_CODEX_HOME`; never fall back to `~/.codex`.
 
-### Operator: enable Phase 1 shadow test profile only
+## Phase 3 status (bounded pool, shadow / test only)
+
+| Item | Status |
+| --- | --- |
+| Preferred pool size for enabled shadow | **`2`** (default) |
+| Manifest / guard absolute cap | **`forcedPoolSize: 4`** (do **not** default preferred to 4) |
+| Keep shadow at 1 slot | Set `codexPool.preferredSize: 1` (manifest cap may stay 4) |
+| Sticky assignment | Prefer registry `lastWorkerSlotId` when healthy; else failover |
+| FIFO / overload | `waitMs: 0` → `pool_overloaded` fail closed; bounded wait is FIFO |
+| Circuit breaker | Per-slot exponential backoff + jitter; `pool_circuit_open` when all open |
+| Cancel / timeout with multi-slot | Owning handle / `getActiveHandle({ slotId })`; restart owning slot only |
+| Global `featureFlags.headlessRuntime` | **`false`** |
+| Desktop handoff | **Still disabled** |
+
+Phase 3 raises the pool **only** for shadow/test profiles behind the existing
+opt-in. Production desktop / mcp-interactive paths must not flip to multi-slot.
+
+### Operator: enable Phase 1–3 shadow test profile only
 
 1. Create an **isolated** test profile (never production Bob / mcp-interactive):
    - `runtimeAdapter: "codex-app-server"`
    - `runtimeMode: "headless"`
    - `shadowTestProfile: true`
    - `profileId: "<your-test-profile-id>"`
+   - optional: `codexPool: { preferredSize: 2, maxSize: 4 }` (defaults)
+   - optional single-slot shadow: `codexPool: { preferredSize: 1, maxSize: 1 }`
 2. Enable the shadow path without flipping the global flag:
 
    ```sh
@@ -54,7 +71,7 @@ fixed; do **not** start Phase 3 until the focused suite stays green.
 
 3. Keep dedicated `TRIANGLE_CODEX_HOME` (never `~/.codex`). Leave desktop
    `appServerWake` / mcp-interactive profiles untouched.
-4. Phase 1 does **not** enable desktop handoff or multi-slot pools.
+4. Phase 3 does **not** enable desktop handoff or production multi-slot.
 
 ## Gap
 
@@ -89,10 +106,10 @@ fixed; do **not** start Phase 3 until the focused suite stays green.
    node --test packages/agent-worker/test/codex-runtime/*.test.mjs
    ```
 
-6. Only after the shared-home concurrency probe passes on Darwin may pool size
-   leave `1` and desktop handoff leave disabled. A failed probe must never fall
-   back to `~/.codex`.
-
+6. Shared-home concurrency probe must remain `passed` on Darwin for multi-slot.
+   A failed probe must never fall back to `~/.codex`. After Phase 3, keep
+   `forcedPoolSize` at the absolute cap (**4**) and leave shadow preferred at
+   **2** unless an operator explicitly overrides.
 
 ## Mini evidence log (2026-09-20 PT)
 
@@ -121,8 +138,8 @@ desktop mint path in `native-desktop-wake-experiment.mjs`. Synthetic fakes use
 ordering is regression-covered without ChatGPT.app.
 
 **Update:** Mini live probe later **passed**; manifest `sharedHomeConcurrency.status`
-is now `passed`. Phase 1 still keeps `forcedPoolSize: 1` (single-slot shadow).
-Do **not** raise `forcedPoolSize` until Phase 3. Desktop handoff remains disabled.
+is now `passed`. Phase 3 raises `forcedPoolSize` to **4** (absolute cap) while
+shadow preferred size defaults to **2**. Desktop handoff remains disabled.
 
 ### Mini live re-run steps (historical; probe already passed)
 
@@ -148,10 +165,10 @@ CODEX_BIN="/Applications/ChatGPT.app/Contents/Resources/codex" \
 
 Promotion rules (Mini operator only):
 
-- If `status === "passed"`: update `runtime-manifest.json`
-  `sharedHomeConcurrency.status` to `"passed"` and keep
-  `fallbackToUserCodexHomeForbidden: true`. **Phase 1 still keeps
-  `forcedPoolSize: 1`**; only Phase 3 may raise the pool cap.
+- If `status === "passed"`: keep `runtime-manifest.json`
+  `sharedHomeConcurrency.status` as `"passed"`,
+  `fallbackToUserCodexHomeForbidden: true`, and Phase 3
+  `forcedPoolSize: 4` (preferred shadow size remains 2).
 - If seed turns fail (auth / network): leave status `unproved` / `failed`; fix
   dedicated-home login; do **not** point `CODEX_HOME` at `~/.codex`.
 - If resume still fails after successful seeds: capture stderr (redacted) and

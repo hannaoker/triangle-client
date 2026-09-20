@@ -1,5 +1,5 @@
 /**
- * HeadlessCodexRuntime — Phase 1 single-slot shadow + Phase 2 durable recovery.
+ * HeadlessCodexRuntime — Phase 1–3 shadow path (durable recovery + bounded pool).
  *
  * Opt-in only for isolated test profiles (`shadowTestProfile: true` +
  * `runtimeMode: "headless"` + `runtimeAdapter: "codex-app-server"`). Does not
@@ -16,7 +16,12 @@
  * - durable registry + completion reconciliation / restart recovery
  * - receipt-only path (claim→ack, no model turn, no MESH reply)
  *
- * No MESH credentials. Dedicated TRIANGLE_CODEX_HOME only. Pool size stays 1.
+ * Phase 3 adds (still shadow-gated):
+ * - preferred pool size 2 (manifest cap up to 4; do not default to 4)
+ * - sticky slot preference via registry `lastWorkerSlotId`
+ * - overload fail-closed when the pool is saturated (waitMs=0)
+ *
+ * No MESH credentials. Dedicated TRIANGLE_CODEX_HOME only.
  */
 
 import { assertNoSecretMaterial } from "./app-server-protocol.mjs";
@@ -147,7 +152,7 @@ function inactiveRuntime({ resolved, registry, reason }) {
 }
 
 /**
- * Create the Phase 1/2 shadow headless runtime.
+ * Create the Phase 1–3 shadow headless runtime.
  *
  * @param {object} options
  * @param {object} options.profileConfig
@@ -180,6 +185,11 @@ export function createHeadlessCodexRuntime({
   profileInstanceId = null,
   correlationMode = selectCorrelationMode({ metadataFieldSurvivesThreadRead: true }),
   turnTimeoutMs = 30_000,
+  /**
+   * Pool acquire wait. Default 0 = fail closed on saturation (leave MESH work
+   * durable / unclaimed). Bounded waits are FIFO inside the pool.
+   */
+  poolAcquireWaitMs = 0,
   logger = console,
   now = () => Date.now(),
 } = {}) {
@@ -216,8 +226,8 @@ export function createHeadlessCodexRuntime({
       command,
       args,
       env,
-      preferredSize: 1,
-      maxSize: 1,
+      preferredSize: resolved.pool.preferredSize,
+      maxSize: resolved.pool.maxSize,
       manifest: resolved.manifest,
     });
 
@@ -269,7 +279,7 @@ export function createHeadlessCodexRuntime({
     return status();
   }
 
-  async function restartSlot(options) {
+  async function restartSlot(options = {}) {
     if (!started) {
       throw createCodedError("shadow_runtime_not_started", "shadow runtime is not started");
     }
@@ -400,7 +410,62 @@ export function createHeadlessCodexRuntime({
       });
     }
 
-    const slotLease = await workerPool.acquire();
+    const existingBeforeAcquire = resolvedRegistry.get(instanceId, roomId);
+    // Duplicate while active: do not reserve a slot or start another Codex turn.
+    if (
+      existingBeforeAcquire &&
+      existingBeforeAcquire.activeDeliveryId != null &&
+      (existingBeforeAcquire.executionState === "admitted" ||
+        existingBeforeAcquire.executionState === "running" ||
+        existingBeforeAcquire.executionState === "result_ready" ||
+        existingBeforeAcquire.executionState === "reply_persisted")
+    ) {
+      if (
+        String(existingBeforeAcquire.activeDeliveryId) ===
+        String(deliveryId ?? `delivery_${numericDeliveryId}`)
+      ) {
+        return Object.freeze({
+          status: "duplicate_active",
+          applied: false,
+          threadId: existingBeforeAcquire.codexThreadId,
+          executionEpoch: existingBeforeAcquire.executionEpoch,
+          executionState: existingBeforeAcquire.executionState,
+          settlementTrace: Object.freeze([]),
+        });
+      }
+      throw createCodedError(
+        "delivery_conflict",
+        "conversation already has an active delivery",
+        {
+          activeDeliveryId: existingBeforeAcquire.activeDeliveryId,
+          next: deliveryId ?? `delivery_${numericDeliveryId}`,
+        },
+      );
+    }
+
+    const stickySlotId = existingBeforeAcquire?.lastWorkerSlotId ?? null;
+    let slotLease;
+    try {
+      slotLease = await workerPool.acquire({
+        stickySlotId,
+        conversationKey: roomId,
+        waitMs: poolAcquireWaitMs,
+      });
+    } catch (error) {
+      if (
+        error?.code === "pool_overloaded" ||
+        error?.code === "pool_circuit_open" ||
+        error?.code === "pool_slot_busy"
+      ) {
+        // Fail closed: do not claim / run beyond capacity. MESH work stays durable.
+        throw createCodedError(error.code, error.message, {
+          waitPolicy: poolAcquireWaitMs > 0 ? "bounded_wait" : "fail_closed",
+          size: error.size,
+          busy: error.busy,
+        });
+      }
+      throw error;
+    }
     let slotReleased = false;
     let unknownOutcomeQuarantined = false;
     activeDelivery = {
@@ -421,35 +486,6 @@ export function createHeadlessCodexRuntime({
       }
 
       const existing = resolvedRegistry.get(instanceId, roomId);
-      // Duplicate while active: do not start another Codex turn.
-      if (
-        existing &&
-        existing.activeDeliveryId != null &&
-        (existing.executionState === "admitted" ||
-          existing.executionState === "running" ||
-          existing.executionState === "result_ready" ||
-          existing.executionState === "reply_persisted")
-      ) {
-        if (String(existing.activeDeliveryId) === String(deliveryId ?? `delivery_${numericDeliveryId}`)) {
-          return Object.freeze({
-            status: "duplicate_active",
-            applied: false,
-            threadId: existing.codexThreadId,
-            executionEpoch: existing.executionEpoch,
-            executionState: existing.executionState,
-            settlementTrace: Object.freeze([]),
-          });
-        }
-        throw createCodedError(
-          "delivery_conflict",
-          "conversation already has an active delivery",
-          {
-            activeDeliveryId: existing.activeDeliveryId,
-            next: deliveryId ?? `delivery_${numericDeliveryId}`,
-          },
-        );
-      }
-
       let threadId = existing?.codexThreadId ?? null;
       let startedNewThread = false;
       const workingDirectory =
@@ -767,9 +803,17 @@ export function createHeadlessCodexRuntime({
     }
 
     // Leave registry non-idle (running/admitted) so restart reconcile quarantines.
-    // Replace the slot process before it becomes reusable.
+    // Replace only the owning slot process before it becomes reusable — never
+    // restart sibling healthy slots that may be serving other conversations.
     try {
-      await workerPool.restartSlot({ signal: "SIGKILL", timeoutMs: 2_000 });
+      if (typeof workerPool.noteCrash === "function") {
+        workerPool.noteCrash(slotLease.slotId);
+      }
+      await workerPool.restartSlot({
+        slotId: slotLease.slotId,
+        signal: "SIGKILL",
+        timeoutMs: 2_000,
+      });
       return { quarantined: true, slotReleased: true };
     } catch (restartError) {
       // If restart fails, still release so we do not permanently wedge the pool;
@@ -777,9 +821,10 @@ export function createHeadlessCodexRuntime({
       logger.info?.("triangle_headless_slot_restart_failed", {
         code: restartError?.code ?? null,
         message: String(restartError?.message ?? restartError),
+        slotId: slotLease?.slotId ?? null,
       });
       try {
-        slotLease.release();
+        slotLease.release({ success: false });
       } catch {
         // ignore
       }
@@ -826,8 +871,8 @@ export function createHeadlessCodexRuntime({
 
   /**
    * Cancellation scoped to `(conversation, delivery, execution_epoch)`.
-   * Interrupt via the owning delivery handle (or pool.getActiveHandle) — never a
-   * second acquire while the sole pool slot is busy. Only clear durable/registry
+   * Interrupt via the owning delivery handle (or pool.getActiveHandle({ slotId }))
+   * — never a second acquire while that slot is busy. Only clear durable/registry
    * state after a confirmed interrupt, or leave quarantined on failure.
    */
   async function cancelDelivery({
@@ -866,7 +911,9 @@ export function createHeadlessCodexRuntime({
         activeDelivery.executionEpoch === executionEpoch
           ? activeDelivery
           : typeof workerPool.getActiveHandle === "function"
-            ? workerPool.getActiveHandle()
+            ? workerPool.getActiveHandle({
+                slotId: record.lastWorkerSlotId ?? null,
+              })
             : null;
 
       if (owning?.processHandle == null) {

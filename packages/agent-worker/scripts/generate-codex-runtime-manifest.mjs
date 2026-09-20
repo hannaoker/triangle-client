@@ -235,7 +235,7 @@ async function main() {
     },
     sharedHomeConcurrency: previous?.sharedHomeConcurrency ?? {
       status: "unproved",
-      forcedPoolSize: 1,
+      forcedPoolSize: 4,
       desktopHandoffEnabled: false,
       fallbackToUserCodexHomeForbidden: true,
     },

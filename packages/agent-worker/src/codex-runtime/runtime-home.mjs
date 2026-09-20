@@ -171,9 +171,13 @@ export function buildSanitizedCodexChildEnv({
  * Pool / handoff guards driven by the shared-home concurrency probe status and
  * the immutable manifest `forcedPoolSize` cap.
  *
- * Probe `passed` unlocks shared-home safety, but Phase 1 still keeps
- * `forcedPoolSize: 1` (single-slot shadow). Desktop handoff stays off until a
- * later phase clears both the probe gate and the handoff feature flag.
+ * Probe `passed` unlocks shared-home multi-slot safety. Phase 3 raises the
+ * manifest cap (up to 4); shadow defaults prefer size 2 and must not default to
+ * 4. Desktop handoff stays off until a later phase clears both the probe gate
+ * and the handoff feature flag. An unproved/failed probe still forces size 1.
+ *
+ * Operators may keep shadow at size 1 by setting `codexPool.preferredSize: 1`
+ * even when `forcedPoolSize` is higher.
  */
 export function resolveCodexPoolGuards({
   preferredSize = 2,
@@ -189,38 +193,37 @@ export function resolveCodexPoolGuards({
   const forcedPoolSize = Number.isSafeInteger(shared.forcedPoolSize)
     ? shared.forcedPoolSize
     : 1;
-  const manifestForcesOne = forcedPoolSize === 1;
-  const forceToOne = probeForcesOne || manifestForcesOne;
   const handoffAllowed =
     effectiveProbe === "passed" &&
     shared.desktopHandoffEnabled === true &&
     desktopHandoffRequested === true;
 
-  if (forceToOne) {
+  if (probeForcesOne) {
     return Object.freeze({
       preferredSize: 1,
       maxSize: 1,
       desktopHandoffEnabled: false,
-      forcedByProbe: probeForcesOne,
-      forcedByManifest: !probeForcesOne && manifestForcesOne,
+      forcedByProbe: true,
+      forcedByManifest: false,
       forcedPoolSize: 1,
       probeStatus: effectiveProbe,
-      reason: probeForcesOne
-        ? "shared_home_concurrency_unproved"
-        : "forced_pool_size_phase_cap",
+      reason: "shared_home_concurrency_unproved",
       userFallbackForbidden: shared.fallbackToUserCodexHomeForbidden !== false,
     });
   }
 
-  const preferred = clampInt(preferredSize, 1, Math.min(4, forcedPoolSize));
-  const maximum = clampInt(maxSize, preferred, Math.min(4, forcedPoolSize));
+  // Cap is min(4, forcedPoolSize). Preferred defaults to 2 for Phase 3 shadow;
+  // callers may pass 1 to stay single-slot without lowering the manifest cap.
+  const cap = Math.min(4, Math.max(1, forcedPoolSize));
+  const preferred = clampInt(preferredSize, 1, cap);
+  const maximum = clampInt(maxSize, preferred, cap);
   return Object.freeze({
     preferredSize: preferred,
     maxSize: maximum,
     desktopHandoffEnabled: handoffAllowed,
     forcedByProbe: false,
     forcedByManifest: false,
-    forcedPoolSize,
+    forcedPoolSize: cap,
     probeStatus: "passed",
     reason: null,
     userFallbackForbidden: shared.fallbackToUserCodexHomeForbidden !== false,
