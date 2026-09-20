@@ -1,6 +1,6 @@
 # Headless Codex worker runtime with optional desktop handoff
 
-Status: **Proposed**  
+Status: **Phase 0 complete (Mini proved); Phase 1 shadow single-slot in progress**  
 Date: 2026-09-20  
 Owner: Triangle Client  
 Target repository: `triangle-client`
@@ -772,6 +772,50 @@ separate claims.
 - Run one headless slot only for an isolated test profile.
 - Prove new/resumed thread continuity and reply-before-ack.
 - Keep production desktop profiles unchanged.
+
+#### Phase 1 implementation status (2026-09-20)
+
+Shipped under `packages/agent-worker/src/codex-runtime/`:
+
+| Piece | Module |
+| --- | --- |
+| Single-slot pool (`forcedPoolSize: 1`) | `worker-pool.mjs` |
+| In-memory room→thread registry (slot-restart durable) | `conversation-registry.mjs` |
+| Reply-before-ack execution stages | `execution-state.mjs` |
+| Shadow runtime (test profile only) | `headless-runtime.mjs` |
+| Opt-in gating | `config-guards.mjs` → `resolvePhase1ShadowRuntimeConfig` |
+
+**Not in Phase 1:** supervisor migration of production profiles, durable helper
+lease/epoch recovery (Phase 2), multi-slot pool (Phase 3), desktop handoff
+(Phase 4). Global `featureFlags.headlessRuntime` stays `false`.
+
+##### Operator enablement (test profile only)
+
+1. Isolated profile shape (do **not** set on production mcp-interactive / Bob):
+
+```json
+{
+  "profileId": "codex-shadow-test",
+  "runtimeAdapter": "codex-app-server",
+  "runtimeMode": "headless",
+  "shadowTestProfile": true,
+  "approvalPolicy": "never",
+  "sandboxClass": "workspace-write",
+  "workingDirectory": "/approved/project/path"
+}
+```
+
+2. Host enablement (either):
+
+```sh
+export TRIANGLE_HEADLESS_SHADOW_ENABLE=1
+# or
+export TRIANGLE_HEADLESS_SHADOW_PROFILES=codex-shadow-test
+```
+
+3. Dedicated Triangle `CODEX_HOME` only; never fall back to `~/.codex`.
+   `forcedPoolSize` remains **1**. See
+   `packages/agent-worker/src/codex-runtime/manifest/REPIN.md`.
 
 ### Phase 2 — durable recovery
 

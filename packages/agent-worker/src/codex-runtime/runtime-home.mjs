@@ -168,8 +168,12 @@ export function buildSanitizedCodexChildEnv({
 }
 
 /**
- * Pool / handoff guards driven by the shared-home concurrency probe status.
- * Until the probe passes, pool size is forced to 1 and desktop handoff is off.
+ * Pool / handoff guards driven by the shared-home concurrency probe status and
+ * the immutable manifest `forcedPoolSize` cap.
+ *
+ * Probe `passed` unlocks shared-home safety, but Phase 1 still keeps
+ * `forcedPoolSize: 1` (single-slot shadow). Desktop handoff stays off until a
+ * later phase clears both the probe gate and the handoff feature flag.
  */
 export function resolveCodexPoolGuards({
   preferredSize = 2,
@@ -178,32 +182,48 @@ export function resolveCodexPoolGuards({
   probeStatus = loadRuntimeManifest().sharedHomeConcurrency?.status ?? "unproved",
   manifest = loadRuntimeManifest(),
 } = {}) {
-  const forced =
-    probeStatus !== "passed" ||
-    manifest.sharedHomeConcurrency?.status !== "passed";
+  const shared = manifest.sharedHomeConcurrency ?? {};
+  const effectiveProbe =
+    probeStatus === "passed" && shared.status === "passed" ? "passed" : probeStatus;
+  const probeForcesOne = effectiveProbe !== "passed";
+  const forcedPoolSize = Number.isSafeInteger(shared.forcedPoolSize)
+    ? shared.forcedPoolSize
+    : 1;
+  const manifestForcesOne = forcedPoolSize === 1;
+  const forceToOne = probeForcesOne || manifestForcesOne;
+  const handoffAllowed =
+    effectiveProbe === "passed" &&
+    shared.desktopHandoffEnabled === true &&
+    desktopHandoffRequested === true;
 
-  if (forced) {
+  if (forceToOne) {
     return Object.freeze({
       preferredSize: 1,
       maxSize: 1,
       desktopHandoffEnabled: false,
-      forcedByProbe: true,
-      probeStatus,
-      reason: "shared_home_concurrency_unproved",
-      userFallbackForbidden: true,
+      forcedByProbe: probeForcesOne,
+      forcedByManifest: !probeForcesOne && manifestForcesOne,
+      forcedPoolSize: 1,
+      probeStatus: effectiveProbe,
+      reason: probeForcesOne
+        ? "shared_home_concurrency_unproved"
+        : "forced_pool_size_phase_cap",
+      userFallbackForbidden: shared.fallbackToUserCodexHomeForbidden !== false,
     });
   }
 
-  const preferred = clampInt(preferredSize, 1, 4);
-  const maximum = clampInt(maxSize, preferred, 4);
+  const preferred = clampInt(preferredSize, 1, Math.min(4, forcedPoolSize));
+  const maximum = clampInt(maxSize, preferred, Math.min(4, forcedPoolSize));
   return Object.freeze({
     preferredSize: preferred,
     maxSize: maximum,
-    desktopHandoffEnabled: desktopHandoffRequested === true,
+    desktopHandoffEnabled: handoffAllowed,
     forcedByProbe: false,
+    forcedByManifest: false,
+    forcedPoolSize,
     probeStatus: "passed",
     reason: null,
-    userFallbackForbidden: true,
+    userFallbackForbidden: shared.fallbackToUserCodexHomeForbidden !== false,
   });
 }
 

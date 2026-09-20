@@ -56,18 +56,39 @@ test("dedicated CODEX_HOME is env-only and never the user ~/.codex", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("until shared-home probe passes, pool size is forced to 1 and handoff is disabled", () => {
-  const guards = resolveCodexPoolGuards({
+test("unproved probe or Phase 1 forcedPoolSize keeps pool at 1 and handoff disabled", () => {
+  const unproved = resolveCodexPoolGuards({
     preferredSize: 2,
     maxSize: 4,
     desktopHandoffRequested: true,
     probeStatus: "unproved",
+    manifest: {
+      sharedHomeConcurrency: {
+        status: "unproved",
+        forcedPoolSize: 1,
+        desktopHandoffEnabled: false,
+        fallbackToUserCodexHomeForbidden: true,
+      },
+    },
   });
-  assert.equal(guards.preferredSize, 1);
-  assert.equal(guards.maxSize, 1);
-  assert.equal(guards.desktopHandoffEnabled, false);
-  assert.equal(guards.forcedByProbe, true);
-  assert.equal(guards.userFallbackForbidden, true);
+  assert.equal(unproved.preferredSize, 1);
+  assert.equal(unproved.maxSize, 1);
+  assert.equal(unproved.desktopHandoffEnabled, false);
+  assert.equal(unproved.forcedByProbe, true);
+  assert.equal(unproved.userFallbackForbidden, true);
+
+  // Mini promoted shared-home to passed, but Phase 1 still caps via forcedPoolSize.
+  const phase1 = resolveCodexPoolGuards({
+    preferredSize: 2,
+    maxSize: 4,
+    desktopHandoffRequested: true,
+    probeStatus: "passed",
+  });
+  assert.equal(phase1.preferredSize, 1);
+  assert.equal(phase1.maxSize, 1);
+  assert.equal(phase1.forcedPoolSize, 1);
+  assert.equal(phase1.forcedByManifest, true);
+  assert.equal(phase1.desktopHandoffEnabled, false);
 
   const config = resolvePhase0RuntimeConfig({
     runtimeMode: "headless",
@@ -97,7 +118,7 @@ test("synthetic shared-home concurrency probe passes with fake servers and never
   assert.match(file, /shared-home-concurrency-probe\.json$/);
 
   const manifest = loadRuntimeManifest({ forceReload: true });
-  assert.equal(manifest.sharedHomeConcurrency.status, "unproved");
+  assert.equal(manifest.sharedHomeConcurrency.status, "passed");
   assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
   assert.equal(manifest.sharedHomeConcurrency.fallbackToUserCodexHomeForbidden, true);
   rmSync(root, { recursive: true, force: true });

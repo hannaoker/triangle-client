@@ -1,8 +1,9 @@
 /**
- * Phase 0 headless Codex worker runtime surface.
+ * Headless Codex worker runtime surface (Phase 0 + Phase 1 shadow).
  *
- * Does not change Bob / grok-bot wake paths or production mcp-interactive
- * desktop profiles. Feature flags remain inactive.
+ * Phase 1 adds a single-slot shadow path for isolated test profiles only.
+ * Production mcp-interactive / Shared App Server desktop profiles stay
+ * unchanged. Feature flags remain inactive unless a shadow test profile opts in.
  */
 
 export {
@@ -63,5 +64,22 @@ export {
   isDesktopHandoffEnabled,
   isHeadlessRuntimeEnabled,
   isHelperConversationStoreEnabled,
+  isShadowHeadlessTestProfile,
   resolvePhase0RuntimeConfig,
+  resolvePhase1ShadowRuntimeConfig,
 } from "./config-guards.mjs";
+
+export {
+  EXECUTION_STATES,
+  assertExecutionState,
+  canTransitionExecutionState,
+  createExecutionRecord,
+  replyBeforeAckStages,
+  transitionExecutionState,
+} from "./execution-state.mjs";
+
+export { createMemoryConversationRegistry } from "./conversation-registry.mjs";
+
+export { createCodexWorkerPool } from "./worker-pool.mjs";
+
+export { createHeadlessCodexRuntime } from "./headless-runtime.mjs";
