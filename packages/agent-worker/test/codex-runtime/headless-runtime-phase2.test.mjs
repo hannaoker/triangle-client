@@ -404,5 +404,5 @@ test("Phase 2 keeps global production flags off", () => {
   const manifest = loadRuntimeManifest({ forceReload: true });
   assert.equal(manifest.featureFlags.headlessRuntime, false);
   assert.equal(manifest.featureFlags.helperConversationStore, false);
-  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
+  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 4);
 });

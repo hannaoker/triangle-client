@@ -56,7 +56,7 @@ test("dedicated CODEX_HOME is env-only and never the user ~/.codex", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("unproved probe or Phase 1 forcedPoolSize keeps pool at 1 and handoff disabled", () => {
+test("unproved probe forces pool to 1; passed probe unlocks Phase 3 preferred 2 / cap 4", () => {
   const unproved = resolveCodexPoolGuards({
     preferredSize: 2,
     maxSize: 4,
@@ -65,7 +65,7 @@ test("unproved probe or Phase 1 forcedPoolSize keeps pool at 1 and handoff disab
     manifest: {
       sharedHomeConcurrency: {
         status: "unproved",
-        forcedPoolSize: 1,
+        forcedPoolSize: 4,
         desktopHandoffEnabled: false,
         fallbackToUserCodexHomeForbidden: true,
       },
@@ -77,24 +77,33 @@ test("unproved probe or Phase 1 forcedPoolSize keeps pool at 1 and handoff disab
   assert.equal(unproved.forcedByProbe, true);
   assert.equal(unproved.userFallbackForbidden, true);
 
-  // Mini promoted shared-home to passed, but Phase 1 still caps via forcedPoolSize.
-  const phase1 = resolveCodexPoolGuards({
+  // Mini promoted shared-home to passed; Phase 3 raises the manifest cap to 4
+  // while shadow defaults prefer size 2 (not 4).
+  const phase3 = resolveCodexPoolGuards({
     preferredSize: 2,
     maxSize: 4,
     desktopHandoffRequested: true,
     probeStatus: "passed",
   });
-  assert.equal(phase1.preferredSize, 1);
-  assert.equal(phase1.maxSize, 1);
-  assert.equal(phase1.forcedPoolSize, 1);
-  assert.equal(phase1.forcedByManifest, true);
-  assert.equal(phase1.desktopHandoffEnabled, false);
+  assert.equal(phase3.preferredSize, 2);
+  assert.equal(phase3.maxSize, 4);
+  assert.equal(phase3.forcedPoolSize, 4);
+  assert.equal(phase3.forcedByManifest, false);
+  assert.equal(phase3.desktopHandoffEnabled, false);
+
+  const shadowOne = resolveCodexPoolGuards({
+    preferredSize: 1,
+    maxSize: 1,
+    probeStatus: "passed",
+  });
+  assert.equal(shadowOne.preferredSize, 1);
+  assert.equal(shadowOne.maxSize, 1);
 
   const config = resolvePhase0RuntimeConfig({
     runtimeMode: "headless",
     codexPool: { preferredSize: 2, maxSize: 4 },
   });
-  assert.equal(config.pool.preferredSize, 1);
+  assert.equal(config.pool.preferredSize, 2);
   assert.equal(config.desktopHandoffEnabled, false);
   assert.equal(config.headlessRuntimeEnabled, false);
   assert.equal(isDesktopHandoffEnabled(), false);
@@ -119,7 +128,7 @@ test("synthetic shared-home concurrency probe passes with fake servers and never
 
   const manifest = loadRuntimeManifest({ forceReload: true });
   assert.equal(manifest.sharedHomeConcurrency.status, "passed");
-  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
+  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 4);
   assert.equal(manifest.sharedHomeConcurrency.fallbackToUserCodexHomeForbidden, true);
   rmSync(root, { recursive: true, force: true });
 });

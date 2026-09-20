@@ -52,7 +52,7 @@ function parseAllowlist(raw) {
 }
 
 /**
- * Operator enablement for the Phase 1 shadow path.
+ * Operator enablement for the Phase 1–3 shadow path.
  *
  * A profile activates only when:
  * 1. It is an isolated shadow test profile (`shadowTestProfile: true`, …), AND
@@ -61,8 +61,11 @@ function parseAllowlist(raw) {
  *    - `TRIANGLE_HEADLESS_SHADOW_ENABLE=1`, OR
  *    - the profile id is listed in `TRIANGLE_HEADLESS_SHADOW_PROFILES`.
  *
- * The global manifest `featureFlags.headlessRuntime` remains false and does
- * not activate production profiles.
+ * Phase 3 defaults the shadow pool to preferredSize 2 (cap up to 4 via
+ * manifest `forcedPoolSize`). Set `codexPool.preferredSize: 1` to keep a
+ * shadow profile on a single slot. The global manifest
+ * `featureFlags.headlessRuntime` remains false and does not activate
+ * production profiles.
  */
 export function resolvePhase1ShadowRuntimeConfig(
   profileConfig = {},
@@ -73,8 +76,8 @@ export function resolvePhase1ShadowRuntimeConfig(
   } = {},
 ) {
   const pool = resolveCodexPoolGuards({
-    preferredSize: profileConfig.codexPool?.preferredSize ?? 1,
-    maxSize: profileConfig.codexPool?.maxSize ?? 1,
+    preferredSize: profileConfig.codexPool?.preferredSize ?? 2,
+    maxSize: profileConfig.codexPool?.maxSize ?? 4,
     desktopHandoffRequested: false,
     probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
     manifest,
@@ -98,8 +101,8 @@ export function resolvePhase1ShadowRuntimeConfig(
     inactiveReason = "not_shadow_test_profile";
   } else if (!operatorEnabled) {
     inactiveReason = "shadow_not_operator_enabled";
-  } else if (pool.preferredSize !== 1 || pool.maxSize !== 1) {
-    inactiveReason = "pool_size_not_one";
+  } else if (pool.preferredSize < 1 || pool.preferredSize > 4) {
+    inactiveReason = "pool_size_out_of_bounds";
   }
 
   return Object.freeze({

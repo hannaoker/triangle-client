@@ -26,7 +26,7 @@ test("runtime manifest pins sandbox and approval allowlists from schema artifact
   assert.ok(manifest.provenance.sourceCommit);
   assert.equal(manifest.provenance.bundledCodexBinary, "codex-cli 0.155.0-alpha.9.2");
   assert.equal(manifest.sharedHomeConcurrency.status, "passed");
-  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
+  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 4);
   assert.equal(manifest.sharedHomeConcurrency.fallbackToUserCodexHomeForbidden, true);
   assert.match(manifest.provenance.gap, /clientUserMessageId/i);
 });

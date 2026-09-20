@@ -80,7 +80,7 @@
   },
   "sharedHomeConcurrency": {
     "status": "passed",
-    "forcedPoolSize": 1,
+    "forcedPoolSize": 4,
     "desktopHandoffEnabled": false,
     "fallbackToUserCodexHomeForbidden": true
   },

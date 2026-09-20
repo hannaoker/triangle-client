@@ -93,10 +93,10 @@ test("shadow gating: test profile requires operator enablement", () => {
 
   const manifest = loadRuntimeManifest({ forceReload: true });
   assert.equal(manifest.featureFlags.headlessRuntime, false);
-  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
+  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 4);
 });
 
-test("Phase 1 single-slot: start, turn, reply-before-ack ordering", async () => {
+test("Phase 1/3 shadow: start, turn, reply-before-ack ordering", async () => {
   const home = tempHome();
   const store = path.join(home, "materialized-threads");
   const fake = createFakeAppServerStdioProgram({
@@ -120,9 +120,10 @@ test("Phase 1 single-slot: start, turn, reply-before-ack ordering", async () => 
   try {
     assert.equal(runtime.active, true);
     const started = await runtime.start();
-    assert.equal(started.pool.size, 1);
-    assert.equal(started.pool.forcedPoolSize, 1);
-    assert.equal(started.pool.slot.slotId, "slot-1");
+    assert.equal(started.pool.size, 2);
+    assert.equal(started.pool.forcedPoolSize, 4);
+    assert.equal(started.pool.slots[0].slotId, "slot-1");
+    assert.equal(started.pool.slots[1].slotId, "slot-2");
 
     const result = await runtime.runDelivery({
       profileInstanceId: PROFILE_INSTANCE_ID,
@@ -192,8 +193,12 @@ test("Phase 1 thread resume continuity after forced slot restart", async () => {
     const threadId = first.threadId;
     const generationBefore = first.generation;
 
-    const restarted = await runtime.restartSlot({ signal: "SIGKILL", timeoutMs: 1_000 });
-    assert.equal(restarted.slotId, "slot-1");
+    const restarted = await runtime.restartSlot({
+      slotId: first.slotId,
+      signal: "SIGKILL",
+      timeoutMs: 1_000,
+    });
+    assert.equal(restarted.slotId, first.slotId);
     assert.ok(restarted.generation > generationBefore);
 
     // Registry kept the thread id across slot restart (parent process).

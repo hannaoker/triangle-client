@@ -199,7 +199,11 @@ for await (const line of rl) {
 
   try {
     await runtime.start();
-    const generationBefore = runtime.pool.status().slot?.generation ?? 0;
+    const generationBefore = Math.max(
+      0,
+      ...(runtime.pool.status().slots ?? []).map((slot) => slot.generation),
+      runtime.pool.status().slot?.generation ?? 0,
+    );
     await assert.rejects(
       () =>
         runtime.runDelivery({
@@ -217,9 +221,14 @@ for await (const line of rl) {
     assert.ok(["admitted", "running"].includes(row.executionState));
     assert.equal(row.activeDeliveryId, "delivery_61");
     // Slot process replaced so the next delivery cannot reuse a still-running child.
-    const generationAfter = runtime.pool.status().slot?.generation ?? 0;
-    assert.ok(generationAfter > generationBefore);
-    assert.equal(runtime.pool.status().busy, false);
+    const statusAfter = runtime.pool.status();
+    const generations = (statusAfter.slots ?? []).map((slot) => slot.generation);
+    assert.ok(
+      generations.some((generation) => generation > generationBefore) ||
+        (statusAfter.slot?.generation ?? 0) > generationBefore,
+    );
+    assert.equal(statusAfter.busy, false);
+    assert.equal(statusAfter.busyCount, 0);
 
     const report = await runtime.recoverAfterRestart({
       profileInstanceId: PROFILE_INSTANCE_ID,
