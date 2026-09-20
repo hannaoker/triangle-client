@@ -312,6 +312,19 @@ export function waitForAppServerTurnCompleted(
       );
     }, timeoutMs);
     unsubscribe = processHandle.onEvent((event) => {
+      if (event?.type === "exit") {
+        settle(
+          reject,
+          createCodedError("child_exited", "App Server child exited before turn completed", {
+            code: event.code,
+            signal: event.signal,
+            turnId,
+            threadId,
+            outcome: "unknown",
+          }),
+        );
+        return;
+      }
       if (event?.type !== "message" || event?.method !== "turn/completed") return;
       const completedTurnId = event?.params?.turn?.id;
       const completedThreadId = event?.params?.threadId;
@@ -362,6 +375,7 @@ export function createCodexAppServerProcess({
   let readline = null;
   let initialized = false;
   let closing = false;
+  let childExited = false;
   let stderrBytes = 0;
   let lastStderr = "";
   let serverInfo = null;
@@ -422,6 +436,7 @@ export function createCodexAppServerProcess({
       codexHome: resolvedHome,
       parentEnv: env,
     });
+    childExited = false;
     child = spawnImpl(command, args, {
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
@@ -431,6 +446,7 @@ export function createCodexAppServerProcess({
       failPending(createCodedError("spawn_failed", error.message, { cause: error }));
     });
     child.on("exit", (code, signal) => {
+      childExited = true;
       const error = createCodedError("child_exited", "App Server child exited", { code, signal });
       failPending(error);
       initialized = false;
@@ -503,23 +519,40 @@ export function createCodexAppServerProcess({
       // ignore
     }
     if (!child) return;
+    const current = child;
+    if (childExited) {
+      child = null;
+      initialized = false;
+      return;
+    }
     const exited = new Promise((resolve) => {
-      child.once("exit", () => resolve());
+      if (childExited || current.exitCode != null || current.signalCode != null) {
+        resolve();
+        return;
+      }
+      current.once("exit", () => resolve());
     });
     try {
-      child.stdin?.end();
+      current.stdin?.end();
     } catch {
       // ignore
     }
-    child.kill(signal);
+    try {
+      current.kill(signal);
+    } catch {
+      // ignore
+    }
     const timer = setTimeout(() => {
       try {
-        child.kill("SIGKILL");
+        current.kill("SIGKILL");
       } catch {
         // ignore
       }
     }, timeoutMs);
-    await exited;
+    await Promise.race([
+      exited,
+      new Promise((resolve) => setTimeout(resolve, timeoutMs + 100)),
+    ]);
     clearTimeout(timer);
     child = null;
     initialized = false;

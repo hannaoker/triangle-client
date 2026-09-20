@@ -2,7 +2,8 @@
  * Execution state machine helpers for the headless Codex runtime.
  *
  * Phase 1 uses these transitions in-memory for the shadow single-slot path.
- * Durable lease/epoch recovery lands in Phase 2.
+ * Phase 2 renews the profile lease while any conversation is non-idle and
+ * scopes cancellation / late events to `(conversation, delivery, execution_epoch)`.
  */
 
 export const EXECUTION_STATES = Object.freeze([
@@ -12,6 +13,14 @@ export const EXECUTION_STATES = Object.freeze([
   "result_ready",
   "reply_persisted",
   "acked",
+]);
+
+/** States that keep the profile lease non-stealable even after wall-clock expiry. */
+export const NON_IDLE_EXECUTION_STATES = Object.freeze([
+  "admitted",
+  "running",
+  "result_ready",
+  "reply_persisted",
 ]);
 
 const TRANSITIONS = Object.freeze({
@@ -73,4 +82,33 @@ export function createExecutionRecord(seed = {}) {
     lastCompletedDeliveryId:
       typeof seed.lastCompletedDeliveryId === "string" ? seed.lastCompletedDeliveryId : null,
   };
+}
+
+export function isNonIdleExecutionState(state) {
+  return NON_IDLE_EXECUTION_STATES.includes(assertExecutionState(state));
+}
+
+/**
+ * Late App Server / MESH events from a stale epoch are ignored (metadata-only).
+ * Returns true when the event epoch matches the admitted conversation epoch.
+ */
+export function shouldAcceptExecutionEpochEvent({ conversationEpoch, eventEpoch } = {}) {
+  if (!Number.isSafeInteger(conversationEpoch) || conversationEpoch < 1) return false;
+  if (!Number.isSafeInteger(eventEpoch) || eventEpoch < 1) return false;
+  return conversationEpoch === eventEpoch;
+}
+
+/**
+ * Cancellation is scoped to `(conversation, delivery, execution_epoch)`.
+ */
+export function matchesCancellationScope(
+  record,
+  { deliveryId, executionEpoch } = {},
+) {
+  if (record == null) return false;
+  if (!Number.isSafeInteger(executionEpoch) || executionEpoch < 1) return false;
+  if (record.executionEpoch !== executionEpoch) return false;
+  const active = record.activeDeliveryId ?? null;
+  if (active == null || deliveryId == null) return false;
+  return String(active) === String(deliveryId);
 }

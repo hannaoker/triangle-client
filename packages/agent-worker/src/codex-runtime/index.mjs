@@ -1,9 +1,9 @@
 /**
- * Headless Codex worker runtime surface (Phase 0 + Phase 1 shadow).
+ * Headless Codex worker runtime surface (Phase 0 + Phase 1 shadow + Phase 2 durable recovery).
  *
- * Phase 1 adds a single-slot shadow path for isolated test profiles only.
- * Production mcp-interactive / Shared App Server desktop profiles stay
- * unchanged. Feature flags remain inactive unless a shadow test profile opts in.
+ * Phase 2 adds lease/epoch/completion reconciliation and receipt-only behind the
+ * same shadow opt-in. Production mcp-interactive / desktop profiles stay unchanged.
+ * Global featureFlags.headlessRuntime and helperConversationStore remain false.
  */
 
 export {
@@ -71,14 +71,32 @@ export {
 
 export {
   EXECUTION_STATES,
+  NON_IDLE_EXECUTION_STATES,
   assertExecutionState,
   canTransitionExecutionState,
   createExecutionRecord,
+  isNonIdleExecutionState,
+  matchesCancellationScope,
   replyBeforeAckStages,
+  shouldAcceptExecutionEpochEvent,
   transitionExecutionState,
 } from "./execution-state.mjs";
 
-export { createMemoryConversationRegistry } from "./conversation-registry.mjs";
+export {
+  createDurableConversationRegistry,
+  createMemoryConversationRegistry,
+} from "./conversation-registry.mjs";
+
+export { createDurableConversationStore } from "./durable-conversation-store.mjs";
+
+export { createExecutionLeaseManager } from "./execution-lease.mjs";
+
+export {
+  buildCompletionIdempotencyKey,
+  recordOrReplayCompletion,
+  reconcileConversationAfterRestart,
+  reconcileProfileAfterRestart,
+} from "./completion-reconciler.mjs";
 
 export { createCodexWorkerPool } from "./worker-pool.mjs";
 
