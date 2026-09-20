@@ -5,7 +5,9 @@
  * Mini Darwin + authenticated dedicated CODEX_HOME. Until status === "passed",
  * pool size stays 1 and desktop handoff stays disabled.
  *
- * A failed probe must never fall back to ~/.codex.
+ * Live App Server materializes rollouts lazily on the first turn/start — not at
+ * thread/start. Resuming before that seed turn yields `no rollout found for
+ * thread id`. A failed probe must never fall back to ~/.codex.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,8 +17,13 @@ import path from "node:path";
 import {
   createCodexAppServerProcess,
   createFakeAppServerStdioProgram,
+  waitForAppServerTurnCompleted,
 } from "./app-server-process.mjs";
 import { resolveTriangleCodexHome } from "./runtime-home.mjs";
+
+const DEFAULT_SEED_TIMEOUT_MS = 90_000;
+const PROBE_SEED_TEXT =
+  "Triangle shared-home concurrency probe seed turn. Do not use tools. Reply briefly.";
 
 function createCodedError(code, message, extra = {}) {
   const error = new Error(message);
@@ -26,9 +33,64 @@ function createCodedError(code, message, extra = {}) {
 }
 
 /**
+ * Start a thread then run one seed turn so live App Server writes a durable
+ * rollout before any thread/resume (same-process or cross-process).
+ */
+async function startMaterializedThread(
+  slot,
+  {
+    cwd,
+    seedTimeoutMs = DEFAULT_SEED_TIMEOUT_MS,
+    seedText = PROBE_SEED_TEXT,
+  } = {},
+) {
+  const started = await slot.threadStart({
+    cwd,
+    approvalPolicy: "never",
+    sandbox: "read-only",
+    ephemeral: false,
+  });
+  const threadId = started?.thread?.id;
+  if (typeof threadId !== "string" || threadId.length === 0) {
+    throw createCodedError("probe_thread_start_failed", "thread/start did not return ids");
+  }
+
+  const seedDone = waitForAppServerTurnCompleted(slot, {
+    threadId,
+    timeoutMs: seedTimeoutMs,
+  });
+  const seedStarted = await slot.turnStart({
+    threadId,
+    input: [{ type: "text", text: seedText }],
+  });
+  const seedTurnId = seedStarted?.turn?.id;
+  if (typeof seedTurnId !== "string" || seedTurnId.length === 0) {
+    throw createCodedError(
+      "probe_seed_turn_failed",
+      "seed turn/start did not return a turn id",
+      { threadId },
+    );
+  }
+
+  const seedTurn = await seedDone;
+  if (seedTurn?.status && seedTurn.status !== "completed") {
+    throw createCodedError(
+      "probe_seed_turn_failed",
+      "seed turn did not complete successfully",
+      { threadId, seedTurnId, status: seedTurn.status },
+    );
+  }
+
+  return Object.freeze({ threadId, seedTurnId });
+}
+
+/**
  * Run two App Server children against the same dedicated CODEX_HOME.
  * Uses the fake stdio server by default (unit-testable). Pass `live: true`
  * plus a real `command`/`args` on Mini Darwin.
+ *
+ * Synthetic fakes default to live-like rollout materialization so the seed
+ * ordering is regression-covered without ChatGPT.app.
  */
 export async function runSharedHomeConcurrencyProbe({
   codexHome,
@@ -38,6 +100,7 @@ export async function runSharedHomeConcurrencyProbe({
   createProcess = createCodexAppServerProcess,
   createFake = createFakeAppServerStdioProgram,
   env = process.env,
+  seedTimeoutMs = DEFAULT_SEED_TIMEOUT_MS,
 } = {}) {
   if (live && (!command || !args)) {
     throw createCodedError(
@@ -60,8 +123,21 @@ export async function runSharedHomeConcurrencyProbe({
     );
   }
 
-  const fakeA = createFake({ serverIdentity: "fake-shared-home-a", idPrefix: "slotA" });
-  const fakeB = createFake({ serverIdentity: "fake-shared-home-b", idPrefix: "slotB" });
+  // Live-like fake: resume before first turn fails with no rollout found.
+  // Shared store simulates durable CODEX_HOME rollouts across fake process restarts.
+  const materializedStorePath = path.join(home, ".triangle-probe-materialized-threads");
+  const fakeA = createFake({
+    serverIdentity: "fake-shared-home-a",
+    idPrefix: "slotA",
+    requireMaterializedRollout: true,
+    materializedStorePath,
+  });
+  const fakeB = createFake({
+    serverIdentity: "fake-shared-home-b",
+    idPrefix: "slotB",
+    requireMaterializedRollout: true,
+    materializedStorePath,
+  });
 
   const slotA = createProcess({
     command: live ? command : fakeA.command,
@@ -82,6 +158,7 @@ export async function runSharedHomeConcurrencyProbe({
     live,
     startedAt: new Date().toISOString(),
     threads: [],
+    seedTurnIds: [],
     error: null,
   };
 
@@ -91,24 +168,14 @@ export async function runSharedHomeConcurrencyProbe({
     await slotA.initialize({ name: "triangle-probe-a", version: "0.1.0" });
     await slotB.initialize({ name: "triangle-probe-b", version: "0.1.0" });
 
-    const startedA = await slotA.threadStart({
-      cwd: home,
-      approvalPolicy: "never",
-      sandbox: "read-only",
-      ephemeral: false,
-    });
-    const startedB = await slotB.threadStart({
-      cwd: home,
-      approvalPolicy: "never",
-      sandbox: "read-only",
-      ephemeral: false,
-    });
+    // Concurrent materialization on one dedicated home (distinct threads).
+    const [materializedA, materializedB] = await Promise.all([
+      startMaterializedThread(slotA, { cwd: home, seedTimeoutMs }),
+      startMaterializedThread(slotB, { cwd: home, seedTimeoutMs }),
+    ]);
 
-    const threadA = startedA?.thread?.id;
-    const threadB = startedB?.thread?.id;
-    if (typeof threadA !== "string" || typeof threadB !== "string") {
-      throw createCodedError("probe_thread_start_failed", "thread/start did not return ids");
-    }
+    const threadA = materializedA.threadId;
+    const threadB = materializedB.threadId;
     if (threadA === threadB) {
       throw createCodedError("probe_thread_collision", "slots minted identical thread ids");
     }
@@ -141,10 +208,11 @@ export async function runSharedHomeConcurrencyProbe({
 
     report.status = live ? "passed" : "synthetic-passed";
     report.threads = [threadA, threadB];
+    report.seedTurnIds = [materializedA.seedTurnId, materializedB.seedTurnId];
     report.finishedAt = new Date().toISOString();
     report.note = live
-      ? "Live dual App Server shared-home probe passed."
-      : "Synthetic fake-server probe passed unit gates only; Mini Darwin live Codex login still required before status=passed.";
+      ? "Live dual App Server shared-home probe passed (seed turns materialized rollouts before resume)."
+      : "Synthetic live-like fake probe passed unit gates only; Mini Darwin live Codex login still required before status=passed.";
     return Object.freeze(report);
   } catch (error) {
     report.status = "failed";
@@ -189,3 +257,5 @@ export function writeProbeReport(report, { directory = null } = {}) {
 export function cleanupProbeDirectory(directory) {
   rmSync(directory, { recursive: true, force: true });
 }
+
+export { startMaterializedThread, PROBE_SEED_TEXT, DEFAULT_SEED_TIMEOUT_MS };

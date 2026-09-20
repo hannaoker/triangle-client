@@ -20,6 +20,7 @@ export {
 export {
   createCodexAppServerProcess,
   createFakeAppServerStdioProgram,
+  waitForAppServerTurnCompleted,
 } from "./app-server-process.mjs";
 
 export {
@@ -42,6 +43,7 @@ export {
 export {
   cleanupProbeDirectory,
   runSharedHomeConcurrencyProbe,
+  startMaterializedThread,
   writeProbeReport,
 } from "./shared-home-concurrency-probe.mjs";
 
