@@ -1,10 +1,11 @@
 /**
- * Headless Codex worker runtime surface (Phase 0–4).
+ * Headless Codex worker runtime surface (Phase 0–5).
  *
- * Phase 4 adds optional idle-only desktop handoff behind an explicit shadow
- * opt-in. Production mcp-interactive / desktop Shared App Server stays the
- * default path. Global featureFlags.headlessRuntime, helperConversationStore,
- * and desktopHandoff remain false.
+ * Phase 5 adds migration machinery + schema classification + gated new-profile
+ * defaults. Production mcp-interactive / desktop Shared App Server stays the
+ * default path until Phase 5 is explicitly enabled. Global
+ * featureFlags.headlessRuntime, helperConversationStore, and desktopHandoff
+ * remain false in the immutable manifest.
  */
 
 export {
@@ -65,10 +66,35 @@ export {
   isDesktopHandoffEnabled,
   isHeadlessRuntimeEnabled,
   isHelperConversationStoreEnabled,
+  isPhase5MigrationEnabled,
   isShadowHeadlessTestProfile,
   resolvePhase0RuntimeConfig,
   resolvePhase1ShadowRuntimeConfig,
+  resolvePhase5MigrationConfig,
 } from "./config-guards.mjs";
+
+export {
+  CODEX_EXECUTION_KIND,
+  CODEX_PROFILE_SCHEMA_VERSION,
+  annotateCodexProfileSchema,
+  classifyCodexProfileExecution,
+  executionKindForSchemaVersion,
+  isDesktopAppServerExecution,
+  isHeadlessAppServerExecution,
+  isLegacyCommandExecution,
+  isMcpInteractiveDesktopProfile,
+  schemaVersionForExecutionKind,
+} from "./profile-schema.mjs";
+
+export {
+  createDefaultCodexProfileConfig,
+  wouldNewCodexProfileDefaultToHeadless,
+} from "./profile-factory.mjs";
+
+export {
+  createMemoryProfileConfigStore,
+  createProfileMigrationController,
+} from "./profile-migration.mjs";
 
 export {
   EXECUTION_STATES,

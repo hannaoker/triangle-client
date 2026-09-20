@@ -1,6 +1,6 @@
 # Headless Codex worker runtime with optional desktop handoff
 
-Status: **Phase 0–4 complete for shadow/test (preferred pool 2, cap 4; desktop handoff opt-in only); Phase 5 default migration not started**  
+Status: **Phase 0–4 complete for shadow/test (preferred pool 2, cap 4; desktop handoff opt-in only); Phase 5 migration machinery shipped (defaults still off — soak / live canary operator-owned)**  
 Date: 2026-09-20  
 Owner: Triangle Client  
 Target repository: `triangle-client`
@@ -1007,6 +1007,85 @@ and `rollback-headless` against a synthetic desktop owner.
 - After soak and production canaries, migrate selected profiles one at a time.
 - Preserve a rollback path to the prior desktop binding or command adapter.
 
+#### Phase 5 implementation status (2026-09-20)
+
+Shipped under `packages/agent-worker/src/codex-runtime/` behind an **explicit**
+operator enable (`TRIANGLE_PHASE5_MIGRATION_ENABLE=1` or
+`enablePhase5Migration: true`). Immutable manifest
+`featureFlags.headlessRuntime` stays **false**. Production
+`codex-bob-test` / Bob / Shared App Server / `appServerWake` bindings are
+**not** rewritten by install or by this PR alone.
+
+| Piece | Module |
+| --- | --- |
+| Schema versions + execution-kind classification | `profile-schema.mjs` (`legacy-command` / `desktop-app-server` / `headless-app-server`) |
+| Gated new-profile factory defaults | `profile-factory.mjs` + `resolvePhase5MigrationConfig` |
+| One-at-a-time migrate / rollback (fail-closed) | `profile-migration.mjs` (`migrateToHeadless` / `rollbackToDesktop`) |
+| Focused suite | `phase5-migration.test.mjs` |
+
+**What this PR proves in CI**
+
+- New Codex profiles default to **desktop / mcp-interactive** when Phase 5 is off.
+- New Codex profiles default to **headless App Server** only when Phase 5 is explicitly enabled.
+- Existing mcp-interactive configs stay unchanged until `migrateToHeadless`.
+- Migrate + rollback restore prior delivery mode, binding `enabled`, and single mailbox consumer.
+- Migrate rejects while non-idle, transferring, or admission-frozen.
+- Failed first-start / readiness gate restores desktop without dual consumers.
+- Committed `featureFlags.headlessRuntime` remains false.
+
+**Release-gate checklist (still operator-owned — do not fake evidence)**
+
+The **global** default must not flip until all design release gates are true
+(see [Release gates](#release-gates) above). For Phase 5 production cutover:
+
+| Gate | Owner | Status in this PR |
+| --- | --- | --- |
+| Focused Node `codex-runtime` suites | CI | Proven by `phase5-migration.test.mjs` + suite |
+| Darwin signed-helper / LaunchAgent tests | Operator / Darwin CI | Open |
+| Crash / reconnect / handoff regression suites | CI + operator | Prior phases shipped; re-run before cutover |
+| Wall-clock **24h soak** (no duplicate/lost replies, no lease overlap) | Operator | Open |
+| Existing desktop wake canary (ChatGPT.app / Shared App Server) | Operator | Open |
+| Operator pause / drain / restart recovery rehearsal | Operator | Open |
+
+##### Operator enablement (migration experiments only)
+
+Manifest defaults keep headless production **off**. For a controlled migration
+lab only (never silently on Mini production Bob):
+
+```sh
+export TRIANGLE_PHASE5_MIGRATION_ENABLE=1
+```
+
+Or inject `enablePhase5Migration: true` into `resolvePhase5MigrationConfig` /
+`createDefaultCodexProfileConfig` in tests.
+
+##### Operator migration runbook (one profile at a time)
+
+1. Confirm release gates for this profile’s host (or accept shadow-only risk).
+2. Enable Phase 5 on that host only (`TRIANGLE_PHASE5_MIGRATION_ENABLE=1`).
+3. Ensure the target profile is **idle** (no open delivery, not transferring,
+   not admission-frozen). Pause admission if needed.
+4. Call `migrateToHeadless` for **one** profile. The controller:
+   - snapshots prior profile config + App Server binding;
+   - stops the desktop mailbox consumer first;
+   - soft-disables the binding (`enabled: false`) without deleting it;
+   - writes headless schema (`executionKind: headless-app-server`);
+   - runs the first-start / readiness gate;
+   - starts the headless consumer only after prove succeeds.
+5. On any failure, prior desktop config + binding are restored and only the
+   desktop consumer is restarted (no dual claimers).
+6. To undo after a successful migrate: `rollbackToDesktop` (requires the
+   durable Phase 5 snapshot). Rehearse rollback before production canaries.
+7. Leave other mcp-interactive profiles untouched. Do **not** set
+   `featureFlags.headlessRuntime: true` in the committed immutable manifest
+   until soak + live desktop canary pass.
+
+##### Focused verification
+
+```sh
+node --test packages/agent-worker/test/codex-runtime/*.test.mjs
+```
+
 ## Compatibility and migration
 
 - Existing `deliveryMode: mcp-interactive` keeps current behavior.
@@ -1014,7 +1093,8 @@ and `rollback-headless` against a synthetic desktop owner.
 - Existing `event-driven` command adapters remain available during migration but
   are not treated as equivalent to the persistent App Server runtime.
 - The profile schema version must distinguish legacy command execution,
-  headless App Server execution, and desktop App Server execution.
+  headless App Server execution, and desktop App Server execution
+  (`CODEX_PROFILE_SCHEMA_VERSION` 1 / 2 / 3).
 - Runtime bundles remain immutable and content-addressed.
 - A failed install or first-start gate restores the previous runtime and service
   configuration without activating a second mailbox consumer.

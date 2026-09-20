@@ -20,6 +20,13 @@ Inbound work for `deliveryMode: mcp-interactive` Codex profiles is admitted into
 the **bound** desktop thread — not ordinary ChatGPT’s private unix app-server,
 and not a headless `event-driven` / `codex exec` drain.
 
+Phase 5 headless migration machinery exists in `codex-runtime` but stays
+**off** unless an operator explicitly enables it. Do **not** treat Phase 5 as
+an automatic replacement for this runbook; keep Codex at `mcp-interactive` and
+follow the steps below until soak / live canary gates pass. See
+[headless Codex worker runtime design](2026-09-20-headless-codex-worker-runtime-design.md)
+Phase 5.
+
 | Do | Do not |
 | --- | --- |
 | Keep Codex at `mcp-interactive` | Flip Codex to `event-driven` to “finish” inbound |

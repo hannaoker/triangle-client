@@ -103,10 +103,37 @@ Dedicated `TRIANGLE_CODEX_HOME` remains required; never fall back to `~/.codex`.
 
 3. Do **not** set `sharedHomeConcurrency.desktopHandoffEnabled` / 
    `featureFlags.desktopHandoff` true in the default immutable manifest until
-   Phase 5 gates pass. Production desktop wake stays on Shared App Server —
-   see `docs/triangle-client/shared-codex-app-server-runbook.md`.
+   Phase 5 release gates (soak / live canary) pass. Production desktop wake
+   stays on Shared App Server — see
+   `docs/triangle-client/shared-codex-app-server-runbook.md`.
 4. Handoff is explicit API/operator only (`handoffToDesktop` /
    `handoffToHeadless` / `recoverDesktop` / `rollbackHeadless`); never on wake.
+
+## Phase 5 status (migration machinery; production defaults still safe)
+
+| Item | Status |
+| --- | --- |
+| Schema classify legacy / desktop / headless | **Shipped** (`profile-schema.mjs`) |
+| New-profile factory defaults → headless | **Gated** — only when `TRIANGLE_PHASE5_MIGRATION_ENABLE=1` or `enablePhase5Migration: true` |
+| `migrate-to-headless` / `rollback-to-desktop` | **Shipped** (`profile-migration.mjs`); one profile at a time; fail-closed |
+| Global `featureFlags.headlessRuntime` | **`false`** (do not flip in committed manifest) |
+| Production mcp-interactive / `appServerWake` | **Unchanged** without explicit migrate |
+| 24h soak / live desktop wake canary | **Operator-owned — still open** |
+| Darwin helper + pause/drain/restart rehearsal | **Operator-owned — still open** |
+
+Phase 5 does **not** silently flip Mini production `codex-bob-test` / Bob /
+existing Shared App Server bindings. Installation alone does not rewrite
+bindings. Dedicated `TRIANGLE_CODEX_HOME` remains required; never `~/.codex`.
+
+### Operator: enable Phase 5 migration (lab / canary only)
+
+```sh
+export TRIANGLE_PHASE5_MIGRATION_ENABLE=1
+```
+
+See the design doc Phase 5 operator migration runbook for one-at-a-time migrate
++ rollback steps and the release-gate checklist that remains open for soak and
+live desktop canary.
 
 ## Gap
 
@@ -176,7 +203,10 @@ ordering is regression-covered without ChatGPT.app.
 is now `passed`. Phase 3 raises `forcedPoolSize` to **4** (absolute cap) while
 shadow preferred size defaults to **2**. Phase 4 ships idle-only desktop handoff
 behind an explicit shadow opt-in; default `desktopHandoffEnabled` /
-`featureFlags.desktopHandoff` remain **false**.
+`featureFlags.desktopHandoff` remain **false**. Phase 5 ships migration
+machinery + schema + gated new-profile defaults; committed
+`featureFlags.headlessRuntime` remains **false** until operator soak / live
+desktop canary gates pass.
 
 ### Mini live re-run steps (historical; probe already passed)
 

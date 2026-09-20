@@ -6,6 +6,9 @@
  * production desktop / mcp-interactive profiles by default.
  * Phase 4 desktop handoff stays off unless resolvePhase4DesktopHandoffConfig
  * (or isDesktopHandoffEnabled) is explicitly opted in for shadow experiments.
+ * Phase 5 migration / new-profile headless defaults stay off unless
+ * resolvePhase5MigrationConfig is explicitly opted in. Global
+ * featureFlags.headlessRuntime remains false in the immutable manifest.
  */
 
 import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
@@ -149,4 +152,74 @@ export function resolvePhase0RuntimeConfig(profileConfig = {}, { manifest = load
     featureFlags: getFeatureFlags(manifest),
     shadow: resolvePhase1ShadowRuntimeConfig(profileConfig, { manifest }),
   });
+}
+
+/**
+ * Phase 5 operator enablement for migration machinery and new-profile defaults.
+ *
+ * Production defaults stay safe. Activation requires an explicit opt-in:
+ * - `enablePhase5Migration: true` (unit/integration / profile factory injection), OR
+ * - `TRIANGLE_PHASE5_MIGRATION_ENABLE=1`
+ *
+ * The immutable manifest `featureFlags.headlessRuntime` must remain **false**
+ * until the design release-gate checklist (soak, live desktop canary, etc.)
+ * is operator-proven. This resolver never flips that flag.
+ *
+ * When inactive:
+ * - new Codex profiles do **not** default to headless;
+ * - migrate-to-headless / rollback-to-desktop reject as disabled;
+ * - existing mcp-interactive / Shared App Server bindings are untouched.
+ */
+export function resolvePhase5MigrationConfig(
+  profileConfig = {},
+  {
+    manifest = loadRuntimeManifest(),
+    env = process.env,
+    enablePhase5Migration = false,
+  } = {},
+) {
+  const flags = getFeatureFlags(manifest);
+  const envEnable = env.TRIANGLE_PHASE5_MIGRATION_ENABLE === "1";
+  const operatorEnabled = enablePhase5Migration === true || envEnable === true;
+  // Manifest global flag is recorded for operators but must not auto-enable
+  // Phase 5 in this PR — release gates (soak / live canary) remain open.
+  const globalHeadlessFlag = flags.headlessRuntime === true;
+
+  let inactiveReason = null;
+  if (!operatorEnabled) {
+    inactiveReason = "phase5_migration_not_enabled";
+  }
+
+  return Object.freeze({
+    active: inactiveReason == null,
+    inactiveReason,
+    operatorEnabled,
+    // New-profile factory defaults to headless only when Phase 5 is explicitly on.
+    newProfileDefaultHeadless: operatorEnabled,
+    // Migrate / rollback APIs allowed only when explicitly on.
+    migrationOperationsEnabled: operatorEnabled,
+    globalHeadlessRuntimeFlag: globalHeadlessFlag,
+    // Always false for committed defaults in this PR; do not treat as enablement.
+    manifestHeadlessRuntimeEnabled: globalHeadlessFlag,
+    profileId:
+      typeof profileConfig.profileId === "string"
+        ? profileConfig.profileId
+        : typeof profileConfig.actorProfile === "string"
+          ? profileConfig.actorProfile
+          : null,
+    featureFlags: flags,
+    manifest,
+  });
+}
+
+/**
+ * True only when an operator explicitly enabled Phase 5 (env or injection).
+ * Never true solely because the committed manifest exists.
+ */
+export function isPhase5MigrationEnabled({
+  manifest = loadRuntimeManifest(),
+  env = process.env,
+  enablePhase5Migration = false,
+} = {}) {
+  return resolvePhase5MigrationConfig({}, { manifest, env, enablePhase5Migration }).active === true;
 }
