@@ -11,7 +11,7 @@ binary (`ChatGPT.app` Resources `codex`).
 | Upstream schema commit | Pinned in `runtime-manifest.json` → `provenance.sourceCommit` |
 | Bundled Codex binary version | **Missing here** — set on Mini |
 | Live `clientUserMessageId` survival through `thread/read` | **Blocked** — prove on Mini |
-| Dual App Server shared `CODEX_HOME` concurrency | **Unproved** — re-run probe on Mini after seed-turn fix |
+| Dual App Server shared `CODEX_HOME` concurrency | **Passed** — Mini live 2026-09-20 (seed turns then resume/restart) |
 
 ## Mini re-pin procedure
 
