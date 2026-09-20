@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -28,7 +28,7 @@ test("dedicated CODEX_HOME is env-only and never the user ~/.codex", () => {
     home: root,
     allowCreate: true,
   });
-  assert.equal(resolved, dedicated);
+  assert.equal(resolved, realpathSync(dedicated));
 
   const childEnv = buildSanitizedCodexChildEnv({
     codexHome: dedicated,
@@ -39,7 +39,7 @@ test("dedicated CODEX_HOME is env-only and never the user ~/.codex", () => {
       OPENAI_API_KEY: "sk-test",
     },
   });
-  assert.equal(childEnv.CODEX_HOME, dedicated);
+  assert.equal(childEnv.CODEX_HOME, realpathSync(dedicated));
   assert.equal(childEnv.MESH_TOKEN, undefined);
   assert.equal(childEnv.OPENAI_API_KEY, undefined);
   assert.equal(Object.hasOwn(childEnv, "CODEX_HOME"), true);
@@ -89,7 +89,7 @@ test("synthetic shared-home concurrency probe passes with fake servers and never
   assert.equal(report.status, "synthetic-passed");
   assert.equal(report.threads.length, 2);
   assert.notEqual(report.threads[0], report.threads[1]);
-  assert.equal(report.codexHome, dedicated);
+  assert.equal(report.codexHome, realpathSync(dedicated));
   assert.doesNotMatch(JSON.stringify(report), /\.codex/);
 
   const file = writeProbeReport(report, { directory: path.join(root, "out") });
