@@ -11,7 +11,7 @@ binary (`ChatGPT.app` Resources `codex`).
 | Upstream schema commit | Pinned in `runtime-manifest.json` → `provenance.sourceCommit` |
 | Bundled Codex binary version | **Missing here** — set on Mini |
 | Live `clientUserMessageId` survival through `thread/read` | **Blocked** — prove on Mini |
-| Dual App Server shared `CODEX_HOME` concurrency | **Unproved** — run probe on Mini |
+| Dual App Server shared `CODEX_HOME` concurrency | **Unproved** — re-run probe on Mini after seed-turn fix |
 
 ## Mini re-pin procedure
 
@@ -49,3 +49,58 @@ binary (`ChatGPT.app` Resources `codex`).
 - Node Phase 0 suite: 17/17 after Darwin `realpath` test expects (`/var` vs `/private/var`)
 - Live shared-home probe (`live: true`, dual `codex app-server` stdio, dedicated TRIANGLE home): **failed** on `thread/resume` with `no rollout found for thread id ...` after concurrent slot start. Dedicated home was created and wrote sqlite/locks; do **not** promote `sharedHomeConcurrency.status` to `passed`. Recovery must not use `~/.codex`.
 - Live `clientUserMessageId` survival through real `thread/read`: **not yet run** (blocked on stable live probe/session).
+
+### Root cause (2026-09-20 follow-up)
+
+Live Codex App Server (confirmed by upstream
+`thread_resume_rejects_unmaterialized_thread` and Claude Code plugin issue
+[#31158](https://github.com/openai/codex/issues/31158)) creates the durable
+rollout **lazily on the first `turn/start`**, not at `thread/start`. Calling
+`thread/resume` immediately after `thread/start` returns
+`rpc_error: no rollout found for thread id …` even with `ephemeral: false`.
+
+This matches the Mini symptom. SQLite/WAL + `thread-writer-locks/` after start
+only show partial bookkeeping; they do not imply a resumeable rollout.
+
+Fix in-tree: the shared-home probe now runs a seed `turn/start` and waits for
+`turn/completed` on each slot before any resume or forced restart, matching the
+desktop mint path in `native-desktop-wake-experiment.mjs`. Synthetic fakes use
+`requireMaterializedRollout: true` plus a shared materialized-id store so this
+ordering is regression-covered without ChatGPT.app.
+
+**Do not** set `sharedHomeConcurrency.status` to `passed` until Mini re-runs the
+live probe successfully. Pool size remains forced to `1`.
+
+### Mini live re-run steps (after this fix)
+
+Prerequisites:
+
+1. Dedicated home already exists (or will be created by the probe):
+   `~/Library/Application Support/The Triangle/model-state/codex-runtime-home`
+2. That home is authenticated via a supported Codex login for the Triangle
+   runtime (seed turns require model auth). Never copy cookies into the helper
+   and never fall back to `~/.codex`.
+3. Bundled binary:
+   `/Applications/ChatGPT.app/Contents/Resources/codex`
+
+Commands:
+
+```sh
+cd /path/to/triangle-client
+node --test packages/agent-worker/test/codex-runtime/*.test.mjs
+
+CODEX_BIN="/Applications/ChatGPT.app/Contents/Resources/codex" \
+  node packages/agent-worker/scripts/run-shared-home-concurrency-probe.mjs --live
+```
+
+Promotion rules (Mini operator only):
+
+- If `status === "passed"`: update `runtime-manifest.json`
+  `sharedHomeConcurrency.status` to `"passed"` and keep
+  `fallbackToUserCodexHomeForbidden: true`. Only then may
+  `forcedPoolSize` leave `1`.
+- If seed turns fail (auth / network): leave status `unproved` / `failed`; fix
+  dedicated-home login; do **not** point `CODEX_HOME` at `~/.codex`.
+- If resume still fails after successful seeds: capture stderr (redacted) and
+  home layout (`sessions/`, sqlite, locks) for a follow-up; still no user-home
+  fallback.

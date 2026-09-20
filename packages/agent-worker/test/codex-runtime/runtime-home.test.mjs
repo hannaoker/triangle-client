@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -88,6 +88,7 @@ test("synthetic shared-home concurrency probe passes with fake servers and never
   });
   assert.equal(report.status, "synthetic-passed");
   assert.equal(report.threads.length, 2);
+  assert.equal(report.seedTurnIds.length, 2);
   assert.notEqual(report.threads[0], report.threads[1]);
   assert.equal(report.codexHome, realpathSync(dedicated));
   assert.doesNotMatch(JSON.stringify(report), /\.codex/);
@@ -97,7 +98,60 @@ test("synthetic shared-home concurrency probe passes with fake servers and never
 
   const manifest = loadRuntimeManifest({ forceReload: true });
   assert.equal(manifest.sharedHomeConcurrency.status, "unproved");
+  assert.equal(manifest.sharedHomeConcurrency.forcedPoolSize, 1);
   assert.equal(manifest.sharedHomeConcurrency.fallbackToUserCodexHomeForbidden, true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("live-like fake rejects resume before seed; probe seed ordering avoids Mini no-rollout failure", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "triangle-probe-rollout-"));
+  const dedicated = path.join(root, "codex-runtime-home");
+  const store = path.join(dedicated, ".triangle-probe-materialized-threads");
+  mkdirSync(dedicated, { recursive: true, mode: 0o700 });
+
+  const { createFakeAppServerStdioProgram, createCodexAppServerProcess } = await import(
+    "../../src/codex-runtime/app-server-process.mjs"
+  );
+
+  const fake = createFakeAppServerStdioProgram({
+    serverIdentity: "fake-live-like",
+    idPrefix: "liveLike",
+    requireMaterializedRollout: true,
+    materializedStorePath: store,
+  });
+  const slot = createCodexAppServerProcess({
+    command: fake.command,
+    args: fake.args,
+    codexHome: dedicated,
+    env: { ...process.env, HOME: root },
+  });
+
+  try {
+    await slot.start();
+    await slot.initialize({ name: "triangle-rollout-repro", version: "0.0.0" });
+    const started = await slot.threadStart({
+      cwd: dedicated,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      ephemeral: false,
+    });
+    const threadId = started.thread.id;
+    await assert.rejects(
+      () => slot.threadResume({ threadId }),
+      (error) =>
+        error.code === "rpc_error" &&
+        /no rollout found for thread id/.test(error.message),
+    );
+  } finally {
+    await slot.close({ signal: "SIGKILL", timeoutMs: 1_000 });
+  }
+
+  const report = await runSharedHomeConcurrencyProbe({
+    codexHome: dedicated,
+    env: { ...process.env, HOME: root },
+  });
+  assert.equal(report.status, "synthetic-passed");
+  assert.equal(report.seedTurnIds.length, 2);
   rmSync(root, { recursive: true, force: true });
 });
 

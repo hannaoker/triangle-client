@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createCodexAppServerProcess,
   createFakeAppServerStdioProgram,
+  waitForAppServerTurnCompleted,
 } from "../../src/codex-runtime/app-server-process.mjs";
 import {
   encodeJsonRpcRequest,
@@ -128,4 +129,65 @@ test("refuses user ~/.codex as dedicated runtime home", () => {
     (error) => error.code === "codex_home_user_fallback_forbidden",
   );
   rmSync(home, { recursive: true, force: true });
+});
+
+test("live-like fake materializes rollout on turn/start and survives process restart", async () => {
+  const home = tempHome();
+  const store = path.join(home, "materialized-threads");
+  const fake = createFakeAppServerStdioProgram({
+    serverIdentity: "fake-materialize",
+    idPrefix: "mat",
+    requireMaterializedRollout: true,
+    materializedStorePath: store,
+  });
+
+  const first = createCodexAppServerProcess({
+    command: fake.command,
+    args: fake.args,
+    codexHome: home,
+    env: { ...process.env, HOME: path.dirname(home) },
+  });
+
+  let threadId;
+  try {
+    await first.start();
+    await first.initialize({ name: "triangle-test", version: "0.0.0" });
+    const started = await first.threadStart({ cwd: home, approvalPolicy: "never", sandbox: "read-only" });
+    threadId = started.thread.id;
+    await assert.rejects(
+      () => first.threadResume({ threadId }),
+      (error) => error.code === "rpc_error" && /no rollout found/.test(error.message),
+    );
+
+    const pending = waitForAppServerTurnCompleted(first, {
+      threadId,
+      timeoutMs: 5_000,
+    });
+    const turn = await first.turnStart({
+      threadId,
+      input: [{ type: "text", text: "materialize rollout" }],
+    });
+    const completed = await pending;
+    assert.equal(completed.id, turn.turn.id);
+    const resumed = await first.threadResume({ threadId });
+    assert.equal(resumed.thread.id, threadId);
+  } finally {
+    await first.close({ signal: "SIGKILL", timeoutMs: 1_000 });
+  }
+
+  const second = createCodexAppServerProcess({
+    command: fake.command,
+    args: fake.args,
+    codexHome: home,
+    env: { ...process.env, HOME: path.dirname(home) },
+  });
+  try {
+    await second.start();
+    await second.initialize({ name: "triangle-test-restart", version: "0.0.0" });
+    const afterRestart = await second.threadResume({ threadId });
+    assert.equal(afterRestart.thread.id, threadId);
+  } finally {
+    await second.close({ signal: "SIGKILL", timeoutMs: 1_000 });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
