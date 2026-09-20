@@ -79,7 +79,7 @@
     "liveSurvivalStatus": "blocked-needs-mini-darwin"
   },
   "sharedHomeConcurrency": {
-    "status": "unproved",
+    "status": "passed",
     "forcedPoolSize": 1,
     "desktopHandoffEnabled": false,
     "fallbackToUserCodexHomeForbidden": true
