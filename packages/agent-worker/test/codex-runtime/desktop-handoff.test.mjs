@@ -450,3 +450,180 @@ test("disabled controller rejects handoff; transferring blocks admit", async () 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("P1: frozen leases reject acquire and renew (same owner)", async () => {
+  const root = tempRoot();
+  const clock = createClock();
+  try {
+    const { store, leaseManager } = await seedHeadlessIdle({ root, clock });
+    const owned = store.readProfile(PROFILE);
+    assert.equal(owned.owner_instance_id, HEADLESS_OWNER);
+
+    leaseManager.freezeAdmissionAfterCommit({
+      profileInstanceId: PROFILE,
+      expectedGeneration: owned.owner_generation,
+    });
+    assert.equal(store.readProfile(PROFILE).admission_frozen, true);
+
+    assert.throws(
+      () => leaseManager.acquire({ profileInstanceId: PROFILE }),
+      (error) => error.code === "handoff_admission_frozen",
+    );
+    assert.throws(
+      () => leaseManager.renew({ profileInstanceId: PROFILE }),
+      (error) => error.code === "handoff_admission_frozen",
+    );
+
+    // Still frozen after rejected acquire/renew — generation unchanged.
+    const after = store.readProfile(PROFILE);
+    assert.equal(after.admission_frozen, true);
+    assert.equal(after.owner_generation, owned.owner_generation);
+    assert.equal(after.ownership_state, "owned");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("P1: recover-desktop fails closed while transferring (does not reopen admission)", async () => {
+  const root = tempRoot();
+  const home = tempRoot("triangle-codex-home-");
+  const clock = createClock();
+  let desktop = null;
+  try {
+    const { store, leaseManager } = await seedHeadlessIdle({ root, clock });
+    desktop = createFakeDesktopOwner({
+      ownerInstanceId: DESKTOP_OWNER,
+      codexHome: home,
+      now: clock.now,
+    });
+    const handoff = createDesktopHandoffController({
+      store,
+      leaseManager,
+      profileInstanceId: PROFILE,
+      headlessOwnerInstanceId: HEADLESS_OWNER,
+      desktopOwner: desktop,
+      enabled: true,
+      now: clock.now,
+    });
+
+    await handoff.handoffToDesktop({ meshRoomId: ROOM });
+    assert.equal(desktop.isAdmissionOpen(), true);
+    desktop.pauseAdmission();
+    assert.equal(desktop.isAdmissionOpen(), false);
+
+    const owned = store.readProfile(PROFILE);
+    assert.equal(owned.runtime_mode, "desktop");
+    assert.equal(owned.ownership_state, "owned");
+
+    // Begin desktop→headless transfer: runtime_mode stays desktop while transferring.
+    leaseManager.beginTransfer({
+      profileInstanceId: PROFILE,
+      expectedGeneration: owned.owner_generation,
+      transferOwnerInstanceId: "transfer:mid",
+      targetRuntimeMode: "headless",
+    });
+    const mid = store.readProfile(PROFILE);
+    assert.equal(mid.ownership_state, "transferring");
+    assert.equal(mid.runtime_mode, "desktop");
+
+    await assert.rejects(
+      () => handoff.recoverDesktop({ meshRoomId: ROOM }),
+      (error) => error.code === "lease_transferring",
+    );
+
+    const after = store.readProfile(PROFILE);
+    assert.equal(after.ownership_state, "transferring");
+    assert.equal(after.runtime_mode, "desktop");
+    // Must not clear freeze / reopen admission while transferring.
+    assert.equal(desktop.isAdmissionOpen(), false);
+    assert.equal(handoff.isAdmissionPaused(), false);
+  } finally {
+    if (desktop) await desktop.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("P2: rejected handoffToHeadless (wrong mode) leaves desktop admission open", async () => {
+  const root = tempRoot();
+  const home = tempRoot("triangle-codex-home-");
+  const clock = createClock();
+  let desktop = null;
+  try {
+    const { store, leaseManager } = await seedHeadlessIdle({ root, clock });
+    desktop = createFakeDesktopOwner({
+      ownerInstanceId: DESKTOP_OWNER,
+      codexHome: home,
+      now: clock.now,
+    });
+    // Simulate desktop already admitting while profile is still headless-owned.
+    desktop.resumeAdmission();
+    assert.equal(desktop.isAdmissionOpen(), true);
+
+    const handoff = createDesktopHandoffController({
+      store,
+      leaseManager,
+      profileInstanceId: PROFILE,
+      headlessOwnerInstanceId: HEADLESS_OWNER,
+      desktopOwner: desktop,
+      enabled: true,
+      now: clock.now,
+    });
+
+    await assert.rejects(
+      () =>
+        handoff.handoffToHeadless({
+          meshRoomId: ROOM,
+          verifyResume: async ({ threadId }) => ({ threadId }),
+        }),
+      (error) => error.code === "handoff_wrong_mode",
+    );
+
+    assert.equal(store.readProfile(PROFILE).runtime_mode, "headless");
+    assert.equal(store.readProfile(PROFILE).ownership_state, "owned");
+    assert.equal(handoff.isAdmissionPaused(), false);
+    assert.equal(desktop.isAdmissionOpen(), true);
+  } finally {
+    if (desktop) await desktop.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("P2: rejected handoffToDesktop (wrong mode) does not pause desktop admission", async () => {
+  const root = tempRoot();
+  const home = tempRoot("triangle-codex-home-");
+  const clock = createClock();
+  let desktop = null;
+  try {
+    const { store, leaseManager } = await seedHeadlessIdle({ root, clock });
+    desktop = createFakeDesktopOwner({
+      ownerInstanceId: DESKTOP_OWNER,
+      codexHome: home,
+      now: clock.now,
+    });
+    const handoff = createDesktopHandoffController({
+      store,
+      leaseManager,
+      profileInstanceId: PROFILE,
+      headlessOwnerInstanceId: HEADLESS_OWNER,
+      desktopOwner: desktop,
+      enabled: true,
+      now: clock.now,
+    });
+    await handoff.handoffToDesktop({ meshRoomId: ROOM });
+    assert.equal(desktop.isAdmissionOpen(), true);
+
+    await assert.rejects(
+      () => handoff.handoffToDesktop({ meshRoomId: ROOM }),
+      (error) => error.code === "handoff_wrong_mode",
+    );
+    assert.equal(handoff.isAdmissionPaused(), false);
+    assert.equal(desktop.isAdmissionOpen(), true);
+    assert.equal(store.readProfile(PROFILE).runtime_mode, "desktop");
+  } finally {
+    if (desktop) await desktop.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

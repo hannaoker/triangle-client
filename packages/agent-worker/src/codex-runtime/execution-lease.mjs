@@ -160,6 +160,14 @@ export function createExecutionLeaseManager({
         );
       }
 
+      if (existing.admission_frozen === true) {
+        throw createCodedError(
+          "handoff_admission_frozen",
+          "admission is frozen; cannot acquire until recover-desktop or rollback-headless",
+          { ownerGeneration: existing.owner_generation },
+        );
+      }
+
       const sameOwner = existing.owner_instance_id === ownerInstanceId;
       if (sameOwner && !afterRestart) {
         if (expectedGeneration != null && expectedGeneration !== existing.owner_generation) {
@@ -227,6 +235,12 @@ export function createExecutionLeaseManager({
       if (latest.ownership_state === "transferring") {
         throw createCodedError("lease_transferring", "profile ownership became transferring");
       }
+      if (latest.admission_frozen === true) {
+        throw createCodedError(
+          "handoff_admission_frozen",
+          "admission became frozen during acquire",
+        );
+      }
       const stillNonIdle = listNonIdle(profileInstanceId);
       if (stillNonIdle.length > 0) {
         throw createCodedError(
@@ -256,6 +270,13 @@ export function createExecutionLeaseManager({
       assertClockSane(existing);
       if (existing.ownership_state === "transferring") {
         throw createCodedError("lease_transferring", "cannot renew while transferring");
+      }
+      if (existing.admission_frozen === true) {
+        throw createCodedError(
+          "handoff_admission_frozen",
+          "admission is frozen; cannot renew until recover-desktop or rollback-headless",
+          { ownerGeneration: existing.owner_generation },
+        );
       }
       if (existing.owner_instance_id !== ownerInstanceId) {
         throw createCodedError("lease_conflict", "cannot renew lease owned by another instance", {
@@ -605,6 +626,73 @@ export function createExecutionLeaseManager({
     });
   }
 
+  /**
+   * Operator recover-desktop: clear freeze under locked CAS while retaining the
+   * same owned desktop generation. Rejects transferring / owner mismatch.
+   */
+  function clearAdmissionFreezeForRecover({
+    profileInstanceId,
+    expectedGeneration,
+    expectedOwnerInstanceId,
+    desktopServerIdentity = null,
+    chatgptAttachmentState = "attached",
+    boundCodexThreadId = null,
+  } = {}) {
+    if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
+      throw new TypeError("expectedGeneration must be a positive integer");
+    }
+    if (typeof expectedOwnerInstanceId !== "string" || expectedOwnerInstanceId.length === 0) {
+      throw new TypeError("expectedOwnerInstanceId is required");
+    }
+    return runUnderProfileLock(() => {
+      const existing = store.readProfile(profileInstanceId);
+      if (existing == null) {
+        throw createCodedError("lease_missing", "no profile lease to recover");
+      }
+      if (existing.ownership_state === "transferring") {
+        throw createCodedError(
+          "lease_transferring",
+          "cannot recover-desktop while ownership is transferring",
+          { ownerGeneration: existing.owner_generation },
+        );
+      }
+      if (existing.ownership_state !== "owned") {
+        throw createCodedError("handoff_not_owned", "recover-desktop requires owned profile", {
+          ownershipState: existing.ownership_state,
+        });
+      }
+      if (existing.runtime_mode !== "desktop") {
+        throw createCodedError("handoff_wrong_mode", "recover-desktop requires desktop ownership", {
+          runtimeMode: existing.runtime_mode,
+        });
+      }
+      if (existing.owner_instance_id !== expectedOwnerInstanceId) {
+        throw createCodedError("lease_conflict", "desktop owner does not hold the lease", {
+          ownerInstanceId: existing.owner_instance_id,
+          expectedOwnerInstanceId,
+        });
+      }
+      if (existing.owner_generation !== expectedGeneration) {
+        throw createCodedError("lease_cas_conflict", "generation mismatch on recover-desktop", {
+          expectedGeneration,
+          actual: existing.owner_generation,
+        });
+      }
+      const t = now();
+      return commitProfile({
+        ...existing,
+        profile_instance_id: profileInstanceId,
+        lease_renewed_at: isoFromMs(t),
+        lease_expires_at: isoFromMs(t + leaseDurationMs),
+        admission_frozen: false,
+        chatgpt_attachment_state: chatgptAttachmentState,
+        desktop_server_identity: desktopServerIdentity ?? existing.desktop_server_identity ?? null,
+        bound_codex_thread_id:
+          boundCodexThreadId ?? existing.bound_codex_thread_id ?? null,
+      });
+    });
+  }
+
   return Object.freeze({
     ownerInstanceId,
     leaseDurationMs,
@@ -616,6 +704,7 @@ export function createExecutionLeaseManager({
     commitTransfer,
     rollbackTransfer,
     freezeAdmissionAfterCommit,
+    clearAdmissionFreezeForRecover,
     status,
   });
 }

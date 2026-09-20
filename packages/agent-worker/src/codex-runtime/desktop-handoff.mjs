@@ -307,6 +307,9 @@ export function createDesktopHandoffController({
   if (leaseManager == null || typeof leaseManager.beginTransfer !== "function") {
     throw new TypeError("leaseManager with transfer primitives is required");
   }
+  if (typeof leaseManager.clearAdmissionFreezeForRecover !== "function") {
+    throw new TypeError("leaseManager.clearAdmissionFreezeForRecover is required");
+  }
   if (typeof profileInstanceId !== "string" || profileInstanceId.length === 0) {
     throw new TypeError("profileInstanceId is required");
   }
@@ -420,15 +423,14 @@ export function createDesktopHandoffController({
 
   /**
    * Explicit headless → desktop idle handoff.
-   * Failure before commit rolls back to headless.
+   * Failure before commit rolls ownership back to headless.
    * Failure after commit retains desktop ownership and freezes admission.
    */
   async function handoffToDesktop({ threadId = null, meshRoomId = null } = {}) {
     assertEnabled();
     const handoffStarted = now();
-    admissionPaused = true;
-    desktopOwner.pauseAdmission();
 
+    // Preflight before pausing admission so rejected handoffs leave prior state.
     assertConversationsIdle();
     assertDesktopQuiesced();
 
@@ -453,15 +455,21 @@ export function createDesktopHandoffController({
       });
     }
 
-    const transfer = leaseManager.beginTransfer({
-      profileInstanceId,
-      expectedGeneration: existing.owner_generation,
-      transferOwnerInstanceId: transferOwner,
-      targetRuntimeMode: "desktop",
-    });
+    const priorDesktopAdmission =
+      typeof desktopOwner.isAdmissionOpen === "function" ? desktopOwner.isAdmissionOpen() : false;
+    admissionPaused = true;
+    desktopOwner.pauseAdmission();
 
+    let transfer = null;
     let committed = null;
     try {
+      transfer = leaseManager.beginTransfer({
+        profileInstanceId,
+        expectedGeneration: existing.owner_generation,
+        transferOwnerInstanceId: transferOwner,
+        targetRuntimeMode: "desktop",
+      });
+
       // Steps 5–6: select desktop App Server and verify resume/read.
       const verified = await desktopOwner.attachAndVerify({ threadId: boundThreadId });
 
@@ -501,7 +509,7 @@ export function createDesktopHandoffController({
         durationMs: now() - handoffStarted,
       });
     } catch (error) {
-      if (committed == null) {
+      if (committed == null && transfer != null) {
         // Failure before commit → roll ownership back to headless.
         leaseManager.rollbackTransfer({
           profileInstanceId,
@@ -510,6 +518,11 @@ export function createDesktopHandoffController({
           runtimeMode: "headless",
         });
         admissionPaused = false;
+        if (priorDesktopAdmission) desktopOwner.resumeAdmission();
+      } else if (transfer == null) {
+        // beginTransfer failed after pause; restore prior admission.
+        admissionPaused = false;
+        if (priorDesktopAdmission) desktopOwner.resumeAdmission();
       }
       throw error;
     }
@@ -525,9 +538,8 @@ export function createDesktopHandoffController({
   } = {}) {
     assertEnabled();
     const handoffStarted = now();
-    admissionPaused = true;
-    desktopOwner.pauseAdmission();
 
+    // Preflight before pausing admission so rejected handoffs leave prior state.
     assertConversationsIdle();
     assertDesktopQuiesced();
 
@@ -552,15 +564,21 @@ export function createDesktopHandoffController({
       });
     }
 
-    const transfer = leaseManager.beginTransfer({
-      profileInstanceId,
-      expectedGeneration: existing.owner_generation,
-      transferOwnerInstanceId: transferOwner,
-      targetRuntimeMode: "headless",
-    });
+    const priorDesktopAdmission =
+      typeof desktopOwner.isAdmissionOpen === "function" ? desktopOwner.isAdmissionOpen() : false;
+    admissionPaused = true;
+    desktopOwner.pauseAdmission();
 
+    let transfer = null;
     let committed = null;
     try {
+      transfer = leaseManager.beginTransfer({
+        profileInstanceId,
+        expectedGeneration: existing.owner_generation,
+        transferOwnerInstanceId: transferOwner,
+        targetRuntimeMode: "headless",
+      });
+
       if (typeof verifyResume === "function") {
         const resumed = await verifyResume({ threadId: boundThreadId });
         const resumedId = resumed?.threadId ?? resumed?.thread?.id ?? null;
@@ -595,16 +613,20 @@ export function createDesktopHandoffController({
         durationMs: now() - handoffStarted,
       });
     } catch (error) {
-      if (committed == null) {
+      if (committed == null && transfer != null) {
         leaseManager.rollbackTransfer({
           profileInstanceId,
           expectedTransferGeneration: transfer.owner_generation,
           ownerInstanceId: desktopOwner.ownerInstanceId,
           runtimeMode: "desktop",
         });
-        // Desktop retains ownership after rollback; keep admission paused until
-        // the desktop adapter explicitly reopens (mirrors fail-closed recovery).
-        admissionPaused = true;
+        // Desktop retains ownership after mid-transfer rollback; restore prior
+        // admission so the profile is not wedged indefinitely.
+        admissionPaused = false;
+        if (priorDesktopAdmission) desktopOwner.resumeAdmission();
+      } else if (transfer == null) {
+        admissionPaused = false;
+        if (priorDesktopAdmission) desktopOwner.resumeAdmission();
       }
       throw error;
     }
@@ -612,6 +634,7 @@ export function createDesktopHandoffController({
 
   /**
    * Operator: `handoff recover-desktop` — App Server healthy, ChatGPT.app absent.
+   * Requires owned desktop (not transferring). Clears freeze via locked CAS.
    */
   async function recoverDesktop({ threadId = null, meshRoomId = null } = {}) {
     assertEnabled();
@@ -619,9 +642,26 @@ export function createDesktopHandoffController({
     if (existing == null) {
       throw createCodedError("lease_missing", "no profile lease");
     }
+    if (existing.ownership_state === "transferring") {
+      throw createCodedError(
+        "lease_transferring",
+        "cannot recover-desktop while ownership is transferring",
+        { ownershipState: existing.ownership_state },
+      );
+    }
+    if (existing.ownership_state !== "owned") {
+      throw createCodedError("handoff_not_owned", "recover-desktop requires owned profile", {
+        ownershipState: existing.ownership_state,
+      });
+    }
     if (existing.runtime_mode !== "desktop") {
       throw createCodedError("handoff_wrong_mode", "recover-desktop requires desktop ownership", {
         runtimeMode: existing.runtime_mode,
+      });
+    }
+    if (existing.owner_instance_id !== desktopOwner.ownerInstanceId) {
+      throw createCodedError("lease_conflict", "desktop owner does not hold the lease", {
+        ownerInstanceId: existing.owner_instance_id,
       });
     }
     assertConversationsIdle({ allowFrozen: true });
@@ -638,16 +678,14 @@ export function createDesktopHandoffController({
 
     const verified = await desktopOwner.recoverAttachment({ threadId: boundThreadId });
 
-    // Clear freeze after successful re-attach; retain desktop ownership.
-    const t = now();
-    const renewed = store.writeProfile({
-      ...existing,
-      lease_renewed_at: new Date(t).toISOString(),
-      lease_expires_at: new Date(t + (leaseManager.leaseDurationMs ?? 60_000)).toISOString(),
-      chatgpt_attachment_state: "attached",
-      bound_codex_thread_id: boundThreadId,
-      admission_frozen: false,
-      desktop_server_identity: desktopOwner.serverIdentity,
+    // Clear freeze under locked CAS; retain the same owned desktop generation.
+    const renewed = leaseManager.clearAdmissionFreezeForRecover({
+      profileInstanceId,
+      expectedGeneration: existing.owner_generation,
+      expectedOwnerInstanceId: desktopOwner.ownerInstanceId,
+      desktopServerIdentity: desktopOwner.serverIdentity,
+      chatgptAttachmentState: "attached",
+      boundCodexThreadId: boundThreadId,
     });
     desktopOwner.resumeAdmission();
     admissionPaused = false;
