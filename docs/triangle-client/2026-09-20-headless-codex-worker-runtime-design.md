@@ -838,6 +838,22 @@ Phase 1 shadow opt-in (`shadowTestProfile` + operator enablement). Global
 | Completion replay + restart reconcile | `completion-reconciler.mjs` |
 | Receipt-only + recoverAfterRestart + stale epoch | `headless-runtime.mjs` |
 
+**P1 ownership / cancel / timeout / completion gaps fixed (pre-Phase 3):**
+
+- File-backed lease CAS holds an exclusive inter-process lock across
+  compare+write (`withProfileLock`); concurrent two-process replace fails closed
+  for the loser (`lease_cas_conflict`).
+- `cancelDelivery` interrupts via the owning delivery handle /
+  `pool.getActiveHandle` — never a second `acquire` while the sole slot is busy
+  — and only clears registry state after a confirmed interrupt (else quarantines).
+- Turn wait timeout / crash-before-terminal outcome interrupts, restarts the
+  slot process, and leaves the delivery non-idle for reconciler quarantine
+  before the slot is reusable.
+- When the durable store is enabled, a non-empty canonical `replyEventId` is
+  required before `reply_persisted`, completion write, or ack; otherwise fail
+  closed (`completion_reply_missing`). Non-durable unit paths without a proxy
+  may still record order-only settlement.
+
 **Why a Node durable file (not the Darwin helper store yet):** CI and the Linux
 agent environment cannot exercise the signed helper's `FileCodexConversationStore`.
 Phase 2 activates a schema-compatible Node store only when the shadow runtime
@@ -846,7 +862,8 @@ passes `durableStore: { enabled: true, root }`. Production helper
 identifiers only — no MESH credentials.
 
 **Not in Phase 2:** multi-slot pool (Phase 3), desktop handoff (Phase 4),
-default migration / production profile flip (Phase 5).
+default migration / production profile flip (Phase 5). Do **not** start Phase 3
+until these P1 fixes remain green on the focused suite.
 
 ##### Focused verification
 
@@ -854,9 +871,11 @@ default migration / production profile flip (Phase 5).
 node --test packages/agent-worker/test/codex-runtime/*.test.mjs
 ```
 
-Covers lease CAS/conflict/stale-generation/non-idle no-steal, epoch ignore,
-receipt-only, reply_persisted ack-only restart recovery, crash-boundary child
-exit, and reconnect after slot restart.
+Covers lease CAS/conflict/stale-generation/non-idle no-steal, concurrent
+two-process CAS, epoch ignore, receipt-only, reply_persisted ack-only restart
+recovery, crash-boundary child exit, reconnect after slot restart, cancel
+without second acquire, turn-timeout slot quarantine/restart, and durable
+replyEventId fail-closed.
 
 ### Phase 3 — bounded pool
 

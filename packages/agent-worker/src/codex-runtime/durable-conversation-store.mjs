@@ -14,12 +14,15 @@
 
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -106,6 +109,48 @@ function atomicWriteJson(filePath, value) {
   }
 }
 
+/**
+ * Inter-process exclusive lock via O_EXCL create. Held across compare+write CAS.
+ * Fail closed on lock timeout so two writers cannot both observe the same
+ * generation and both succeed as next owner.
+ */
+function withExclusiveLock(lockPath, fn, { retries = 200, retryDelayMs = 5 } = {}) {
+  ensureDir(path.dirname(lockPath));
+  let fd = null;
+  let attempts = 0;
+  while (fd == null) {
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      attempts += 1;
+      if (attempts > retries) {
+        throw createCodedError(
+          "durable_store_lock_timeout",
+          "could not acquire exclusive profile lock",
+          { lockPath },
+        );
+      }
+      const wait = new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(wait, 0, 0, retryDelayMs);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // ignore
+    }
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function readJson(filePath) {
   if (!existsSync(filePath)) return null;
   const raw = readFileSync(filePath, "utf8");
@@ -135,6 +180,7 @@ export function createDurableConversationStore({
   const conversationsDir = path.join(root, "conversations");
   const completionsDir = path.join(root, "completions");
   const profilePath = path.join(root, "profile.json");
+  const profileLockPath = path.join(root, ".profile.json.lock");
 
   function conversationPath(meshRoomId) {
     return path.join(conversationsDir, `${assertRoomId(meshRoomId)}.json`);
@@ -142,6 +188,19 @@ export function createDurableConversationStore({
 
   function completionPath(idempotencyId) {
     return path.join(completionsDir, `${assertIdempotencyId(idempotencyId)}.json`);
+  }
+
+  /**
+   * Hold an exclusive inter-process lock for the duration of `fn`.
+   * Required for compare-and-write lease CAS so two processes cannot both
+   * observe the same owner_generation and both succeed as next owner.
+   */
+  function withProfileLock(fn) {
+    assertEnabled(enabled);
+    if (typeof fn !== "function") {
+      throw new TypeError("withProfileLock(fn) requires a function");
+    }
+    return withExclusiveLock(profileLockPath, fn);
   }
 
   function readProfile(profileInstanceId) {
@@ -155,8 +214,7 @@ export function createDurableConversationStore({
     return Object.freeze({ ...record });
   }
 
-  function writeProfile(record) {
-    assertEnabled(enabled);
+  function writeProfileUnlocked(record) {
     const profileInstanceId = assertProfileInstanceId(record.profile_instance_id);
     if (typeof record.owner_instance_id !== "string" || !OWNER_ID.test(record.owner_instance_id)) {
       throw createCodedError("durable_store_invalid", "owner_instance_id is invalid");
@@ -188,6 +246,13 @@ export function createDurableConversationStore({
     if (next.active_mesh_room_id != null) assertRoomId(next.active_mesh_room_id);
     atomicWriteJson(profilePath, next);
     return Object.freeze({ ...next });
+  }
+
+  function writeProfile(record) {
+    assertEnabled(enabled);
+    // Serialize standalone writes; CAS callers hold withProfileLock and use
+    // writeProfileUnlocked so compare+write stays one critical section.
+    return withProfileLock(() => writeProfileUnlocked(record));
   }
 
   function readConversation(profileInstanceId, meshRoomId) {
@@ -290,8 +355,10 @@ export function createDurableConversationStore({
   return Object.freeze({
     root,
     enabled,
+    withProfileLock,
     readProfile,
     writeProfile,
+    writeProfileUnlocked,
     readConversation,
     writeConversation,
     readCompletion,
