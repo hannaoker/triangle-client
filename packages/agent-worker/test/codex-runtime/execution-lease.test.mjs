@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { createDurableConversationStore } from "../../src/codex-runtime/durable-conversation-store.mjs";
@@ -182,6 +184,133 @@ test("clock skew freezes lease admission", () => {
       () => owner.renew({ profileInstanceId: PROFILE }),
       (error) => error.code === "lease_clock_skew",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent two-process lease CAS: only one owner wins", async () => {
+  const root = tempRoot();
+  const goFile = path.join(root, "go");
+  const clock = createClock(2_000_000);
+  try {
+    const store = createDurableConversationStore({
+      root,
+      enabled: true,
+      now: clock.now,
+    });
+    const seeder = createExecutionLeaseManager({
+      store,
+      ownerInstanceId: "owner-seed",
+      now: clock.now,
+      leaseDurationMs: 5_000,
+    });
+    seeder.acquire({ profileInstanceId: PROFILE });
+    // Expire the idle lease so both racers attempt CAS replace of generation 1.
+    clock.advance(10_000);
+    assert.equal(seeder.status({ profileInstanceId: PROFILE }).expired, true);
+
+    const leaseModule = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../src/codex-runtime/execution-lease.mjs",
+    );
+    const storeModule = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../src/codex-runtime/durable-conversation-store.mjs",
+    );
+
+    const workerSource = `
+import { existsSync } from "node:fs";
+import { createDurableConversationStore } from ${JSON.stringify(storeModule)};
+import { createExecutionLeaseManager } from ${JSON.stringify(leaseModule)};
+
+const root = process.argv[1];
+const ownerId = process.argv[2];
+const goFile = process.argv[3];
+const profile = ${JSON.stringify(PROFILE)};
+const nowMs = ${JSON.stringify(clock.now())};
+
+while (!existsSync(goFile)) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+}
+
+const store = createDurableConversationStore({
+  root,
+  enabled: true,
+  now: () => nowMs,
+});
+const owner = createExecutionLeaseManager({
+  store,
+  ownerInstanceId: ownerId,
+  now: () => nowMs,
+  leaseDurationMs: 5_000,
+});
+try {
+  const replaced = owner.replaceExpiredIdle({
+    profileInstanceId: profile,
+    expectedGeneration: 1,
+  });
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    owner: replaced.owner_instance_id,
+    generation: replaced.owner_generation,
+  }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    code: error?.code ?? null,
+  }));
+}
+`;
+
+    function spawnRacer(ownerId) {
+      return spawn(process.execPath, ["--input-type=module", "-e", workerSource, root, ownerId, goFile], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    }
+
+    const a = spawnRacer("owner-race-a");
+    const b = spawnRacer("owner-race-b");
+
+    const collect = (child) =>
+      new Promise((resolve, reject) => {
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+          resolve({ code, stdout, stderr });
+        });
+      });
+
+    const pendingA = collect(a);
+    const pendingB = collect(b);
+    // Brief delay so both children are blocked on the go-file barrier.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    writeFileSync(goFile, "1\n");
+
+    const [resultA, resultB] = await Promise.all([pendingA, pendingB]);
+    assert.equal(resultA.code, 0, resultA.stderr);
+    assert.equal(resultB.code, 0, resultB.stderr);
+    const parsedA = JSON.parse(resultA.stdout);
+    const parsedB = JSON.parse(resultB.stdout);
+    const winners = [parsedA, parsedB].filter((row) => row.ok === true);
+    const losers = [parsedA, parsedB].filter((row) => row.ok === false);
+    assert.equal(winners.length, 1, JSON.stringify({ parsedA, parsedB }));
+    assert.equal(losers.length, 1, JSON.stringify({ parsedA, parsedB }));
+    assert.equal(winners[0].generation, 2);
+    assert.equal(losers[0].code, "lease_cas_conflict");
+
+    const finalProfile = store.readProfile(PROFILE);
+    assert.equal(finalProfile.owner_generation, 2);
+    assert.equal(finalProfile.owner_instance_id, winners[0].owner);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

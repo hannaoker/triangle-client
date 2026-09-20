@@ -7,6 +7,9 @@
  * - Expired idle lease may be replaced only via compare-and-swap on owner_generation.
  * - Non-idle expiry / clock skew / missed renewal freezes admission (no steal).
  * - After host restart, no owner is presumed live until reconciliation.
+ *
+ * File-backed CAS holds an exclusive inter-process lock across compare+write so
+ * two processes cannot both observe the same generation and both succeed.
  */
 
 import { NON_IDLE_EXECUTION_STATES } from "./execution-state.mjs";
@@ -54,6 +57,22 @@ export function createExecutionLeaseManager({
   }
   if (!Number.isSafeInteger(leaseDurationMs) || leaseDurationMs < 1_000) {
     throw new TypeError("leaseDurationMs must be >= 1000");
+  }
+
+  function runUnderProfileLock(fn) {
+    if (typeof store.withProfileLock === "function") {
+      return store.withProfileLock(fn);
+    }
+    // In-memory stubs without locking — single-process only.
+    return fn();
+  }
+
+  function commitProfile(record) {
+    // Prefer unlocked write when already inside withProfileLock (non-reentrant).
+    if (typeof store.writeProfileUnlocked === "function") {
+      return store.writeProfileUnlocked(record);
+    }
+    return store.writeProfile(record);
   }
 
   function listNonIdle(profileInstanceId) {
@@ -115,133 +134,143 @@ export function createExecutionLeaseManager({
     afterRestart = false,
     activeMeshRoomId = null,
   } = {}) {
-    const existing = store.readProfile(profileInstanceId);
-    if (existing != null) assertClockSane(existing);
+    return runUnderProfileLock(() => {
+      const existing = store.readProfile(profileInstanceId);
+      if (existing != null) assertClockSane(existing);
 
-    if (existing == null) {
-      if (expectedGeneration != null && expectedGeneration !== 0) {
+      if (existing == null) {
+        if (expectedGeneration != null && expectedGeneration !== 0) {
+          throw createCodedError(
+            "lease_cas_conflict",
+            "expected generation does not match empty profile",
+            { expectedGeneration, actual: 0 },
+          );
+        }
+        return commitProfile({
+          profile_instance_id: profileInstanceId,
+          ...buildLeaseFields({ generation: 1, runtimeMode, activeMeshRoomId }),
+        });
+      }
+
+      if (existing.ownership_state === "transferring") {
         throw createCodedError(
-          "lease_cas_conflict",
-          "expected generation does not match empty profile",
-          { expectedGeneration, actual: 0 },
+          "lease_transferring",
+          "profile ownership is transferring; cannot admit",
+          { ownerGeneration: existing.owner_generation },
         );
       }
-      return store.writeProfile({
-        profile_instance_id: profileInstanceId,
-        ...buildLeaseFields({ generation: 1, runtimeMode, activeMeshRoomId }),
-      });
-    }
 
-    if (existing.ownership_state === "transferring") {
-      throw createCodedError(
-        "lease_transferring",
-        "profile ownership is transferring; cannot admit",
-        { ownerGeneration: existing.owner_generation },
-      );
-    }
+      const sameOwner = existing.owner_instance_id === ownerInstanceId;
+      if (sameOwner && !afterRestart) {
+        if (expectedGeneration != null && expectedGeneration !== existing.owner_generation) {
+          throw createCodedError("lease_stale_generation", "owner generation mismatch on renew", {
+            expectedGeneration,
+            actual: existing.owner_generation,
+          });
+        }
+        // Renew under the same lock (avoid nested withProfileLock deadlock).
+        const t = now();
+        return commitProfile({
+          ...existing,
+          profile_instance_id: profileInstanceId,
+          lease_renewed_at: isoFromMs(t),
+          lease_expires_at: isoFromMs(t + leaseDurationMs),
+          active_mesh_room_id:
+            activeMeshRoomId === null ? existing.active_mesh_room_id : activeMeshRoomId,
+        });
+      }
 
-    const sameOwner = existing.owner_instance_id === ownerInstanceId;
-    if (sameOwner && !afterRestart) {
+      // Different owner, or afterRestart: only steal expired idle via CAS.
+      const nonIdle = listNonIdle(profileInstanceId);
+      if (nonIdle.length > 0) {
+        throw createCodedError(
+          "lease_non_idle_no_steal",
+          "cannot replace lease while conversations are non-idle",
+          {
+            ownerGeneration: existing.owner_generation,
+            nonIdleCount: nonIdle.length,
+            states: nonIdle.map((row) => row.execution_state),
+          },
+        );
+      }
+
+      if (!isExpired(existing) && !afterRestart) {
+        throw createCodedError("lease_conflict", "profile lease is held by another owner", {
+          ownerInstanceId: existing.owner_instance_id,
+          ownerGeneration: existing.owner_generation,
+          leaseExpiresAt: existing.lease_expires_at,
+        });
+      }
+
+      if (afterRestart && !isExpired(existing) && !sameOwner) {
+        // After restart, prior owner is not presumed live, but design still requires
+        // reconciliation before a new generation when idle + unexpired is ambiguous.
+        // For idle profiles we allow CAS replace to a new generation.
+      }
+
       if (expectedGeneration != null && expectedGeneration !== existing.owner_generation) {
-        throw createCodedError("lease_stale_generation", "owner generation mismatch on renew", {
+        throw createCodedError("lease_cas_conflict", "compare-and-swap generation mismatch", {
           expectedGeneration,
           actual: existing.owner_generation,
         });
       }
-      return renew({
-        profileInstanceId,
-        activeMeshRoomId: activeMeshRoomId ?? existing.active_mesh_room_id,
+
+      // CAS under exclusive lock: re-read and ensure generation unchanged before write.
+      const observed = existing.owner_generation;
+      const latest = store.readProfile(profileInstanceId);
+      if (latest == null || latest.owner_generation !== observed) {
+        throw createCodedError("lease_cas_conflict", "owner generation changed during acquire", {
+          expectedGeneration: observed,
+          actual: latest?.owner_generation ?? null,
+        });
+      }
+      if (latest.ownership_state === "transferring") {
+        throw createCodedError("lease_transferring", "profile ownership became transferring");
+      }
+      const stillNonIdle = listNonIdle(profileInstanceId);
+      if (stillNonIdle.length > 0) {
+        throw createCodedError(
+          "lease_non_idle_no_steal",
+          "conversations became non-idle during acquire",
+          { nonIdleCount: stillNonIdle.length },
+        );
+      }
+
+      return commitProfile({
+        profile_instance_id: profileInstanceId,
+        ...buildLeaseFields({
+          generation: observed + 1,
+          runtimeMode: latest.runtime_mode ?? runtimeMode,
+          activeMeshRoomId,
+        }),
       });
-    }
-
-    // Different owner, or afterRestart: only steal expired idle via CAS.
-    const nonIdle = listNonIdle(profileInstanceId);
-    if (nonIdle.length > 0) {
-      throw createCodedError(
-        "lease_non_idle_no_steal",
-        "cannot replace lease while conversations are non-idle",
-        {
-          ownerGeneration: existing.owner_generation,
-          nonIdleCount: nonIdle.length,
-          states: nonIdle.map((row) => row.execution_state),
-        },
-      );
-    }
-
-    if (!isExpired(existing) && !afterRestart) {
-      throw createCodedError("lease_conflict", "profile lease is held by another owner", {
-        ownerInstanceId: existing.owner_instance_id,
-        ownerGeneration: existing.owner_generation,
-        leaseExpiresAt: existing.lease_expires_at,
-      });
-    }
-
-    if (afterRestart && !isExpired(existing) && !sameOwner) {
-      // After restart, prior owner is not presumed live, but design still requires
-      // reconciliation before a new generation when idle + unexpired is ambiguous.
-      // For idle profiles we allow CAS replace to a new generation.
-    }
-
-    if (expectedGeneration != null && expectedGeneration !== existing.owner_generation) {
-      throw createCodedError("lease_cas_conflict", "compare-and-swap generation mismatch", {
-        expectedGeneration,
-        actual: existing.owner_generation,
-      });
-    }
-
-    // CAS: re-read and ensure generation unchanged before write.
-    const observed = existing.owner_generation;
-    const latest = store.readProfile(profileInstanceId);
-    if (latest == null || latest.owner_generation !== observed) {
-      throw createCodedError("lease_cas_conflict", "owner generation changed during acquire", {
-        expectedGeneration: observed,
-        actual: latest?.owner_generation ?? null,
-      });
-    }
-    if (latest.ownership_state === "transferring") {
-      throw createCodedError("lease_transferring", "profile ownership became transferring");
-    }
-    const stillNonIdle = listNonIdle(profileInstanceId);
-    if (stillNonIdle.length > 0) {
-      throw createCodedError(
-        "lease_non_idle_no_steal",
-        "conversations became non-idle during acquire",
-        { nonIdleCount: stillNonIdle.length },
-      );
-    }
-
-    return store.writeProfile({
-      profile_instance_id: profileInstanceId,
-      ...buildLeaseFields({
-        generation: observed + 1,
-        runtimeMode: latest.runtime_mode ?? runtimeMode,
-        activeMeshRoomId,
-      }),
     });
   }
 
   function renew({ profileInstanceId, activeMeshRoomId = undefined } = {}) {
-    const existing = store.readProfile(profileInstanceId);
-    if (existing == null) {
-      throw createCodedError("lease_missing", "no profile lease to renew");
-    }
-    assertClockSane(existing);
-    if (existing.owner_instance_id !== ownerInstanceId) {
-      throw createCodedError("lease_conflict", "cannot renew lease owned by another instance", {
-        ownerInstanceId: existing.owner_instance_id,
+    return runUnderProfileLock(() => {
+      const existing = store.readProfile(profileInstanceId);
+      if (existing == null) {
+        throw createCodedError("lease_missing", "no profile lease to renew");
+      }
+      assertClockSane(existing);
+      if (existing.owner_instance_id !== ownerInstanceId) {
+        throw createCodedError("lease_conflict", "cannot renew lease owned by another instance", {
+          ownerInstanceId: existing.owner_instance_id,
+        });
+      }
+      if (existing.ownership_state === "transferring") {
+        throw createCodedError("lease_transferring", "cannot renew while transferring");
+      }
+      const t = now();
+      return commitProfile({
+        ...existing,
+        profile_instance_id: profileInstanceId,
+        lease_renewed_at: isoFromMs(t),
+        lease_expires_at: isoFromMs(t + leaseDurationMs),
+        active_mesh_room_id:
+          activeMeshRoomId === undefined ? existing.active_mesh_room_id : activeMeshRoomId,
       });
-    }
-    if (existing.ownership_state === "transferring") {
-      throw createCodedError("lease_transferring", "cannot renew while transferring");
-    }
-    const t = now();
-    return store.writeProfile({
-      ...existing,
-      profile_instance_id: profileInstanceId,
-      lease_renewed_at: isoFromMs(t),
-      lease_expires_at: isoFromMs(t + leaseDurationMs),
-      active_mesh_room_id:
-        activeMeshRoomId === undefined ? existing.active_mesh_room_id : activeMeshRoomId,
     });
   }
 
@@ -257,37 +286,39 @@ export function createExecutionLeaseManager({
     if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
       throw new TypeError("expectedGeneration must be a positive integer");
     }
-    const existing = store.readProfile(profileInstanceId);
-    if (existing == null) {
-      throw createCodedError("lease_missing", "no profile lease to replace");
-    }
-    assertClockSane(existing);
-    if (existing.owner_generation !== expectedGeneration) {
-      throw createCodedError("lease_cas_conflict", "compare-and-swap generation mismatch", {
-        expectedGeneration,
-        actual: existing.owner_generation,
+    return runUnderProfileLock(() => {
+      const existing = store.readProfile(profileInstanceId);
+      if (existing == null) {
+        throw createCodedError("lease_missing", "no profile lease to replace");
+      }
+      assertClockSane(existing);
+      if (existing.owner_generation !== expectedGeneration) {
+        throw createCodedError("lease_cas_conflict", "compare-and-swap generation mismatch", {
+          expectedGeneration,
+          actual: existing.owner_generation,
+        });
+      }
+      if (!isExpired(existing)) {
+        throw createCodedError("lease_not_expired", "idle lease has not expired", {
+          leaseExpiresAt: existing.lease_expires_at,
+        });
+      }
+      const nonIdle = listNonIdle(profileInstanceId);
+      if (nonIdle.length > 0) {
+        throw createCodedError(
+          "lease_non_idle_no_steal",
+          "expired lease cannot be stolen while non-idle",
+          { states: nonIdle.map((row) => row.execution_state) },
+        );
+      }
+      return commitProfile({
+        profile_instance_id: profileInstanceId,
+        ...buildLeaseFields({
+          generation: expectedGeneration + 1,
+          runtimeMode: existing.runtime_mode ?? runtimeMode,
+          activeMeshRoomId,
+        }),
       });
-    }
-    if (!isExpired(existing)) {
-      throw createCodedError("lease_not_expired", "idle lease has not expired", {
-        leaseExpiresAt: existing.lease_expires_at,
-      });
-    }
-    const nonIdle = listNonIdle(profileInstanceId);
-    if (nonIdle.length > 0) {
-      throw createCodedError(
-        "lease_non_idle_no_steal",
-        "expired lease cannot be stolen while non-idle",
-        { states: nonIdle.map((row) => row.execution_state) },
-      );
-    }
-    return store.writeProfile({
-      profile_instance_id: profileInstanceId,
-      ...buildLeaseFields({
-        generation: expectedGeneration + 1,
-        runtimeMode: existing.runtime_mode ?? runtimeMode,
-        activeMeshRoomId,
-      }),
     });
   }
 

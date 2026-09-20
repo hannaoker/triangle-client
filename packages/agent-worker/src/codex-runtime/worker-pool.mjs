@@ -155,6 +155,19 @@ export function createCodexWorkerPool({
     });
   }
 
+  /**
+   * Return the busy slot's process handle without a second acquire.
+   * Used by cancel/timeout paths that must interrupt the owning delivery.
+   */
+  function getActiveHandle() {
+    if (!started || !busy || slot == null) return null;
+    return Object.freeze({
+      slotId: slot.slotId,
+      generation: slot.generation,
+      processHandle: slot.processHandle,
+    });
+  }
+
   function status() {
     return Object.freeze({
       started,
@@ -179,6 +192,7 @@ export function createCodexWorkerPool({
     stop,
     restartSlot,
     acquire,
+    getActiveHandle,
     status,
     guards,
   });

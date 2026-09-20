@@ -19,6 +19,10 @@ binary (`ChatGPT.app` Resources `codex`).
 | Item | Status |
 | --- | --- |
 | Durable lease acquire / renew / CAS / no-steal | **Shipped** (`execution-lease.mjs`) |
+| Inter-process lease CAS lock (fail closed) | **Fixed** (`withProfileLock` + concurrent two-process test) |
+| Cancel via owning slot handle (no second acquire) | **Fixed** (`getActiveHandle` / active delivery) |
+| Turn timeout → interrupt + slot restart + quarantine | **Fixed** |
+| Durable `replyEventId` required before reply_persisted/ack | **Fixed** (fail closed) |
 | Execution epoch + stale-epoch ignore | **Shipped** |
 | Restart completion reconciliation (ack-only) | **Shipped** (`completion-reconciler.mjs`) |
 | Receipt-only (no model / no MESH reply) | **Shipped** |
@@ -28,7 +32,8 @@ binary (`ChatGPT.app` Resources `codex`).
 
 Phase 2 does **not** flip production defaults, raise pool size, or enable
 desktop handoff. Keep dedicated `TRIANGLE_CODEX_HOME`; never fall back to
-`~/.codex`.
+`~/.codex`. Phase 1/2 P1 ownership/cancel/timeout/completion gaps above are
+fixed; do **not** start Phase 3 until the focused suite stays green.
 
 ### Operator: enable Phase 1 shadow test profile only
 

@@ -236,6 +236,20 @@ export function createHeadlessCodexRuntime({
   const lastSettlementTrace = [];
   /** @type {object[]} */
   const ignoredStaleEpochEvents = [];
+  /**
+   * Owning slot handle for the in-flight delivery. Cancel/timeout must use this
+   * (or pool.getActiveHandle) — never a second acquire while the slot is busy.
+   * @type {null | {
+   *   profileInstanceId: string,
+   *   roomId: string,
+   *   deliveryId: string,
+   *   executionEpoch: number | null,
+   *   slotId: string,
+   *   processHandle: object,
+   *   threadId: string | null,
+   * }}
+   */
+  let activeDelivery = null;
 
   async function start() {
     if (started) return status();
@@ -387,6 +401,17 @@ export function createHeadlessCodexRuntime({
     }
 
     const slotLease = await workerPool.acquire();
+    let slotReleased = false;
+    let unknownOutcomeQuarantined = false;
+    activeDelivery = {
+      profileInstanceId: instanceId,
+      roomId,
+      deliveryId: deliveryId ?? `delivery_${numericDeliveryId}`,
+      executionEpoch: null,
+      slotId: slotLease.slotId,
+      processHandle: slotLease.processHandle,
+      threadId: null,
+    };
     try {
       if (resolvedLeaseManager) {
         resolvedLeaseManager.renew({
@@ -465,6 +490,7 @@ export function createHeadlessCodexRuntime({
           lastWorkerSlotId: slotLease.slotId,
         });
       }
+      activeDelivery.threadId = threadId;
 
       const priorEpoch = resolvedRegistry.get(instanceId, roomId)?.executionEpoch ?? 0;
       const executionEpoch = priorEpoch + 1;
@@ -473,6 +499,7 @@ export function createHeadlessCodexRuntime({
         activeDeliveryId: deliveryId ?? `delivery_${numericDeliveryId}`,
         executionEpoch,
       });
+      activeDelivery.executionEpoch = executionEpoch;
 
       if (resolvedLeaseManager) {
         resolvedLeaseManager.renew({
@@ -509,18 +536,52 @@ export function createHeadlessCodexRuntime({
       try {
         startedTurn = await slotLease.processHandle.turnStart(turnParams);
       } catch (error) {
-        await pendingResult;
+        const pendingOutcome = await pendingResult;
+        const quarantineError =
+          pendingOutcome && pendingOutcome.ok === false ? pendingOutcome.error : error;
+        const q = await quarantineUnknownTurnOutcome({
+          slotLease,
+          threadId,
+          error: quarantineError,
+        });
+        if (q.slotReleased) {
+          unknownOutcomeQuarantined = true;
+          slotReleased = true;
+        }
         throw error;
       }
       const turnId = startedTurn?.turn?.id;
       if (typeof turnId !== "string" || turnId.length === 0) {
-        await pendingResult;
-        throw createCodedError("turn_start_failed", "turn/start returned no turn id", {
-          outcome: "unknown",
+        const pendingOutcome = await pendingResult;
+        const quarantineError = createCodedError(
+          "turn_start_failed",
+          "turn/start returned no turn id",
+          { outcome: "unknown" },
+        );
+        const q = await quarantineUnknownTurnOutcome({
+          slotLease,
+          threadId,
+          error: pendingOutcome?.ok === false ? pendingOutcome.error : quarantineError,
         });
+        if (q.slotReleased) {
+          unknownOutcomeQuarantined = true;
+          slotReleased = true;
+        }
+        throw quarantineError;
       }
       const completed = await pendingResult;
-      if (!completed.ok) throw completed.error;
+      if (!completed.ok) {
+        const q = await quarantineUnknownTurnOutcome({
+          slotLease,
+          threadId,
+          error: completed.error,
+        });
+        if (q.slotReleased) {
+          unknownOutcomeQuarantined = true;
+          slotReleased = true;
+        }
+        throw completed.error;
+      }
       const completedTurn = completed.value;
       // Stale-epoch guard: ignore late completions that do not match admitted epoch.
       if (
@@ -565,6 +626,7 @@ export function createHeadlessCodexRuntime({
       }
       assertNoSecretMaterial(assistantText, "mesh reply");
 
+      const durableEnabled = durableStore?.enabled === true;
       let replyEventId = null;
       if (transactionProxy) {
         const replied = await transactionProxy.reply({
@@ -573,14 +635,27 @@ export function createHeadlessCodexRuntime({
           inReplyToEventId: inboundEventId,
         });
         replyEventId =
-          typeof replied?.replyEventId === "string" ? replied.replyEventId : null;
+          typeof replied?.replyEventId === "string" && replied.replyEventId.length > 0
+            ? replied.replyEventId
+            : null;
+
+        // Durable path must not mark reply_persisted / write completion / ack
+        // without a canonical non-empty replyEventId (fail closed).
+        if (durableEnabled && replyEventId == null) {
+          throw createCodedError(
+            "completion_reply_missing",
+            "durable reply proof missing; refusing reply_persisted/ack",
+            { profileInstanceId: instanceId, roomId },
+          );
+        }
+
         resolvedRegistry.upsert(instanceId, roomId, {
           executionState: "reply_persisted",
           lastReplyEventId: replyEventId,
         });
         lastSettlementTrace.push("reply_persisted");
 
-        if (durableStore?.enabled === true && replyEventId) {
+        if (durableEnabled) {
           recordOrReplayCompletion(durableStore, {
             profile_instance_id: instanceId,
             mesh_room_id: roomId,
@@ -602,8 +677,15 @@ export function createHeadlessCodexRuntime({
           lastCompletedDeliveryId: deliveryId ?? `delivery_${numericDeliveryId}`,
         });
         lastSettlementTrace.push("acked");
+      } else if (durableEnabled) {
+        // Durable settlement requires a proxy-backed replyEventId.
+        throw createCodedError(
+          "completion_reply_missing",
+          "durable path requires transactionProxy with replyEventId",
+          { profileInstanceId: instanceId, roomId },
+        );
       } else {
-        // Unit paths without a proxy still record the settlement order contract.
+        // Unit paths without a proxy stay order-only when clearly non-durable.
         resolvedRegistry.upsert(instanceId, roomId, { executionState: "reply_persisted" });
         lastSettlementTrace.push("reply_persisted");
         resolvedRegistry.upsert(instanceId, roomId, {
@@ -631,7 +713,77 @@ export function createHeadlessCodexRuntime({
         ownerGeneration: leaseRecord?.owner_generation ?? null,
       });
     } finally {
-      slotLease.release();
+      activeDelivery = null;
+      if (!slotReleased) {
+        slotLease.release();
+      }
+      // unknownOutcomeQuarantined: slot already restarted; busy cleared by restartSlot.
+      void unknownOutcomeQuarantined;
+    }
+  }
+
+  /**
+   * On unknown timeout / crash-before-terminal: interrupt, quarantine the
+   * delivery (leave non-idle for reconciler), and replace the slot process so
+   * the next delivery cannot start on a still-running/zombie App Server.
+   * @returns {{ quarantined: boolean, slotReleased: boolean }}
+   */
+  async function quarantineUnknownTurnOutcome({ slotLease, threadId, error }) {
+    const unknown =
+      error?.outcome === "unknown" ||
+      error?.code === "seed_turn_timeout" ||
+      error?.code === "child_exited" ||
+      error?.code === "not_connected" ||
+      error?.code === "closing";
+    if (!unknown) {
+      return { quarantined: false, slotReleased: false };
+    }
+
+    logger.info?.("triangle_headless_turn_outcome_unknown", {
+      code: error?.code ?? null,
+      threadId,
+      slotId: slotLease?.slotId ?? null,
+    });
+
+    if (threadId != null && typeof slotLease?.processHandle?.turnInterrupt === "function") {
+      try {
+        const status =
+          typeof slotLease.processHandle.status === "function"
+            ? slotLease.processHandle.status()
+            : null;
+        if (status?.connected !== false) {
+          await Promise.race([
+            slotLease.processHandle.turnInterrupt({ threadId }),
+            new Promise((_, reject) => {
+              setTimeout(() => {
+                reject(createCodedError("interrupt_timeout", "turn interrupt timed out"));
+              }, 500);
+            }),
+          ]);
+        }
+      } catch {
+        // Best-effort interrupt before replacing the process.
+      }
+    }
+
+    // Leave registry non-idle (running/admitted) so restart reconcile quarantines.
+    // Replace the slot process before it becomes reusable.
+    try {
+      await workerPool.restartSlot({ signal: "SIGKILL", timeoutMs: 2_000 });
+      return { quarantined: true, slotReleased: true };
+    } catch (restartError) {
+      // If restart fails, still release so we do not permanently wedge the pool;
+      // the delivery remains non-idle for operator quarantine.
+      logger.info?.("triangle_headless_slot_restart_failed", {
+        code: restartError?.code ?? null,
+        message: String(restartError?.message ?? restartError),
+      });
+      try {
+        slotLease.release();
+      } catch {
+        // ignore
+      }
+      return { quarantined: true, slotReleased: true };
     }
   }
 
@@ -674,6 +826,9 @@ export function createHeadlessCodexRuntime({
 
   /**
    * Cancellation scoped to `(conversation, delivery, execution_epoch)`.
+   * Interrupt via the owning delivery handle (or pool.getActiveHandle) — never a
+   * second acquire while the sole pool slot is busy. Only clear durable/registry
+   * state after a confirmed interrupt, or leave quarantined on failure.
    */
   async function cancelDelivery({
     profileInstanceId: instanceId,
@@ -703,26 +858,64 @@ export function createHeadlessCodexRuntime({
       record.executionState === "running" &&
       record.codexThreadId != null
     ) {
-      try {
-        const slotLease = await workerPool.acquire({ waitMs: 0 });
-        try {
-          await slotLease.processHandle.turnInterrupt({ threadId: record.codexThreadId });
-        } finally {
-          slotLease.release();
-        }
-      } catch (error) {
-        if (error?.code !== "pool_slot_busy") throw error;
-        // Slot busy with this turn — interrupt best-effort skipped; caller may abandon.
+      const owning =
+        activeDelivery != null &&
+        activeDelivery.profileInstanceId === instanceId &&
+        activeDelivery.roomId === roomId &&
+        String(activeDelivery.deliveryId) === String(deliveryId) &&
+        activeDelivery.executionEpoch === executionEpoch
+          ? activeDelivery
+          : typeof workerPool.getActiveHandle === "function"
+            ? workerPool.getActiveHandle()
+            : null;
+
+      if (owning?.processHandle == null) {
+        // Cannot prove interrupt while the turn may still be running — fail closed.
+        return Object.freeze({
+          cancelled: false,
+          reason: "no_active_handle",
+          quarantined: true,
+          deliveryId,
+          executionEpoch,
+          acknowledged: false,
+        });
       }
+
+      try {
+        await owning.processHandle.turnInterrupt({ threadId: record.codexThreadId });
+      } catch (error) {
+        return Object.freeze({
+          cancelled: false,
+          reason: "interrupt_failed",
+          quarantined: true,
+          code: error?.code ?? null,
+          deliveryId,
+          executionEpoch,
+          acknowledged: false,
+        });
+      }
+
+      resolvedRegistry.upsert(instanceId, roomId, {
+        executionState: "idle",
+        activeDeliveryId: null,
+      });
+      return Object.freeze({
+        cancelled: true,
+        interrupted: true,
+        deliveryId,
+        executionEpoch,
+        acknowledged: false,
+      });
     }
 
-    // Return to idle without acknowledging unless MESH contract says otherwise.
+    // Non-running scoped cancel (e.g. admitted before turn/start): clear without interrupt.
     resolvedRegistry.upsert(instanceId, roomId, {
       executionState: "idle",
       activeDeliveryId: null,
     });
     return Object.freeze({
       cancelled: true,
+      interrupted: false,
       deliveryId,
       executionEpoch,
       acknowledged: false,
