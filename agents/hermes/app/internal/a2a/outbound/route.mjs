@@ -1,8 +1,3 @@
-import { createOutboundA2AHandler } from "@the-triangle/a2a-gateway/outbound-a2a";
+import { createOutboundA2ARouteHandlers } from "@the-triangle/a2a-gateway/next";
 
-let handler;
-
-export function POST(request) {
-  handler ||= createOutboundA2AHandler();
-  return handler(request);
-}
+export const { POST } = createOutboundA2ARouteHandlers();

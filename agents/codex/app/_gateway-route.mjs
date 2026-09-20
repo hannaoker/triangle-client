@@ -1,5 +1,4 @@
 import gateway from "../api/gateway.mjs";
+import { createForwardGatewayRequest } from "@the-triangle/a2a-gateway/next";
 
-export function forwardGatewayRequest(request) {
-  return gateway.fetch(request);
-}
+export const forwardGatewayRequest = createForwardGatewayRequest(gateway);
