@@ -40,3 +40,12 @@ binary (`ChatGPT.app` Resources `codex`).
 6. Only after the shared-home concurrency probe passes on Darwin may pool size
    leave `1` and desktop handoff leave disabled. A failed probe must never fall
    back to `~/.codex`.
+
+
+## Mini evidence log (2026-09-20 PT)
+
+- Bundled binary: `/Applications/ChatGPT.app/Contents/Resources/codex` -> `codex-cli 0.155.0-alpha.9.2`
+- Schema re-pin: openai/codex tag `rust-v0.155.0-alpha.9.2` commit `4607249e430dac1c961df4dc615beae88e33cec8`
+- Node Phase 0 suite: 17/17 after Darwin `realpath` test expects (`/var` vs `/private/var`)
+- Live shared-home probe (`live: true`, dual `codex app-server` stdio, dedicated TRIANGLE home): **failed** on `thread/resume` with `no rollout found for thread id ...` after concurrent slot start. Dedicated home was created and wrote sqlite/locks; do **not** promote `sharedHomeConcurrency.status` to `passed`. Recovery must not use `~/.codex`.
+- Live `clientUserMessageId` survival through real `thread/read`: **not yet run** (blocked on stable live probe/session).
