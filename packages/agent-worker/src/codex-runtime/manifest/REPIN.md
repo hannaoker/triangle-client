@@ -9,10 +9,26 @@ binary (`ChatGPT.app` Resources `codex`).
 | Item | Status |
 | --- | --- |
 | `sharedHomeConcurrency.status` | **`passed`** (Mini live) |
-| `forcedPoolSize` | **`1`** (Phase 1 single-slot cap — do not raise until Phase 3) |
+| `forcedPoolSize` | **`1`** (Phase 1/2 single-slot cap — do not raise until Phase 3) |
 | `fallbackToUserCodexHomeForbidden` | **`true`** |
 | Global `featureFlags.headlessRuntime` | **`false`** (production unchanged) |
 | Shadow test profile opt-in | See design doc Phase 1 operator note |
+
+## Phase 2 status (durable recovery, shadow only)
+
+| Item | Status |
+| --- | --- |
+| Durable lease acquire / renew / CAS / no-steal | **Shipped** (`execution-lease.mjs`) |
+| Execution epoch + stale-epoch ignore | **Shipped** |
+| Restart completion reconciliation (ack-only) | **Shipped** (`completion-reconciler.mjs`) |
+| Receipt-only (no model / no MESH reply) | **Shipped** |
+| Crash-boundary + reconnect tests | **Shipped** (synthetic fake App Server) |
+| Helper `conversationStoreEnabled` | **Still false** (production inactive) |
+| Node durable store for shadow/CI | **Opt-in** via `createDurableConversationStore({ enabled: true })` — mirrors helper schema; no MESH secrets |
+
+Phase 2 does **not** flip production defaults, raise pool size, or enable
+desktop handoff. Keep dedicated `TRIANGLE_CODEX_HOME`; never fall back to
+`~/.codex`.
 
 ### Operator: enable Phase 1 shadow test profile only
 

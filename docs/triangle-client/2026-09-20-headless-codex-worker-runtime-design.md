@@ -823,6 +823,41 @@ export TRIANGLE_HEADLESS_SHADOW_PROFILES=codex-shadow-test
   coverage.
 - Run crash-boundary and reconnect tests.
 
+#### Phase 2 implementation status (2026-09-20)
+
+Shipped under `packages/agent-worker/src/codex-runtime/` behind the **same**
+Phase 1 shadow opt-in (`shadowTestProfile` + operator enablement). Global
+`featureFlags.headlessRuntime` / `helperConversationStore` stay **false**.
+`forcedPoolSize` remains **1**.
+
+| Piece | Module |
+| --- | --- |
+| Durable file store (helper schema mirror) | `durable-conversation-store.mjs` |
+| Profile execution lease (acquire/renew/CAS/no-steal) | `execution-lease.mjs` |
+| Durable-backed registry | `conversation-registry.mjs` → `createDurableConversationRegistry` |
+| Completion replay + restart reconcile | `completion-reconciler.mjs` |
+| Receipt-only + recoverAfterRestart + stale epoch | `headless-runtime.mjs` |
+
+**Why a Node durable file (not the Darwin helper store yet):** CI and the Linux
+agent environment cannot exercise the signed helper's `FileCodexConversationStore`.
+Phase 2 activates a schema-compatible Node store only when the shadow runtime
+passes `durableStore: { enabled: true, root }`. Production helper
+`CodexRuntimeFeatureFlags.conversationStoreEnabled` stays inactive. Records are
+identifiers only — no MESH credentials.
+
+**Not in Phase 2:** multi-slot pool (Phase 3), desktop handoff (Phase 4),
+default migration / production profile flip (Phase 5).
+
+##### Focused verification
+
+```sh
+node --test packages/agent-worker/test/codex-runtime/*.test.mjs
+```
+
+Covers lease CAS/conflict/stale-generation/non-idle no-steal, epoch ignore,
+receipt-only, reply_persisted ack-only restart recovery, crash-boundary child
+exit, and reconnect after slot restart.
+
 ### Phase 3 — bounded pool
 
 - Enable two slots for test profiles.

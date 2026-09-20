@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   canTransitionExecutionState,
   createExecutionRecord,
+  isNonIdleExecutionState,
   replyBeforeAckStages,
+  shouldAcceptExecutionEpochEvent,
   transitionExecutionState,
 } from "../../src/codex-runtime/execution-state.mjs";
 import { createMemoryConversationRegistry } from "../../src/codex-runtime/conversation-registry.mjs";
@@ -17,6 +19,9 @@ test("execution state enforces reply-before-ack transitions", () => {
   assert.equal(canTransitionExecutionState("result_ready", "acked"), false);
   assert.equal(canTransitionExecutionState("reply_persisted", "acked"), true);
   assert.deepEqual(replyBeforeAckStages(), ["result_ready", "reply_persisted", "acked"]);
+  assert.equal(isNonIdleExecutionState("running"), true);
+  assert.equal(isNonIdleExecutionState("idle"), false);
+  assert.equal(shouldAcceptExecutionEpochEvent({ conversationEpoch: 1, eventEpoch: 1 }), true);
 
   let state = "idle";
   state = transitionExecutionState(state, "admitted");
