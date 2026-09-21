@@ -48,7 +48,7 @@ import {
 import { createExecutionLeaseManager } from "./execution-lease.mjs";
 import {
   isShadowHeadlessTestProfile,
-  resolvePhase1ShadowRuntimeConfig,
+  resolveHeadlessRuntimeConfig,
 } from "./config-guards.mjs";
 import { validateHeadlessCodexConfig } from "./runtime-manifest.mjs";
 import { createCodexWorkerPool } from "./worker-pool.mjs";
@@ -177,6 +177,7 @@ export function createHeadlessCodexRuntime({
   args = ["app-server"],
   env = process.env,
   enableShadow = false,
+  enablePhase5Migration = false,
   registry = null,
   pool = null,
   durableStore = null,
@@ -193,8 +194,9 @@ export function createHeadlessCodexRuntime({
   logger = console,
   now = () => Date.now(),
 } = {}) {
-  const resolved = resolvePhase1ShadowRuntimeConfig(profileConfig, {
+  const resolved = resolveHeadlessRuntimeConfig(profileConfig, {
     enableShadow,
+    enablePhase5Migration,
     env,
   });
 

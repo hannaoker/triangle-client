@@ -36,6 +36,25 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/wake-client.mjs",
 ]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
+CODEX_HEADLESS_ARTIFACTS = [
+    "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
+    "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
+    "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",
+    "packages/agent-worker/src/codex-runtime/config-guards.mjs",
+    "packages/agent-worker/src/codex-runtime/conversation-registry.mjs",
+    "packages/agent-worker/src/codex-runtime/correlation.mjs",
+    "packages/agent-worker/src/codex-runtime/durable-conversation-store.mjs",
+    "packages/agent-worker/src/codex-runtime/execution-lease.mjs",
+    "packages/agent-worker/src/codex-runtime/execution-state.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain-cli.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain-service.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-runtime.mjs",
+    "packages/agent-worker/src/codex-runtime/runtime-home.mjs",
+    "packages/agent-worker/src/codex-runtime/runtime-manifest.mjs",
+    "packages/agent-worker/src/codex-runtime/worker-pool.mjs",
+    "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
+]
 
 
 def fail(message):
@@ -155,13 +174,14 @@ def copy_regular(source, destination, destination_mode=0o600):
         os.close(destination_fd)
 
 
-def expected_artifacts(agent, version=4):
+def expected_artifacts(agent, version=5):
     if agent not in AGENTS:
         fail("invalid worker kind")
-    common = LEGACY_COMMON_ARTIFACTS if version == 3 else COMMON_ARTIFACTS if version == 4 else None
+    common = LEGACY_COMMON_ARTIFACTS if version == 3 else COMMON_ARTIFACTS if version in {4, 5} else None
     if common is None:
         fail("unsupported manifest version")
-    return common + [
+    extras = CODEX_HEADLESS_ARTIFACTS if version == 5 and agent == "codex" else []
+    return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
     ]
@@ -229,7 +249,7 @@ def strict_manifest(path, agent):
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
         "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
-    if value["version"] not in {3, 4} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in {3, 4, 5} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")
@@ -326,7 +346,7 @@ def stage_runtime(args):
             ("CODEX_CLI" if args.agent == "codex" else ("HERMES_CLI" if args.agent == "hermes" else "ANTIGRAVITY_CLI")): cli,
         }
         manifest = {
-            "version": 4, "nodeSHA256": node_hash,
+            "version": 5, "nodeSHA256": node_hash,
             "projectRoot": bundle, "environment": environment, "artifacts": artifacts,
         }
         manifest_path = os.path.join(runtime, f"{args.agent}.manifest.json")

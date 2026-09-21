@@ -113,7 +113,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 4);
+  assert.equal(manifest.version, 5);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
   assert.deepEqual(Object.keys(manifest).sort(), ["artifacts", "environment", "nodeSHA256", "projectRoot", "version"].sort());
@@ -139,7 +139,24 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/runtime.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/wake-client.mjs",
-  ]);
+    "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
+    "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
+    "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",
+    "packages/agent-worker/src/codex-runtime/config-guards.mjs",
+    "packages/agent-worker/src/codex-runtime/conversation-registry.mjs",
+    "packages/agent-worker/src/codex-runtime/correlation.mjs",
+    "packages/agent-worker/src/codex-runtime/durable-conversation-store.mjs",
+    "packages/agent-worker/src/codex-runtime/execution-lease.mjs",
+    "packages/agent-worker/src/codex-runtime/execution-state.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain-cli.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain-service.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-drain.mjs",
+    "packages/agent-worker/src/codex-runtime/headless-runtime.mjs",
+    "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
+    "packages/agent-worker/src/codex-runtime/runtime-home.mjs",
+    "packages/agent-worker/src/codex-runtime/runtime-manifest.mjs",
+    "packages/agent-worker/src/codex-runtime/worker-pool.mjs",
+  ].sort());
   for (const [relative, digest] of Object.entries(manifest.artifacts)) {
     const installed = path.join(manifest.projectRoot, relative);
     assert.equal(fs.lstatSync(installed).isFile(), true);
@@ -180,6 +197,10 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     "packages/agent-worker/src/wake-client.mjs",
   ];
   for (const relative of removed) {
+    delete manifest.artifacts[relative];
+    fs.rmSync(path.join(manifest.projectRoot, relative));
+  }
+  for (const relative of Object.keys(manifest.artifacts).filter((name) => name.includes("/codex-runtime/"))) {
     delete manifest.artifacts[relative];
     fs.rmSync(path.join(manifest.projectRoot, relative));
   }

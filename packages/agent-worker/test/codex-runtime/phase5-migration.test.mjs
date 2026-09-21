@@ -12,6 +12,7 @@ import {
   createProfileMigrationController,
   isPhase5MigrationEnabled,
   loadRuntimeManifest,
+  resolveHeadlessRuntimeConfig,
   resolvePhase5MigrationConfig,
   wouldNewCodexProfileDefaultToHeadless,
   CODEX_EXECUTION_KIND,
@@ -133,6 +134,53 @@ test("Phase 5 feature gate stays off by default; env/injection enables machinery
     { manifest: SAFE_MANIFEST, env: {}, enablePhase5Migration: true },
   );
   assert.equal(viaFlag.active, true);
+});
+
+test("production headless runtime requires Phase 5 plus an exact profile allowlist", () => {
+  const profile = {
+    profileId: "codex-headless",
+    executionKind: CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER,
+    runtimeAdapter: "codex-app-server",
+    runtimeMode: "headless",
+    shadowTestProfile: false,
+    codexPool: { preferredSize: 1, maxSize: 1 },
+  };
+
+  assert.equal(
+    resolveHeadlessRuntimeConfig(profile, { manifest: SAFE_MANIFEST, env: {} }).active,
+    false,
+  );
+  assert.equal(
+    resolveHeadlessRuntimeConfig(profile, {
+      manifest: SAFE_MANIFEST,
+      env: { TRIANGLE_PHASE5_MIGRATION_ENABLE: "1" },
+    }).inactiveReason,
+    "headless_profile_not_allowlisted",
+  );
+
+  const enabled = resolveHeadlessRuntimeConfig(profile, {
+    manifest: SAFE_MANIFEST,
+    env: {
+      TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
+      TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-headless",
+    },
+  });
+  assert.equal(enabled.active, true);
+  assert.equal(enabled.activationMode, "phase5_profile");
+
+  assert.equal(
+    resolveHeadlessRuntimeConfig(
+      { ...profile, profileId: "codex-bob-test" },
+      {
+        manifest: SAFE_MANIFEST,
+        env: {
+          TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
+          TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-headless",
+        },
+      },
+    ).active,
+    false,
+  );
 });
 
 test("profile schema classifies legacy vs desktop vs headless App Server", () => {

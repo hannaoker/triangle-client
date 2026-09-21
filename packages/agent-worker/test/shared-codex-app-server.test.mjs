@@ -426,6 +426,18 @@ test("production durable resolver: one wake starts one Codex turn", async () => 
     helperPath: "/trusted/triangle-mailbox",
     profile: "event-codex",
     async run(_file, args) {
+      if (args[0] === "transaction-read-inbound") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            deliveryId: 9,
+            roomId,
+            inboundEventId: `event_${"e".repeat(32)}`,
+            text: "production peer request",
+          }),
+          stderr: "",
+        };
+      }
       assert.equal(args[0], "transaction-claim-next");
       statusCalls += 1;
       return {
@@ -433,7 +445,7 @@ test("production durable resolver: one wake starts one Codex turn", async () => 
         stdout: JSON.stringify({
           shouldStartModel: true,
           transactionStuck: false,
-          open: { deliveryId: 9, roomId, state: "claimed" },
+          open: { deliveryId: 9, roomId, inboundEventId: `event_${"e".repeat(32)}`, state: "claimed" },
         }),
         stderr: "",
       };

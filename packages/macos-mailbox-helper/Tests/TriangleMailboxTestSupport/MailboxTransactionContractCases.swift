@@ -32,6 +32,7 @@ public enum MailboxTransactionContractCases {
         .init(name: "crash after ack", run: crashAfterAck),
         .init(name: "policy evaluator filters list and preflight", run: policyEvaluatorShared),
         .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
+        .init(name: "claimNext scopes selection to the allowed room", run: claimNextScopesAllowedRoom),
         .init(name: "claimNext receipt-only acks without starting model", run: claimNextReceiptOnlyAcksWithoutModel),
         .init(name: "claimNext resumes receipt-only ack after crash", run: claimNextReceiptOnlyResumesAfterCrash),
         .init(name: "claimed inbound survives resume and is read exactly", run: claimedInboundSurvivesResume),
@@ -770,6 +771,29 @@ public enum MailboxTransactionContractCases {
         try expect(transport.claims.count == 1, "resume reclaimed delivery")
         try expect(resumed["shouldStartModel"] as? Bool == true, "resume shouldStartModel false")
         try expect(payload["replyRequired"] as? Bool == true, "work claim missing replyRequired")
+    }
+
+    public static func claimNextScopesAllowedRoom() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        let allowedRoom = MailboxRoomID(rawValue: "room_" + String(repeating: "c", count: 32))!
+        let allowedEvent = MailboxEventID(rawValue: "event_" + String(repeating: "d", count: 32))!
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(deliveryID: 40, roomID: room, eventID: event, roomSequence: 1),
+            try MailboxDeliveryCandidate(deliveryID: 41, roomID: allowedRoom, eventID: allowedEvent, roomSequence: 1),
+        ]
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let instanceID = ClientInstanceID.derive(profile: profile)
+
+        let payload = try await service.claimNext(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            allowedRoomID: allowedRoom
+        )
+
+        try expect(transport.claims.map(\.0) == [41], "claimNext crossed the allowed room boundary")
+        let open = payload["open"] as? [String: Any]
+        try expect(open?["roomId"] as? String == allowedRoom.value, "claimed room mismatch")
     }
 
     public static func claimNextReceiptOnlyAcksWithoutModel() async throws {

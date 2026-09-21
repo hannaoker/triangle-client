@@ -325,7 +325,7 @@ private final class ResolverFixture {
     private let node: URL
     private let manifest: URL
     var manifestURL: URL { manifest }
-    init(manifestVersion: Int = 4) throws {
+    init(manifestVersion: Int = 5) throws {
         fixtureHome = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("triangle-worker-\(UUID().uuidString)")
         applicationRoot = fixtureHome.appendingPathComponent("Library/Application Support/The Triangle")
         try manager.createDirectory(at: applicationRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -352,7 +352,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 {
+        if manifestVersion == 4 || manifestVersion == 5 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -365,6 +365,27 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/app-server-bind-cli.mjs",
                 "packages/agent-worker/src/grok-bot-wake.mjs",
                 "packages/agent-worker/src/wake-client.mjs",
+            ]
+        }
+        if manifestVersion == 5 {
+            artifactNames += [
+                "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
+                "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
+                "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",
+                "packages/agent-worker/src/codex-runtime/config-guards.mjs",
+                "packages/agent-worker/src/codex-runtime/conversation-registry.mjs",
+                "packages/agent-worker/src/codex-runtime/correlation.mjs",
+                "packages/agent-worker/src/codex-runtime/durable-conversation-store.mjs",
+                "packages/agent-worker/src/codex-runtime/execution-lease.mjs",
+                "packages/agent-worker/src/codex-runtime/execution-state.mjs",
+                "packages/agent-worker/src/codex-runtime/headless-drain-cli.mjs",
+                "packages/agent-worker/src/codex-runtime/headless-drain-service.mjs",
+                "packages/agent-worker/src/codex-runtime/headless-drain.mjs",
+                "packages/agent-worker/src/codex-runtime/headless-runtime.mjs",
+                "packages/agent-worker/src/codex-runtime/runtime-home.mjs",
+                "packages/agent-worker/src/codex-runtime/runtime-manifest.mjs",
+                "packages/agent-worker/src/codex-runtime/worker-pool.mjs",
+                "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
         var artifacts: [String: String] = [:]

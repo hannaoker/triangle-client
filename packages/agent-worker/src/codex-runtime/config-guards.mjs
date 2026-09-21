@@ -130,6 +130,75 @@ export function resolvePhase1ShadowRuntimeConfig(
 }
 
 /**
+ * Resolve the actual persistent headless runtime, not just migration tooling.
+ * Production activation is deliberately stricter than Phase 5 migration:
+ * the profile must have the headless App Server execution shape, Phase 5 must
+ * be enabled, and its exact profile id must be operator-allowlisted.
+ */
+export function resolveHeadlessRuntimeConfig(
+  profileConfig = {},
+  {
+    manifest = loadRuntimeManifest(),
+    env = process.env,
+    enableShadow = false,
+    enablePhase5Migration = false,
+  } = {},
+) {
+  const shadow = resolvePhase1ShadowRuntimeConfig(profileConfig, {
+    manifest,
+    env,
+    enableShadow,
+  });
+  if (shadow.active) {
+    return Object.freeze({ ...shadow, activationMode: "shadow" });
+  }
+
+  const phase5 = resolvePhase5MigrationConfig(profileConfig, {
+    manifest,
+    env,
+    enablePhase5Migration,
+  });
+  const profileId = phase5.profileId;
+  const allowlist = parseAllowlist(env.TRIANGLE_HEADLESS_RUNTIME_PROFILES);
+  const allowlisted =
+    allowlist != null && profileId != null && allowlist.has(profileId);
+  const productionShape =
+    profileConfig?.executionKind === "headless-app-server" &&
+    profileConfig?.runtimeAdapter === "codex-app-server" &&
+    profileConfig?.runtimeMode === "headless" &&
+    profileConfig?.shadowTestProfile !== true;
+  const pool = resolveCodexPoolGuards({
+    preferredSize: profileConfig.codexPool?.preferredSize ?? 2,
+    maxSize: profileConfig.codexPool?.maxSize ?? 4,
+    desktopHandoffRequested: false,
+    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
+    manifest,
+  });
+
+  let inactiveReason = null;
+  if (!productionShape) inactiveReason = shadow.inactiveReason ?? "not_headless_app_server_profile";
+  else if (!phase5.active) inactiveReason = phase5.inactiveReason;
+  else if (!allowlisted) inactiveReason = "headless_profile_not_allowlisted";
+
+  return Object.freeze({
+    active: inactiveReason == null,
+    inactiveReason,
+    activationMode: inactiveReason == null ? "phase5_profile" : null,
+    shadowTestProfile: false,
+    operatorEnabled: phase5.active && allowlisted,
+    profileId,
+    runtimeMode: profileConfig.runtimeMode ?? null,
+    runtimeAdapter: profileConfig.runtimeAdapter ?? null,
+    headlessRuntimeEnabled: isHeadlessRuntimeEnabled(manifest),
+    helperConversationStoreEnabled: isHelperConversationStoreEnabled(manifest),
+    desktopHandoffEnabled: false,
+    pool,
+    featureFlags: getFeatureFlags(manifest),
+    manifest,
+  });
+}
+
+/**
  * Resolve effective runtime config for a Codex profile without activating
  * headless production behavior in Phase 0 / Phase 1 defaults.
  */

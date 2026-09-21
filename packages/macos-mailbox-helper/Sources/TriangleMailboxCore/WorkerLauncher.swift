@@ -113,6 +113,43 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
+        if manifestVersion == 5 {
+            var artifacts = legacy.union([
+                "packages/agent-worker/src/authenticated-app-server-transport.mjs",
+                "packages/agent-worker/src/client-supervisor-cli.mjs",
+                "packages/agent-worker/src/client-supervisor.mjs",
+                "packages/agent-worker/src/concurrency-gate.mjs",
+                "packages/agent-worker/src/helper-transaction-proxy.mjs",
+                "packages/agent-worker/src/helper-watch-transport.mjs",
+                "packages/agent-worker/src/profile-scheduler.mjs",
+                "packages/agent-worker/src/shared-codex-app-server.mjs",
+                "packages/agent-worker/src/app-server-bind-cli.mjs",
+                "packages/agent-worker/src/grok-bot-wake.mjs",
+                "packages/agent-worker/src/wake-client.mjs",
+            ])
+            if worker == .codex {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
+                    "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
+                    "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",
+                    "packages/agent-worker/src/codex-runtime/config-guards.mjs",
+                    "packages/agent-worker/src/codex-runtime/conversation-registry.mjs",
+                    "packages/agent-worker/src/codex-runtime/correlation.mjs",
+                    "packages/agent-worker/src/codex-runtime/durable-conversation-store.mjs",
+                    "packages/agent-worker/src/codex-runtime/execution-lease.mjs",
+                    "packages/agent-worker/src/codex-runtime/execution-state.mjs",
+                    "packages/agent-worker/src/codex-runtime/headless-drain-cli.mjs",
+                    "packages/agent-worker/src/codex-runtime/headless-drain-service.mjs",
+                    "packages/agent-worker/src/codex-runtime/headless-drain.mjs",
+                    "packages/agent-worker/src/codex-runtime/headless-runtime.mjs",
+                    "packages/agent-worker/src/codex-runtime/runtime-home.mjs",
+                    "packages/agent-worker/src/codex-runtime/runtime-manifest.mjs",
+                    "packages/agent-worker/src/codex-runtime/worker-pool.mjs",
+                    "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
+                ])
+            }
+            return artifacts
+        }
         return nil
     }
 
