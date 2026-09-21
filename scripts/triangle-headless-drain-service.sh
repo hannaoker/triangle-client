@@ -22,6 +22,8 @@ launchctl_command="${TRIANGLE_LAUNCHCTL:-/bin/launchctl}"
 
 [[ "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "invalid TRIANGLE_MAILBOX_PROFILE" >&2; exit 64; }
 [[ "$room" =~ ^room_[a-f0-9]{32}$ ]] || { echo "invalid TRIANGLE_HEADLESS_ROOM_ID" >&2; exit 64; }
+[[ "$profile" == "codex-headless" ]] || { echo "dedicated drain remains Mini-allowlisted to codex-headless" >&2; exit 64; }
+[[ "$room" == "room_8594d12312e14afbb291fcff60a22048" ]] || { echo "dedicated drain remains Mini-allowlisted to the canary room" >&2; exit 64; }
 for directory in "$workdir" "$codex_home"; do
   [[ "$directory" = /* ]] || { echo "headless paths must be absolute" >&2; exit 64; }
 done
@@ -53,7 +55,18 @@ sys.stdout.write(text)
 PY
 }
 
+# Migration-only LaunchAgent. After `dev.thetriangle.client` owns headlessWake,
+# stop/uninstall this label so two claimers never share the Mini allowlist.
+refuse_dual_claimer() {
+  local lock="${application_root}/client/headless-claimer.json"
+  if [[ -f "$lock" ]]; then
+    echo "refusing to start dedicated drain: client supervisor headless claimer lock exists" >&2
+    exit 75
+  fi
+}
+
 install_service() {
+  refuse_dual_claimer
   /bin/mkdir -p "$launch_agents" "$logs_dir" "$codex_home" "$state_root"
   /bin/chmod 700 "$codex_home" "$state_root"
   local staged
@@ -72,7 +85,10 @@ install_service() {
 case "$action" in
   render) render ;;
   install) install_service ;;
-  start) if [[ -f "$plist_path" ]]; then "$launchctl_command" bootstrap "$domain" "$plist_path" 2>/dev/null || "$launchctl_command" kickstart -k "${domain}/${label}"; else install_service; fi ;;
+  start)
+    refuse_dual_claimer
+    if [[ -f "$plist_path" ]]; then "$launchctl_command" bootstrap "$domain" "$plist_path" 2>/dev/null || "$launchctl_command" kickstart -k "${domain}/${label}"; else install_service; fi
+    ;;
   stop) "$launchctl_command" bootout "${domain}/${label}" >/dev/null 2>&1 || true ;;
   status) "$launchctl_command" print "${domain}/${label}" ;;
   uninstall) "$launchctl_command" bootout "${domain}/${label}" >/dev/null 2>&1 || true; /bin/rm -f "$plist_path" ;;

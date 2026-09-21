@@ -96,6 +96,8 @@ public struct ClientSupervisor: Sendable {
     private let grokBotWakeCursorURL: URL
     private let grokBotWebhookURLPath: URL
     private let grokBotWebhookKeyPath: URL
+    private let headlessRuntimeBindingURL: URL
+    private let isDedicatedHeadlessDrainLoaded: @Sendable (String) -> Bool
 
     public init(
         instanceStore: any ClientInstanceStore,
@@ -112,7 +114,9 @@ public struct ClientSupervisor: Sendable {
         grokBotBindingURL: URL? = nil,
         grokBotWakeCursorURL: URL? = nil,
         grokBotWebhookURLPath: URL? = nil,
-        grokBotWebhookKeyPath: URL? = nil
+        grokBotWebhookKeyPath: URL? = nil,
+        headlessRuntimeBindingURL: URL? = nil,
+        isDedicatedHeadlessDrainLoaded: (@Sendable (String) -> Bool)? = nil
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
@@ -150,6 +154,29 @@ public struct ClientSupervisor: Sendable {
             ?? clientRoot.appendingPathComponent("grok-bot-webhook.url")
         self.grokBotWebhookKeyPath = grokBotWebhookKeyPath
             ?? clientRoot.appendingPathComponent("grok-bot-webhook.key")
+        self.headlessRuntimeBindingURL = headlessRuntimeBindingURL
+            ?? clientRoot.appendingPathComponent("headless-runtime-binding.json")
+        self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
+    }
+
+    private static let pinnedHeadlessProfile = "codex-headless"
+    private static let pinnedHeadlessRoomId = "room_8594d12312e14afbb291fcff60a22048"
+
+    private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
+        let uid = getuid()
+        let label = "dev.thetriangle.codex-headless-drain.\(profile)"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", "gui/\(uid)/\(label)"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     public func prepareEnabledInstances() async throws -> PreparedClientSupervisorLaunch {
@@ -168,6 +195,9 @@ public struct ClientSupervisor: Sendable {
             case .grokBot:
                 // Recorded as omitted from worker/eventWake; may still feed grokBotWake.
                 return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_grok_bot")
+            case .headlessAppServer:
+                // Recorded as omitted from worker/eventWake; may still feed headlessWake.
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_headless_app_server")
             case .eventDriven, .worker:
                 return nil
             }
@@ -176,15 +206,18 @@ public struct ClientSupervisor: Sendable {
         let wakeMembers = allInstances.filter(\.participatesInEventDrivenWake)
         let appServerMembers = allInstances.filter(\.participatesInAppServerWake)
         let grokBotMembers = allInstances.filter(\.participatesInGrokBotWake)
-        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty || !grokBotMembers.isEmpty),
+        let headlessMembers = allInstances.filter(\.participatesInHeadlessWake)
+        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty || !grokBotMembers.isEmpty || !headlessMembers.isEmpty),
               Set(workers.map(\.profile)).count == workers.count,
               Set(wakeMembers.map(\.profile)).count == wakeMembers.count,
               Set(appServerMembers.map(\.profile)).count == appServerMembers.count,
               Set(grokBotMembers.map(\.profile)).count == grokBotMembers.count,
+              Set(headlessMembers.map(\.profile)).count == headlessMembers.count,
               workers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               wakeMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               appServerMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
-              grokBotMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
+              grokBotMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
+              headlessMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
         else { throw ClientSupervisorError.noEligibleInstances }
 
         // This entire resolution phase deliberately precedes the first
@@ -209,8 +242,10 @@ public struct ClientSupervisor: Sendable {
             coordinatorSources = wakeMembers
         } else if !appServerMembers.isEmpty {
             coordinatorSources = appServerMembers
-        } else {
+        } else if !grokBotMembers.isEmpty {
             coordinatorSources = grokBotMembers
+        } else {
+            coordinatorSources = headlessMembers
         }
         guard !coordinatorSources.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
         let coordinator: WorkerCommand
@@ -286,7 +321,16 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil else {
+        let headlessWake: PreparedHeadlessWakeBootstrap?
+        do {
+            headlessWake = try await prepareHeadlessWake(members: headlessMembers, omitted: &omitted)
+        } catch let error as ClientSupervisorError {
+            throw error
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil || headlessWake != nil else {
             throw ClientSupervisorError.noEligibleInstances
         }
 
@@ -319,6 +363,17 @@ public struct ClientSupervisor: Sendable {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
+        if let headlessWake {
+            let workerIds = Set(prepared.map(\.instanceId))
+            let wakeIds = Set(eventWake?.profiles.map(\.instanceId) ?? [])
+            guard !workerIds.contains(headlessWake.profileInstanceId),
+                  !wakeIds.contains(headlessWake.profileInstanceId),
+                  appServerWake?.binding.instanceId != headlessWake.profileInstanceId,
+                  grokBotWake?.binding.instanceId != headlessWake.profileInstanceId
+            else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
+        }
 
         var allMailboxTokens = prepared.map(\.mailbox.meshToken)
         if let eventWake {
@@ -334,7 +389,8 @@ public struct ClientSupervisor: Sendable {
             instances: prepared,
             eventWake: eventWake,
             appServerWake: appServerWake,
-            grokBotWake: grokBotWake
+            grokBotWake: grokBotWake,
+            headlessWake: headlessWake
         )
         let data: Data
         do {
@@ -656,6 +712,142 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
+    private func prepareHeadlessWake(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> PreparedHeadlessWakeBootstrap? {
+        guard !members.isEmpty else { return nil }
+        guard helperExecutableURL.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+        else { throw ClientSupervisorError.runtimeUnavailable }
+        guard headlessRuntimeBindingURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
+
+        guard FileManager.default.isReadableFile(atPath: headlessRuntimeBindingURL.path) else {
+            for instance in members {
+                omitted.append(.init(
+                    instanceID: instance.instanceID.value,
+                    reasonCode: "headless_runtime_binding_missing"
+                ))
+            }
+            return nil
+        }
+
+        let bindingData: Data
+        do {
+            bindingData = try Data(contentsOf: headlessRuntimeBindingURL)
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        guard let object = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any] else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
+        let bindingInstanceIdHint = object["instanceId"] as? String
+        let matched = sortedMembers.first(where: { $0.instanceID.value == bindingInstanceIdHint })
+        guard let primary = matched ?? (sortedMembers.count == 1 ? sortedMembers.first : nil) else {
+            for instance in sortedMembers {
+                omitted.append(.init(
+                    instanceID: instance.instanceID.value,
+                    reasonCode: "headless_runtime_binding_mismatch"
+                ))
+            }
+            return nil
+        }
+
+        guard primary.profile.value == Self.pinnedHeadlessProfile else {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "headless_profile_not_allowlisted"
+            ))
+            return nil
+        }
+
+        if isDedicatedHeadlessDrainLoaded(primary.profile.value) {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "dedicated_headless_drain_loaded"
+            ))
+            return nil
+        }
+
+        let installationID: InstallationID
+        do {
+            installationID = try installationIdentity.resolve()
+        } catch {
+            throw ClientSupervisorError.runtimeUnavailable
+        }
+
+        let credential: VerifiedCredential
+        do {
+            credential = try await gate.credential(for: primary.profile)
+        } catch {
+            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
+            return nil
+        }
+        guard !credential.agentID.value.isEmpty else {
+            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
+            return nil
+        }
+
+        let pollIntervalMs: Int
+        if let number = object["pollIntervalMs"] as? Int {
+            pollIntervalMs = number
+        } else if let number = object["pollIntervalMs"] as? NSNumber {
+            pollIntervalMs = number.intValue
+        } else {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "headless_runtime_binding_mismatch"
+            ))
+            return nil
+        }
+
+        guard let adapterVersion = object["adapterVersion"] as? String,
+              adapterVersion == "1",
+              object["enabled"] as? Bool == true,
+              let bindingProfile = object["profile"] as? String,
+              bindingProfile == primary.profile.value,
+              let bindingInstallationId = object["installationId"] as? String,
+              bindingInstallationId == installationID.value,
+              let bindingInstanceId = object["instanceId"] as? String,
+              bindingInstanceId == primary.instanceID.value,
+              let allowedRoomId = object["allowedRoomId"] as? String,
+              allowedRoomId == Self.pinnedHeadlessRoomId,
+              let workingDirectory = object["workingDirectory"] as? String,
+              workingDirectory.hasPrefix("/"),
+              !workingDirectory.contains("\0"),
+              let codexHome = object["codexHome"] as? String,
+              codexHome.hasPrefix("/"),
+              !codexHome.contains("\0"),
+              let stateRoot = object["stateRoot"] as? String,
+              stateRoot.hasPrefix("/"),
+              !stateRoot.contains("\0"),
+              let command = object["command"] as? String,
+              command.hasPrefix("/"),
+              !command.contains("\0"),
+              (100...60_000).contains(pollIntervalMs)
+        else {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "headless_runtime_binding_mismatch"
+            ))
+            return nil
+        }
+
+        return PreparedHeadlessWakeBootstrap(
+            profile: primary.profile.value,
+            profileInstanceId: primary.instanceID.value,
+            helperPath: helperExecutableURL.path,
+            allowedRoomId: allowedRoomId,
+            workingDirectory: workingDirectory,
+            codexHome: codexHome,
+            stateRoot: stateRoot,
+            command: command,
+            pollIntervalMs: pollIntervalMs
+        )
+    }
+
     public func run() async throws {
         let launch = try await prepareEnabledInstances()
         let request = ClientSupervisorProcessRequest(
@@ -716,9 +908,10 @@ private struct PreparedBootstrap: Encodable {
     let eventWake: PreparedEventWakeBootstrap?
     let appServerWake: PreparedAppServerWakeBootstrap?
     let grokBotWake: PreparedGrokBotWakeBootstrap?
+    let headlessWake: PreparedHeadlessWakeBootstrap?
 
     private enum CodingKeys: String, CodingKey {
-        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWake
     }
 
     func encode(to encoder: Encoder) throws {
@@ -729,6 +922,7 @@ private struct PreparedBootstrap: Encodable {
         try container.encodeIfPresent(eventWake, forKey: .eventWake)
         try container.encodeIfPresent(appServerWake, forKey: .appServerWake)
         try container.encodeIfPresent(grokBotWake, forKey: .grokBotWake)
+        try container.encodeIfPresent(headlessWake, forKey: .headlessWake)
     }
 }
 private struct PreparedBootstrapInstance: Encodable {
@@ -837,6 +1031,18 @@ private struct PreparedGrokBotBinding: Encodable {
     let profile: String
     let grokAgentId: String
     let wakeMode: String
+}
+
+private struct PreparedHeadlessWakeBootstrap: Encodable {
+    let profile: String
+    let profileInstanceId: String
+    let helperPath: String
+    let allowedRoomId: String
+    let workingDirectory: String
+    let codexHome: String
+    let stateRoot: String
+    let command: String
+    let pollIntervalMs: Int
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {

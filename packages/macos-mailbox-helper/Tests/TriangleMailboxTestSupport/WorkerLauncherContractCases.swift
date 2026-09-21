@@ -18,6 +18,7 @@ public enum WorkerLauncherContractCases {
         .init(name: "filesystem resolver rejects unsafe manifests and artifacts", run: { try resolverSafety() }),
         .init(name: "helper-only upgrade resolves exact legacy version-3 runtime", run: { try legacyVersionThreeRuntimeResolves() }),
         .init(name: "legacy version-3 runtime cannot host the shared supervisor", run: { try legacyVersionThreeCannotHostSupervisor() }),
+        .init(name: "version-5 runtime can host the shared supervisor", run: { try versionFiveCanHostSupervisor() }),
         .init(name: "shared runtime release resolves isolated opaque instance state", run: { try instanceStateIsolation() }),
         .init(name: "concurrent fresh instance resolution is idempotent", run: concurrentFreshRootResolution),
         .init(name: "clean installed runtime resolves and passes Node syntax smoke", run: { try installedBundleResolvesAndSmokes() }),
@@ -167,6 +168,13 @@ public enum WorkerLauncherContractCases {
             _ = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolveCoordinator(for: [instance])
             throw WorkerContractFailure("legacy runtime hosted the shared supervisor")
         } catch is WorkerLauncherError {}
+    }
+
+    public static func versionFiveCanHostSupervisor() throws {
+        let fixture = try ResolverFixture(manifestVersion: 5); defer { fixture.cleanup() }
+        let instance = try ClientInstance(profile: ProfileName("headless-supervisor-host"), runtimeAdapter: .codex)
+        let command = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolveCoordinator(for: [instance])
+        try expect(command.arguments[0].hasSuffix("/packages/agent-worker/src/client-supervisor-cli.mjs"), "v5 coordinator script missing")
     }
 
     public static func instanceStateIsolation() throws {

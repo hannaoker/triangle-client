@@ -95,7 +95,10 @@ export function classifyCodexProfileExecution(profileConfig = {}) {
   const runtimeMode = profileConfig?.runtimeMode ?? null;
   const deliveryMode = profileConfig?.deliveryMode ?? null;
 
-  if (runtimeAdapter === "codex-app-server" && runtimeMode === "headless") {
+  if (
+    deliveryMode === "headless-app-server"
+    || (runtimeAdapter === "codex-app-server" && runtimeMode === "headless")
+  ) {
     return CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER;
   }
 

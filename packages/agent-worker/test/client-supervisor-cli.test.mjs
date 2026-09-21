@@ -10,6 +10,11 @@ import {
   parseClientSupervisorBootstrap,
   runClientSupervisorCLI,
 } from "../src/client-supervisor-cli.mjs";
+import {
+  PINNED_HEADLESS_DRAIN_PROFILE,
+  PINNED_HEADLESS_DRAIN_ROOM_ID,
+  deriveProfileInstanceId,
+} from "../src/codex-runtime/headless-drain-service.mjs";
 
 const instanceId = (digit) => digit.repeat(64);
 
@@ -770,5 +775,91 @@ test("CLI forwards grokBotWake into supervisor creation", async () => {
   });
   assert.equal(result, 0);
   assert.deepEqual(received.grokBotWake, grokBotWake());
+  assert.equal(stderr.value(), "");
+});
+
+function headlessWake(overrides = {}) {
+  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  return {
+    profile,
+    profileInstanceId: deriveProfileInstanceId(profile),
+    helperPath: "/trusted/triangle-mailbox",
+    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+    workingDirectory: "/srv/triangle-work",
+    codexHome: "/private/codex-home",
+    stateRoot: "/private/headless-state",
+    command: "/trusted/bin/codex",
+    pollIntervalMs: 1_000,
+    ...overrides,
+  };
+}
+
+test("bootstrap accepts pinned headlessWake and rejects dual consumers or production profiles", () => {
+  const withHeadless = bootstrap({ headlessWake: headlessWake() });
+  const parsed = parseClientSupervisorBootstrap(JSON.stringify(withHeadless));
+  assert.deepEqual(parsed.headlessWake, headlessWake());
+
+  const headlessOnly = {
+    version: 1,
+    maxConcurrentReasoners: 2,
+    instances: [],
+    headlessWake: headlessWake(),
+  };
+  assert.equal(
+    parseClientSupervisorBootstrap(JSON.stringify(headlessOnly)).headlessWake.profile,
+    PINNED_HEADLESS_DRAIN_PROFILE,
+  );
+
+  for (const candidate of [
+    bootstrap({ headlessWake: { ...headlessWake(), extra: true } }),
+    bootstrap({
+      headlessWake: headlessWake({
+        profile: "codex-bob-test",
+        profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
+      }),
+    }),
+    bootstrap({
+      headlessWake: headlessWake({
+        allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    }),
+    bootstrap({
+      headlessWake: headlessWake({
+        profileInstanceId: instance().instanceId,
+      }),
+    }),
+    bootstrap({
+      grokBotWake: {
+        ...grokBotWake(),
+        binding: {
+          ...grokBotWake().binding,
+          instanceId: deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE),
+        },
+      },
+      headlessWake: headlessWake(),
+    }),
+  ]) {
+    assert.throws(
+      () => parseClientSupervisorBootstrap(JSON.stringify(candidate)),
+      /Invalid Triangle Client bootstrap/,
+    );
+  }
+});
+
+test("CLI forwards headlessWake into supervisor creation", async () => {
+  let received;
+  const stderr = capture();
+  const result = await runClientSupervisorCLI({
+    argv: [],
+    input: Readable.from([JSON.stringify(bootstrap({ headlessWake: headlessWake() }))]),
+    stderr: stderr.stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], headlessWake: null }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.deepEqual(received.headlessWake, headlessWake());
   assert.equal(stderr.value(), "");
 });

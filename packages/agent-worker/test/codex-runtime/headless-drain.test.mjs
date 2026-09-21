@@ -3,12 +3,17 @@ import test from "node:test";
 
 import { createHeadlessCodexDrain } from "../../src/codex-runtime/headless-drain.mjs";
 import {
+  PINNED_HEADLESS_DRAIN_PROFILE,
+  PINNED_HEADLESS_DRAIN_ROOM_ID,
+  createHeadlessClaimerGuard,
+  dedicatedHeadlessDrainLaunchAgentLabel,
   deriveProfileInstanceId,
   loadHeadlessDrainConfig,
+  normalizeHeadlessWakeConfig,
 } from "../../src/codex-runtime/headless-drain-service.mjs";
 
 const INSTANCE = "a".repeat(64);
-const ROOM = `room_${"b".repeat(32)}`;
+const ROOM = "room_8594d12312e14afbb291fcff60a22048";
 const EVENT = `event_${"c".repeat(32)}`;
 
 function delivery(overrides = {}) {
@@ -156,4 +161,94 @@ test("installed drain config is exact-profile allowlisted and derives the Swift-
     () => loadHeadlessDrainConfig({ profile, env: { ...env, TRIANGLE_HEADLESS_ROOM_ID: "room_invalid" } }),
     /TRIANGLE_HEADLESS_ROOM_ID/,
   );
+  assert.throws(
+    () => loadHeadlessDrainConfig({
+      profile: "codex-bob-test",
+      env: { ...env, TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-bob-test" },
+    }),
+    /not explicitly enabled/,
+  );
+  assert.throws(
+    () => loadHeadlessDrainConfig({
+      profile,
+      env: { ...env, TRIANGLE_HEADLESS_ROOM_ID: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    }),
+    /allowlisted Mini canary room/,
+  );
 });
+
+test("headless wake config is pinned to the Mini allowlist", () => {
+  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  const profileInstanceId = deriveProfileInstanceId(profile);
+  const valid = {
+    profile,
+    profileInstanceId,
+    helperPath: "/trusted/triangle-mailbox",
+    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+    workingDirectory: "/srv/triangle-work",
+    codexHome: "/private/codex-home",
+    stateRoot: "/private/headless-state",
+    command: "/trusted/bin/codex",
+    pollIntervalMs: 1_000,
+  };
+  assert.deepEqual(normalizeHeadlessWakeConfig(valid), valid);
+  assert.throws(
+    () => normalizeHeadlessWakeConfig({
+      ...valid,
+      profile: "codex-bob-test",
+      profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
+    }),
+    /not explicitly enabled/,
+  );
+  assert.throws(
+    () => normalizeHeadlessWakeConfig({ ...valid, allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    /allowlisted Mini canary room/,
+  );
+});
+
+test("claimer guard refuses dual consumers on the same profile", () => {
+  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  const lockPath = `/tmp/triangle-headless-claimer-${process.pid}.json`;
+  const supervisor = createHeadlessClaimerGuard({
+    profile,
+    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+    pid: 4_001,
+    lockPath,
+    probeDedicatedDrain: () => false,
+    pidAlive: (candidate) => candidate === 4_001 || candidate === 4_002,
+  });
+  supervisor.acquire({ owner: "dev.thetriangle.client" });
+  try {
+    const dedicated = createHeadlessClaimerGuard({
+      profile,
+      allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+      pid: 4_002,
+      lockPath,
+      probeDedicatedDrain: () => false,
+      pidAlive: (candidate) => candidate === 4_001 || candidate === 4_002,
+    });
+    assert.throws(
+      () => dedicated.assertDedicatedDrainMayClaim(),
+      (error) => error.code === "supervisor_headless_claimer_active",
+    );
+    const blockedSupervisor = createHeadlessClaimerGuard({
+      profile,
+      allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+      pid: 4_003,
+      lockPath,
+      probeDedicatedDrain: () => true,
+      pidAlive: () => false,
+    });
+    assert.equal(
+      dedicatedHeadlessDrainLaunchAgentLabel(profile),
+      "dev.thetriangle.codex-headless-drain.codex-headless",
+    );
+    assert.throws(
+      () => blockedSupervisor.assertSupervisorMayClaim(),
+      (error) => error.code === "dedicated_headless_drain_loaded",
+    );
+  } finally {
+    supervisor.release({ owner: "dev.thetriangle.client" });
+  }
+});
+

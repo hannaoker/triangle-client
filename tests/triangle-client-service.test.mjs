@@ -187,6 +187,7 @@ test("install accepts legacy and delivery-mode registry records but rejects unkn
   enabledProfile(f, "a");
   enabledProfile(f, "b", "mcp-interactive");
   enabledProfile(f, "d", "event-driven");
+  enabledProfile(f, "h", "headless-app-server");
   let result = run("install", f.env);
   assert.equal(result.status, 0, result.stderr);
 
