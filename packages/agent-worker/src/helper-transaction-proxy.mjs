@@ -40,6 +40,13 @@ function assertProtocol(protocol) {
   return protocol;
 }
 
+function assertRoomId(roomId) {
+  if (typeof roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(roomId)) {
+    throw new TypeError("roomId is invalid");
+  }
+  return roomId;
+}
+
 /**
  * Pure ID derivation mirrored from Swift `MailboxTransactionIdentifier`.
  * Used by Linux unit tests; production IDs still come from the helper.
@@ -274,9 +281,19 @@ export function createHelperTrustedTransactionProxy({
       );
     },
 
-    async claimNext({ signal } = {}) {
+    async claimNext({ roomId = null, signal } = {}) {
+      if (roomId != null) assertRoomId(roomId);
+      const args = ["transaction-claim-next", "--profile", profile, "--protocol", protocol];
+      if (roomId != null) args.push("--room-id", roomId);
       return invoke(
-        ["transaction-claim-next", "--profile", profile, "--protocol", protocol],
+        args,
+        { signal },
+      );
+    },
+
+    async readInbound({ signal } = {}) {
+      return invoke(
+        ["transaction-read-inbound", "--profile", profile, "--protocol", protocol],
         { signal },
       );
     },
@@ -402,10 +419,12 @@ export function createHelperDurableDeliveryResolver({
   protocol = "coordinator-delivery-v1",
   createProxy,
   run,
+  allowedRoomId = null,
 } = {}) {
   assertHelperPath(helperPath);
   assertProfile(profile);
   assertProtocol(protocol);
+  if (allowedRoomId != null) assertRoomId(allowedRoomId);
   if (typeof createProxy !== "function") {
     throw new TypeError("createProxy is required");
   }
@@ -416,7 +435,7 @@ export function createHelperDurableDeliveryResolver({
     if (typeof proxy.claimNext !== "function") return null;
     let status;
     try {
-      status = await proxy.claimNext({ signal });
+      status = await proxy.claimNext({ roomId: allowedRoomId, signal });
     } catch (error) {
       if (error?.code === "slice6_required" || error?.code === "helper_unavailable") {
         return null;
@@ -467,21 +486,33 @@ export function createHelperDurableDeliveryResolver({
       typeof open.inboundEventId === "string" && /^event_[a-f0-9]{32}$/.test(open.inboundEventId)
         ? open.inboundEventId
         : null;
-    const admitText =
+    let admitText =
       typeof status.admitText === "string" && status.admitText.length > 0 && status.admitText.length <= 32 * 1024
         ? status.admitText
         : null;
-    const text = admitText ?? [
-      "Continue the bound desktop turn for the open durable mailbox transaction.",
-      `deliveryId=${open.deliveryId}`,
-      `roomId=${open.roomId}`,
-      `state=${typeof open.state === "string" ? open.state : "claimed"}`,
-      inboundEventId ? `inboundEventId=${inboundEventId}` : null,
-      "Reply in one short assistant message that answers the inbound MESH message.",
-    ].filter(Boolean).join("\n");
+    if (admitText == null) {
+      if (typeof proxy.readInbound !== "function") {
+        throw createCodedError("inbound_read_required", "helper cannot read the claimed inbound event");
+      }
+      const inbound = await proxy.readInbound({ signal });
+      const matchesClaim =
+        inbound &&
+        inbound.deliveryId === open.deliveryId &&
+        inbound.roomId === open.roomId &&
+        inbound.inboundEventId === inboundEventId;
+      if (
+        !matchesClaim ||
+        typeof inbound.text !== "string" ||
+        inbound.text.length === 0 ||
+        Buffer.byteLength(inbound.text) > 32 * 1024
+      ) {
+        throw createCodedError("invalid_inbound_event", "helper returned an invalid claimed inbound event");
+      }
+      admitText = inbound.text;
+    }
     return {
       deliveryId,
-      text,
+      text: admitText,
       roomId: open.roomId,
       inboundEventId,
       numericDeliveryId: open.deliveryId,

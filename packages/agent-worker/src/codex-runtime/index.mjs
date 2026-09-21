@@ -68,6 +68,7 @@ export {
   isHelperConversationStoreEnabled,
   isPhase5MigrationEnabled,
   isShadowHeadlessTestProfile,
+  resolveHeadlessRuntimeConfig,
   resolvePhase0RuntimeConfig,
   resolvePhase1ShadowRuntimeConfig,
   resolvePhase5MigrationConfig,
@@ -128,6 +129,14 @@ export {
 export { createCodexWorkerPool } from "./worker-pool.mjs";
 
 export { createHeadlessCodexRuntime } from "./headless-runtime.mjs";
+
+export { createHeadlessCodexDrain } from "./headless-drain.mjs";
+
+export {
+  createInstalledHeadlessDrain,
+  deriveProfileInstanceId,
+  loadHeadlessDrainConfig,
+} from "./headless-drain-service.mjs";
 
 export {
   createDesktopHandoffController,

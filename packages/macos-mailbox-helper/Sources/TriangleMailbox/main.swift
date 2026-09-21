@@ -292,7 +292,11 @@ enum TriangleMailboxCLI {
         case .transactionStatus:
             writeJSON(try service.status(instanceID: instanceID, protocolOwnership: protocolOwnership))
         case .transactionClaimNext:
-            writeJSON(try await service.claimNext(instanceID: instanceID, protocolOwnership: protocolOwnership))
+            writeJSON(try await service.claimNext(
+                instanceID: instanceID,
+                protocolOwnership: protocolOwnership,
+                allowedRoomID: command.roomID.flatMap(MailboxRoomID.init(rawValue:))
+            ))
         case .transactionReadInbound:
             writeJSON(try await service.readInbound(instanceID: instanceID, protocolOwnership: protocolOwnership))
         case .transactionPreflight:

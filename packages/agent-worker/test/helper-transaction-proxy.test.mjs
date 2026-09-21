@@ -242,11 +242,68 @@ test("durable delivery resolver returns null when helper status is empty", async
   assert.equal(await resolveDelivery({ reason: "wake" }), null);
 });
 
+test("durable delivery resolver pins claim-next to the configured room", async () => {
+  const calls = [];
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    allowedRoomId: roomId,
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      calls.push(args);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ shouldStartModel: false, transactionStuck: false, open: null }),
+        stderr: "",
+      };
+    },
+  });
+
+  assert.equal(await resolveDelivery(), null);
+  assert.deepEqual(calls[0].slice(-2), ["--room-id", roomId]);
+});
+
+test("durable delivery resolver reads exact claimed inbound text when list omits admitText", async () => {
+  const commands = [];
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    allowedRoomId: roomId,
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      commands.push(args[0]);
+      if (args[0] === "transaction-claim-next") {
+        return { code: 0, stderr: "", stdout: JSON.stringify({
+          shouldStartModel: true,
+          replyRequired: true,
+          open: { deliveryId: 77, roomId, inboundEventId: eventId, state: "claimed" },
+        }) };
+      }
+      assert.equal(args[0], "transaction-read-inbound");
+      return { code: 0, stderr: "", stdout: JSON.stringify({
+        deliveryId: 77,
+        roomId,
+        inboundEventId: eventId,
+        text: "exact peer request",
+      }) };
+    },
+  });
+
+  const delivery = await resolveDelivery();
+  assert.equal(delivery.text, "exact peer request");
+  assert.deepEqual(commands, ["transaction-claim-next", "transaction-read-inbound"]);
+});
+
 test("durable delivery resolver maps open helper status into admit payload", async () => {
   const resolveDelivery = createProductionAppServerDeliveryResolver({
     helperPath: "/trusted/triangle-mailbox",
     profile: "event-codex",
     async run(_file, args) {
+      if (args[0] === "transaction-read-inbound") {
+        return { code: 0, stderr: "", stdout: JSON.stringify({ deliveryId: 42, roomId, inboundEventId: eventId, text: "peer request 42" }) };
+      }
       assert.equal(args[0], "transaction-claim-next");
       assert.ok(args.includes("coordinator-delivery-v1"));
       return {
@@ -257,6 +314,7 @@ test("durable delivery resolver maps open helper status into admit payload", asy
           open: {
             deliveryId: 42,
             roomId,
+            inboundEventId: eventId,
             state: "claimed",
           },
         }),
@@ -266,8 +324,7 @@ test("durable delivery resolver maps open helper status into admit payload", asy
   });
   const delivery = await resolveDelivery({ reason: "wake", highWatermark: 7 });
   assert.equal(delivery.deliveryId, "delivery_42");
-  assert.match(delivery.text, /deliveryId=42/);
-  assert.match(delivery.text, new RegExp(`roomId=${roomId}`));
+  assert.equal(delivery.text, "peer request 42");
   assert.doesNotMatch(delivery.text, /mesh_/);
 });
 
@@ -278,6 +335,9 @@ test("durable delivery resolver claims next from pending mailbox with no open tr
     profile: "event-codex",
     async run(_file, args) {
       calls.push(args[0]);
+      if (args[0] === "transaction-read-inbound") {
+        return { code: 0, stderr: "", stdout: JSON.stringify({ deliveryId: 51, roomId, inboundEventId: eventId, text: "peer request 51" }) };
+      }
       assert.equal(args[0], "transaction-claim-next");
       // Helper performed list → preflight → claim; Node only sees the resulting open claim.
       return {
@@ -289,6 +349,7 @@ test("durable delivery resolver claims next from pending mailbox with no open tr
           open: {
             deliveryId: 51,
             roomId,
+            inboundEventId: eventId,
             state: "claimed",
           },
         }),
@@ -297,10 +358,9 @@ test("durable delivery resolver claims next from pending mailbox with no open tr
     },
   });
   const delivery = await resolveDelivery({ reason: "wake" });
-  assert.deepEqual(calls, ["transaction-claim-next"]);
+  assert.deepEqual(calls, ["transaction-claim-next", "transaction-read-inbound"]);
   assert.equal(delivery.deliveryId, "delivery_51");
-  assert.match(delivery.text, /deliveryId=51/);
-  assert.match(delivery.text, /state=claimed/);
+  assert.equal(delivery.text, "peer request 51");
   assert.doesNotMatch(delivery.text, /mesh_/);
 });
 

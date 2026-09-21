@@ -125,7 +125,8 @@ public struct MailboxTransactionService: Sendable {
     /// Used by App Server wake so a pending mailbox delivery can start a model turn.
     public func claimNext(
         instanceID: ClientInstanceID,
-        protocolOwnership: MailboxTransactionProtocol
+        protocolOwnership: MailboxTransactionProtocol,
+        allowedRoomID: MailboxRoomID? = nil
     ) async throws -> [String: Any] {
         if let open = try store.readOpen(instanceID: instanceID) {
             if open.protocolOwnership != protocolOwnership {
@@ -133,6 +134,9 @@ public struct MailboxTransactionService: Sendable {
             }
             if open.isStuck {
                 throw MailboxTransactionServiceError.transactionStuck
+            }
+            if let allowedRoomID, open.roomID != allowedRoomID {
+                throw MailboxTransactionServiceError.roomMismatch
             }
             if open.replyRequired == false {
                 return try await settleReceiptOnly(
@@ -157,10 +161,13 @@ public struct MailboxTransactionService: Sendable {
         } catch {
             throw MailboxTransactionServiceError.upstreamUnavailable
         }
+        let scopedCandidates = allowedRoomID.map { allowed in
+            candidates.filter { $0.roomID == allowed }
+        } ?? candidates
         let quarantined = try store.listQuarantined(instanceID: instanceID)
         let evaluation = try MailboxPolicyEvaluator.evaluate(
             protocolOwnership: protocolOwnership,
-            candidates: candidates,
+            candidates: scopedCandidates,
             open: nil,
             quarantined: quarantined
         )
@@ -183,13 +190,13 @@ public struct MailboxTransactionService: Sendable {
                 instanceID: instanceID,
                 open: claimed,
                 quarantined: quarantined,
-                remainingCandidates: candidates.filter { $0.deliveryID != next.deliveryID }
+                remainingCandidates: scopedCandidates.filter { $0.deliveryID != next.deliveryID }
             )
         }
 
         let afterClaim = try MailboxPolicyEvaluator.evaluate(
             protocolOwnership: protocolOwnership,
-            candidates: candidates,
+            candidates: scopedCandidates,
             open: claimed,
             quarantined: quarantined
         )

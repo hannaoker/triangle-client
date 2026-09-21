@@ -523,8 +523,10 @@ public enum CommandParser {
 
         let allowedFlags: Set<String>
         switch command {
-        case .transactionStatus, .transactionClaimNext, .transactionReadInbound:
+        case .transactionStatus, .transactionReadInbound:
             allowedFlags = ["--profile", "--protocol"]
+        case .transactionClaimNext:
+            allowedFlags = ["--profile", "--protocol", "--room-id"]
         case .transactionPreflight, .transactionAck, .transactionReply:
             allowedFlags = ["--profile", "--protocol"]
         case .transactionClaim:
@@ -536,8 +538,15 @@ public enum CommandParser {
         default:
             throw CommandParseError.invalidCommand
         }
-        guard Set(flagValues.keys) == allowedFlags else {
-            throw CommandParseError.unknownOrDuplicateFlag
+        if command == .transactionClaimNext {
+            guard Set(flagValues.keys).isSubset(of: allowedFlags),
+                  flagValues["--profile"] != nil,
+                  flagValues["--protocol"] != nil
+            else { throw CommandParseError.unknownOrDuplicateFlag }
+        } else {
+            guard Set(flagValues.keys) == allowedFlags else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
         }
         if command == .transactionAbandon {
             guard confirmAbandon else { throw CommandParseError.missingRequiredFlag }
@@ -554,7 +563,17 @@ public enum CommandParser {
         catch { throw CommandParseError.invalidFlagValue }
 
         switch command {
-        case .transactionStatus, .transactionClaimNext, .transactionReadInbound, .transactionPreflight, .transactionReply, .transactionAck:
+        case .transactionClaimNext:
+            if let roomID = flagValues["--room-id"], MailboxRoomID(rawValue: roomID) == nil {
+                throw CommandParseError.invalidFlagValue
+            }
+            return ParsedCommand(
+                command: command,
+                profile: profile,
+                protocolOwnership: protocolOwnership,
+                roomID: flagValues["--room-id"]
+            )
+        case .transactionStatus, .transactionReadInbound, .transactionPreflight, .transactionReply, .transactionAck:
             return ParsedCommand(command: command, profile: profile, protocolOwnership: protocolOwnership)
         case .transactionAbandon:
             return ParsedCommand(

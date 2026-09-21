@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__ENTRYPOINT__</string>
+    <string>--profile</string><string>__PROFILE__</string>
+    <string>--room-id</string><string>__ROOM__</string>
+    <string>--working-directory</string><string>__WORKDIR__</string>
+    <string>--codex-home</string><string>__CODEX_HOME__</string>
+    <string>--codex-cli</string><string>__CODEX_CLI__</string>
+    <string>--helper</string><string>__HELPER__</string>
+    <string>--state-root</string><string>__STATE_ROOT__</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__LOG_DIR__/__PROFILE__.headless-drain.log</string>
+  <key>StandardErrorPath</key><string>__LOG_DIR__/__PROFILE__.headless-drain.error.log</string>
+</dict>
+</plist>
