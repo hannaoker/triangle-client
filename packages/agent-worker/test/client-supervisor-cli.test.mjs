@@ -11,8 +11,6 @@ import {
   runClientSupervisorCLI,
 } from "../src/client-supervisor-cli.mjs";
 import {
-  PINNED_HEADLESS_DRAIN_PROFILE,
-  PINNED_HEADLESS_DRAIN_ROOM_ID,
   deriveProfileInstanceId,
 } from "../src/codex-runtime/headless-drain-service.mjs";
 
@@ -779,12 +777,11 @@ test("CLI forwards grokBotWake into supervisor creation", async () => {
 });
 
 function headlessWake(overrides = {}) {
-  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  const profile = overrides.profile ?? "codex-bob-test";
   return {
     profile,
     profileInstanceId: deriveProfileInstanceId(profile),
     helperPath: "/trusted/triangle-mailbox",
-    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
     workingDirectory: "/srv/triangle-work",
     codexHome: "/private/codex-home",
     stateRoot: "/private/headless-state",
@@ -794,7 +791,7 @@ function headlessWake(overrides = {}) {
   };
 }
 
-test("bootstrap accepts pinned headlessWake and rejects dual consumers or production profiles", () => {
+test("bootstrap accepts Codex headlessWake without Mini pin and rejects dual consumers", () => {
   const withHeadless = bootstrap({ headlessWake: headlessWake() });
   const parsed = parseClientSupervisorBootstrap(JSON.stringify(withHeadless));
   assert.deepEqual(parsed.headlessWake, headlessWake());
@@ -807,22 +804,15 @@ test("bootstrap accepts pinned headlessWake and rejects dual consumers or produc
   };
   assert.equal(
     parseClientSupervisorBootstrap(JSON.stringify(headlessOnly)).headlessWake.profile,
-    PINNED_HEADLESS_DRAIN_PROFILE,
+    "codex-bob-test",
+  );
+  assert.equal(
+    parseClientSupervisorBootstrap(JSON.stringify(headlessOnly)).headlessWake.allowedRoomId,
+    undefined,
   );
 
   for (const candidate of [
     bootstrap({ headlessWake: { ...headlessWake(), extra: true } }),
-    bootstrap({
-      headlessWake: headlessWake({
-        profile: "codex-bob-test",
-        profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
-      }),
-    }),
-    bootstrap({
-      headlessWake: headlessWake({
-        allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      }),
-    }),
     bootstrap({
       headlessWake: headlessWake({
         profileInstanceId: instance().instanceId,
@@ -833,7 +823,7 @@ test("bootstrap accepts pinned headlessWake and rejects dual consumers or produc
         ...grokBotWake(),
         binding: {
           ...grokBotWake().binding,
-          instanceId: deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE),
+          instanceId: deriveProfileInstanceId("codex-bob-test"),
         },
       },
       headlessWake: headlessWake(),
@@ -844,6 +834,16 @@ test("bootstrap accepts pinned headlessWake and rejects dual consumers or produc
       /Invalid Triangle Client bootstrap/,
     );
   }
+
+  const withRoom = bootstrap({
+    headlessWake: headlessWake({
+      allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+  });
+  assert.equal(
+    parseClientSupervisorBootstrap(JSON.stringify(withRoom)).headlessWake.allowedRoomId,
+    "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  );
 });
 
 test("CLI forwards headlessWake into supervisor creation", async () => {

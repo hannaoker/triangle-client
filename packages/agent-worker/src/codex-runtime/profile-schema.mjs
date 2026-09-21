@@ -1,9 +1,9 @@
 /**
- * Phase 5 — Codex profile schema classification.
+ * Codex profile schema classification.
  *
  * Distinguishes legacy command execution, headless App Server execution, and
- * desktop App Server execution. Does not flip production defaults; classification
- * is pure. Migration / new-profile defaults stay behind Phase 5 enablement.
+ * desktop App Server execution. Classification is pure. New Codex profiles
+ * default to headless; existing mcp-interactive stays desktop until migrated.
  */
 
 export const CODEX_EXECUTION_KIND = Object.freeze({
@@ -69,9 +69,10 @@ export function executionKindForSchemaVersion(version) {
  * 2. Explicit `schemaVersion` when valid
  * 3. Shape inference from runtimeAdapter / runtimeMode / deliveryMode
  *
- * mcp-interactive and desktop App Server bindings stay desktop until migrated.
+ * mcp-interactive and desktop App Server bindings stay desktop until migrated
+ * so a profile cannot silently run desktop + headless claimers together.
  * event-driven / worker command adapters are legacy-command (not equivalent to
- * persistent headless App Server).
+ * persistent headless App Server). grok-bot is not a Codex execution kind.
  */
 export function classifyCodexProfileExecution(profileConfig = {}) {
   const explicitKind = profileConfig?.executionKind;
@@ -160,7 +161,8 @@ export function isHeadlessAppServerExecution(profileConfig = {}) {
 }
 
 /**
- * mcp-interactive keeps current desktop behavior until explicit migrate.
+ * mcp-interactive keeps current desktop behavior until explicit migrate so
+ * desktop and headless never dual-claim the same mailbox.
  */
 export function isMcpInteractiveDesktopProfile(profileConfig = {}) {
   return (

@@ -641,7 +641,7 @@ export function createClientSupervisor({
   if (headlessConfig) {
     headlessClaimer = createClaimerGuard({
       profile: headlessConfig.profile,
-      allowedRoomId: headlessConfig.allowedRoomId,
+      allowedRoomId: headlessConfig.allowedRoomId ?? null,
     });
     try {
       headlessClaimer.assertSupervisorMayClaim();

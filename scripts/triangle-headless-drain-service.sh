@@ -58,11 +58,12 @@ PY
 # Migration-only LaunchAgent. After `dev.thetriangle.client` owns headlessWake,
 # stop/uninstall this label so two claimers never share the Mini allowlist.
 refuse_dual_claimer() {
-  local lock="${application_root}/client/headless-claimer.json"
-  if [[ -f "$lock" ]]; then
-    echo "refusing to start dedicated drain: client supervisor headless claimer lock exists" >&2
-    exit 75
-  fi
+  local lock="${application_root}/client/headless-claimer.${profile}.json"
+legacy_lock="${application_root}/client/headless-claimer.json"
+if [[ -f "$lock" || -f "$legacy_lock" ]]; then
+  echo "refusing to start dedicated drain: client supervisor headless claimer lock exists" >&2
+  exit 75
+fi
 }
 
 install_service() {

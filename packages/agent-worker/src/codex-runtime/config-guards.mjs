@@ -6,9 +6,12 @@
  * production desktop / mcp-interactive profiles by default.
  * Phase 4 desktop handoff stays off unless resolvePhase4DesktopHandoffConfig
  * (or isDesktopHandoffEnabled) is explicitly opted in for shadow experiments.
- * Phase 5 migration / new-profile headless defaults stay off unless
- * resolvePhase5MigrationConfig is explicitly opted in. Global
- * featureFlags.headlessRuntime remains false in the immutable manifest.
+ *
+ * Product default (2026-09-21): Codex profiles use headless App Server. grok-bot
+ * never enters this pool. Mini-only profile/room allowlists are not the product
+ * gate. Pool size stays 1 until shared CODEX_HOME is proved; desktop handoff
+ * stays off. Existing mcp-interactive Codex stays desktop until migrated so
+ * desktop + headless never share a mailbox.
  */
 
 import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
@@ -130,10 +133,11 @@ export function resolvePhase1ShadowRuntimeConfig(
 }
 
 /**
- * Resolve the actual persistent headless runtime, not just migration tooling.
- * Production activation is deliberately stricter than Phase 5 migration:
- * the profile must have the headless App Server execution shape, Phase 5 must
- * be enabled, and its exact profile id must be operator-allowlisted.
+ * Resolve the persistent headless Codex App Server runtime.
+ * Product activation: headless App Server shape, not Mini-only allowlist.
+ * grok-bot never activates. Desktop mcp-interactive stays inactive so this
+ * path cannot silently dual-claim with Shared App Server. Pool size is 1
+ * until shared CODEX_HOME is proved; desktop handoff stays off.
  */
 export function resolveHeadlessRuntimeConfig(
   profileConfig = {},
@@ -159,40 +163,48 @@ export function resolveHeadlessRuntimeConfig(
     enablePhase5Migration,
   });
   const profileId = phase5.profileId;
-  const allowlist = parseAllowlist(env.TRIANGLE_HEADLESS_RUNTIME_PROFILES);
-  const allowlisted =
-    allowlist != null && profileId != null && allowlist.has(profileId);
+  const runtimeAdapter = profileConfig?.runtimeAdapter ?? null;
+  const deliveryMode = profileConfig?.deliveryMode ?? null;
+  const grokBotShape =
+    runtimeAdapter === "grok-bot" || deliveryMode === "grok-bot";
   const productionShape =
+    !grokBotShape &&
     profileConfig?.executionKind === "headless-app-server" &&
-    profileConfig?.runtimeAdapter === "codex-app-server" &&
+    (runtimeAdapter === "codex-app-server" || runtimeAdapter === "codex") &&
     profileConfig?.runtimeMode === "headless" &&
     profileConfig?.shadowTestProfile !== true;
   const pool = resolveCodexPoolGuards({
-    preferredSize: profileConfig.codexPool?.preferredSize ?? 2,
-    maxSize: profileConfig.codexPool?.maxSize ?? 4,
+    preferredSize: 1,
+    maxSize: 1,
     desktopHandoffRequested: false,
     probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
     manifest,
   });
 
   let inactiveReason = null;
-  if (!productionShape) inactiveReason = shadow.inactiveReason ?? "not_headless_app_server_profile";
-  else if (!phase5.active) inactiveReason = phase5.inactiveReason;
-  else if (!allowlisted) inactiveReason = "headless_profile_not_allowlisted";
+  if (grokBotShape) inactiveReason = "grok_bot_not_in_codex_pool";
+  else if (!productionShape) inactiveReason = shadow.inactiveReason ?? "not_headless_app_server_profile";
+
+  const forcedPool = Object.freeze({
+    ...pool,
+    preferredSize: 1,
+    maxSize: 1,
+    desktopHandoffEnabled: false,
+  });
 
   return Object.freeze({
     active: inactiveReason == null,
     inactiveReason,
-    activationMode: inactiveReason == null ? "phase5_profile" : null,
+    activationMode: inactiveReason == null ? "headless_app_server" : null,
     shadowTestProfile: false,
-    operatorEnabled: phase5.active && allowlisted,
+    operatorEnabled: inactiveReason == null,
     profileId,
     runtimeMode: profileConfig.runtimeMode ?? null,
     runtimeAdapter: profileConfig.runtimeAdapter ?? null,
     headlessRuntimeEnabled: isHeadlessRuntimeEnabled(manifest),
     helperConversationStoreEnabled: isHelperConversationStoreEnabled(manifest),
     desktopHandoffEnabled: false,
-    pool,
+    pool: forcedPool,
     featureFlags: getFeatureFlags(manifest),
     manifest,
   });
@@ -226,32 +238,29 @@ export function resolvePhase0RuntimeConfig(profileConfig = {}, { manifest = load
 /**
  * Phase 5 operator enablement for migration machinery and new-profile defaults.
  *
- * Production defaults stay safe. Activation requires an explicit opt-in:
- * - `enablePhase5Migration: true` (unit/integration / profile factory injection), OR
- * - `TRIANGLE_PHASE5_MIGRATION_ENABLE=1`
+ * Product default: new Codex profiles are headless App Server. Migration
+ * operations stay available so existing mcp-interactive Codex can move one
+ * profile at a time without dual claimers. Disable with
+ * `enablePhase5Migration: false` or `TRIANGLE_PHASE5_MIGRATION_ENABLE=0`.
  *
- * The immutable manifest `featureFlags.headlessRuntime` must remain **false**
- * until the design release-gate checklist (soak, live desktop canary, etc.)
- * is operator-proven. This resolver never flips that flag.
- *
- * When inactive:
- * - new Codex profiles do **not** default to headless;
- * - migrate-to-headless / rollback-to-desktop reject as disabled;
- * - existing mcp-interactive / Shared App Server bindings are untouched.
+ * The immutable manifest `featureFlags.headlessRuntime` is recorded for
+ * operators and is not required for per-profile headless activation.
  */
 export function resolvePhase5MigrationConfig(
   profileConfig = {},
   {
     manifest = loadRuntimeManifest(),
     env = process.env,
-    enablePhase5Migration = false,
+    enablePhase5Migration = null,
   } = {},
 ) {
   const flags = getFeatureFlags(manifest);
+  const envDisable = env.TRIANGLE_PHASE5_MIGRATION_ENABLE === "0";
   const envEnable = env.TRIANGLE_PHASE5_MIGRATION_ENABLE === "1";
-  const operatorEnabled = enablePhase5Migration === true || envEnable === true;
-  // Manifest global flag is recorded for operators but must not auto-enable
-  // Phase 5 in this PR — release gates (soak / live canary) remain open.
+  const operatorEnabled =
+    enablePhase5Migration === true
+    || (enablePhase5Migration !== false && !envDisable)
+    || envEnable === true;
   const globalHeadlessFlag = flags.headlessRuntime === true;
 
   let inactiveReason = null;
@@ -263,12 +272,9 @@ export function resolvePhase5MigrationConfig(
     active: inactiveReason == null,
     inactiveReason,
     operatorEnabled,
-    // New-profile factory defaults to headless only when Phase 5 is explicitly on.
-    newProfileDefaultHeadless: operatorEnabled,
-    // Migrate / rollback APIs allowed only when explicitly on.
+    newProfileDefaultHeadless: true,
     migrationOperationsEnabled: operatorEnabled,
     globalHeadlessRuntimeFlag: globalHeadlessFlag,
-    // Always false for committed defaults in this PR; do not treat as enablement.
     manifestHeadlessRuntimeEnabled: globalHeadlessFlag,
     profileId:
       typeof profileConfig.profileId === "string"
@@ -282,13 +288,13 @@ export function resolvePhase5MigrationConfig(
 }
 
 /**
- * True only when an operator explicitly enabled Phase 5 (env or injection).
- * Never true solely because the committed manifest exists.
+ * True when Codex headless migration machinery is available (product default).
+ * Disable with `enablePhase5Migration: false` or `TRIANGLE_PHASE5_MIGRATION_ENABLE=0`.
  */
 export function isPhase5MigrationEnabled({
   manifest = loadRuntimeManifest(),
   env = process.env,
-  enablePhase5Migration = false,
+  enablePhase5Migration = null,
 } = {}) {
   return resolvePhase5MigrationConfig({}, { manifest, env, enablePhase5Migration }).active === true;
 }

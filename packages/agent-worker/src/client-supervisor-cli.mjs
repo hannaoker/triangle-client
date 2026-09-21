@@ -11,12 +11,11 @@ import {
   createClientSupervisor,
   GROK_BOT_BINDING_KEYS as EXACT_GROK_BOT_BINDING_KEYS,
   GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
-  HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
 } from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
-import { normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
+import { hasHeadlessWakeKeys, normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -534,7 +533,7 @@ function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWak
 }
 
 function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerWake, grokBotWake) {
-  if (!hasExactKeys(headlessWake, EXACT_HEADLESS_WAKE_KEYS)) throw invalidBootstrap();
+  if (!hasHeadlessWakeKeys(headlessWake)) throw invalidBootstrap();
   let normalized;
   try {
     normalized = normalizeHeadlessWakeConfig(headlessWake);

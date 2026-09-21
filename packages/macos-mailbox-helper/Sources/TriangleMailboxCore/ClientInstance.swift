@@ -63,7 +63,18 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     /// grok-bot profiles wake via native Grok Bot webhook (not eventWake / App Server).
     public var participatesInGrokBotWake: Bool { enabled && deliveryMode == .grokBot }
     /// Headless Codex App Server drain is owned by the shared client supervisor (not a second LaunchAgent).
-    public var participatesInHeadlessWake: Bool { enabled && deliveryMode == .headlessAppServer }
+    /// grok-bot adapters never enter this path even if deliveryMode is mis-set.
+    public var participatesInHeadlessWake: Bool {
+        enabled && deliveryMode == .headlessAppServer && runtimeAdapter == .codex
+    }
+    /// LaunchAgent `dev.thetriangle.client` must stay loaded for any supervisor-owned wake.
+    public var participatesInClientSupervisor: Bool {
+        participatesInWorkerPolling
+            || participatesInEventDrivenWake
+            || participatesInAppServerWake
+            || participatesInGrokBotWake
+            || participatesInHeadlessWake
+    }
     /// Installation watch grant notify members: event-driven drains + App Server + Grok Bot hosts.
     /// Headless App Server admission is helper-transaction poll, not watch-grant notify.
     public var participatesInWatchGrantNotify: Bool {
@@ -78,14 +89,22 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         profile: ProfileName,
         runtimeAdapter: RuntimeAdapter,
         enabled: Bool = true,
-        deliveryMode: DeliveryMode = .worker
+        deliveryMode: DeliveryMode? = nil
     ) throws {
         version = 1
         instanceID = .derive(profile: profile)
         self.profile = profile
         self.runtimeAdapter = runtimeAdapter
         self.enabled = enabled
-        self.deliveryMode = deliveryMode
+        self.deliveryMode = deliveryMode ?? Self.defaultDeliveryMode(for: runtimeAdapter)
+    }
+
+    public static func defaultDeliveryMode(for runtimeAdapter: RuntimeAdapter) -> DeliveryMode {
+        switch runtimeAdapter {
+        case .codex: return .headlessAppServer
+        case .grokBot: return .grokBot
+        case .hermes, .antigravity: return .worker
+        }
     }
 
     func settingEnabled(_ enabled: Bool) throws -> Self {

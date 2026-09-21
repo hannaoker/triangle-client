@@ -159,9 +159,6 @@ public struct ClientSupervisor: Sendable {
         self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
     }
 
-    private static let pinnedHeadlessProfile = "codex-headless"
-    private static let pinnedHeadlessRoomId = "room_8594d12312e14afbb291fcff60a22048"
-
     private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
         let uid = getuid()
         let label = "dev.thetriangle.codex-headless-drain.\(profile)"
@@ -755,10 +752,10 @@ public struct ClientSupervisor: Sendable {
             return nil
         }
 
-        guard primary.profile.value == Self.pinnedHeadlessProfile else {
+        guard primary.runtimeAdapter == .codex else {
             omitted.append(.init(
                 instanceID: primary.instanceID.value,
-                reasonCode: "headless_profile_not_allowlisted"
+                reasonCode: "grok_bot_not_in_codex_pool"
             ))
             return nil
         }
@@ -812,8 +809,6 @@ public struct ClientSupervisor: Sendable {
               bindingInstallationId == installationID.value,
               let bindingInstanceId = object["instanceId"] as? String,
               bindingInstanceId == primary.instanceID.value,
-              let allowedRoomId = object["allowedRoomId"] as? String,
-              allowedRoomId == Self.pinnedHeadlessRoomId,
               let workingDirectory = object["workingDirectory"] as? String,
               workingDirectory.hasPrefix("/"),
               !workingDirectory.contains("\0"),
@@ -828,6 +823,20 @@ public struct ClientSupervisor: Sendable {
               !command.contains("\0"),
               (100...60_000).contains(pollIntervalMs)
         else {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "headless_runtime_binding_mismatch"
+            ))
+            return nil
+        }
+
+        let allowedRoomId: String?
+        if object["allowedRoomId"] == nil {
+            allowedRoomId = nil
+        } else if let room = object["allowedRoomId"] as? String,
+                  room.wholeMatch(of: /^room_[a-f0-9]{32}$/) != nil {
+            allowedRoomId = room
+        } else {
             omitted.append(.init(
                 instanceID: primary.instanceID.value,
                 reasonCode: "headless_runtime_binding_mismatch"
@@ -1037,12 +1046,29 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
-    let allowedRoomId: String
+    let allowedRoomId: String?
     let workingDirectory: String
     let codexHome: String
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case profile, profileInstanceId, helperPath, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(profile, forKey: .profile)
+        try container.encode(profileInstanceId, forKey: .profileInstanceId)
+        try container.encode(helperPath, forKey: .helperPath)
+        try container.encodeIfPresent(allowedRoomId, forKey: .allowedRoomId)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(codexHome, forKey: .codexHome)
+        try container.encode(stateRoot, forKey: .stateRoot)
+        try container.encode(command, forKey: .command)
+        try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
+    }
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {

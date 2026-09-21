@@ -33,9 +33,11 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive without binding stays omitted", run: mcpInteractiveAppServerBindingMissing),
         .init(name: "grok-bot emits grokBotWake when binding present", run: grokBotWakeBootstrap),
         .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
-        .init(name: "headless-app-server emits headlessWake for the Mini allowlist", run: headlessWakeBootstrap),
+        .init(name: "headless-app-server emits headlessWake for any Codex profile", run: headlessWakeBootstrap),
         .init(name: "headless-app-server without binding stays omitted", run: headlessWakeBindingMissing),
         .init(name: "loaded dedicated drain LaunchAgent omits supervisor headlessWake", run: dedicatedHeadlessDrainOmitsSupervisorClaimer),
+        .init(name: "headlessWake keys conversations without a global room pin", run: headlessWakeNoGlobalRoomPin),
+        .init(name: "grok-bot never joins headless Codex wake", run: grokBotExcludedFromHeadlessWake),
         .init(name: "invalid durable installation identity fails closed", run: invalidInstallationIdentityFailsClosed),
         .init(name: "concurrent durable installation identity resolution is stable", run: concurrentInstallationIdentityResolutionIsStable),
     ]
@@ -442,7 +444,7 @@ public enum ClientSupervisorContractCases {
         let headlessID = ClientInstanceID.derive(profile: headless.profile).value
         try expect(headlessWake.profile == "codex-headless", "wrong headless profile")
         try expect(headlessWake.profileInstanceId == headlessID, "headless instance mismatch")
-        try expect(headlessWake.allowedRoomId == "room_8594d12312e14afbb291fcff60a22048", "room allowlist drifted")
+        try expect(headlessWake.allowedRoomId == "room_8594d12312e14afbb291fcff60a22048", "optional room filter dropped")
         try expect(!bootstrap.instances.contains { $0.instanceId == headlessID }, "headless leaked into worker instances")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
@@ -484,6 +486,45 @@ public enum ClientSupervisorContractCases {
         let bootstrap = try fixture.process.decodedBootstrap()
         try expect(bootstrap.headlessWake == nil, "supervisor claimed while dedicated drain LaunchAgent is loaded")
         try expect(bootstrap.instances.count == 1, "worker instance was lost while omitting headlessWake")
+    }
+
+    public static func headlessWakeNoGlobalRoomPin() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "codex-bob-test", adapter: .codex, digit: "b"),
+            ],
+            provisionHeadlessRuntimeBinding: true,
+            headlessBindingProfile: "codex-bob-test",
+            includeHeadlessAllowedRoomId: false
+        )
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        let headlessWake = try require(bootstrap.headlessWake, "headlessWake missing for non-Mini Codex")
+        try expect(headlessWake.profile == "codex-bob-test", "production Codex profile was not selected")
+        try expect(headlessWake.allowedRoomId == nil, "global room pin was applied")
+        try expect(headlessWake.allowedRoomId != "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "classic room_77 was used as a drain pin")
+    }
+
+    public static func grokBotExcludedFromHeadlessWake() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "bob", adapter: .grokBot, digit: "b"),
+                .init(profile: "codex-headless", adapter: .codex, digit: "c"),
+            ],
+            provisionGrokBotBinding: true,
+            provisionHeadlessRuntimeBinding: true
+        )
+        try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[0].profile)
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
+        try expect(bootstrap.headlessWake != nil, "headlessWake missing beside grok-bot")
+        try expect(bootstrap.grokBotWake?.actorProfile == "bob", "grok-bot actor drifted")
+        try expect(bootstrap.headlessWake?.profile == "codex-headless", "Codex drain claimed grok-bot")
+        try expect(bootstrap.headlessWake?.profileInstanceId != bootstrap.grokBotWake?.binding.instanceId, "grok-bot entered the Codex pool")
     }
 
     public static func noEligibleProfile() async throws {
@@ -712,7 +753,9 @@ private final class SupervisorFixture: @unchecked Sendable {
         provisionAppServerBinding: Bool = false,
         provisionGrokBotBinding: Bool = false,
         provisionHeadlessRuntimeBinding: Bool = false,
-        dedicatedHeadlessDrainLoaded: Bool = false
+        dedicatedHeadlessDrainLoaded: Bool = false,
+        headlessBindingProfile: String? = nil,
+        includeHeadlessAllowedRoomId: Bool = true
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
@@ -737,7 +780,11 @@ private final class SupervisorFixture: @unchecked Sendable {
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
         for specification in specifications {
-            let instance = try ClientInstance(profile: specification.profile, runtimeAdapter: specification.adapter)
+            let instance = try ClientInstance(
+                profile: specification.profile,
+                runtimeAdapter: specification.adapter,
+                deliveryMode: .worker
+            )
             try instances.create(instance)
             let binding = CredentialBinding(
                 origin: try MeshOrigin(ClientSupervisorContractCases.origin),
@@ -807,23 +854,29 @@ private final class SupervisorFixture: @unchecked Sendable {
         }
         if provisionHeadlessRuntimeBinding {
             let headless = try require(
-                specifications.first(where: { $0.profile.value == "codex-headless" }),
-                "codex-headless specification required for headless runtime binding"
+                specifications.first(where: {
+                    $0.profile.value == (headlessBindingProfile ?? "codex-headless")
+                    || $0.profile.value == "codex-bob-test"
+                    || $0.profile.value.contains("headless")
+                }),
+                "headless Codex specification required for headless runtime binding"
             )
             let instanceId = ClientInstanceID.derive(profile: headless.profile).value
-            let bindingObject: [String: Any] = [
+            var bindingObject: [String: Any] = [
                 "adapterVersion": "1",
                 "enabled": true,
                 "profile": headless.profile.value,
                 "installationId": installationID.value,
                 "instanceId": instanceId,
-                "allowedRoomId": "room_8594d12312e14afbb291fcff60a22048",
                 "workingDirectory": "/srv/triangle-work",
                 "codexHome": "/private/codex-home",
                 "stateRoot": "/private/headless-state",
                 "command": "/trusted/bin/codex",
                 "pollIntervalMs": 1_000,
             ]
+            if includeHeadlessAllowedRoomId {
+                bindingObject["allowedRoomId"] = "room_8594d12312e14afbb291fcff60a22048"
+            }
             let bindingData = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
             try bindingData.write(to: headlessRuntimeBindingURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: headlessRuntimeBindingURL.path)
@@ -1053,7 +1106,7 @@ private struct TestHeadlessWake: Decodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
-    let allowedRoomId: String
+    let allowedRoomId: String?
     let workingDirectory: String
     let codexHome: String
     let stateRoot: String

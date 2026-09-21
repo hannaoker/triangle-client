@@ -132,27 +132,20 @@ test("restart recovery blocks new claims when a prior turn is quarantined", asyn
   assert.equal(resolved, false);
 });
 
-test("installed drain config is exact-profile allowlisted and derives the Swift-compatible instance id", () => {
-  const profile = "codex-headless";
+test("installed drain config accepts any Codex profile and does not pin a global room", () => {
+  const profile = "codex-bob-test";
   const env = {
     HOME: "/Users/tester",
     CODEX_CLI: "/opt/triangle/bin/codex",
     TRIANGLE_CODEX_HOME: "/Users/tester/Library/Application Support/The Triangle/codex-home",
     TRIANGLE_HEADLESS_WORKING_DIRECTORY: "/srv/triangle-work",
-    TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
-    TRIANGLE_HEADLESS_RUNTIME_PROFILES: profile,
-    TRIANGLE_HEADLESS_ROOM_ID: ROOM,
   };
   const config = loadHeadlessDrainConfig({ profile, env });
   assert.equal(config.profileInstanceId, deriveProfileInstanceId(profile));
   assert.match(config.profileInstanceId, /^[a-f0-9]{64}$/);
   assert.equal(config.pollIntervalMs, 1_000);
-  assert.equal(config.allowedRoomId, ROOM);
+  assert.equal(config.allowedRoomId, null);
 
-  assert.throws(
-    () => loadHeadlessDrainConfig({ profile: "codex-bob-test", env }),
-    /not explicitly enabled/,
-  );
   assert.throws(
     () => loadHeadlessDrainConfig({ profile, env: { ...env, TRIANGLE_INSTANCE_ID: "f".repeat(64) } }),
     /does not match profile/,
@@ -161,49 +154,76 @@ test("installed drain config is exact-profile allowlisted and derives the Swift-
     () => loadHeadlessDrainConfig({ profile, env: { ...env, TRIANGLE_HEADLESS_ROOM_ID: "room_invalid" } }),
     /TRIANGLE_HEADLESS_ROOM_ID/,
   );
-  assert.throws(
-    () => loadHeadlessDrainConfig({
-      profile: "codex-bob-test",
-      env: { ...env, TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-bob-test" },
-    }),
-    /not explicitly enabled/,
-  );
-  assert.throws(
-    () => loadHeadlessDrainConfig({
-      profile,
-      env: { ...env, TRIANGLE_HEADLESS_ROOM_ID: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-    }),
-    /allowlisted Mini canary room/,
-  );
+  const filtered = loadHeadlessDrainConfig({
+    profile,
+    env: { ...env, TRIANGLE_HEADLESS_ROOM_ID: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+  });
+  assert.equal(filtered.allowedRoomId, "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 });
 
-test("headless wake config is pinned to the Mini allowlist", () => {
-  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+test("headless wake config accepts any Codex profile and keys conversations by delivery roomId", () => {
+  const profile = "codex-bob-test";
   const profileInstanceId = deriveProfileInstanceId(profile);
   const valid = {
     profile,
     profileInstanceId,
     helperPath: "/trusted/triangle-mailbox",
-    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
     workingDirectory: "/srv/triangle-work",
     codexHome: "/private/codex-home",
     stateRoot: "/private/headless-state",
     command: "/trusted/bin/codex",
     pollIntervalMs: 1_000,
   };
-  assert.deepEqual(normalizeHeadlessWakeConfig(valid), valid);
+  assert.deepEqual(normalizeHeadlessWakeConfig(valid), { ...valid, allowedRoomId: null });
+  const withRoom = {
+    ...valid,
+    allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  };
+  assert.equal(normalizeHeadlessWakeConfig(withRoom).allowedRoomId, withRoom.allowedRoomId);
   assert.throws(
-    () => normalizeHeadlessWakeConfig({
-      ...valid,
-      profile: "codex-bob-test",
-      profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
+    () => normalizeHeadlessWakeConfig({ ...valid, allowedRoomId: "room_invalid" }),
+    /allowedRoomId/,
+  );
+  assert.throws(
+    () => createHeadlessClaimerGuard({
+      profile: "bob",
+      runtimeAdapter: "grok-bot",
+      env: { HOME: "/Users/tester" },
+      lockPath: `/tmp/triangle-headless-claimer-grok-${process.pid}.json`,
     }),
-    /not explicitly enabled/,
+    (error) => error.code === "grok_bot_not_in_codex_pool",
   );
-  assert.throws(
-    () => normalizeHeadlessWakeConfig({ ...valid, allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
-    /allowlisted Mini canary room/,
-  );
+});
+
+test("drain passes each delivery roomId through as the conversation key", async () => {
+  const rooms = [];
+  const runtime = {
+    async start() {},
+    async recoverAfterRestart() { return { quarantined: 0 }; },
+    async runDelivery(args) {
+      rooms.push(args.roomId);
+      return { status: "completed" };
+    },
+    async stop() {},
+  };
+  const deliveries = [
+    delivery({ roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    delivery({ roomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+  ];
+  let index = 0;
+  const drain = createHeadlessCodexDrain({
+    runtime,
+    resolveDelivery: async () => deliveries[index++] ?? null,
+    profileInstanceId: INSTANCE,
+  });
+  await drain.start({ runLoop: false });
+  await drain.drainOnce();
+  await drain.drainOnce();
+  await drain.stop();
+  assert.deepEqual(rooms, [
+    "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  ]);
 });
 
 test("claimer guard refuses dual consumers on the same profile", () => {

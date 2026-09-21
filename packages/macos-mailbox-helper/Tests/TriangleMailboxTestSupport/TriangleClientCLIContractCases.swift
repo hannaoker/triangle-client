@@ -514,7 +514,7 @@ private final class RecordingServiceControl: TriangleClientServiceControlling, @
     func applyAndVerify(shouldRun: Bool) throws {
         let count = lock.withLock { reloadCount += 1; return reloadCount }
         snapshots.append(try instances.list().map { "\($0.profile.value):\($0.enabled):\($0.deliveryMode.rawValue)" })
-        let expected = try instances.list().contains(where: { $0.participatesInWorkerPolling })
+        let expected = try instances.list().contains(where: \.participatesInClientSupervisor)
         if shouldRun != expected { throw TriangleClientLifecycleError.reloadFailed }
         if lock.withLock({ failures.contains(count) }) { throw TriangleClientLifecycleError.reloadFailed }
     }

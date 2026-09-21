@@ -23,22 +23,30 @@ const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const INSTANCE = /^[a-f0-9]{64}$/;
 const ROOM = /^room_[a-f0-9]{32}$/;
 
-/** Mini Phase-1 allowlist. Production `codex-bob-test` / classic `room_77` stay out. */
-export const PINNED_HEADLESS_DRAIN_PROFILE = "codex-headless";
-export const PINNED_HEADLESS_DRAIN_ROOM_ID = "room_8594d12312e14afbb291fcff60a22048";
+/** Historic Mini canary identifiers. Not a product allowlist or global room pin. */
+export const MINI_HEADLESS_CANARY_PROFILE = "codex-headless";
+export const MINI_HEADLESS_CANARY_ROOM_ID = "room_8594d12312e14afbb291fcff60a22048";
+/** @deprecated Use MINI_HEADLESS_CANARY_PROFILE. Kept for existing test fixtures. */
+export const PINNED_HEADLESS_DRAIN_PROFILE = MINI_HEADLESS_CANARY_PROFILE;
+/** @deprecated Use MINI_HEADLESS_CANARY_ROOM_ID. Not a required drain pin. */
+export const PINNED_HEADLESS_DRAIN_ROOM_ID = MINI_HEADLESS_CANARY_ROOM_ID;
 export const CLIENT_SUPERVISOR_CLAIMER_OWNER = "dev.thetriangle.client";
 export const DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER = "dev.thetriangle.codex-headless-drain";
 
-export const HEADLESS_WAKE_KEYS = Object.freeze([
+export const HEADLESS_WAKE_REQUIRED_KEYS = Object.freeze([
   "profile",
   "profileInstanceId",
   "helperPath",
-  "allowedRoomId",
   "workingDirectory",
   "codexHome",
   "stateRoot",
   "command",
   "pollIntervalMs",
+]);
+export const HEADLESS_WAKE_OPTIONAL_KEYS = Object.freeze(["allowedRoomId"]);
+export const HEADLESS_WAKE_KEYS = Object.freeze([
+  ...HEADLESS_WAKE_REQUIRED_KEYS,
+  ...HEADLESS_WAKE_OPTIONAL_KEYS,
 ]);
 
 function codedError(code, message, extra = {}) {
@@ -67,13 +75,41 @@ function requiredAbsolute(value, name) {
   return value;
 }
 
-export function assertPinnedHeadlessDrainAllowlist({ profile, allowedRoomId } = {}) {
-  if (profile !== PINNED_HEADLESS_DRAIN_PROFILE) {
-    throw new TypeError("profile is not explicitly enabled for the Phase 5 headless runtime");
+export function isGrokBotRuntimeAdapter(runtimeAdapter) {
+  return runtimeAdapter === "grok-bot";
+}
+
+/**
+ * Product Codex headless drain identity. Any Codex profile may drain.
+ * `allowedRoomId` is an optional claim filter, never a global pin (including
+ * classic `room_77`). Conversations are keyed by each delivery's `roomId`.
+ * grok-bot adapters are rejected — they stay on grokBotWake.
+ */
+export function assertHeadlessDrainIdentity({
+  profile,
+  allowedRoomId = null,
+  runtimeAdapter = "codex-app-server",
+} = {}) {
+  if (typeof profile !== "string" || !PROFILE.test(profile)) {
+    throw new TypeError("profile is invalid");
   }
-  if (allowedRoomId !== PINNED_HEADLESS_DRAIN_ROOM_ID) {
-    throw new TypeError("allowedRoomId is not the allowlisted Mini canary room");
+  if (isGrokBotRuntimeAdapter(runtimeAdapter) || runtimeAdapter === "grok-bot") {
+    throw codedError(
+      "grok_bot_not_in_codex_pool",
+      "grok-bot profiles cannot join the Codex headless pool",
+      { profile },
+    );
   }
+  if (allowedRoomId != null) {
+    if (typeof allowedRoomId !== "string" || !ROOM.test(allowedRoomId)) {
+      throw new TypeError("allowedRoomId is invalid");
+    }
+  }
+}
+
+/** @deprecated Mini pin is no longer a product default. Validates identity only. */
+export function assertPinnedHeadlessDrainAllowlist(args = {}) {
+  assertHeadlessDrainIdentity(args);
 }
 
 export function dedicatedHeadlessDrainLaunchAgentLabel(profile) {
@@ -83,16 +119,23 @@ export function dedicatedHeadlessDrainLaunchAgentLabel(profile) {
   return `dev.thetriangle.codex-headless-drain.${profile}`;
 }
 
-export function defaultHeadlessClaimerLockPath(env = process.env) {
+export function defaultHeadlessClaimerLockPath(env = process.env, profile = null) {
   const home = requiredAbsolute(env.HOME, "HOME");
-  return path.join(
+  const directory = path.join(
     home,
     "Library",
     "Application Support",
     "The Triangle",
     "client",
-    "headless-claimer.json",
   );
+  if (typeof profile === "string" && PROFILE.test(profile)) {
+    return path.join(directory, `headless-claimer.${profile}.json`);
+  }
+  return path.join(directory, "headless-claimer.json");
+}
+
+function legacyHeadlessClaimerLockPath(lockPath) {
+  return path.join(path.dirname(lockPath), "headless-claimer.json");
 }
 
 export function probeDedicatedHeadlessDrainLoaded(
@@ -159,18 +202,22 @@ function writeClaimerLock(lockPath, document) {
 
 export function createHeadlessClaimerGuard({
   profile,
-  allowedRoomId = PINNED_HEADLESS_DRAIN_ROOM_ID,
+  allowedRoomId = null,
+  runtimeAdapter = "codex-app-server",
   env = process.env,
   pid = process.pid,
-  lockPath = defaultHeadlessClaimerLockPath(env),
+  lockPath = defaultHeadlessClaimerLockPath(env, profile),
   probeDedicatedDrain = probeDedicatedHeadlessDrainLoaded,
   pidAlive = isPidAlive,
 } = {}) {
-  assertPinnedHeadlessDrainAllowlist({ profile, allowedRoomId });
+  assertHeadlessDrainIdentity({ profile, allowedRoomId, runtimeAdapter });
 
   function liveLock() {
-    const lock = readClaimerLock(lockPath);
-    if (lock == null || lock.profile !== profile) return null;
+    const primary = readClaimerLock(lockPath);
+    const legacyPath = legacyHeadlessClaimerLockPath(lockPath);
+    const legacy = legacyPath === lockPath ? null : readClaimerLock(legacyPath);
+    const lock = primary?.profile === profile ? primary : (legacy?.profile === profile ? legacy : null);
+    if (lock == null) return null;
     if (!pidAlive(lock.pid)) return null;
     return lock;
   }
@@ -245,13 +292,17 @@ export function createHeadlessClaimerGuard({
   });
 }
 
+export function hasHeadlessWakeKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value);
+  const optional = new Set(HEADLESS_WAKE_OPTIONAL_KEYS);
+  const required = new Set(HEADLESS_WAKE_REQUIRED_KEYS);
+  if (!HEADLESS_WAKE_REQUIRED_KEYS.every((key) => Object.hasOwn(value, key))) return false;
+  return actual.every((key) => required.has(key) || optional.has(key));
+}
+
 export function normalizeHeadlessWakeConfig(headlessWake) {
-  if (!headlessWake || typeof headlessWake !== "object" || Array.isArray(headlessWake)) {
-    throw new TypeError("headlessWake must be an object");
-  }
-  const actual = Object.keys(headlessWake).sort();
-  const wanted = [...HEADLESS_WAKE_KEYS].sort();
-  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+  if (!hasHeadlessWakeKeys(headlessWake)) {
     throw new TypeError("headlessWake schema is invalid");
   }
   if (typeof headlessWake.profile !== "string" || !PROFILE.test(headlessWake.profile)) {
@@ -263,12 +314,15 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
   if (headlessWake.profileInstanceId !== deriveProfileInstanceId(headlessWake.profile)) {
     throw new TypeError("headlessWake.profileInstanceId does not match profile");
   }
-  if (typeof headlessWake.allowedRoomId !== "string" || !ROOM.test(headlessWake.allowedRoomId)) {
+  const allowedRoomId = Object.hasOwn(headlessWake, "allowedRoomId") && headlessWake.allowedRoomId != null
+    ? headlessWake.allowedRoomId
+    : null;
+  if (allowedRoomId != null && (typeof allowedRoomId !== "string" || !ROOM.test(allowedRoomId))) {
     throw new TypeError("headlessWake.allowedRoomId is invalid");
   }
-  assertPinnedHeadlessDrainAllowlist({
+  assertHeadlessDrainIdentity({
     profile: headlessWake.profile,
-    allowedRoomId: headlessWake.allowedRoomId,
+    allowedRoomId,
   });
   if (!Number.isSafeInteger(headlessWake.pollIntervalMs)
     || headlessWake.pollIntervalMs < 100
@@ -279,7 +333,7 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
     profile: headlessWake.profile,
     profileInstanceId: headlessWake.profileInstanceId,
     helperPath: requiredAbsolute(headlessWake.helperPath, "headlessWake.helperPath"),
-    allowedRoomId: headlessWake.allowedRoomId,
+    allowedRoomId,
     workingDirectory: requiredAbsolute(headlessWake.workingDirectory, "headlessWake.workingDirectory"),
     codexHome: requiredAbsolute(headlessWake.codexHome, "headlessWake.codexHome"),
     stateRoot: requiredAbsolute(headlessWake.stateRoot, "headlessWake.stateRoot"),
@@ -314,24 +368,19 @@ export function loadHeadlessDrainConfig({ profile, env = process.env } = {}) {
     "TRIANGLE_HEADLESS_STATE_ROOT",
   );
   const command = requiredAbsolute(env.CODEX_CLI, "CODEX_CLI");
-  const allowedRoomId = env.TRIANGLE_HEADLESS_ROOM_ID;
-  if (typeof allowedRoomId !== "string" || !ROOM.test(allowedRoomId)) {
+  const rawRoom = env.TRIANGLE_HEADLESS_ROOM_ID;
+  const allowedRoomId =
+    rawRoom == null || rawRoom === ""
+      ? null
+      : rawRoom;
+  if (allowedRoomId != null && (typeof allowedRoomId !== "string" || !ROOM.test(allowedRoomId))) {
     throw new TypeError("TRIANGLE_HEADLESS_ROOM_ID is invalid");
   }
   const pollIntervalMs = Number(env.TRIANGLE_HEADLESS_POLL_INTERVAL_MS ?? 1_000);
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 60_000) {
     throw new TypeError("TRIANGLE_HEADLESS_POLL_INTERVAL_MS is invalid");
   }
-  const allowlist = new Set(
-    String(env.TRIANGLE_HEADLESS_RUNTIME_PROFILES ?? "")
-      .split(",")
-      .map((part) => part.trim())
-      .filter(Boolean),
-  );
-  if (env.TRIANGLE_PHASE5_MIGRATION_ENABLE !== "1" || !allowlist.has(profile)) {
-    throw new TypeError("profile is not explicitly enabled for the Phase 5 headless runtime");
-  }
-  assertPinnedHeadlessDrainAllowlist({ profile, allowedRoomId });
+  assertHeadlessDrainIdentity({ profile, allowedRoomId });
   return Object.freeze({
     profile,
     profileInstanceId,
@@ -350,7 +399,7 @@ export function createInstalledHeadlessDrain(config, {
   logger = console,
   ownerInstanceId = `headless-drain-${process.pid}`,
 } = {}) {
-  const normalized = config.profileInstanceId && config.allowedRoomId
+  const normalized = config.profileInstanceId
     ? {
       ...config,
       helperPath: requiredAbsolute(config.helperPath, "helperPath"),
@@ -358,11 +407,12 @@ export function createInstalledHeadlessDrain(config, {
       codexHome: requiredAbsolute(config.codexHome, "codexHome"),
       stateRoot: requiredAbsolute(config.stateRoot, "stateRoot"),
       command: requiredAbsolute(config.command, "command"),
+      allowedRoomId: config.allowedRoomId ?? null,
     }
     : config;
-  assertPinnedHeadlessDrainAllowlist({
+  assertHeadlessDrainIdentity({
     profile: normalized.profile,
-    allowedRoomId: normalized.allowedRoomId,
+    allowedRoomId: normalized.allowedRoomId ?? null,
   });
   mkdirSync(normalized.stateRoot, { recursive: true, mode: 0o700 });
   const transactionProxy = createHelperTrustedTransactionProxy({
@@ -375,17 +425,13 @@ export function createInstalledHeadlessDrain(config, {
     profile: normalized.profile,
     protocol: "self-serve-drain",
     createProxy: () => transactionProxy,
-    allowedRoomId: normalized.allowedRoomId,
+    allowedRoomId: normalized.allowedRoomId ?? null,
   });
   const durableStore = createDurableConversationStore({
     root: normalized.stateRoot,
     enabled: true,
   });
-  const runtimeEnv = {
-    ...(normalized.env ?? {}),
-    TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
-    TRIANGLE_HEADLESS_RUNTIME_PROFILES: normalized.profile,
-  };
+  const runtimeEnv = { ...(normalized.env ?? {}) };
   const runtime = createHeadlessCodexRuntime({
     profileConfig: {
       profileId: normalized.profile,
@@ -394,6 +440,8 @@ export function createInstalledHeadlessDrain(config, {
       runtimeAdapter: "codex-app-server",
       runtimeMode: "headless",
       deliveryMode: "headless-app-server",
+      conversationKey: "roomId",
+      maxInFlightPerProfile: 1,
       shadowTestProfile: false,
       workingDirectory: normalized.workingDirectory,
       codexPool: { preferredSize: 1, maxSize: 1 },

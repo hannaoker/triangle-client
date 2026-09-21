@@ -94,7 +94,7 @@ export function createProfileMigrationController({
   mailboxConsumers = null,
   proveHeadlessReady = null,
   proveDesktopReady = null,
-  enabled = false,
+  enabled = true,
   snapshotRoot = null,
   now = () => Date.now(),
 } = {}) {
@@ -118,7 +118,7 @@ export function createProfileMigrationController({
     if (enabled !== true) {
       throw createCodedError(
         "phase5_migration_disabled",
-        "Phase 5 migration is feature-gated off; set TRIANGLE_PHASE5_MIGRATION_ENABLE=1 or enablePhase5Migration",
+        "migrate-to-headless is disabled; set enablePhase5Migration or omit TRIANGLE_PHASE5_MIGRATION_ENABLE=0",
       );
     }
   }
@@ -283,7 +283,7 @@ export function createProfileMigrationController({
       executionKind: CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER,
       runtimeAdapter: "codex-app-server",
       runtimeMode: "headless",
-      deliveryMode: "event-driven",
+      deliveryMode: "headless-app-server",
       // Keep binding bytes for rollback; do not activate desktop wake.
       appServerBinding:
         prior.appServerBinding == null
