@@ -133,9 +133,19 @@ export { createHeadlessCodexRuntime } from "./headless-runtime.mjs";
 export { createHeadlessCodexDrain } from "./headless-drain.mjs";
 
 export {
+  CLIENT_SUPERVISOR_CLAIMER_OWNER,
+  DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER,
+  HEADLESS_WAKE_KEYS,
+  PINNED_HEADLESS_DRAIN_PROFILE,
+  PINNED_HEADLESS_DRAIN_ROOM_ID,
+  assertPinnedHeadlessDrainAllowlist,
+  createHeadlessClaimerGuard,
   createInstalledHeadlessDrain,
+  dedicatedHeadlessDrainLaunchAgentLabel,
   deriveProfileInstanceId,
   loadHeadlessDrainConfig,
+  normalizeHeadlessWakeConfig,
+  probeDedicatedHeadlessDrainLoaded,
 } from "./headless-drain-service.mjs";
 
 export {

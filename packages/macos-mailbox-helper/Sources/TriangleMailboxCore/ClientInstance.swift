@@ -13,6 +13,7 @@ public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
     case mcpInteractive = "mcp-interactive"
     case eventDriven = "event-driven"
     case grokBot = "grok-bot"
+    case headlessAppServer = "headless-app-server"
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -61,7 +62,10 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public var participatesInAppServerWake: Bool { enabled && deliveryMode == .mcpInteractive }
     /// grok-bot profiles wake via native Grok Bot webhook (not eventWake / App Server).
     public var participatesInGrokBotWake: Bool { enabled && deliveryMode == .grokBot }
+    /// Headless Codex App Server drain is owned by the shared client supervisor (not a second LaunchAgent).
+    public var participatesInHeadlessWake: Bool { enabled && deliveryMode == .headlessAppServer }
     /// Installation watch grant notify members: event-driven drains + App Server + Grok Bot hosts.
+    /// Headless App Server admission is helper-transaction poll, not watch-grant notify.
     public var participatesInWatchGrantNotify: Bool {
         enabled && (
             deliveryMode == .eventDriven

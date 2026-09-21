@@ -281,7 +281,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let manifest: WorkerInstallManifest
             do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
             catch { throw WorkerLauncherError.invalidManifest }
-            guard manifest.version == 4 else { continue }
+            guard manifest.version == 4 || manifest.version == 5 else { continue }
             let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
             try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
             var environment: [String: String] = [:]

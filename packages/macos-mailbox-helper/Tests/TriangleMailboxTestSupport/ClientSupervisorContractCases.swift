@@ -33,6 +33,9 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive without binding stays omitted", run: mcpInteractiveAppServerBindingMissing),
         .init(name: "grok-bot emits grokBotWake when binding present", run: grokBotWakeBootstrap),
         .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
+        .init(name: "headless-app-server emits headlessWake for the Mini allowlist", run: headlessWakeBootstrap),
+        .init(name: "headless-app-server without binding stays omitted", run: headlessWakeBindingMissing),
+        .init(name: "loaded dedicated drain LaunchAgent omits supervisor headlessWake", run: dedicatedHeadlessDrainOmitsSupervisorClaimer),
         .init(name: "invalid durable installation identity fails closed", run: invalidInstallationIdentityFailsClosed),
         .init(name: "concurrent durable installation identity resolution is stable", run: concurrentInstallationIdentityResolutionIsStable),
     ]
@@ -422,6 +425,67 @@ public enum ClientSupervisorContractCases {
         try expect(bootstrap.grokBotWake == nil, "grokBotWake emitted without binding file")
     }
 
+    public static func headlessWakeBootstrap() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "codex-headless", adapter: .codex, digit: "c"),
+            ],
+            provisionHeadlessRuntimeBinding: true
+        )
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "worker count wrong with headlessWake")
+        let headlessWake = try require(bootstrap.headlessWake, "headlessWake missing")
+        let headless = fixture.specifications[1]
+        let headlessID = ClientInstanceID.derive(profile: headless.profile).value
+        try expect(headlessWake.profile == "codex-headless", "wrong headless profile")
+        try expect(headlessWake.profileInstanceId == headlessID, "headless instance mismatch")
+        try expect(headlessWake.allowedRoomId == "room_8594d12312e14afbb291fcff60a22048", "room allowlist drifted")
+        try expect(!bootstrap.instances.contains { $0.instanceId == headlessID }, "headless leaked into worker instances")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let raw = String(decoding: encoded, as: UTF8.self)
+        try expect(!raw.contains(headless.token), "headless mailbox token leaked into headlessWake")
+    }
+
+    public static func headlessWakeBindingMissing() async throws {
+        let fixture = try SupervisorFixture(specifications: [
+            .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+            .init(profile: "codex-headless", adapter: .codex, digit: "c"),
+        ])
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        let headlessID = ClientInstanceID.derive(profile: fixture.specifications[1].profile).value
+        try expect(launch.omitted.contains {
+            $0.instanceID == headlessID && $0.reasonCode == "headless_runtime_binding_missing"
+        }, "missing headless binding was not recorded")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.headlessWake == nil, "headlessWake emitted without binding file")
+    }
+
+    public static func dedicatedHeadlessDrainOmitsSupervisorClaimer() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "codex-headless", adapter: .codex, digit: "c"),
+            ],
+            provisionHeadlessRuntimeBinding: true,
+            dedicatedHeadlessDrainLoaded: true
+        )
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        let headlessID = ClientInstanceID.derive(profile: fixture.specifications[1].profile).value
+        try expect(launch.omitted.contains {
+            $0.instanceID == headlessID && $0.reasonCode == "dedicated_headless_drain_loaded"
+        }, "loaded dedicated drain was not treated as a dual-claimer block")
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.headlessWake == nil, "supervisor claimed while dedicated drain LaunchAgent is loaded")
+        try expect(bootstrap.instances.count == 1, "worker instance was lost while omitting headlessWake")
+    }
+
     public static func noEligibleProfile() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "bad-only", adapter: .codex, digit: "9", verificationFails: true),
@@ -646,7 +710,9 @@ private final class SupervisorFixture: @unchecked Sendable {
         resolverFailureAt: Int? = nil,
         coordinatorFails: Bool = false,
         provisionAppServerBinding: Bool = false,
-        provisionGrokBotBinding: Bool = false
+        provisionGrokBotBinding: Bool = false,
+        provisionHeadlessRuntimeBinding: Bool = false,
+        dedicatedHeadlessDrainLoaded: Bool = false
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
@@ -666,6 +732,7 @@ private final class SupervisorFixture: @unchecked Sendable {
         let grokBotWakeCursorURL = helperRoot.appendingPathComponent("grok-bot-wake-cursor.json")
         let grokBotWebhookURLPath = helperRoot.appendingPathComponent("grok-bot-webhook.url")
         let grokBotWebhookKeyPath = helperRoot.appendingPathComponent("grok-bot-webhook.key")
+        let headlessRuntimeBindingURL = helperRoot.appendingPathComponent("headless-runtime-binding.json")
         let installationID = try InstallationID("inst_N7VhDq3mQ2")
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
@@ -738,6 +805,29 @@ private final class SupervisorFixture: @unchecked Sendable {
             try Data("webhook-secret-key\n".utf8).write(to: grokBotWebhookKeyPath)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: grokBotWebhookKeyPath.path)
         }
+        if provisionHeadlessRuntimeBinding {
+            let headless = try require(
+                specifications.first(where: { $0.profile.value == "codex-headless" }),
+                "codex-headless specification required for headless runtime binding"
+            )
+            let instanceId = ClientInstanceID.derive(profile: headless.profile).value
+            let bindingObject: [String: Any] = [
+                "adapterVersion": "1",
+                "enabled": true,
+                "profile": headless.profile.value,
+                "installationId": installationID.value,
+                "instanceId": instanceId,
+                "allowedRoomId": "room_8594d12312e14afbb291fcff60a22048",
+                "workingDirectory": "/srv/triangle-work",
+                "codexHome": "/private/codex-home",
+                "stateRoot": "/private/headless-state",
+                "command": "/trusted/bin/codex",
+                "pollIntervalMs": 1_000,
+            ]
+            let bindingData = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
+            try bindingData.write(to: headlessRuntimeBindingURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: headlessRuntimeBindingURL.path)
+        }
         credentials = RecordingMultiCredentialStore(bindings: bindings, events: events)
         let gate = VerifiedCredentialGate(
             store: credentials,
@@ -759,7 +849,9 @@ private final class SupervisorFixture: @unchecked Sendable {
             grokBotBindingURL: grokBotBindingURL,
             grokBotWakeCursorURL: grokBotWakeCursorURL,
             grokBotWebhookURLPath: grokBotWebhookURLPath,
-            grokBotWebhookKeyPath: grokBotWebhookKeyPath
+            grokBotWebhookKeyPath: grokBotWebhookKeyPath,
+            headlessRuntimeBindingURL: headlessRuntimeBindingURL,
+            isDedicatedHeadlessDrainLoaded: { _ in dedicatedHeadlessDrainLoaded }
         )
     }
 
@@ -891,6 +983,7 @@ private struct TestBootstrap: Decodable {
     let eventWake: TestEventWake?
     let appServerWake: TestAppServerWake?
     let grokBotWake: TestGrokBotWake?
+    let headlessWake: TestHeadlessWake?
 }
 private struct TestBootstrapInstance: Decodable {
     let instanceId: String
@@ -955,6 +1048,17 @@ private struct TestGrokBotBinding: Decodable {
     let profile: String
     let grokAgentId: String
     let wakeMode: String
+}
+private struct TestHeadlessWake: Decodable {
+    let profile: String
+    let profileInstanceId: String
+    let helperPath: String
+    let allowedRoomId: String
+    let workingDirectory: String
+    let codexHome: String
+    let stateRoot: String
+    let command: String
+    let pollIntervalMs: Int
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

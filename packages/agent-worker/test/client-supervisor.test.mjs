@@ -4,6 +4,11 @@ import test from "node:test";
 import { createClientSupervisor } from "../src/client-supervisor.mjs";
 import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
 import { createAgentWorker } from "../src/runtime.mjs";
+import {
+  PINNED_HEADLESS_DRAIN_PROFILE,
+  PINNED_HEADLESS_DRAIN_ROOM_ID,
+  deriveProfileInstanceId,
+} from "../src/codex-runtime/headless-drain-service.mjs";
 
 const id = (index) => index.toString(16).padStart(64, "0");
 
@@ -1155,4 +1160,211 @@ test("supervisor renews one expired shared watch grant and resumes both wake cur
   assert.equal(grokWakes[0].highWatermark, 42);
   assert.equal(result.appServerWake?.cursor, 42);
   assert.equal(result.grokBotWake?.cursor, 42);
+});
+
+function headlessWakeFixture(overrides = {}) {
+  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  return {
+    profile,
+    profileInstanceId: deriveProfileInstanceId(profile),
+    helperPath: "/trusted/triangle-mailbox",
+    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
+    workingDirectory: "/srv/triangle-work",
+    codexHome: "/private/codex-home",
+    stateRoot: "/private/headless-state",
+    command: "/trusted/bin/codex",
+    pollIntervalMs: 1_000,
+    ...overrides,
+  };
+}
+
+function fakeClaimerGuard({ failCode = null } = {}) {
+  const events = [];
+  return {
+    events,
+    create() {
+      return {
+        assertSupervisorMayClaim() {
+          events.push("assert");
+          if (failCode) {
+            const error = new Error(failCode);
+            error.code = failCode;
+            throw error;
+          }
+        },
+        acquire() { events.push("acquire"); },
+        release() { events.push("release"); },
+      };
+    },
+  };
+}
+
+test("supervisor composes one allowlisted headless drain and no other claimer", async () => {
+  const claimer = fakeClaimerGuard();
+  const drainEvents = [];
+  let created = 0;
+  const supervisor = createClientSupervisor({
+    instances: [],
+    headlessWake: headlessWakeFixture(),
+    createHeadlessDrain(config) {
+      created += 1;
+      assert.equal(config.profile, PINNED_HEADLESS_DRAIN_PROFILE);
+      assert.equal(config.allowedRoomId, PINNED_HEADLESS_DRAIN_ROOM_ID);
+      assert.equal(config.profileInstanceId, deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE));
+      return {
+        async start() {
+          drainEvents.push("start");
+          return { started: true };
+        },
+        async stop() {
+          drainEvents.push("stop");
+          return { started: false };
+        },
+      };
+    },
+    createClaimerGuard: claimer.create,
+    logger: { error() {} },
+  });
+
+  assert.equal(created, 1);
+  assert.equal(supervisor.headlessInstanceId, deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE));
+  assert.equal(supervisor.headlessWakeSkipReason, null);
+  const controller = new AbortController();
+  const watching = supervisor.watch({ signal: controller.signal });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await watching;
+  assert.equal(result.headlessWake?.skipped, false);
+  assert.deepEqual(drainEvents, ["start", "stop"]);
+  assert.deepEqual(claimer.events, ["assert", "acquire", "release"]);
+});
+
+test("supervisor skips headless admission when the dedicated drain LaunchAgent is loaded", async () => {
+  const claimer = fakeClaimerGuard({ failCode: "dedicated_headless_drain_loaded" });
+  let created = 0;
+  const logs = [];
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    headlessWake: headlessWakeFixture(),
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({
+      async watch() { return { processed: 0, stopped: true }; },
+      async runOnce() { return { found: null, processed: 0 }; },
+    }),
+    createHeadlessDrain() {
+      created += 1;
+      throw new Error("must not create a second claimer");
+    },
+    createClaimerGuard: claimer.create,
+    logger: {
+      error(event, detail) {
+        logs.push({ event, code: detail?.code });
+      },
+    },
+  });
+
+  assert.equal(created, 0);
+  assert.equal(supervisor.headlessWakeSkipReason, "dedicated_headless_drain_loaded");
+  const result = await supervisor.watch({ signal: AbortSignal.timeout(50) });
+  assert.deepEqual(result.headlessWake, {
+    skipped: true,
+    reason: "dedicated_headless_drain_loaded",
+  });
+  assert.equal(logs.some((entry) => entry.event === "triangle_client_headless_wake_skipped"), true);
+});
+
+test("supervisor rejects headlessWake collision with every other mailbox claimer", () => {
+  const headlessId = deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE);
+  const factories = {
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() {} }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+    createWake: () => ({ async start() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createHarness: () => ({ async preflight() { return false; }, async run() {} }),
+    createAuthResolver: () => ({ async resolveAuth() { return { authorization: "Bearer x", serverIdentity: "s" }; } }),
+    createAppServerTransport: () => ({ async connect() {}, async call() {}, onEvent() { return () => {}; }, async close() {} }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createSession: () => ({ async connect() {}, async shutdown() {}, admit: async () => ({}), status: () => ({}) }),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
+    createHeadlessDrain: () => ({ async start() {}, async stop() {} }),
+    createClaimerGuard: fakeClaimerGuard().create,
+  };
+
+  assert.throws(() => createClientSupervisor({
+    instances: [{
+      instanceId: headlessId,
+      mailbox: { meshToken: "secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { TRIANGLE_INSTANCE_ID: headlessId },
+    }],
+    headlessWake: headlessWakeFixture(),
+    ...factories,
+  }), /collides/i);
+
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    eventWake: {
+      ...eventWakeFixture(2),
+      profiles: [{ instanceId: headlessId, agentId: `agent_${"e".repeat(32)}` }],
+      drains: [{
+        ...wakeDrain(2),
+        instanceId: headlessId,
+        runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: headlessId },
+      }],
+    },
+    headlessWake: headlessWakeFixture(),
+    ...factories,
+  }), /collides/i);
+
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    appServerWake: {
+      ...appServerWakeFixture(3),
+      binding: { ...appServerWakeFixture(3).binding, instanceId: headlessId },
+    },
+    headlessWake: headlessWakeFixture(),
+    ...factories,
+  }), /collides/i);
+
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    grokBotWake: {
+      ...grokBotWakeFixture(4),
+      binding: { ...grokBotWakeFixture(4).binding, instanceId: headlessId },
+    },
+    headlessWake: headlessWakeFixture(),
+    ...factories,
+  }), /collides/i);
+});
+
+test("supervisor rejects non-allowlisted headless profiles and rooms", () => {
+  const factories = {
+    createHeadlessDrain: () => ({ async start() {}, async stop() {} }),
+    createClaimerGuard: fakeClaimerGuard().create,
+  };
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    headlessWake: headlessWakeFixture({
+      profile: "codex-bob-test",
+      profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
+    }),
+    ...factories,
+  }), /not explicitly enabled/);
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    headlessWake: headlessWakeFixture({
+      allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+    ...factories,
+  }), /allowlisted Mini canary room/);
 });

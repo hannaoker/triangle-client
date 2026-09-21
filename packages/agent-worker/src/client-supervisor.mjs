@@ -23,6 +23,13 @@ import {
   createGrokBotWakeBridge,
   validateGrokBotBinding,
 } from "./grok-bot-wake.mjs";
+import {
+  CLIENT_SUPERVISOR_CLAIMER_OWNER,
+  HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
+  createHeadlessClaimerGuard,
+  createInstalledHeadlessDrain,
+  normalizeHeadlessWakeConfig,
+} from "./codex-runtime/headless-drain-service.mjs";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
@@ -72,6 +79,7 @@ export const GROK_BOT_BINDING_KEYS = Object.freeze([
   "profile",
   "wakeMode",
 ]);
+export const HEADLESS_WAKE_KEYS = EXACT_HEADLESS_WAKE_KEYS;
 
 function isRenewableWatchCredentialError(error) {
   const rejectedCode = typeof error?.rejectedCode === "string"
@@ -347,11 +355,17 @@ function validateGrokBotWake(grokBotWake) {
   });
 }
 
+function validateHeadlessWake(headlessWake) {
+  if (headlessWake == null) return null;
+  return normalizeHeadlessWakeConfig(headlessWake);
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
   appServerWake = null,
   grokBotWake = null,
+  headlessWake = null,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
   createWorker = createAgentWorker,
@@ -366,6 +380,8 @@ export function createClientSupervisor({
   createSession = createSharedCodexSession,
   createWakeBridge = createAppServerWakeBridge,
   createGrokBotBridge = createGrokBotWakeBridge,
+  createHeadlessDrain = createInstalledHeadlessDrain,
+  createClaimerGuard = createHeadlessClaimerGuard,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -381,7 +397,8 @@ export function createClientSupervisor({
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
   const grokBotConfig = validateGrokBotWake(grokBotWake);
-  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig) {
+  const headlessConfig = validateHeadlessWake(headlessWake);
+  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig && !headlessConfig) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
@@ -501,6 +518,21 @@ export function createClientSupervisor({
     }
   }
 
+  if (headlessConfig) {
+    if (seen.has(headlessConfig.profileInstanceId)) {
+      throw new TypeError("headlessWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === headlessConfig.profileInstanceId)) {
+      throw new TypeError("headlessWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === headlessConfig.profileInstanceId) {
+      throw new TypeError("headlessWake instanceId collides with an appServerWake profile");
+    }
+    if (grokBotConfig?.binding.instanceId === headlessConfig.profileInstanceId) {
+      throw new TypeError("headlessWake instanceId collides with a grokBotWake profile");
+    }
+  }
+
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
     ? sharedWatchTransport({
@@ -603,14 +635,53 @@ export function createClientSupervisor({
     }
   }
 
+  let headlessDrain = null;
+  let headlessClaimer = null;
+  let headlessWakeSkipReason = null;
+  if (headlessConfig) {
+    headlessClaimer = createClaimerGuard({
+      profile: headlessConfig.profile,
+      allowedRoomId: headlessConfig.allowedRoomId,
+    });
+    try {
+      headlessClaimer.assertSupervisorMayClaim();
+    } catch (error) {
+      if (
+        error?.code === "dedicated_headless_drain_loaded"
+        || error?.code === "supervisor_headless_claimer_active"
+      ) {
+        headlessWakeSkipReason = error.code;
+        logger.error?.("triangle_client_headless_wake_skipped", {
+          error: "Refusing dual headless mailbox claimers",
+          code: error.code,
+        });
+      } else {
+        throw error;
+      }
+    }
+    if (headlessWakeSkipReason == null) {
+      const drain = createHeadlessDrain(headlessConfig, {
+        logger,
+        ownerInstanceId: `client-supervisor-${process.pid}`,
+      });
+      if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
+        throw new TypeError("createHeadlessDrain must return a drain");
+      }
+      headlessDrain = drain;
+    }
+  }
+
   return Object.freeze({
     instanceIds: Object.freeze(entries.map(({ instanceId }) => instanceId)),
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
     appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
     grokBotInstanceId: grokBotConfig?.binding.instanceId ?? null,
+    headlessInstanceId: headlessConfig?.profileInstanceId ?? null,
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
     grokBotWake: grokBotConfig,
+    headlessWake: headlessConfig,
+    headlessWakeSkipReason,
 
     async runOnce({ signal } = {}) {
       const results = await Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -780,17 +851,59 @@ export function createClientSupervisor({
         })
         : Promise.resolve(null);
 
-      const [instances, wakeResult, appServerResult, grokBotResult] = await Promise.all([
+      function waitForAbort(target) {
+        if (target?.aborted) return Promise.resolve();
+        if (target == null) return new Promise(() => {});
+        return new Promise((resolve) => {
+          target.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+
+      const headlessLoop = headlessDrain
+        ? runDurableWakeLoop({
+          start: async () => {
+            headlessClaimer.acquire({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+            try {
+              await headlessDrain.start({ runLoop: true });
+              await waitForAbort(signal);
+              return { status: "stopped", skipped: false, profileInstanceId: headlessConfig.profileInstanceId };
+            } finally {
+              try {
+                await headlessDrain.stop();
+              } finally {
+                headlessClaimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+              }
+            }
+          },
+          stop: async () => {
+            try {
+              await headlessDrain.stop();
+            } finally {
+              headlessClaimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+            }
+          },
+          logEvent: "triangle_client_headless_wake_failed",
+          logMessage: "Headless Codex drain failed",
+        })
+        : Promise.resolve(
+          headlessWakeSkipReason
+            ? { skipped: true, reason: headlessWakeSkipReason }
+            : null,
+        );
+
+      const [instances, wakeResult, appServerResult, grokBotResult, headlessResult] = await Promise.all([
         workerLoop,
         wakeLoop,
         appServerLoop,
         grokBotLoop,
+        headlessLoop,
       ]);
       return {
         instances,
         eventWake: wakeResult,
         appServerWake: appServerResult,
         grokBotWake: grokBotResult,
+        headlessWake: headlessResult,
       };
     },
   });

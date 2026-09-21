@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import {
+  DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER,
+  createHeadlessClaimerGuard,
   createInstalledHeadlessDrain,
   isDirectExecution,
   loadHeadlessDrainConfig,
@@ -45,26 +47,48 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
       TRIANGLE_HEADLESS_RUNTIME_PROFILES: profile,
     },
   });
-  const drain = createInstalledHeadlessDrain(config, { logger });
-
-  await drain.start({ runLoop: !once });
-  if (once) {
-    const result = await drain.drainOnce();
-    await drain.stop();
-    logger.info?.("triangle_headless_drain_once_complete", { status: result.status });
-    return 0;
-  }
-
-  const stop = async () => {
-    await drain.stop({ signal: "SIGTERM", timeoutMs: 5_000 });
-  };
-  process.once("SIGINT", () => { void stop().finally(() => process.exit(0)); });
-  process.once("SIGTERM", () => { void stop().finally(() => process.exit(0)); });
-  logger.info?.("triangle_headless_drain_started", {
+  const claimer = createHeadlessClaimerGuard({
     profile: config.profile,
-    profileInstanceId: config.profileInstanceId,
+    allowedRoomId: config.allowedRoomId,
+    env: config.env,
   });
-  return new Promise(() => {});
+  claimer.assertDedicatedDrainMayClaim();
+  claimer.acquire({ owner: DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER });
+  const releaseClaimer = () => {
+    claimer.release({ owner: DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER });
+  };
+  try {
+    const drain = createInstalledHeadlessDrain(config, { logger });
+    await drain.start({ runLoop: !once });
+    if (once) {
+      try {
+        const result = await drain.drainOnce();
+        await drain.stop();
+        logger.info?.("triangle_headless_drain_once_complete", { status: result.status });
+        return 0;
+      } finally {
+        releaseClaimer();
+      }
+    }
+
+    const stop = async () => {
+      try {
+        await drain.stop({ signal: "SIGTERM", timeoutMs: 5_000 });
+      } finally {
+        releaseClaimer();
+      }
+    };
+    process.once("SIGINT", () => { void stop().finally(() => process.exit(0)); });
+    process.once("SIGTERM", () => { void stop().finally(() => process.exit(0)); });
+    logger.info?.("triangle_headless_drain_started", {
+      profile: config.profile,
+      profileInstanceId: config.profileInstanceId,
+    });
+    return new Promise(() => {});
+  } catch (error) {
+    releaseClaimer();
+    throw error;
+  }
 }
 
 if (isDirectExecution(import.meta.url)) {

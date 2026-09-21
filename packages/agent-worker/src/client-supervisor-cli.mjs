@@ -11,17 +11,19 @@ import {
   createClientSupervisor,
   GROK_BOT_BINDING_KEYS as EXACT_GROK_BOT_BINDING_KEYS,
   GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
+  HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
 } from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
+import { normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWake"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -305,7 +307,21 @@ function grokBotWakeOutsideValues(grokBotWake) {
   ].filter((value) => typeof value === "string");
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake) {
+function headlessWakeOutsideValues(headlessWake) {
+  if (!headlessWake) return [];
+  return [
+    headlessWake.profile,
+    headlessWake.profileInstanceId,
+    headlessWake.helperPath,
+    headlessWake.allowedRoomId,
+    headlessWake.workingDirectory,
+    headlessWake.codexHome,
+    headlessWake.stateRoot,
+    headlessWake.command,
+  ].filter((value) => typeof value === "string");
+}
+
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWake) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -338,6 +354,9 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
       for (const candidate of grokBotWakeOutsideValues(grokBotWake)) {
+        if (candidate.includes(secret)) throw invalidBootstrap();
+      }
+      for (const candidate of headlessWakeOutsideValues(headlessWake)) {
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
     }
@@ -514,6 +533,24 @@ function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWak
   }
 }
 
+function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerWake, grokBotWake) {
+  if (!hasExactKeys(headlessWake, EXACT_HEADLESS_WAKE_KEYS)) throw invalidBootstrap();
+  let normalized;
+  try {
+    normalized = normalizeHeadlessWakeConfig(headlessWake);
+  } catch {
+    throw invalidBootstrap();
+  }
+  if (
+    seenWorkerIds.has(normalized.profileInstanceId)
+    || eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
+    || appServerWake?.binding?.instanceId === normalized.profileInstanceId
+    || grokBotWake?.binding?.instanceId === normalized.profileInstanceId
+  ) {
+    throw invalidBootstrap();
+  }
+}
+
 export function parseClientSupervisorBootstrap(text) {
   try {
     if (typeof text !== "string" || Buffer.byteLength(text) > MAX_BOOTSTRAP_BYTES) {
@@ -546,11 +583,21 @@ export function parseClientSupervisorBootstrap(text) {
         bootstrap.appServerWake,
       );
     }
+    if (Object.hasOwn(bootstrap, "headlessWake")) {
+      validateHeadlessWake(
+        bootstrap.headlessWake,
+        seen,
+        bootstrap.eventWake,
+        bootstrap.appServerWake,
+        bootstrap.grokBotWake,
+      );
+    }
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")
       && !Object.hasOwn(bootstrap, "appServerWake")
       && !Object.hasOwn(bootstrap, "grokBotWake")
+      && !Object.hasOwn(bootstrap, "headlessWake")
     ) {
       throw invalidBootstrap();
     }
@@ -559,6 +606,7 @@ export function parseClientSupervisorBootstrap(text) {
       bootstrap.eventWake,
       bootstrap.appServerWake,
       bootstrap.grokBotWake,
+      bootstrap.headlessWake,
     );
     return bootstrap;
   } catch {
@@ -688,6 +736,7 @@ export async function runClientSupervisorCLI({
         eventWake: bootstrap.eventWake ?? null,
         appServerWake: bootstrap.appServerWake ?? null,
         grokBotWake: bootstrap.grokBotWake ?? null,
+        headlessWake: bootstrap.headlessWake ?? null,
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake
