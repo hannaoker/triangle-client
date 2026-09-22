@@ -5,8 +5,6 @@ import { createClientSupervisor } from "../src/client-supervisor.mjs";
 import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
 import { createAgentWorker } from "../src/runtime.mjs";
 import {
-  PINNED_HEADLESS_DRAIN_PROFILE,
-  PINNED_HEADLESS_DRAIN_ROOM_ID,
   deriveProfileInstanceId,
 } from "../src/codex-runtime/headless-drain-service.mjs";
 
@@ -1163,12 +1161,11 @@ test("supervisor renews one expired shared watch grant and resumes both wake cur
 });
 
 function headlessWakeFixture(overrides = {}) {
-  const profile = PINNED_HEADLESS_DRAIN_PROFILE;
+  const profile = overrides.profile ?? "codex-bob-test";
   return {
     profile,
     profileInstanceId: deriveProfileInstanceId(profile),
     helperPath: "/trusted/triangle-mailbox",
-    allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
     workingDirectory: "/srv/triangle-work",
     codexHome: "/private/codex-home",
     stateRoot: "/private/headless-state",
@@ -1199,18 +1196,19 @@ function fakeClaimerGuard({ failCode = null } = {}) {
   };
 }
 
-test("supervisor composes one allowlisted headless drain and no other claimer", async () => {
+test("supervisor composes one Codex headless drain and no other claimer", async () => {
   const claimer = fakeClaimerGuard();
   const drainEvents = [];
   let created = 0;
+  const fixture = headlessWakeFixture();
   const supervisor = createClientSupervisor({
     instances: [],
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [fixture],
     createHeadlessDrain(config) {
       created += 1;
-      assert.equal(config.profile, PINNED_HEADLESS_DRAIN_PROFILE);
-      assert.equal(config.allowedRoomId, PINNED_HEADLESS_DRAIN_ROOM_ID);
-      assert.equal(config.profileInstanceId, deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE));
+      assert.equal(config.profile, "codex-bob-test");
+      assert.equal(Object.hasOwn(config, "allowedRoomId"), false);
+      assert.equal(config.profileInstanceId, deriveProfileInstanceId("codex-bob-test"));
       return {
         async start() {
           drainEvents.push("start");
@@ -1227,14 +1225,14 @@ test("supervisor composes one allowlisted headless drain and no other claimer", 
   });
 
   assert.equal(created, 1);
-  assert.equal(supervisor.headlessInstanceId, deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE));
-  assert.equal(supervisor.headlessWakeSkipReason, null);
+  assert.deepEqual(supervisor.headlessInstanceIds, [deriveProfileInstanceId("codex-bob-test")]);
+  assert.deepEqual(supervisor.headlessWakeSkipReasons, {});
   const controller = new AbortController();
   const watching = supervisor.watch({ signal: controller.signal });
   await new Promise((resolve) => setImmediate(resolve));
   controller.abort();
   const result = await watching;
-  assert.equal(result.headlessWake?.skipped, false);
+  assert.equal(result.headlessWakes[0]?.skipped, false);
   assert.deepEqual(drainEvents, ["start", "stop"]);
   assert.deepEqual(claimer.events, ["assert", "acquire", "release"]);
 });
@@ -1250,7 +1248,7 @@ test("supervisor skips headless admission when the dedicated drain LaunchAgent i
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [headlessWakeFixture()],
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
     createWorker: () => ({
@@ -1270,17 +1268,18 @@ test("supervisor skips headless admission when the dedicated drain LaunchAgent i
   });
 
   assert.equal(created, 0);
-  assert.equal(supervisor.headlessWakeSkipReason, "dedicated_headless_drain_loaded");
+  assert.equal(supervisor.headlessWakeSkipReasons["codex-bob-test"], "dedicated_headless_drain_loaded");
   const result = await supervisor.watch({ signal: AbortSignal.timeout(50) });
-  assert.deepEqual(result.headlessWake, {
+  assert.deepEqual(result.headlessWakes[0], {
     skipped: true,
     reason: "dedicated_headless_drain_loaded",
+    profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
   });
   assert.equal(logs.some((entry) => entry.event === "triangle_client_headless_wake_skipped"), true);
 });
 
 test("supervisor rejects headlessWake collision with every other mailbox claimer", () => {
-  const headlessId = deriveProfileInstanceId(PINNED_HEADLESS_DRAIN_PROFILE);
+  const headlessId = deriveProfileInstanceId("codex-bob-test");
   const factories = {
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
@@ -1307,7 +1306,7 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: headlessId },
     }],
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [headlessWakeFixture()],
     ...factories,
   }), /collides/i);
 
@@ -1322,7 +1321,7 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
         runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: headlessId },
       }],
     },
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [headlessWakeFixture()],
     ...factories,
   }), /collides/i);
 
@@ -1332,7 +1331,7 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
       ...appServerWakeFixture(3),
       binding: { ...appServerWakeFixture(3).binding, instanceId: headlessId },
     },
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [headlessWakeFixture()],
     ...factories,
   }), /collides/i);
 
@@ -1342,29 +1341,137 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
       ...grokBotWakeFixture(4),
       binding: { ...grokBotWakeFixture(4).binding, instanceId: headlessId },
     },
-    headlessWake: headlessWakeFixture(),
+    headlessWakes: [headlessWakeFixture()],
     ...factories,
   }), /collides/i);
 });
 
-test("supervisor rejects non-allowlisted headless profiles and rooms", () => {
+test("supervisor does not put grok-bot on the Codex headless pool", () => {
+  const factories = {
+    createHeadlessDrain: () => ({ async start() {}, async stop() {} }),
+    createClaimerGuard: fakeClaimerGuard().create,
+    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+  };
+  const grok = grokBotWakeFixture(4);
+  const headless = headlessWakeFixture();
+  const supervisor = createClientSupervisor({
+    instances: [],
+    grokBotWake: grok,
+    headlessWakes: [headless],
+    ...factories,
+  });
+  assert.equal(supervisor.grokBotInstanceId, grok.binding.instanceId);
+  assert.deepEqual(supervisor.headlessInstanceIds, [headless.profileInstanceId]);
+  assert.notEqual(supervisor.grokBotInstanceId, supervisor.headlessInstanceIds[0]);
+});
+
+test("supervisor accepts Codex headless without Mini pin or classic room_77 pin", () => {
   const factories = {
     createHeadlessDrain: () => ({ async start() {}, async stop() {} }),
     createClaimerGuard: fakeClaimerGuard().create,
   };
-  assert.throws(() => createClientSupervisor({
+  const supervisor = createClientSupervisor({
     instances: [],
-    headlessWake: headlessWakeFixture({
+    headlessWakes: [headlessWakeFixture({
       profile: "codex-bob-test",
       profileInstanceId: deriveProfileInstanceId("codex-bob-test"),
-    }),
+    })],
     ...factories,
-  }), /not explicitly enabled/);
+  });
+  assert.equal(supervisor.headlessWakes[0].profile, "codex-bob-test");
+  assert.equal(Object.hasOwn(supervisor.headlessWakes[0], "allowedRoomId"), false);
+});
+
+test("supervisor constructs and exposes one isolated drain per sorted headless profile", () => {
+  const createdDrains = [];
+  const createdGuards = [];
+  const wakes = [
+    headlessWakeFixture({ profile: "codex-headless", profileInstanceId: deriveProfileInstanceId("codex-headless"), stateRoot: "/state/headless" }),
+    headlessWakeFixture({ stateRoot: "/state/bob" }),
+  ];
+  const supervisor = createClientSupervisor({
+    instances: [], headlessWakes: wakes,
+    createHeadlessDrain(config) { createdDrains.push(config.profile); return { async start() {}, async stop() {} }; },
+    createClaimerGuard(options) { createdGuards.push(options); return fakeClaimerGuard().create(); },
+  });
+  assert.deepEqual(supervisor.headlessInstanceIds, wakes.slice().sort((a, b) => a.profile.localeCompare(b.profile)).map((wake) => wake.profileInstanceId));
+  assert.deepEqual(createdDrains, ["codex-bob-test", "codex-headless"]);
+  assert.deepEqual(createdGuards.map(({ profile }) => profile), ["codex-bob-test", "codex-headless"]);
+  assert.equal(Object.isFrozen(supervisor.headlessWakes), true);
+});
+
+test("supervisor rolls back multi-drain startup and shuts down in reverse order", async () => {
+  const events = [];
+  const wakes = [
+    headlessWakeFixture({ stateRoot: "/state/bob" }),
+    headlessWakeFixture({ profile: "codex-headless", profileInstanceId: deriveProfileInstanceId("codex-headless"), stateRoot: "/state/headless" }),
+  ];
+  const supervisor = createClientSupervisor({
+    instances: [], headlessWakes: wakes,
+    createClaimerGuard({ profile }) { return { assertSupervisorMayClaim() {}, acquire() { events.push(`acquire:${profile}`); }, release() { events.push(`release:${profile}`); } }; },
+    createHeadlessDrain({ profile }) { return { async start() { events.push(`start:${profile}`); if (profile === "codex-headless") throw new Error("boom"); }, async stop() { events.push(`stop:${profile}`); } }; },
+    logger: { error() {} },
+  });
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 20);
+  await supervisor.watch({ signal: controller.signal });
+  assert.ok(events.indexOf("stop:codex-headless") < events.indexOf("stop:codex-bob-test"));
+  assert.ok(events.indexOf("release:codex-headless") < events.indexOf("release:codex-bob-test"));
+  assert.ok(events.indexOf("stop:codex-headless") < events.indexOf("release:codex-headless"));
+  assert.ok(events.indexOf("stop:codex-bob-test") < events.indexOf("release:codex-bob-test"));
+});
+
+test("supervisor fails closed for the whole headless pool when either guard conflicts", async () => {
+  const created = [];
+  const started = [];
+  const wakes = [
+    headlessWakeFixture({ stateRoot: "/state/bob" }),
+    headlessWakeFixture({ profile: "codex-headless", profileInstanceId: deriveProfileInstanceId("codex-headless"), stateRoot: "/state/headless" }),
+  ];
+  const supervisor = createClientSupervisor({
+    instances: [], headlessWakes: wakes,
+    createClaimerGuard({ profile }) {
+      return {
+        assertSupervisorMayClaim() {
+          if (profile === "codex-headless") {
+            const error = new Error("dedicated loaded");
+            error.code = "dedicated_headless_drain_loaded";
+            throw error;
+          }
+        },
+        acquire() { throw new Error("must not acquire any pool guard"); },
+        release() {},
+      };
+    },
+    createHeadlessDrain({ profile }) {
+      created.push(profile);
+      return { async start() { started.push(profile); }, async stop() {} };
+    },
+    logger: { error() {} },
+  });
+  assert.deepEqual(created, []);
+  const result = await supervisor.watch({ signal: AbortSignal.timeout(20) });
+  assert.deepEqual(started, []);
+  assert.equal(supervisor.headlessWakeSkipReasons["codex-headless"], "dedicated_headless_drain_loaded");
+  assert.equal(result.headlessWakes.length, 2);
+  assert.equal(result.headlessWakes.every(({ skipped }) => skipped), true);
+});
+
+test("supervisor rejects the retired singleton headlessWake API", () => {
+  assert.throws(
+    () => createClientSupervisor({ instances: [], headlessWake: headlessWakeFixture() }),
+    /headlessWake.*not supported/i,
+  );
+});
+
+test("supervisor rejects canonical state-root collisions and room-pinned v2 wakes", () => {
+  const bob = headlessWakeFixture({ stateRoot: "/state/a/../shared" });
+  const headless = headlessWakeFixture({ profile: "codex-headless", profileInstanceId: deriveProfileInstanceId("codex-headless"), stateRoot: "/state/shared" });
+  assert.throws(() => createClientSupervisor({ instances: [], headlessWakes: [bob, headless] }), /stateRoot/i);
   assert.throws(() => createClientSupervisor({
     instances: [],
-    headlessWake: headlessWakeFixture({
-      allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    }),
-    ...factories,
-  }), /allowlisted Mini canary room/);
+    headlessWakes: [headlessWakeFixture({ allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })],
+  }), /allowedRoomId|schema/i);
 });

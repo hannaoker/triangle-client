@@ -281,3 +281,6 @@ An operator has:
 4. Set `event-driven` delivery and run `watch-ensure` + `watch-status`
 5. Understood where App Server / desktop wake docs live, without claiming Mac
    Gate results from Linux
+6. For the product headless supervisor path, followed
+   [headless-supervisor-cutover.md](headless-supervisor-cutover.md) instead of
+   leaving Codex on `mcp-interactive`

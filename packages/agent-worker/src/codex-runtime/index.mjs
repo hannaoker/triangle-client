@@ -1,11 +1,11 @@
 /**
- * Headless Codex worker runtime surface (Phase 0–5).
+ * Headless Codex worker runtime surface.
  *
- * Phase 5 adds migration machinery + schema classification + gated new-profile
- * defaults. Production mcp-interactive / desktop Shared App Server stays the
- * default path until Phase 5 is explicitly enabled. Global
- * featureFlags.headlessRuntime, helperConversationStore, and desktopHandoff
- * remain false in the immutable manifest.
+ * Product default: Codex profiles use headless App Server. grok-bot stays on
+ * grokBotWake and never enters the Codex pool. Mini-only allowlists are not
+ * the product gate. Pool size 1 and desktop handoff remain off until shared
+ * CODEX_HOME is proved. Global featureFlags.headlessRuntime stays false in the
+ * immutable manifest.
  */
 
 export {
@@ -136,13 +136,20 @@ export {
   CLIENT_SUPERVISOR_CLAIMER_OWNER,
   DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER,
   HEADLESS_WAKE_KEYS,
+  HEADLESS_WAKE_OPTIONAL_KEYS,
+  HEADLESS_WAKE_REQUIRED_KEYS,
+  MINI_HEADLESS_CANARY_PROFILE,
+  MINI_HEADLESS_CANARY_ROOM_ID,
   PINNED_HEADLESS_DRAIN_PROFILE,
   PINNED_HEADLESS_DRAIN_ROOM_ID,
+  assertHeadlessDrainIdentity,
   assertPinnedHeadlessDrainAllowlist,
   createHeadlessClaimerGuard,
   createInstalledHeadlessDrain,
   dedicatedHeadlessDrainLaunchAgentLabel,
   deriveProfileInstanceId,
+  hasHeadlessWakeKeys,
+  isGrokBotRuntimeAdapter,
   loadHeadlessDrainConfig,
   normalizeHeadlessWakeConfig,
   probeDedicatedHeadlessDrainLoaded,

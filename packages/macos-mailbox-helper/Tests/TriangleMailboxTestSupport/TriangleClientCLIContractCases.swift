@@ -85,7 +85,7 @@ public enum TriangleClientCLIContractCases {
         _ = try await service.execute(.add(profile: fixture.profile, adapter: .codex))
         try clientExpect(fixture.events.values == ["credential", "runtime:codex", "create"], "add mutation occurred before verification/readiness: \(fixture.events.values)")
         try clientExpect(fixture.serviceControl.reloadCount == 1, "first add did not activate the staged client")
-        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true:worker"]], "first activation did not use the exact committed profile")
+        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true:headless-app-server"]], "first activation did not use the exact committed profile")
 
         let failed = try Fixture()
         let failing = failed.service(readiness: { _ in throw TriangleClientOperationError.runtimeUnavailable })
@@ -514,7 +514,7 @@ private final class RecordingServiceControl: TriangleClientServiceControlling, @
     func applyAndVerify(shouldRun: Bool) throws {
         let count = lock.withLock { reloadCount += 1; return reloadCount }
         snapshots.append(try instances.list().map { "\($0.profile.value):\($0.enabled):\($0.deliveryMode.rawValue)" })
-        let expected = try instances.list().contains(where: { $0.participatesInWorkerPolling })
+        let expected = try instances.list().contains(where: \.participatesInClientSupervisor)
         if shouldRun != expected { throw TriangleClientLifecycleError.reloadFailed }
         if lock.withLock({ failures.contains(count) }) { throw TriangleClientLifecycleError.reloadFailed }
     }

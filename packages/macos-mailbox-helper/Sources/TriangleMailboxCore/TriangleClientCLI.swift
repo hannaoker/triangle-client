@@ -123,11 +123,11 @@ public struct TriangleClientAgentService: Sendable {
     private func reloadOrRollback(_ rollback: () throws -> Void) throws {
         do {
             try serviceControl.applyAndVerify(
-                shouldRun: try instanceStore.list().contains(where: { $0.participatesInWorkerPolling })
+                shouldRun: try instanceStore.list().contains(where: \.participatesInClientSupervisor)
             )
         }
         catch {
-            do { try rollback(); try serviceControl.applyAndVerify(shouldRun: try instanceStore.list().contains(where: { $0.participatesInWorkerPolling })) }
+            do { try rollback(); try serviceControl.applyAndVerify(shouldRun: try instanceStore.list().contains(where: \.participatesInClientSupervisor)) }
             catch { throw TriangleClientLifecycleError.rollbackFailed }
             throw TriangleClientLifecycleError.reloadFailed
         }

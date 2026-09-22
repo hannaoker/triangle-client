@@ -108,26 +108,26 @@ function createBindingStore(initial) {
   };
 }
 
-test("Phase 5 feature gate stays off by default; env/injection enables machinery", () => {
-  assert.equal(isPhase5MigrationEnabled({ manifest: SAFE_MANIFEST, env: {} }), false);
+test("Phase 5 feature gate stays operator-disableable; headless is the product default", () => {
+  assert.equal(isPhase5MigrationEnabled({ manifest: SAFE_MANIFEST, env: {} }), true);
   assert.equal(loadRuntimeManifest({ forceReload: true }).featureFlags.headlessRuntime, false);
 
-  const off = resolvePhase5MigrationConfig(
+  const on = resolvePhase5MigrationConfig(
     { profileId: "codex-bob-test" },
     { manifest: SAFE_MANIFEST, env: {} },
   );
-  assert.equal(off.active, false);
-  assert.equal(off.newProfileDefaultHeadless, false);
-  assert.equal(off.migrationOperationsEnabled, false);
-  assert.equal(off.inactiveReason, "phase5_migration_not_enabled");
-  assert.equal(off.globalHeadlessRuntimeFlag, false);
+  assert.equal(on.active, true);
+  assert.equal(on.newProfileDefaultHeadless, true);
+  assert.equal(on.migrationOperationsEnabled, true);
+  assert.equal(on.globalHeadlessRuntimeFlag, false);
 
-  const viaEnv = resolvePhase5MigrationConfig(
+  const viaDisable = resolvePhase5MigrationConfig(
     { profileId: "codex-bob-test" },
-    { manifest: SAFE_MANIFEST, env: { TRIANGLE_PHASE5_MIGRATION_ENABLE: "1" } },
+    { manifest: SAFE_MANIFEST, env: { TRIANGLE_PHASE5_MIGRATION_ENABLE: "0" } },
   );
-  assert.equal(viaEnv.active, true);
-  assert.equal(viaEnv.newProfileDefaultHeadless, true);
+  assert.equal(viaDisable.active, false);
+  assert.equal(viaDisable.newProfileDefaultHeadless, true);
+  assert.equal(viaDisable.inactiveReason, "phase5_migration_not_enabled");
 
   const viaFlag = resolvePhase5MigrationConfig(
     { profileId: "x" },
@@ -136,7 +136,7 @@ test("Phase 5 feature gate stays off by default; env/injection enables machinery
   assert.equal(viaFlag.active, true);
 });
 
-test("production headless runtime requires Phase 5 plus an exact profile allowlist", () => {
+test("production headless runtime activates any Codex profile without Mini allowlist", () => {
   const profile = {
     profileId: "codex-headless",
     executionKind: CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER,
@@ -146,41 +146,43 @@ test("production headless runtime requires Phase 5 plus an exact profile allowli
     codexPool: { preferredSize: 1, maxSize: 1 },
   };
 
-  assert.equal(
-    resolveHeadlessRuntimeConfig(profile, { manifest: SAFE_MANIFEST, env: {} }).active,
-    false,
-  );
-  assert.equal(
-    resolveHeadlessRuntimeConfig(profile, {
-      manifest: SAFE_MANIFEST,
-      env: { TRIANGLE_PHASE5_MIGRATION_ENABLE: "1" },
-    }).inactiveReason,
-    "headless_profile_not_allowlisted",
-  );
-
-  const enabled = resolveHeadlessRuntimeConfig(profile, {
-    manifest: SAFE_MANIFEST,
-    env: {
-      TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
-      TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-headless",
-    },
-  });
+  const enabled = resolveHeadlessRuntimeConfig(profile, { manifest: SAFE_MANIFEST, env: {} });
   assert.equal(enabled.active, true);
-  assert.equal(enabled.activationMode, "phase5_profile");
+  assert.equal(enabled.activationMode, "headless_app_server");
+  assert.equal(enabled.pool.preferredSize, 1);
+  assert.equal(enabled.desktopHandoffEnabled, false);
 
-  assert.equal(
-    resolveHeadlessRuntimeConfig(
-      { ...profile, profileId: "codex-bob-test" },
-      {
-        manifest: SAFE_MANIFEST,
-        env: {
-          TRIANGLE_PHASE5_MIGRATION_ENABLE: "1",
-          TRIANGLE_HEADLESS_RUNTIME_PROFILES: "codex-headless",
-        },
-      },
-    ).active,
-    false,
+  const production = resolveHeadlessRuntimeConfig(
+    { ...profile, profileId: "codex-bob-test" },
+    { manifest: SAFE_MANIFEST, env: {} },
   );
+  assert.equal(production.active, true);
+  assert.equal(production.profileId, "codex-bob-test");
+
+  const grok = resolveHeadlessRuntimeConfig(
+    {
+      profileId: "bob",
+      executionKind: CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER,
+      runtimeAdapter: "grok-bot",
+      runtimeMode: "headless",
+      deliveryMode: "grok-bot",
+    },
+    { manifest: SAFE_MANIFEST, env: {} },
+  );
+  assert.equal(grok.active, false);
+  assert.equal(grok.inactiveReason, "grok_bot_not_in_codex_pool");
+
+  const desktop = resolveHeadlessRuntimeConfig(
+    {
+      profileId: "codex-bob-test",
+      executionKind: CODEX_EXECUTION_KIND.DESKTOP_APP_SERVER,
+      runtimeAdapter: "codex-app-server",
+      runtimeMode: "desktop",
+      deliveryMode: "mcp-interactive",
+    },
+    { manifest: SAFE_MANIFEST, env: {} },
+  );
+  assert.equal(desktop.active, false);
 });
 
 test("profile schema classifies legacy vs desktop vs headless App Server", () => {
@@ -217,31 +219,41 @@ test("profile schema classifies legacy vs desktop vs headless App Server", () =>
   assert.equal(isMcpInteractiveDesktopProfile(annotated), true);
 });
 
-test("new Codex profile defaults to desktop without Phase 5; headless only when enabled", () => {
+test("new Codex profile defaults to headless App Server; grok-bot cannot use the factory", () => {
   const productionDefault = createDefaultCodexProfileConfig({
     profileId: "codex-bob-test",
     manifest: SAFE_MANIFEST,
     env: {},
   });
-  assert.equal(productionDefault.phase5DefaultApplied, false);
-  assert.equal(productionDefault.deliveryMode, "mcp-interactive");
-  assert.equal(productionDefault.runtimeMode, "desktop");
-  assert.equal(productionDefault.executionKind, CODEX_EXECUTION_KIND.DESKTOP_APP_SERVER);
-  assert.equal(wouldNewCodexProfileDefaultToHeadless({ manifest: SAFE_MANIFEST, env: {} }), false);
+  assert.equal(productionDefault.phase5DefaultApplied, true);
+  assert.equal(productionDefault.deliveryMode, "headless-app-server");
+  assert.equal(productionDefault.runtimeMode, "headless");
+  assert.equal(productionDefault.runtimeAdapter, "codex-app-server");
+  assert.equal(productionDefault.executionKind, CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER);
+  assert.equal(productionDefault.conversationKey, "roomId");
+  assert.equal(productionDefault.codexPool.preferredSize, 1);
+  assert.equal(wouldNewCodexProfileDefaultToHeadless({ manifest: SAFE_MANIFEST, env: {} }), true);
 
-  const phase5Default = createDefaultCodexProfileConfig({
+  const another = createDefaultCodexProfileConfig({
     profileId: "codex-new-headless",
     manifest: SAFE_MANIFEST,
     env: {},
-    enablePhase5Migration: true,
   });
-  assert.equal(phase5Default.phase5DefaultApplied, true);
-  assert.equal(phase5Default.runtimeMode, "headless");
-  assert.equal(phase5Default.runtimeAdapter, "codex-app-server");
-  assert.equal(phase5Default.executionKind, CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER);
-  assert.equal(phase5Default.schemaVersion, CODEX_PROFILE_SCHEMA_VERSION.HEADLESS_APP_SERVER);
-  // event-driven delivery is mailbox membership; executionKind is headless App Server
-  assert.equal(phase5Default.deliveryMode, "event-driven");
+  assert.equal(another.runtimeMode, "headless");
+  assert.equal(another.runtimeAdapter, "codex-app-server");
+  assert.equal(another.executionKind, CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER);
+  assert.equal(another.schemaVersion, CODEX_PROFILE_SCHEMA_VERSION.HEADLESS_APP_SERVER);
+  assert.equal(another.deliveryMode, "headless-app-server");
+
+  assert.throws(
+    () => createDefaultCodexProfileConfig({
+      profileId: "bob",
+      manifest: SAFE_MANIFEST,
+      env: {},
+      overrides: { runtimeAdapter: "grok-bot" },
+    }),
+    (error) => error.code === "grok_bot_not_in_codex_pool",
+  );
 });
 
 test("existing mcp-interactive unchanged without migrate; migrate rejects when disabled", async () => {
@@ -343,7 +355,7 @@ test("migrate-to-headless + rollback-to-desktop are transactional and single-con
 
     const after = await configStore.read(PROFILE_ID);
     assert.equal(after.runtimeMode, "headless");
-    assert.equal(after.deliveryMode, "event-driven");
+    assert.equal(after.deliveryMode, "headless-app-server");
     assert.equal(after.executionKind, CODEX_EXECUTION_KIND.HEADLESS_APP_SERVER);
     assert.equal(store.readProfile(PROFILE_INSTANCE).runtime_mode, "headless");
 
