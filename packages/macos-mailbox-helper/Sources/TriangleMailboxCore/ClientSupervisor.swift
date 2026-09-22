@@ -239,10 +239,10 @@ public struct ClientSupervisor: Sendable {
             coordinatorSources = wakeMembers
         } else if !appServerMembers.isEmpty {
             coordinatorSources = appServerMembers
-        } else if !grokBotMembers.isEmpty {
-            coordinatorSources = grokBotMembers
-        } else {
+        } else if !headlessMembers.isEmpty {
             coordinatorSources = headlessMembers
+        } else {
+            coordinatorSources = grokBotMembers
         }
         guard !coordinatorSources.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
         let coordinator: WorkerCommand
@@ -318,16 +318,16 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        let headlessWake: PreparedHeadlessWakeBootstrap?
+        let headlessWakes: [PreparedHeadlessWakeBootstrap]
         do {
-            headlessWake = try await prepareHeadlessWake(members: headlessMembers, omitted: &omitted)
+            headlessWakes = try await prepareHeadlessWakes(members: headlessMembers, omitted: &omitted)
         } catch let error as ClientSupervisorError {
             throw error
         } catch {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil || headlessWake != nil else {
+        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil || !headlessWakes.isEmpty else {
             throw ClientSupervisorError.noEligibleInstances
         }
 
@@ -360,7 +360,7 @@ public struct ClientSupervisor: Sendable {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
-        if let headlessWake {
+        for headlessWake in headlessWakes {
             let workerIds = Set(prepared.map(\.instanceId))
             let wakeIds = Set(eventWake?.profiles.map(\.instanceId) ?? [])
             guard !workerIds.contains(headlessWake.profileInstanceId),
@@ -387,7 +387,7 @@ public struct ClientSupervisor: Sendable {
             eventWake: eventWake,
             appServerWake: appServerWake,
             grokBotWake: grokBotWake,
-            headlessWake: headlessWake
+            headlessWakes: headlessWakes
         )
         let data: Data
         do {
@@ -709,11 +709,11 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
-    private func prepareHeadlessWake(
+    private func prepareHeadlessWakes(
         members: [ClientInstance],
         omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> PreparedHeadlessWakeBootstrap? {
-        guard !members.isEmpty else { return nil }
+    ) async throws -> [PreparedHeadlessWakeBootstrap] {
+        guard !members.isEmpty else { return [] }
         guard helperExecutableURL.path.hasPrefix("/"),
               FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
         else { throw ClientSupervisorError.runtimeUnavailable }
@@ -726,7 +726,7 @@ public struct ClientSupervisor: Sendable {
                     reasonCode: "headless_runtime_binding_missing"
                 ))
             }
-            return nil
+            return []
         }
 
         let bindingData: Data
@@ -739,35 +739,6 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
-        let bindingInstanceIdHint = object["instanceId"] as? String
-        let matched = sortedMembers.first(where: { $0.instanceID.value == bindingInstanceIdHint })
-        guard let primary = matched ?? (sortedMembers.count == 1 ? sortedMembers.first : nil) else {
-            for instance in sortedMembers {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "headless_runtime_binding_mismatch"
-                ))
-            }
-            return nil
-        }
-
-        guard primary.runtimeAdapter == .codex else {
-            omitted.append(.init(
-                instanceID: primary.instanceID.value,
-                reasonCode: "grok_bot_not_in_codex_pool"
-            ))
-            return nil
-        }
-
-        if isDedicatedHeadlessDrainLoaded(primary.profile.value) {
-            omitted.append(.init(
-                instanceID: primary.instanceID.value,
-                reasonCode: "dedicated_headless_drain_loaded"
-            ))
-            return nil
-        }
-
         let installationID: InstallationID
         do {
             installationID = try installationIdentity.resolve()
@@ -775,86 +746,132 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.runtimeUnavailable
         }
 
-        let credential: VerifiedCredential
-        do {
-            credential = try await gate.credential(for: primary.profile)
-        } catch {
-            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
-            return nil
-        }
-        guard !credential.agentID.value.isEmpty else {
-            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
-            return nil
-        }
+        let topLevelKeys: Set<String> = ["version", "common", "profiles"]
+        let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", "codexHome", "command", "pollIntervalMs"]
+        let profileKeys: Set<String> = ["profile", "instanceId", "stateRoot"]
+        guard Set(object.keys) == topLevelKeys,
+              object["version"] as? Int == 2,
+              let common = object["common"] as? [String: Any],
+              Set(common.keys) == commonKeys,
+              let profileObjects = object["profiles"] as? [[String: Any]],
+              !profileObjects.isEmpty,
+              profileObjects.count <= 100,
+              profileObjects.allSatisfy({ Set($0.keys) == profileKeys })
+        else { throw ClientSupervisorError.invalidBootstrap }
 
         let pollIntervalMs: Int
-        if let number = object["pollIntervalMs"] as? Int {
-            pollIntervalMs = number
-        } else if let number = object["pollIntervalMs"] as? NSNumber {
+        if let number = common["pollIntervalMs"] as? NSNumber,
+           number.doubleValue.isFinite,
+           number.doubleValue.rounded(.towardZero) == number.doubleValue,
+           number.doubleValue >= Double(Int.min),
+           number.doubleValue <= Double(Int.max) {
             pollIntervalMs = number.intValue
         } else {
-            omitted.append(.init(
-                instanceID: primary.instanceID.value,
-                reasonCode: "headless_runtime_binding_mismatch"
-            ))
-            return nil
+            throw ClientSupervisorError.invalidBootstrap
         }
 
-        guard let adapterVersion = object["adapterVersion"] as? String,
+        guard let adapterVersion = common["adapterVersion"] as? String,
               adapterVersion == "1",
-              object["enabled"] as? Bool == true,
-              let bindingProfile = object["profile"] as? String,
-              bindingProfile == primary.profile.value,
-              let bindingInstallationId = object["installationId"] as? String,
+              let bindingInstallationId = common["installationId"] as? String,
               bindingInstallationId == installationID.value,
-              let bindingInstanceId = object["instanceId"] as? String,
-              bindingInstanceId == primary.instanceID.value,
-              let workingDirectory = object["workingDirectory"] as? String,
+              let workingDirectory = common["workingDirectory"] as? String,
               workingDirectory.hasPrefix("/"),
               !workingDirectory.contains("\0"),
-              let codexHome = object["codexHome"] as? String,
+              let codexHome = common["codexHome"] as? String,
               codexHome.hasPrefix("/"),
               !codexHome.contains("\0"),
-              let stateRoot = object["stateRoot"] as? String,
-              stateRoot.hasPrefix("/"),
-              !stateRoot.contains("\0"),
-              let command = object["command"] as? String,
+              let command = common["command"] as? String,
               command.hasPrefix("/"),
               !command.contains("\0"),
               (100...60_000).contains(pollIntervalMs)
-        else {
-            omitted.append(.init(
-                instanceID: primary.instanceID.value,
-                reasonCode: "headless_runtime_binding_mismatch"
-            ))
-            return nil
-        }
+        else { throw ClientSupervisorError.invalidBootstrap }
 
-        let allowedRoomId: String?
-        if object["allowedRoomId"] == nil {
-            allowedRoomId = nil
-        } else if let room = object["allowedRoomId"] as? String,
-                  room.wholeMatch(of: /^room_[a-f0-9]{32}$/) != nil {
-            allowedRoomId = room
-        } else {
-            omitted.append(.init(
-                instanceID: primary.instanceID.value,
-                reasonCode: "headless_runtime_binding_mismatch"
-            ))
-            return nil
+        struct BindingEntry {
+            let profile: String
+            let instanceId: String
+            let stateRoot: String
         }
+        func containsSymlinkComponent(_ path: String) -> Bool {
+            var current = "/"
+            for component in (path as NSString).pathComponents.dropFirst() {
+                current = (current as NSString).appendingPathComponent(component)
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: current) else {
+                    continue // A staged suffix may not exist yet.
+                }
+                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                    return true
+                }
+            }
+            return false
+        }
+        let entries: [BindingEntry] = try profileObjects.map { entry in
+            guard let profile = entry["profile"] as? String,
+                  let instanceId = entry["instanceId"] as? String,
+                  let stateRoot = entry["stateRoot"] as? String,
+                  stateRoot.hasPrefix("/"),
+                  !stateRoot.contains("\0")
+            else { throw ClientSupervisorError.invalidBootstrap }
+            let standardizedStateRoot = URL(fileURLWithPath: stateRoot).standardizedFileURL.path
+            guard stateRoot == standardizedStateRoot,
+                  !containsSymlinkComponent(standardizedStateRoot)
+            else { throw ClientSupervisorError.invalidBootstrap }
+            return BindingEntry(profile: profile, instanceId: instanceId, stateRoot: standardizedStateRoot)
+        }
+        guard Set(entries.map(\.profile)).count == entries.count,
+              Set(entries.map(\.instanceId)).count == entries.count,
+              Set(entries.map(\.stateRoot)).count == entries.count
+        else { throw ClientSupervisorError.invalidBootstrap }
 
-        return PreparedHeadlessWakeBootstrap(
-            profile: primary.profile.value,
-            profileInstanceId: primary.instanceID.value,
-            helperPath: helperExecutableURL.path,
-            allowedRoomId: allowedRoomId,
-            workingDirectory: workingDirectory,
-            codexHome: codexHome,
-            stateRoot: stateRoot,
-            command: command,
-            pollIntervalMs: pollIntervalMs
-        )
+        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
+        let memberProfiles = Set(sortedMembers.map { $0.profile.value })
+        guard entries.allSatisfy({ memberProfiles.contains($0.profile) }) else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        var prepared: [PreparedHeadlessWakeBootstrap] = []
+        var credentialTokens: Set<String> = []
+        var credentialAgentIds: Set<String> = []
+        for member in sortedMembers {
+            guard member.runtimeAdapter == .codex else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "grok_bot_not_in_codex_pool"))
+                continue
+            }
+            guard let entry = entries.first(where: { $0.profile == member.profile.value }),
+                  entry.instanceId == member.instanceID.value
+            else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "headless_runtime_binding_mismatch"))
+                continue
+            }
+            if isDedicatedHeadlessDrainLoaded(member.profile.value) {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "dedicated_headless_drain_loaded"))
+                continue
+            }
+            let credential: VerifiedCredential
+            do {
+                credential = try await gate.credential(for: member.profile)
+            } catch {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
+                continue
+            }
+            guard !credential.agentID.value.isEmpty else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
+                continue
+            }
+            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+                  credentialAgentIds.insert(credential.agentID.value).inserted
+            else { throw ClientSupervisorError.invalidBootstrap }
+            prepared.append(PreparedHeadlessWakeBootstrap(
+                profile: member.profile.value,
+                profileInstanceId: member.instanceID.value,
+                helperPath: helperExecutableURL.path,
+                allowedRoomId: nil,
+                workingDirectory: workingDirectory,
+                codexHome: codexHome,
+                stateRoot: entry.stateRoot,
+                command: command,
+                pollIntervalMs: pollIntervalMs
+            ))
+        }
+        return prepared
     }
 
     public func run() async throws {
@@ -872,7 +889,10 @@ public struct ClientSupervisor: Sendable {
     }
 
     public func preflight() async throws {
-        _ = try await prepareEnabledInstances()
+        let launch = try await prepareEnabledInstances()
+        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") }) else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
     }
 
     private func validateCoordinator(_ command: WorkerCommand) throws {
@@ -917,10 +937,10 @@ private struct PreparedBootstrap: Encodable {
     let eventWake: PreparedEventWakeBootstrap?
     let appServerWake: PreparedAppServerWakeBootstrap?
     let grokBotWake: PreparedGrokBotWakeBootstrap?
-    let headlessWake: PreparedHeadlessWakeBootstrap?
+    let headlessWakes: [PreparedHeadlessWakeBootstrap]
 
     private enum CodingKeys: String, CodingKey {
-        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWake
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes
     }
 
     func encode(to encoder: Encoder) throws {
@@ -931,7 +951,7 @@ private struct PreparedBootstrap: Encodable {
         try container.encodeIfPresent(eventWake, forKey: .eventWake)
         try container.encodeIfPresent(appServerWake, forKey: .appServerWake)
         try container.encodeIfPresent(grokBotWake, forKey: .grokBotWake)
-        try container.encodeIfPresent(headlessWake, forKey: .headlessWake)
+        try container.encode(headlessWakes, forKey: .headlessWakes)
     }
 }
 private struct PreparedBootstrapInstance: Encodable {
