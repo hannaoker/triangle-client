@@ -125,6 +125,7 @@ printf '%s\\n' "$*" >> "${launchctlLog}"
 command=\$1
 target=\${2:-}
 if [[ "\$command" == bootstrap ]]; then
+  if [[ "\${TRIANGLE_TEST_FAIL_BOOTSTRAP:-}" == "1" ]]; then exit 75; fi
   label=\$(basename "\$3" .plist)
   /usr/bin/touch "${stateDir}/\$label"
 elif [[ "\$command" == bootout ]]; then
@@ -214,7 +215,7 @@ function run(action, env) {
 
 test("plan refuses Linux hosts without TRIANGLE_TEST_MODE", () => {
   const result = spawnSync("bash", [script, "plan"], {
-    env: { ...process.env, HOME: "/tmp", TRIANGLE_TEST_MODE: "" },
+    env: { ...process.env, HOME: "/tmp", TRIANGLE_TEST_MODE: "", TRIANGLE_UNAME_S: "Linux" },
     encoding: "utf8",
   });
   assert.notEqual(result.status, 0);
@@ -247,11 +248,29 @@ test("plan flips remaining mcp-interactive Codex and leaves grok-bot untouched",
   }]);
   assert.equal(plan.stopSharedAppServer, true);
   assert.equal(plan.bootoutDedicatedDrain, true);
-  assert.equal(plan.binding.profile, "codex-headless");
-  assert.equal(plan.binding.workingDirectory, f.workdir);
-  assert.equal(plan.binding.codexHome, f.codexHome);
-  assert.equal(plan.binding.stateRoot, f.stateRoot);
-  assert.equal(plan.binding.command, f.command);
+  assert.deepEqual(plan.binding, {
+    version: 2,
+    common: {
+      adapterVersion: "1",
+      installationId: "inst_N7VhDq3mQ2",
+      workingDirectory: f.workdir,
+      codexHome: f.codexHome,
+      command: f.command,
+      pollIntervalMs: 1000,
+    },
+    profiles: [
+      {
+        profile: "codex-bob-test",
+        instanceId: instanceId("codex-bob-test"),
+        stateRoot: path.join(f.app, "model-state", "headless-drain", "codex-bob-test"),
+      },
+      {
+        profile: "codex-headless",
+        instanceId: instanceId("codex-headless"),
+        stateRoot: f.stateRoot,
+      },
+    ],
+  });
   assert.equal("allowedRoomId" in plan.binding, false);
   assert.doesNotMatch(result.stdout, /allowedRoomId|room_77/);
   assert.deepEqual(plan.grokUntouched, [{
@@ -277,12 +296,13 @@ test("apply writes an unpinned binding, stops desktop, flips Codex, and bootouts
   const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
   assert.equal(mode(bindingPath), 0o600);
   assert.equal("allowedRoomId" in binding, false);
-  assert.equal(binding.adapterVersion, "1");
-  assert.equal(binding.enabled, true);
-  assert.equal(binding.profile, "codex-headless");
-  assert.equal(binding.installationId, "inst_N7VhDq3mQ2");
-  assert.equal(binding.instanceId, instanceId("codex-headless"));
-  assert.equal(binding.pollIntervalMs, 1000);
+  assert.deepEqual(Object.keys(binding).sort(), ["common", "profiles", "version"]);
+  assert.equal(binding.version, 2);
+  assert.deepEqual(Object.keys(binding.common).sort(), [
+    "adapterVersion", "codexHome", "command", "installationId", "pollIntervalMs", "workingDirectory",
+  ]);
+  assert.deepEqual(binding.profiles.map(({ profile }) => profile), ["codex-bob-test", "codex-headless"]);
+  assert.equal(new Set(binding.profiles.map(({ stateRoot }) => stateRoot)).size, 2);
   assert.doesNotMatch(fs.readFileSync(bindingPath, "utf8"), /allowedRoomId|room_77|room_8594/);
 
   assert.equal(fs.existsSync(f.drainPlist), false);
@@ -298,3 +318,71 @@ test("apply writes an unpinned binding, stops desktop, flips Codex, and bootouts
   assert.ok(bootoutDrain > bootoutClient, "dedicated drain must bootout after client");
   assert.ok(bootstrapClient > bootoutDrain, "client must start only after dedicated drain is gone");
 });
+
+test("repeat apply migrates safe v1 common inputs and writes only v2", (t) => {
+  const f = fixture(t);
+  fs.rmSync(f.drainPlist);
+  const bindingPath = path.join(f.client, "headless-runtime-binding.json");
+  const legacy = {
+    adapterVersion: "1",
+    enabled: true,
+    profile: "codex-headless",
+    installationId: "inst_N7VhDq3mQ2",
+    instanceId: instanceId("codex-headless"),
+    workingDirectory: f.workdir,
+    codexHome: f.codexHome,
+    stateRoot: f.stateRoot,
+    command: f.command,
+    pollIntervalMs: 1000,
+  };
+  fs.writeFileSync(bindingPath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+  const result = run("apply", f.env);
+  assert.equal(result.status, 0, result.stderr);
+  const binding = JSON.parse(fs.readFileSync(bindingPath, "utf8"));
+  assert.equal(binding.version, 2);
+  assert.equal(binding.common.workingDirectory, legacy.workingDirectory);
+  assert.equal(binding.common.codexHome, legacy.codexHome);
+  assert.equal(binding.common.command, legacy.command);
+  assert.deepEqual(binding.profiles.map(({ profile }) => profile), ["codex-bob-test", "codex-headless"]);
+  assert.equal("enabled" in binding, false);
+  assert.equal("profile" in binding, false);
+});
+
+test("plan rejects stale, unknown, or room-pinned v2 binding entries", (t) => {
+  const cases = [
+    (binding) => binding.profiles.push({ profile: "stale", instanceId: instanceId("stale"), stateRoot: path.join(binding.profiles[0].stateRoot, "stale") }),
+    (binding) => { binding.unknown = true; },
+    (binding) => { binding.common.allowedRoomId = "room_other"; },
+  ];
+  for (const mutate of cases) {
+    const f = fixture(t);
+    const initial = run("plan", f.env);
+    assert.equal(initial.status, 0, initial.stderr);
+    const binding = JSON.parse(initial.stdout).binding;
+    mutate(binding);
+    fs.writeFileSync(path.join(f.client, "headless-runtime-binding.json"), `${JSON.stringify(binding)}\n`, { mode: 0o600 });
+    fs.rmSync(f.drainPlist);
+    const result = run("plan", f.env);
+    assert.equal(result.status, 64, result.stderr);
+    assert.match(result.stderr, /binding|room pin|stale/i);
+  }
+});
+
+for (const version of [1, 2]) {
+  test(`failed restart restores the previous v${version} binding snapshot`, (t) => {
+    const f = fixture(t);
+    const bindingPath = path.join(f.client, "headless-runtime-binding.json");
+    const planned = JSON.parse(run("plan", f.env).stdout).binding;
+    const previous = version === 2 ? planned : {
+      adapterVersion: "1", enabled: true, profile: "codex-headless",
+      installationId: "inst_N7VhDq3mQ2", instanceId: instanceId("codex-headless"),
+      workingDirectory: f.workdir, codexHome: f.codexHome, stateRoot: f.stateRoot,
+      command: f.command, pollIntervalMs: 1000,
+    };
+    const previousBlob = `${JSON.stringify(previous)}\n`;
+    fs.writeFileSync(bindingPath, previousBlob, { mode: 0o600 });
+    const result = run("apply", { ...f.env, TRIANGLE_TEST_FAIL_BOOTSTRAP: "1" });
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.readFileSync(bindingPath, "utf8"), previousBlob);
+  });
+}

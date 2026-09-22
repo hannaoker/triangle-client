@@ -21,7 +21,7 @@ usage() {
 action=$1
 case "$action" in plan|apply) ;; *) usage ;; esac
 
-if [[ "${TRIANGLE_TEST_MODE:-}" != "1" && "$(uname -s)" != Darwin ]]; then
+if [[ "${TRIANGLE_TEST_MODE:-}" != "1" && "${TRIANGLE_UNAME_S:-$(uname -s)}" != Darwin ]]; then
   echo "headless supervisor cutover is macOS-only" >&2
   exit 64
 fi
@@ -64,6 +64,10 @@ label_loaded() {
 
 bootout_label() {
   "$launchctl_command" bootout "${domain}/$1" >/dev/null 2>&1 || true
+  for _ in {1..100}; do
+    label_loaded "$1" || break
+    /bin/sleep 0.05
+  done
 }
 
 python_plan() {
@@ -135,6 +139,26 @@ def parse_drain_plist(path):
         i += 1
     return values
 
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            die(64, f"existing binding has duplicate key: {key}")
+        value[key] = item
+    return value
+
+def parse_binding_json(path):
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle, object_pairs_hook=strict_object)
+        if isinstance(doc, dict):
+            return doc
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        die(64, f"existing binding is invalid: {error}")
+    die(64, "existing binding must be an object")
+
 def require_abs(value, name):
     if not isinstance(value, str) or not value.startswith("/") or "\0" in value:
         die(64, f"{name} must be an absolute path")
@@ -174,33 +198,91 @@ if plist_values.get("plistRoomId") in FORBIDDEN_ROOMS:
     # Plist pin is dedicated-drain-only; do not copy it into supervisor binding.
     pass
 
+existing_binding = parse_binding_json(os.environ["TRIANGLE_BINDING_PATH"])
+existing_common = {}
+existing_profile_roots = {}
+if existing_binding:
+    if existing_binding.get("version") == 2:
+        if set(existing_binding) != {"version", "common", "profiles"}:
+            die(64, "existing v2 binding schema mismatch")
+        existing_common = existing_binding.get("common")
+        existing_profiles = existing_binding.get("profiles")
+        if not isinstance(existing_common, dict) or set(existing_common) != {
+            "adapterVersion", "installationId", "workingDirectory", "codexHome",
+            "command", "pollIntervalMs",
+        } or not isinstance(existing_profiles, list):
+            die(64, "existing v2 binding schema mismatch")
+        if existing_common.get("adapterVersion") != "1" or existing_common.get("installationId") != installation_id:
+            die(64, "existing v2 binding common values mismatch")
+        if type(existing_common.get("pollIntervalMs")) is not int or not 100 <= existing_common["pollIntervalMs"] <= 60000:
+            die(64, "existing v2 binding poll interval is invalid")
+        for name in ("workingDirectory", "codexHome", "command"):
+            require_abs(existing_common.get(name), f"existing common {name}")
+        for entry in existing_profiles:
+            if not isinstance(entry, dict) or set(entry) != {"profile", "instanceId", "stateRoot"}:
+                die(64, "existing v2 binding profile schema mismatch")
+            profile = entry.get("profile")
+            if profile in existing_profile_roots:
+                die(64, "existing v2 binding has duplicate profile")
+            if not isinstance(profile, str) or entry.get("instanceId") != derive_instance_id(profile):
+                die(64, "existing v2 binding profile identity mismatch")
+            state_root = require_abs(entry.get("stateRoot"), f"existing stateRoot[{profile}]")
+            if os.path.normpath(state_root) != state_root:
+                die(64, "existing v2 binding state root is not canonical")
+            existing_profile_roots[profile] = state_root
+    else:
+        legacy_keys = {
+            "adapterVersion", "enabled", "profile", "installationId", "instanceId",
+            "workingDirectory", "codexHome", "stateRoot", "command", "pollIntervalMs",
+        }
+        if set(existing_binding) != legacy_keys:
+            die(64, "existing v1 binding schema mismatch")
+        if existing_binding.get("profile") != PROFILE:
+            die(64, "existing binding profile does not match TRIANGLE_HEADLESS_PROFILE")
+        if existing_binding.get("adapterVersion") != "1" or existing_binding.get("enabled") is not True \
+          or existing_binding.get("installationId") != installation_id \
+          or existing_binding.get("instanceId") != derive_instance_id(PROFILE):
+            die(64, "existing v1 binding identity mismatch")
+        if type(existing_binding.get("pollIntervalMs")) is not int or not 100 <= existing_binding["pollIntervalMs"] <= 60000:
+            die(64, "existing v1 binding poll interval is invalid")
+        for name in ("workingDirectory", "codexHome", "stateRoot", "command"):
+            require_abs(existing_binding.get(name), f"existing v1 {name}")
+        existing_common = existing_binding
+        existing_profile_roots[PROFILE] = existing_binding.get("stateRoot")
+
 application_root = os.environ["TRIANGLE_APPLICATION_ROOT"]
 working_directory = (
     os.environ.get("TRIANGLE_HEADLESS_WORKING_DIRECTORY")
     or plist_values.get("workingDirectory")
+    or existing_common.get("workingDirectory")
 )
-codex_home = os.environ.get("TRIANGLE_CODEX_HOME") or plist_values.get("codexHome")
-state_root = os.environ.get("TRIANGLE_HEADLESS_STATE_ROOT") or plist_values.get("stateRoot")
-command = os.environ.get("CODEX_CLI") or plist_values.get("command")
+codex_home = (
+    os.environ.get("TRIANGLE_CODEX_HOME")
+    or plist_values.get("codexHome")
+    or existing_common.get("codexHome")
+)
+command = (
+    os.environ.get("CODEX_CLI")
+    or plist_values.get("command")
+    or existing_common.get("command")
+)
 if not working_directory:
     working_directory = os.path.join(application_root, "headless-work", PROFILE)
 if not codex_home:
     die(66, "CODEX_HOME is unknown; set TRIANGLE_CODEX_HOME or keep the dedicated drain plist")
-if not state_root:
-    state_root = os.path.join(application_root, "model-state", "headless-drain", PROFILE)
 if not command:
     die(66, "CODEX_CLI is unknown; set CODEX_CLI or keep the dedicated drain plist")
 
 for name, value in (
     ("workingDirectory", working_directory),
     ("codexHome", codex_home),
-    ("stateRoot", state_root),
     ("command", command),
     ("helperPath", os.environ["TRIANGLE_HELPER"]),
 ):
     require_abs(value, name)
 
 flip = []
+headless_members = []
 for agent in agents:
     adapter = agent.get("runtimeAdapter")
     mode = agent.get("deliveryMode")
@@ -209,34 +291,61 @@ for agent in agents:
         continue
     if adapter != "codex":
         continue
+    if agent.get("enabled") is not True:
+        continue
+    listed_instance = agent.get("instanceId")
+    expected = derive_instance_id(profile)
+    if listed_instance != expected:
+        die(64, f"headless profile instanceId does not match derived ClientInstanceID: {profile}")
+    headless_members.append((profile, expected))
     if mode != "headless-app-server":
         flip.append({"profile": profile, "from": mode, "to": "headless-app-server"})
+
+headless_members.sort()
+if not headless_members:
+    die(64, "no enabled Codex profiles are eligible for headless cutover")
+member_profiles = {profile for profile, _ in headless_members}
+if existing_binding.get("version") == 2 and set(existing_profile_roots) != member_profiles:
+    die(64, "existing v2 binding contains stale or missing profile entries")
 
 grok = [agent for agent in agents if agent.get("runtimeAdapter") == "grok-bot" or agent.get("deliveryMode") == "grok-bot"]
 if any(item["profile"] == PROFILE for item in grok):
     die(64, "refusing grok_bot_not_in_codex_pool")
 
+profiles = []
+seen_roots = set()
+for profile, instance_id in headless_members:
+    state_root = (
+        os.environ.get("TRIANGLE_HEADLESS_STATE_ROOT") if profile == PROFILE else None
+    ) or (plist_values.get("stateRoot") if profile == PROFILE else None) \
+      or existing_profile_roots.get(profile) \
+      or os.path.join(application_root, "model-state", "headless-drain", profile)
+    require_abs(state_root, f"stateRoot[{profile}]")
+    normalized = os.path.normpath(state_root)
+    if normalized != state_root or state_root in seen_roots:
+        die(64, "headless profile state roots must be canonical and distinct")
+    seen_roots.add(state_root)
+    profiles.append({"profile": profile, "instanceId": instance_id, "stateRoot": state_root})
+
 binding = {
-    "adapterVersion": "1",
-    "enabled": True,
-    "profile": PROFILE,
-    "installationId": installation_id,
-    "instanceId": expected_instance,
-    "workingDirectory": working_directory,
-    "codexHome": codex_home,
-    "stateRoot": state_root,
-    "command": command,
-    "pollIntervalMs": int(os.environ["TRIANGLE_POLL_MS"]),
+    "version": 2,
+    "common": {
+        "adapterVersion": "1",
+        "installationId": installation_id,
+        "workingDirectory": working_directory,
+        "codexHome": codex_home,
+        "command": command,
+        "pollIntervalMs": int(os.environ["TRIANGLE_POLL_MS"]),
+    },
+    "profiles": profiles,
 }
-if "allowedRoomId" in binding:
-    die(64, "internal error: binding must not contain allowedRoomId")
 blob = json.dumps(binding, separators=(",", ":"))
-if "room_77" in blob or "allowedRoomId" in blob:
+if "room_" in blob or "allowedRoomId" in blob:
     die(64, "refusing to write a room-pinned supervisor binding")
 
 plan = {
     "action": "headless-supervisor-cutover",
-    "headlessProfile": PROFILE,
+    "headlessProfiles": [profile for profile, _ in headless_members],
     "flip": flip,
     "grokUntouched": [{"profile": agent["profile"], "deliveryMode": agent.get("deliveryMode"), "runtimeAdapter": agent.get("runtimeAdapter")} for agent in grok],
     "stopSharedAppServer": any(item["from"] == "mcp-interactive" for item in flip),
@@ -267,6 +376,30 @@ flip_profiles=$(/usr/bin/python3 -c 'import json,sys; print("\n".join(item["prof
 if [[ "$action" == plan ]]; then
   exit 0
 fi
+
+# Preserve the exact prior binding across either v1 migration or v2 repeat
+# apply. A failed coordinator restart must not strand an unverified binding.
+binding_backup=$(/usr/bin/mktemp "${client_root}/.headless-runtime-binding.XXXXXX")
+binding_existed=0
+if [[ -f "$binding_path" ]]; then
+  /bin/cp -p "$binding_path" "$binding_backup"
+  binding_existed=1
+fi
+rollback_binding() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [[ $status -ne 0 ]]; then
+    if [[ $binding_existed -eq 1 ]]; then
+      /bin/cp -p "$binding_backup" "$binding_path"
+    else
+      /bin/rm -f "$binding_path"
+    fi
+  fi
+  /bin/rm -f "$binding_backup"
+  exit "$status"
+}
+trap rollback_binding EXIT
+trap 'exit 130' HUP INT TERM
 
 if [[ "$stop_shared" == 1 ]] && label_loaded "$shared_label"; then
   bootout_label "$shared_label"
@@ -325,8 +458,11 @@ if [[ ! -f "$client_plist" ]]; then
 fi
 "$launchctl_command" bootstrap "$domain" "$client_plist"
 
+trap - EXIT HUP INT TERM
+/bin/rm -f "$binding_backup"
+
 echo "headless supervisor cutover applied"
-echo "  profile=$headless_profile"
+echo "  profiles=$(/usr/bin/python3 -c 'import json,sys; print(",".join(json.loads(sys.stdin.read())["headlessProfiles"]))' <<<"$plan_json")"
 echo "  binding=$binding_path"
 echo "  dedicatedDrain=$drain_label (unloaded)"
 echo "  grok-bot profiles were not modified"
