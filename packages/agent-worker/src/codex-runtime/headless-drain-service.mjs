@@ -458,6 +458,8 @@ export function createInstalledHeadlessDrain(config, {
     enabled: true,
   });
   const runtimeEnv = { ...(normalized.env ?? {}) };
+  // Pool size stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1 is already in env.
+  // Do not hardcode preferredSize 1 here — that would swallow the opt-in.
   const runtime = createHeadlessCodexRuntime({
     profileConfig: {
       profileId: normalized.profile,
@@ -470,7 +472,6 @@ export function createInstalledHeadlessDrain(config, {
       maxInFlightPerProfile: 1,
       shadowTestProfile: false,
       workingDirectory: normalized.workingDirectory,
-      codexPool: { preferredSize: 1, maxSize: 1 },
     },
     transactionProxy,
     codexHome: normalized.codexHome,

@@ -4,8 +4,8 @@
  * New Codex profiles default to headless App Server
  * (`runtimeAdapter: codex-app-server`, `runtimeMode: headless`,
  * `executionKind: headless-app-server`). Desktop `mcp-interactive` is opt-in.
- * grok-bot is not a Codex factory path. Pool size is 1 until shared CODEX_HOME
- * is proved; desktop handoff stays off.
+ * grok-bot is not a Codex factory path. Factory pool size stays 1; raising it
+ * requires TRIANGLE_CODEX_POOL_ENABLE=1 at runtime. Desktop handoff stays off.
  */
 
 import {

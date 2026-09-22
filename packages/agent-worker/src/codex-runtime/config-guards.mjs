@@ -9,9 +9,11 @@
  *
  * Product default (2026-09-21): Codex profiles use headless App Server. grok-bot
  * never enters this pool. Mini-only profile/room allowlists are not the product
- * gate. Pool size stays 1 until shared CODEX_HOME is proved; desktop handoff
- * stays off. Existing mcp-interactive Codex stays desktop until migrated so
- * desktop + headless never share a mailbox.
+ * gate. Production pool size stays 1 unless an operator sets
+ * TRIANGLE_CODEX_POOL_ENABLE=1 (still probe-gated, cap 4). Desktop handoff stays
+ * off unless TRIANGLE_DESKTOP_HANDOFF_ENABLE=1 or the Phase 4 injection path.
+ * Existing mcp-interactive Codex stays desktop until migrated so desktop +
+ * headless never share a mailbox. Do not silently raise Mini live pool size.
  */
 
 import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
@@ -33,6 +35,145 @@ export function isDesktopHandoffEnabled(manifest = loadRuntimeManifest()) {
     manifest,
   });
   return guards.desktopHandoffEnabled === true;
+}
+
+/**
+ * Production Codex headless App Server shape. grok-bot and mcp-interactive
+ * desktop profiles never match. Shadow test profiles use the Phase 1 path.
+ */
+export function isProductionHeadlessAppServerProfile(profileConfig = {}) {
+  const runtimeAdapter = profileConfig?.runtimeAdapter ?? null;
+  const deliveryMode = profileConfig?.deliveryMode ?? null;
+  const grokBotShape =
+    runtimeAdapter === "grok-bot" || deliveryMode === "grok-bot";
+  return (
+    !grokBotShape &&
+    profileConfig?.executionKind === "headless-app-server" &&
+    (runtimeAdapter === "codex-app-server" || runtimeAdapter === "codex") &&
+    profileConfig?.runtimeMode === "headless" &&
+    profileConfig?.shadowTestProfile !== true
+  );
+}
+
+function parseCodexPoolSizeEnv(env = process.env) {
+  const raw = env.TRIANGLE_CODEX_POOL_SIZE;
+  if (raw == null || String(raw).trim() === "") return { present: false, size: null, invalid: false };
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 4) {
+    return { present: true, size: null, invalid: true };
+  }
+  return { present: true, size: n, invalid: false };
+}
+
+/**
+ * Production multi-slot opt-in. Default remains 1 even when the on-disk probe
+ * status is `passed`. Raising the pool requires TRIANGLE_CODEX_POOL_ENABLE=1
+ * (or enableProductionPool injection). An unproved/failed probe still forces 1.
+ */
+export function resolveProductionCodexPoolConfig(
+  profileConfig = {},
+  {
+    manifest = loadRuntimeManifest(),
+    env = process.env,
+    enableProductionPool = false,
+  } = {},
+) {
+  const optIn = enableProductionPool === true || env.TRIANGLE_CODEX_POOL_ENABLE === "1";
+  const parsedSize = parseCodexPoolSizeEnv(env);
+  let preferredSize = 1;
+  let maxSize = 1;
+  let inactiveReason = "production_pool_not_enabled";
+
+  if (parsedSize.invalid && optIn) {
+    preferredSize = 1;
+    maxSize = 1;
+    inactiveReason = "pool_size_env_invalid";
+  } else if (optIn) {
+    preferredSize =
+      parsedSize.present && parsedSize.size != null
+        ? parsedSize.size
+        : profileConfig.codexPool?.preferredSize ?? 2;
+    maxSize = profileConfig.codexPool?.maxSize ?? 4;
+    inactiveReason = null;
+  }
+
+  const pool = resolveCodexPoolGuards({
+    preferredSize,
+    maxSize,
+    desktopHandoffRequested: false,
+    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
+    manifest,
+  });
+
+  if (optIn && inactiveReason == null && pool.forcedByProbe === true) {
+    inactiveReason = pool.reason ?? "shared_home_concurrency_unproved";
+  }
+
+  return Object.freeze({
+    ...pool,
+    productionPoolOptIn: optIn,
+    productionPoolInactiveReason: inactiveReason,
+  });
+}
+
+/**
+ * Phase 4 desktop-handoff gate. Defaults stay off. Explicit opt-in:
+ * enableHandoff injection, TRIANGLE_DESKTOP_HANDOFF_ENABLE=1 on a shadow or
+ * production headless profile, or both manifest handoff flags. Probe must
+ * still be `passed`. mcp-interactive / grok-bot are not eligible.
+ */
+export function resolveDesktopHandoffGate(
+  profileConfig = {},
+  {
+    manifest = loadRuntimeManifest(),
+    env = process.env,
+    enableHandoff = false,
+  } = {},
+) {
+  const flags = getFeatureFlags(manifest);
+  const envEnable = env.TRIANGLE_DESKTOP_HANDOFF_ENABLE === "1";
+  const shadowShape = isShadowHeadlessTestProfile(profileConfig);
+  const productionHeadless = isProductionHeadlessAppServerProfile(profileConfig);
+  const eligible = shadowShape || productionHeadless;
+  const manifestGate =
+    flags.desktopHandoff === true &&
+    manifest.sharedHomeConcurrency?.desktopHandoffEnabled === true;
+  const requested =
+    enableHandoff === true || (envEnable && eligible) || manifestGate;
+
+  const pool = resolveCodexPoolGuards({
+    preferredSize: profileConfig.codexPool?.preferredSize ?? 2,
+    maxSize: profileConfig.codexPool?.maxSize ?? 4,
+    desktopHandoffRequested: requested,
+    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
+    manifest,
+  });
+
+  const probePassed = manifest.sharedHomeConcurrency?.status === "passed";
+  const explicitOptIn = enableHandoff === true || (envEnable && eligible);
+  const active = probePassed && (explicitOptIn || pool.desktopHandoffEnabled === true);
+
+  let inactiveReason = null;
+  if (!probePassed) inactiveReason = "shared_home_concurrency_unproved";
+  else if (!requested && !explicitOptIn) inactiveReason = "desktop_handoff_not_enabled";
+  else if (!eligible && !manifestGate && enableHandoff !== true) {
+    inactiveReason = "desktop_handoff_profile_ineligible";
+  } else if (!active) inactiveReason = "desktop_handoff_manifest_disabled";
+
+  return Object.freeze({
+    active,
+    inactiveReason: active ? null : inactiveReason,
+    shadowTestProfile: shadowShape,
+    productionHeadless,
+    eligible,
+    desktopHandoffEnabled: active,
+    pool,
+    featureFlags: flags,
+    manifestDesktopHandoffEnabled:
+      manifest.sharedHomeConcurrency?.desktopHandoffEnabled === true,
+    globalDesktopHandoffFlag: flags.desktopHandoff === true,
+    manifest,
+  });
 }
 
 /**
@@ -136,8 +277,9 @@ export function resolvePhase1ShadowRuntimeConfig(
  * Resolve the persistent headless Codex App Server runtime.
  * Product activation: headless App Server shape, not Mini-only allowlist.
  * grok-bot never activates. Desktop mcp-interactive stays inactive so this
- * path cannot silently dual-claim with Shared App Server. Pool size is 1
- * until shared CODEX_HOME is proved; desktop handoff stays off.
+ * path cannot silently dual-claim with Shared App Server. Production pool
+ * stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1 (probe still gates). Desktop
+ * handoff stays off unless the Phase 4 opt-in is set.
  */
 export function resolveHeadlessRuntimeConfig(
   profileConfig = {},
@@ -146,6 +288,8 @@ export function resolveHeadlessRuntimeConfig(
     env = process.env,
     enableShadow = false,
     enablePhase5Migration = false,
+    enableProductionPool = false,
+    enableHandoff = false,
   } = {},
 ) {
   const shadow = resolvePhase1ShadowRuntimeConfig(profileConfig, {
@@ -154,7 +298,17 @@ export function resolveHeadlessRuntimeConfig(
     enableShadow,
   });
   if (shadow.active) {
-    return Object.freeze({ ...shadow, activationMode: "shadow" });
+    const handoff = resolveDesktopHandoffGate(profileConfig, {
+      manifest,
+      env,
+      enableHandoff,
+    });
+    return Object.freeze({
+      ...shadow,
+      activationMode: "shadow",
+      desktopHandoffEnabled: handoff.desktopHandoffEnabled,
+      handoff,
+    });
   }
 
   const phase5 = resolvePhase5MigrationConfig(profileConfig, {
@@ -167,30 +321,21 @@ export function resolveHeadlessRuntimeConfig(
   const deliveryMode = profileConfig?.deliveryMode ?? null;
   const grokBotShape =
     runtimeAdapter === "grok-bot" || deliveryMode === "grok-bot";
-  const productionShape =
-    !grokBotShape &&
-    profileConfig?.executionKind === "headless-app-server" &&
-    (runtimeAdapter === "codex-app-server" || runtimeAdapter === "codex") &&
-    profileConfig?.runtimeMode === "headless" &&
-    profileConfig?.shadowTestProfile !== true;
-  const pool = resolveCodexPoolGuards({
-    preferredSize: 1,
-    maxSize: 1,
-    desktopHandoffRequested: false,
-    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
+  const productionShape = isProductionHeadlessAppServerProfile(profileConfig);
+  const pool = resolveProductionCodexPoolConfig(profileConfig, {
     manifest,
+    env,
+    enableProductionPool,
+  });
+  const handoff = resolveDesktopHandoffGate(profileConfig, {
+    manifest,
+    env,
+    enableHandoff,
   });
 
   let inactiveReason = null;
   if (grokBotShape) inactiveReason = "grok_bot_not_in_codex_pool";
   else if (!productionShape) inactiveReason = shadow.inactiveReason ?? "not_headless_app_server_profile";
-
-  const forcedPool = Object.freeze({
-    ...pool,
-    preferredSize: 1,
-    maxSize: 1,
-    desktopHandoffEnabled: false,
-  });
 
   return Object.freeze({
     active: inactiveReason == null,
@@ -203,8 +348,9 @@ export function resolveHeadlessRuntimeConfig(
     runtimeAdapter: profileConfig.runtimeAdapter ?? null,
     headlessRuntimeEnabled: isHeadlessRuntimeEnabled(manifest),
     helperConversationStoreEnabled: isHelperConversationStoreEnabled(manifest),
-    desktopHandoffEnabled: false,
-    pool: forcedPool,
+    desktopHandoffEnabled: inactiveReason == null && handoff.desktopHandoffEnabled === true,
+    handoff,
+    pool,
     featureFlags: getFeatureFlags(manifest),
     manifest,
   });

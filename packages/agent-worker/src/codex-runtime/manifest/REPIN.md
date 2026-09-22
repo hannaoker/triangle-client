@@ -109,6 +109,33 @@ Dedicated `TRIANGLE_CODEX_HOME` remains required; never fall back to `~/.codex`.
 4. Handoff is explicit API/operator only (`handoffToDesktop` /
    `handoffToHeadless` / `recoverDesktop` / `rollbackHeadless`); never on wake.
 
+## Production pool / handoff opt-in (2026-09-22)
+
+Headless App Server is the Codex product default. **Pool size stays 1** and
+**desktop handoff stays off** unless an operator sets an explicit env guard.
+The on-disk Mini probe status of `passed` is **not** a live cutover of pool>1.
+
+| Item | Default | Explicit opt-in |
+| --- | --- | --- |
+| Production pool size | **1** | `TRIANGLE_CODEX_POOL_ENABLE=1` (+ optional `TRIANGLE_CODEX_POOL_SIZE=2..4`) |
+| Desktop handoff | **off** | `TRIANGLE_DESKTOP_HANDOFF_ENABLE=1` on a shadow or production headless profile |
+| grok-bot | never in Codex pool | — |
+| mcp-interactive desktop | unchanged until migrate | — |
+| Dual-claimer | fail-closed | — |
+
+Do **not** export `TRIANGLE_CODEX_POOL_ENABLE` on Mini until an operator re-runs
+the live shared-home probe against the current dedicated home and accepts
+pool>1. Unproved/failed probe still forces size 1. Invalid `TRIANGLE_CODEX_POOL_SIZE`
+fails closed at 1.
+
+```sh
+# lab only — not Mini launchd default
+export TRIANGLE_CODEX_POOL_ENABLE=1
+export TRIANGLE_CODEX_POOL_SIZE=2
+# optional idle-only handoff API (still never on wake)
+export TRIANGLE_DESKTOP_HANDOFF_ENABLE=1
+```
+
 ## Phase 5 status (migration machinery; production defaults still safe)
 
 | Item | Status |
