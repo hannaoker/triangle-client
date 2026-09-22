@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -43,7 +45,7 @@ export const HEADLESS_WAKE_REQUIRED_KEYS = Object.freeze([
   "command",
   "pollIntervalMs",
 ]);
-export const HEADLESS_WAKE_OPTIONAL_KEYS = Object.freeze(["allowedRoomId"]);
+export const HEADLESS_WAKE_OPTIONAL_KEYS = Object.freeze([]);
 export const HEADLESS_WAKE_KEYS = Object.freeze([
   ...HEADLESS_WAKE_REQUIRED_KEYS,
   ...HEADLESS_WAKE_OPTIONAL_KEYS,
@@ -119,15 +121,20 @@ export function dedicatedHeadlessDrainLaunchAgentLabel(profile) {
   return `dev.thetriangle.codex-headless-drain.${profile}`;
 }
 
-export function defaultHeadlessClaimerLockPath(env = process.env, profile = null) {
-  const home = requiredAbsolute(env.HOME, "HOME");
-  const directory = path.join(
-    home,
-    "Library",
-    "Application Support",
-    "The Triangle",
-    "client",
-  );
+export function defaultHeadlessClaimerLockPath(env = process.env, profile = null, helperPath = null) {
+  let directory;
+  if (typeof helperPath === "string" && helperPath.startsWith("/") && !helperPath.includes("\0")) {
+    directory = path.resolve(path.dirname(helperPath), "..", "client");
+  } else {
+    const home = requiredAbsolute(env?.HOME, "HOME");
+    directory = path.join(
+      home,
+      "Library",
+      "Application Support",
+      "The Triangle",
+      "client",
+    );
+  }
   if (typeof profile === "string" && PROFILE.test(profile)) {
     return path.join(directory, `headless-claimer.${profile}.json`);
   }
@@ -192,23 +199,28 @@ function readClaimerLock(lockPath) {
   }
 }
 
-function writeClaimerLock(lockPath, document) {
+function writeClaimerLockExclusive(lockPath, document) {
   const directory = path.dirname(lockPath);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(directory, `.headless-claimer-${process.pid}.tmp`);
-  writeFileSync(temporary, `${JSON.stringify(document)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temporary, lockPath);
+  const descriptor = openSync(lockPath, "wx", 0o600);
+  try {
+    writeFileSync(descriptor, `${JSON.stringify(document)}\n`, { encoding: "utf8" });
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export function createHeadlessClaimerGuard({
   profile,
   allowedRoomId = null,
   runtimeAdapter = "codex-app-server",
+  helperPath = null,
   env = process.env,
   pid = process.pid,
-  lockPath = defaultHeadlessClaimerLockPath(env, profile),
+  lockPath = defaultHeadlessClaimerLockPath(env, profile, helperPath),
   probeDedicatedDrain = probeDedicatedHeadlessDrainLoaded,
   pidAlive = isPidAlive,
+  createLockExclusive = ({ lockPath: target, document, create }) => create(target, document),
 } = {}) {
   assertHeadlessDrainIdentity({ profile, allowedRoomId, runtimeAdapter });
 
@@ -271,12 +283,32 @@ export function createHeadlessClaimerGuard({
       }
       if (owner === CLIENT_SUPERVISOR_CLAIMER_OWNER) this.assertSupervisorMayClaim();
       else this.assertDedicatedDrainMayClaim();
-      writeClaimerLock(lockPath, {
+      const document = {
         version: 1,
         profile,
         owner,
         pid,
-      });
+      };
+      try {
+        createLockExclusive({ lockPath, document, create: writeClaimerLockExclusive });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        const existing = readClaimerLock(lockPath);
+        if (existing && pidAlive(existing.pid)) {
+          throw codedError(
+            existing.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER
+              ? "supervisor_headless_claimer_active"
+              : "dedicated_headless_drain_loaded",
+            "another process already owns the headless claimer lock",
+          );
+        }
+        // Fail closed for stale or malformed files. Acquisition never removes
+        // an existing path; operator cleanup is explicit and auditable.
+        throw codedError(
+          "headless_claimer_lock_stale",
+          "an existing stale headless claimer lock requires operator cleanup",
+        );
+      }
     },
     release({ owner } = {}) {
       const lock = readClaimerLock(lockPath);
@@ -314,15 +346,10 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
   if (headlessWake.profileInstanceId !== deriveProfileInstanceId(headlessWake.profile)) {
     throw new TypeError("headlessWake.profileInstanceId does not match profile");
   }
-  const allowedRoomId = Object.hasOwn(headlessWake, "allowedRoomId") && headlessWake.allowedRoomId != null
-    ? headlessWake.allowedRoomId
-    : null;
-  if (allowedRoomId != null && (typeof allowedRoomId !== "string" || !ROOM.test(allowedRoomId))) {
-    throw new TypeError("headlessWake.allowedRoomId is invalid");
-  }
+  if (Object.hasOwn(headlessWake, "allowedRoomId")) throw new TypeError("headlessWake.allowedRoomId is not supported");
   assertHeadlessDrainIdentity({
     profile: headlessWake.profile,
-    allowedRoomId,
+    allowedRoomId: null,
   });
   if (!Number.isSafeInteger(headlessWake.pollIntervalMs)
     || headlessWake.pollIntervalMs < 100
@@ -333,10 +360,9 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
     profile: headlessWake.profile,
     profileInstanceId: headlessWake.profileInstanceId,
     helperPath: requiredAbsolute(headlessWake.helperPath, "headlessWake.helperPath"),
-    allowedRoomId,
     workingDirectory: requiredAbsolute(headlessWake.workingDirectory, "headlessWake.workingDirectory"),
     codexHome: requiredAbsolute(headlessWake.codexHome, "headlessWake.codexHome"),
-    stateRoot: requiredAbsolute(headlessWake.stateRoot, "headlessWake.stateRoot"),
+    stateRoot: path.resolve(requiredAbsolute(headlessWake.stateRoot, "headlessWake.stateRoot")),
     command: requiredAbsolute(headlessWake.command, "headlessWake.command"),
     pollIntervalMs: headlessWake.pollIntervalMs,
   });

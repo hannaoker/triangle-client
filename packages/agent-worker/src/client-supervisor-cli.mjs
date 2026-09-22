@@ -22,7 +22,7 @@ const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWake"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWakes"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -320,7 +320,7 @@ function headlessWakeOutsideValues(headlessWake) {
   ].filter((value) => typeof value === "string");
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWake) {
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWakes) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -355,8 +355,10 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
       for (const candidate of grokBotWakeOutsideValues(grokBotWake)) {
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
-      for (const candidate of headlessWakeOutsideValues(headlessWake)) {
-        if (candidate.includes(secret)) throw invalidBootstrap();
+      for (const headlessWake of headlessWakes ?? []) {
+        for (const candidate of headlessWakeOutsideValues(headlessWake)) {
+          if (candidate.includes(secret)) throw invalidBootstrap();
+        }
       }
     }
   }
@@ -582,21 +584,28 @@ export function parseClientSupervisorBootstrap(text) {
         bootstrap.appServerWake,
       );
     }
-    if (Object.hasOwn(bootstrap, "headlessWake")) {
-      validateHeadlessWake(
-        bootstrap.headlessWake,
-        seen,
-        bootstrap.eventWake,
-        bootstrap.appServerWake,
-        bootstrap.grokBotWake,
-      );
+    if (Object.hasOwn(bootstrap, "headlessWakes")) {
+      if (!Array.isArray(bootstrap.headlessWakes) || bootstrap.headlessWakes.length < 1 || bootstrap.headlessWakes.length > 100) throw invalidBootstrap();
+      const profiles = new Set();
+      const instanceIds = new Set();
+      const stateRoots = new Set();
+      for (const wake of bootstrap.headlessWakes) {
+        validateHeadlessWake(wake, seen, bootstrap.eventWake, bootstrap.appServerWake, bootstrap.grokBotWake);
+        const normalized = normalizeHeadlessWakeConfig(wake);
+        if (profiles.has(normalized.profile) || instanceIds.has(normalized.profileInstanceId) || stateRoots.has(normalized.stateRoot)) throw invalidBootstrap();
+        profiles.add(normalized.profile); instanceIds.add(normalized.profileInstanceId); stateRoots.add(normalized.stateRoot);
+      }
+      bootstrap.headlessWakes = bootstrap.headlessWakes
+        .map((wake) => Object.freeze(normalizeHeadlessWakeConfig(wake)))
+        .sort((a, b) => a.profile.localeCompare(b.profile));
+      Object.freeze(bootstrap.headlessWakes);
     }
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")
       && !Object.hasOwn(bootstrap, "appServerWake")
       && !Object.hasOwn(bootstrap, "grokBotWake")
-      && !Object.hasOwn(bootstrap, "headlessWake")
+      && !Object.hasOwn(bootstrap, "headlessWakes")
     ) {
       throw invalidBootstrap();
     }
@@ -605,7 +614,7 @@ export function parseClientSupervisorBootstrap(text) {
       bootstrap.eventWake,
       bootstrap.appServerWake,
       bootstrap.grokBotWake,
-      bootstrap.headlessWake,
+      bootstrap.headlessWakes,
     );
     return bootstrap;
   } catch {
@@ -735,7 +744,7 @@ export async function runClientSupervisorCLI({
         eventWake: bootstrap.eventWake ?? null,
         appServerWake: bootstrap.appServerWake ?? null,
         grokBotWake: bootstrap.grokBotWake ?? null,
-        headlessWake: bootstrap.headlessWake ?? null,
+        headlessWakes: bootstrap.headlessWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake

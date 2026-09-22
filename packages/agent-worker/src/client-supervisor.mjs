@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { createCommandRunner, createRunnerEnvironment } from "./command-runner.mjs";
 import { createConcurrencyGate } from "./concurrency-gate.mjs";
 import {
@@ -36,6 +38,7 @@ const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const RUNNER_KEYS = new Set(["command", "args", "timeoutMs"]);
 const DRAIN_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
+const LEGACY_HEADLESS_WAKE_UNSET = Symbol("legacy-headless-wake-unset");
 export const APP_SERVER_WAKE_KEYS = Object.freeze([
   "actorProfile",
   "authTokenEnv",
@@ -360,12 +363,27 @@ function validateHeadlessWake(headlessWake) {
   return normalizeHeadlessWakeConfig(headlessWake);
 }
 
+function validateHeadlessWakes(headlessWakes) {
+  const values = headlessWakes ?? [];
+  if (!Array.isArray(values) || values.length > 100) throw new TypeError("headlessWakes must contain between 0 and 100 entries");
+  const normalized = values.map(validateHeadlessWake).sort((a, b) => a.profile.localeCompare(b.profile));
+  const profiles = new Set(); const instanceIds = new Set(); const stateRoots = new Set();
+  for (const wake of normalized) {
+    if (profiles.has(wake.profile)) throw new TypeError("duplicate headless profile");
+    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate headless instanceId");
+    if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate headless stateRoot");
+    profiles.add(wake.profile); instanceIds.add(wake.profileInstanceId); stateRoots.add(wake.stateRoot);
+  }
+  return Object.freeze(normalized);
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
   appServerWake = null,
   grokBotWake = null,
-  headlessWake = null,
+  headlessWakes = null,
+  headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
   createWorker = createAgentWorker,
@@ -391,14 +409,17 @@ export function createClientSupervisor({
   random = Math.random,
   logger = console,
 } = {}) {
+  if (headlessWake !== LEGACY_HEADLESS_WAKE_UNSET) {
+    throw new TypeError("headlessWake is not supported; use headlessWakes");
+  }
   if (!Array.isArray(instances) || instances.length > 100) {
     throw new TypeError("instances must contain between 0 and 100 entries");
   }
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
   const grokBotConfig = validateGrokBotWake(grokBotWake);
-  const headlessConfig = validateHeadlessWake(headlessWake);
-  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig && !headlessConfig) {
+  const headlessConfigs = validateHeadlessWakes(headlessWakes);
+  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig && headlessConfigs.length === 0) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
@@ -518,7 +539,7 @@ export function createClientSupervisor({
     }
   }
 
-  if (headlessConfig) {
+  for (const headlessConfig of headlessConfigs) {
     if (seen.has(headlessConfig.profileInstanceId)) {
       throw new TypeError("headlessWake instanceId collides with a worker instance");
     }
@@ -635,13 +656,17 @@ export function createClientSupervisor({
     }
   }
 
-  let headlessDrain = null;
-  let headlessClaimer = null;
-  let headlessWakeSkipReason = null;
-  if (headlessConfig) {
-    headlessClaimer = createClaimerGuard({
+  const headlessEntries = [];
+  const headlessWakeSkipReasons = {};
+  const headlessAdmissions = [];
+  for (const headlessConfig of headlessConfigs) {
+    const lockDirectory = path.resolve(path.dirname(headlessConfig.helperPath), "..", "client");
+    const lockPath = path.join(lockDirectory, `headless-claimer.${headlessConfig.profile}.json`);
+    const headlessClaimer = createClaimerGuard({
       profile: headlessConfig.profile,
       allowedRoomId: headlessConfig.allowedRoomId ?? null,
+      helperPath: headlessConfig.helperPath,
+      lockPath,
     });
     try {
       headlessClaimer.assertSupervisorMayClaim();
@@ -650,7 +675,7 @@ export function createClientSupervisor({
         error?.code === "dedicated_headless_drain_loaded"
         || error?.code === "supervisor_headless_claimer_active"
       ) {
-        headlessWakeSkipReason = error.code;
+        headlessWakeSkipReasons[headlessConfig.profile] = error.code;
         logger.error?.("triangle_client_headless_wake_skipped", {
           error: "Refusing dual headless mailbox claimers",
           code: error.code,
@@ -659,7 +684,14 @@ export function createClientSupervisor({
         throw error;
       }
     }
-    if (headlessWakeSkipReason == null) {
+    headlessAdmissions.push({ config: headlessConfig, claimer: headlessClaimer });
+  }
+  if (Object.keys(headlessWakeSkipReasons).length > 0) {
+    for (const config of headlessConfigs) {
+      headlessWakeSkipReasons[config.profile] ??= "headless_pool_admission_failed";
+    }
+  } else {
+    for (const { config: headlessConfig, claimer: headlessClaimer } of headlessAdmissions) {
       const drain = createHeadlessDrain(headlessConfig, {
         logger,
         ownerInstanceId: `client-supervisor-${process.pid}`,
@@ -667,7 +699,7 @@ export function createClientSupervisor({
       if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
         throw new TypeError("createHeadlessDrain must return a drain");
       }
-      headlessDrain = drain;
+      headlessEntries.push(Object.freeze({ config: headlessConfig, drain, claimer: headlessClaimer }));
     }
   }
 
@@ -676,12 +708,12 @@ export function createClientSupervisor({
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
     appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
     grokBotInstanceId: grokBotConfig?.binding.instanceId ?? null,
-    headlessInstanceId: headlessConfig?.profileInstanceId ?? null,
+    headlessInstanceIds: Object.freeze(headlessConfigs.map((config) => config.profileInstanceId)),
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
     grokBotWake: grokBotConfig,
-    headlessWake: headlessConfig,
-    headlessWakeSkipReason,
+    headlessWakes: headlessConfigs,
+    headlessWakeSkipReasons: Object.freeze({ ...headlessWakeSkipReasons }),
 
     async runOnce({ signal } = {}) {
       const results = await Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -859,36 +891,53 @@ export function createClientSupervisor({
         });
       }
 
-      const headlessLoop = headlessDrain
+      const headlessLoop = headlessEntries.length
         ? runDurableWakeLoop({
           start: async () => {
-            headlessClaimer.acquire({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+            const acquired = [];
             try {
-              await headlessDrain.start({ runLoop: true });
-              await waitForAbort(signal);
-              return { status: "stopped", skipped: false, profileInstanceId: headlessConfig.profileInstanceId };
-            } finally {
+              for (const entry of headlessEntries) {
+                entry.claimer.acquire({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+                acquired.push(entry);
+              }
+              const starts = headlessEntries.map((entry) => entry.drain.start({ runLoop: true }));
               try {
-                await headlessDrain.stop();
-              } finally {
-                headlessClaimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+                await Promise.all(starts);
+              } catch (error) {
+                // Promise.all rejects on the first failure. Wait for every peer
+                // start attempt to settle before rollback so a late start cannot
+                // escape after its drain has already been stopped.
+                await Promise.allSettled(starts);
+                throw error;
+              }
+              await waitForAbort(signal);
+              return headlessEntries.map(({ config }) => ({ status: "stopped", skipped: false, profileInstanceId: config.profileInstanceId }));
+            } finally {
+              for (const entry of [...headlessEntries].reverse()) {
+                try { await entry.drain.stop(); } catch {}
+              }
+              for (const entry of [...acquired].reverse()) {
+                entry.claimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
               }
             }
           },
           stop: async () => {
-            try {
-              await headlessDrain.stop();
-            } finally {
-              headlessClaimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
+            for (const entry of [...headlessEntries].reverse()) {
+              try { await entry.drain.stop(); } catch {}
+            }
+            for (const entry of [...headlessEntries].reverse()) {
+              entry.claimer.release({ owner: CLIENT_SUPERVISOR_CLAIMER_OWNER });
             }
           },
           logEvent: "triangle_client_headless_wake_failed",
           logMessage: "Headless Codex drain failed",
         })
         : Promise.resolve(
-          headlessWakeSkipReason
-            ? { skipped: true, reason: headlessWakeSkipReason }
-            : null,
+          headlessConfigs.length
+            ? headlessConfigs.map((config) => headlessWakeSkipReasons[config.profile]
+              ? { skipped: true, reason: headlessWakeSkipReasons[config.profile], profileInstanceId: config.profileInstanceId }
+              : null)
+            : [],
         );
 
       const [instances, wakeResult, appServerResult, grokBotResult, headlessResult] = await Promise.all([
@@ -903,7 +952,7 @@ export function createClientSupervisor({
         eventWake: wakeResult,
         appServerWake: appServerResult,
         grokBotWake: grokBotResult,
-        headlessWake: headlessResult,
+        headlessWakes: Array.isArray(headlessResult) ? headlessResult : [headlessResult].filter(Boolean),
       };
     },
   });

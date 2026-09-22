@@ -791,75 +791,54 @@ function headlessWake(overrides = {}) {
   };
 }
 
-test("bootstrap accepts Codex headlessWake without Mini pin and rejects dual consumers", () => {
-  const withHeadless = bootstrap({ headlessWake: headlessWake() });
-  const parsed = parseClientSupervisorBootstrap(JSON.stringify(withHeadless));
-  assert.deepEqual(parsed.headlessWake, headlessWake());
-
-  const headlessOnly = {
-    version: 1,
-    maxConcurrentReasoners: 2,
-    instances: [],
-    headlessWake: headlessWake(),
-  };
-  assert.equal(
-    parseClientSupervisorBootstrap(JSON.stringify(headlessOnly)).headlessWake.profile,
-    "codex-bob-test",
-  );
-  assert.equal(
-    parseClientSupervisorBootstrap(JSON.stringify(headlessOnly)).headlessWake.allowedRoomId,
-    undefined,
-  );
-
-  for (const candidate of [
-    bootstrap({ headlessWake: { ...headlessWake(), extra: true } }),
-    bootstrap({
-      headlessWake: headlessWake({
-        profileInstanceId: instance().instanceId,
-      }),
-    }),
-    bootstrap({
-      grokBotWake: {
-        ...grokBotWake(),
-        binding: {
-          ...grokBotWake().binding,
-          instanceId: deriveProfileInstanceId("codex-bob-test"),
-        },
-      },
-      headlessWake: headlessWake(),
-    }),
-  ]) {
-    assert.throws(
-      () => parseClientSupervisorBootstrap(JSON.stringify(candidate)),
-      /Invalid Triangle Client bootstrap/,
-    );
-  }
-
-  const withRoom = bootstrap({
-    headlessWake: headlessWake({
-      allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    }),
-  });
-  assert.equal(
-    parseClientSupervisorBootstrap(JSON.stringify(withRoom)).headlessWake.allowedRoomId,
-    "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+test("bootstrap rejects the legacy singleton headlessWake key after v2 activation", () => {
+  assert.throws(
+    () => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({ headlessWake: headlessWake() }))),
+    /Invalid Triangle Client bootstrap/,
   );
 });
 
-test("CLI forwards headlessWake into supervisor creation", async () => {
+test("bootstrap strictly accepts a bounded sorted headlessWakes collection", () => {
+  const bob = headlessWake({ stateRoot: "/private/headless-state/bob" });
+  const headless = headlessWake({
+    profile: "codex-headless",
+    profileInstanceId: deriveProfileInstanceId("codex-headless"),
+    stateRoot: "/private/headless-state/headless",
+  });
+  const parsed = parseClientSupervisorBootstrap(JSON.stringify(bootstrap({
+    headlessWakes: [headless, bob],
+  })));
+  assert.deepEqual(parsed.headlessWakes.map(({ profile }) => profile), ["codex-bob-test", "codex-headless"]);
+  assert.throws(() => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({ headlessWake: bob }))), /Invalid/);
+  assert.throws(() => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({
+    headlessWakes: [bob, { ...headless, profileInstanceId: bob.profileInstanceId }],
+  }))), /Invalid/);
+  assert.throws(() => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({
+    headlessWakes: [bob, { ...headless, stateRoot: bob.stateRoot }],
+  }))), /Invalid/);
+});
+
+test("CLI forwards headlessWakes into supervisor creation", async () => {
+  const wakes = [headlessWake({ stateRoot: "/private/headless-state/bob" })];
   let received;
-  const stderr = capture();
   const result = await runClientSupervisorCLI({
-    argv: [],
-    input: Readable.from([JSON.stringify(bootstrap({ headlessWake: headlessWake() }))]),
-    stderr: stderr.stream,
+    input: Readable.from([JSON.stringify(bootstrap({ headlessWakes: wakes }))]),
+    stderr: capture().stream,
     processEvents: new EventEmitter(),
     createSupervisor(options) {
       received = options;
-      return { async watch() { return { instances: [], headlessWake: null }; } };
+      return { async watch() { return { instances: [], headlessWakes: [] }; } };
     },
   });
   assert.equal(result, 0);
-  assert.deepEqual(received.headlessWake, headlessWake());
-  assert.equal(stderr.value(), "");
+  assert.deepEqual(received.headlessWakes, wakes);
+});
+
+test("bootstrap rejects canonical state-root collisions and every room-pinned v2 wake", () => {
+  const bob = headlessWake({ stateRoot: "/state/a/../shared" });
+  const headless = headlessWake({ profile: "codex-headless", profileInstanceId: deriveProfileInstanceId("codex-headless"), stateRoot: "/state/shared" });
+  assert.throws(() => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({ headlessWakes: [bob, headless] }))), /Invalid/);
+  assert.throws(() => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({
+    headlessWakes: [headlessWake({ allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })],
+  }))), /Invalid/);
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import test from "node:test";
 
 import { createHeadlessCodexDrain } from "../../src/codex-runtime/headless-drain.mjs";
@@ -7,6 +8,7 @@ import {
   PINNED_HEADLESS_DRAIN_ROOM_ID,
   createHeadlessClaimerGuard,
   dedicatedHeadlessDrainLaunchAgentLabel,
+  defaultHeadlessClaimerLockPath,
   deriveProfileInstanceId,
   loadHeadlessDrainConfig,
   normalizeHeadlessWakeConfig,
@@ -161,7 +163,7 @@ test("installed drain config accepts any Codex profile and does not pin a global
   assert.equal(filtered.allowedRoomId, "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 });
 
-test("headless wake config accepts any Codex profile and keys conversations by delivery roomId", () => {
+test("headless wake config accepts any Codex profile, canonicalizes state, and rejects room pins", () => {
   const profile = "codex-bob-test";
   const profileInstanceId = deriveProfileInstanceId(profile);
   const valid = {
@@ -174,15 +176,15 @@ test("headless wake config accepts any Codex profile and keys conversations by d
     command: "/trusted/bin/codex",
     pollIntervalMs: 1_000,
   };
-  assert.deepEqual(normalizeHeadlessWakeConfig(valid), { ...valid, allowedRoomId: null });
+  assert.deepEqual(normalizeHeadlessWakeConfig(valid), valid);
   const withRoom = {
     ...valid,
     allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   };
-  assert.equal(normalizeHeadlessWakeConfig(withRoom).allowedRoomId, withRoom.allowedRoomId);
-  assert.throws(
-    () => normalizeHeadlessWakeConfig({ ...valid, allowedRoomId: "room_invalid" }),
-    /allowedRoomId/,
+  assert.throws(() => normalizeHeadlessWakeConfig(withRoom), /schema|allowedRoomId/);
+  assert.equal(
+    normalizeHeadlessWakeConfig({ ...valid, stateRoot: "/private/a/../headless-state" }).stateRoot,
+    "/private/headless-state",
   );
   assert.throws(
     () => createHeadlessClaimerGuard({
@@ -272,3 +274,75 @@ test("claimer guard refuses dual consumers on the same profile", () => {
   }
 });
 
+test("claimer guard uses exclusive creation so a check-then-create race has one winner", () => {
+  const lockPath = `/tmp/triangle-headless-race-${process.pid}-${Date.now()}.json`;
+  const first = createHeadlessClaimerGuard({
+    profile: "codex-headless", pid: 5_001, lockPath,
+    probeDedicatedDrain: () => false,
+    pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
+  });
+  let raced = false;
+  const second = createHeadlessClaimerGuard({
+    profile: "codex-headless", pid: 5_002, lockPath,
+    probeDedicatedDrain: () => false,
+    pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
+    createLockExclusive(args) {
+      raced = true;
+      first.acquire({ owner: "dev.thetriangle.client" });
+      return args.create(args.lockPath, args.document);
+    },
+  });
+  try {
+    assert.throws(
+      () => second.acquire({ owner: "dev.thetriangle.client" }),
+      (error) => error.code === "supervisor_headless_claimer_active",
+    );
+    assert.equal(raced, true);
+    assert.equal(first.inspect().lock?.pid, 5_001);
+  } finally {
+    first.release({ owner: "dev.thetriangle.client" });
+  }
+});
+
+test("claimer guard never unlinks or replaces an existing stale lock during acquire", () => {
+  const lockPath = `/tmp/triangle-headless-stale-${process.pid}-${Date.now()}.json`;
+  const stale = `${JSON.stringify({ version: 1, profile: "codex-headless", owner: "dev.thetriangle.client", pid: 4_444 })}\n`;
+  writeFileSync(lockPath, stale, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const guard = createHeadlessClaimerGuard({
+    profile: "codex-headless", pid: 5_555, lockPath,
+    probeDedicatedDrain: () => false,
+    pidAlive: () => false,
+  });
+  try {
+    assert.throws(
+      () => guard.acquire({ owner: "dev.thetriangle.client" }),
+      (error) => error.code === "headless_claimer_lock_stale",
+    );
+    assert.equal(readFileSync(lockPath, "utf8"), stale);
+    assert.equal(guard.release({ owner: "dev.thetriangle.client" }), false);
+    assert.equal(readFileSync(lockPath, "utf8"), stale);
+  } finally {
+    unlinkSync(lockPath);
+  }
+});
+
+test("defaultHeadlessClaimerLockPath derives client directory from helperPath when env.HOME is absent", () => {
+  const helperPath = "/Users/testuser/Library/Application Support/The Triangle/bin/triangle-mailbox";
+  const lock = defaultHeadlessClaimerLockPath({}, "codex-headless", helperPath);
+  assert.equal(
+    lock,
+    "/Users/testuser/Library/Application Support/The Triangle/client/headless-claimer.codex-headless.json",
+  );
+
+  const guard = createHeadlessClaimerGuard({
+    profile: "codex-headless",
+    helperPath,
+    env: {},
+    probeDedicatedDrain: () => false,
+    pidAlive: () => false,
+  });
+  assert.equal(
+    guard.lockPath,
+    "/Users/testuser/Library/Application Support/The Triangle/client/headless-claimer.codex-headless.json",
+  );
+});
