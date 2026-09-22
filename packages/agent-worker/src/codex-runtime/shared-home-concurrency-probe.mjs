@@ -10,7 +10,7 @@
  * thread id`. A failed probe must never fall back to ~/.codex.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -24,6 +24,149 @@ import { resolveTriangleCodexHome } from "./runtime-home.mjs";
 const DEFAULT_SEED_TIMEOUT_MS = 90_000;
 const PROBE_SEED_TEXT =
   "Triangle shared-home concurrency probe seed turn. Do not use tools. Reply briefly.";
+
+/** Freshness window for an on-disk live probe artifact (this operator session). */
+export const LIVE_SHARED_HOME_PROBE_MAX_AGE_MS = 60 * 60 * 1000;
+export const LIVE_SHARED_HOME_PROBE_FILE_ENV = "TRIANGLE_CODEX_LIVE_PROBE_FILE";
+
+function liveProbeResult({
+  passed,
+  reason,
+  report = null,
+  source = null,
+  ageMs = null,
+} = {}) {
+  return Object.freeze({
+    passed: passed === true,
+    live: passed === true && report?.live === true,
+    reason: passed === true ? null : reason,
+    report,
+    source,
+    ageMs,
+  });
+}
+
+/**
+ * Accept only a *live* shared-home probe (`live: true`, `status: "passed"`)
+ * that finished within `maxAgeMs`. Synthetic-passed, missing finishedAt, and
+ * expired/stale artifacts fail closed.
+ */
+export function evaluateLiveSharedHomeProbe(
+  report,
+  {
+    now = Date.now(),
+    maxAgeMs = LIVE_SHARED_HOME_PROBE_MAX_AGE_MS,
+    source = "in-process",
+  } = {},
+) {
+  if (report == null || typeof report !== "object" || Array.isArray(report)) {
+    return liveProbeResult({ passed: false, reason: "live_shared_home_probe_stale", source });
+  }
+  if (report.live !== true) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_not_live",
+      report,
+      source,
+    });
+  }
+  if (report.status !== "passed") {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_not_passed",
+      report,
+      source,
+    });
+  }
+  const finishedAt = Date.parse(report.finishedAt ?? "");
+  if (!Number.isFinite(finishedAt)) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_stale",
+      report,
+      source,
+    });
+  }
+  const ageMs = now - finishedAt;
+  if (ageMs < 0) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_stale",
+      report,
+      source,
+      ageMs,
+    });
+  }
+  if (ageMs > maxAgeMs) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_expired",
+      report,
+      source,
+      ageMs,
+    });
+  }
+  return liveProbeResult({ passed: true, report, source, ageMs });
+}
+
+/**
+ * Resolve a live shared-home probe for *this process/run*.
+ *
+ * Production pool>1 must not treat committed `runtime-manifest.json`
+ * `sharedHomeConcurrency.status: passed` as live proof. Prefer an in-process
+ * report from a probe that just ran; otherwise read
+ * `TRIANGLE_CODEX_LIVE_PROBE_FILE`. Missing / unreadable / stale / expired /
+ * synthetic artifacts fail closed.
+ */
+export function resolveLiveSharedHomeProbe({
+  liveSharedHomeProbe = null,
+  env = process.env,
+  now = Date.now(),
+  maxAgeMs = LIVE_SHARED_HOME_PROBE_MAX_AGE_MS,
+} = {}) {
+  if (liveSharedHomeProbe != null) {
+    return evaluateLiveSharedHomeProbe(liveSharedHomeProbe, {
+      now,
+      maxAgeMs,
+      source: "in-process",
+    });
+  }
+
+  const filePath = env?.[LIVE_SHARED_HOME_PROBE_FILE_ENV];
+  if (filePath == null || String(filePath).trim() === "") {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_missing",
+      source: null,
+    });
+  }
+  if (typeof filePath !== "string" || !path.isAbsolute(filePath) || filePath.includes("\0")) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_stale",
+      source: "file",
+    });
+  }
+  if (!existsSync(filePath)) {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_missing",
+      source: "file",
+    });
+  }
+
+  let report;
+  try {
+    report = JSON.parse(readFileSync(filePath, { encoding: "utf8" }));
+  } catch {
+    return liveProbeResult({
+      passed: false,
+      reason: "live_shared_home_probe_unreadable",
+      source: "file",
+    });
+  }
+  return evaluateLiveSharedHomeProbe(report, { now, maxAgeMs, source: "file" });
+}
 
 function createCodedError(code, message, extra = {}) {
   const error = new Error(message);

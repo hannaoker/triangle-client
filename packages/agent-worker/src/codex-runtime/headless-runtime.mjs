@@ -162,6 +162,9 @@ function inactiveRuntime({ resolved, registry, reason }) {
  * @param {string[]} [options.args]
  * @param {NodeJS.ProcessEnv} [options.env]
  * @param {boolean} [options.enableShadow] Force-enable for unit tests
+ * @param {boolean} [options.enableProductionPool] Test injection for TRIANGLE_CODEX_POOL_ENABLE
+ * @param {boolean} [options.enableHandoff] Test injection for TRIANGLE_DESKTOP_HANDOFF_ENABLE
+ * @param {object} [options.liveSharedHomeProbe] In-process live probe report for this run
  * @param {ReturnType<typeof createMemoryConversationRegistry>} [options.registry]
  * @param {ReturnType<typeof createCodexWorkerPool>} [options.pool]
  * @param {object} [options.durableStore] Enabled Phase 2 file store
@@ -178,6 +181,9 @@ export function createHeadlessCodexRuntime({
   env = process.env,
   enableShadow = false,
   enablePhase5Migration = false,
+  enableProductionPool = false,
+  enableHandoff = false,
+  liveSharedHomeProbe = null,
   registry = null,
   pool = null,
   durableStore = null,
@@ -197,7 +203,11 @@ export function createHeadlessCodexRuntime({
   const resolved = resolveHeadlessRuntimeConfig(profileConfig, {
     enableShadow,
     enablePhase5Migration,
+    enableProductionPool,
+    enableHandoff,
+    liveSharedHomeProbe,
     env,
+    now: now(),
   });
 
   const resolvedRegistry =

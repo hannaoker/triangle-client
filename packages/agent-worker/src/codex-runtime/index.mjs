@@ -3,9 +3,11 @@
  *
  * Product default: Codex profiles use headless App Server. grok-bot stays on
  * grokBotWake and never enters the Codex pool. Mini-only allowlists are not
- * the product gate. Pool size 1 and desktop handoff remain off until shared
- * CODEX_HOME is proved. Global featureFlags.headlessRuntime stays false in the
- * immutable manifest.
+ * the product gate. Production pool stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1
+ * and a live shared-home probe just passed in this process/run. On-disk
+ * `sharedHomeConcurrency.status: passed` is not live proof. Desktop handoff
+ * stays off unless TRIANGLE_DESKTOP_HANDOFF_ENABLE=1.
+ * Global featureFlags.headlessRuntime stays false in the immutable manifest.
  */
 
 export {
@@ -45,6 +47,10 @@ export {
 
 export {
   cleanupProbeDirectory,
+  evaluateLiveSharedHomeProbe,
+  LIVE_SHARED_HOME_PROBE_FILE_ENV,
+  LIVE_SHARED_HOME_PROBE_MAX_AGE_MS,
+  resolveLiveSharedHomeProbe,
   runSharedHomeConcurrencyProbe,
   startMaterializedThread,
   writeProbeReport,
@@ -67,11 +73,14 @@ export {
   isHeadlessRuntimeEnabled,
   isHelperConversationStoreEnabled,
   isPhase5MigrationEnabled,
+  isProductionHeadlessAppServerProfile,
   isShadowHeadlessTestProfile,
+  resolveDesktopHandoffGate,
   resolveHeadlessRuntimeConfig,
   resolvePhase0RuntimeConfig,
   resolvePhase1ShadowRuntimeConfig,
   resolvePhase5MigrationConfig,
+  resolveProductionCodexPoolConfig,
 } from "./config-guards.mjs";
 
 export {

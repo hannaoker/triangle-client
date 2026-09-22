@@ -109,6 +109,39 @@ Dedicated `TRIANGLE_CODEX_HOME` remains required; never fall back to `~/.codex`.
 4. Handoff is explicit API/operator only (`handoffToDesktop` /
    `handoffToHeadless` / `recoverDesktop` / `rollbackHeadless`); never on wake.
 
+## Production pool / handoff opt-in (2026-09-22)
+
+Headless App Server is the Codex product default. **Pool size stays 1** and
+**desktop handoff stays off** unless an operator sets an explicit env guard.
+The on-disk Mini probe status of `passed` is **not** a live cutover of pool>1
+and is **not** live proof for this process/run.
+
+| Item | Default | Explicit opt-in |
+| --- | --- | --- |
+| Production pool size | **1** | `TRIANGLE_CODEX_POOL_ENABLE=1` **and** a successful *live* shared-home probe in this process/run (`liveSharedHomeProbe` or `TRIANGLE_CODEX_LIVE_PROBE_FILE`). Optional `TRIANGLE_CODEX_POOL_SIZE=2..4` |
+| Desktop handoff | **off** | `TRIANGLE_DESKTOP_HANDOFF_ENABLE=1` on a shadow or production headless profile |
+| grok-bot | never in Codex pool | — |
+| mcp-interactive desktop | unchanged until migrate | — |
+| Dual-claimer | fail-closed | — |
+
+Do **not** export `TRIANGLE_CODEX_POOL_ENABLE` on Mini launchd. Mini supervisor
+drain currently passes empty env (extra fail-closed). Dedicated drain CLI may
+forward process.env, but ENABLE without a fresh live probe, a missing/expired
+stale probe file, or ENABLE without SIZE on a drain-shaped path all stay at
+pool 1. Invalid `TRIANGLE_CODEX_POOL_SIZE` fails closed at 1.
+
+```sh
+# lab only — not Mini launchd default
+# 1. re-run the live shared-home probe against the current dedicated home
+node packages/agent-worker/scripts/run-shared-home-concurrency-probe.mjs --live \
+  --report /tmp/triangle-live-shared-home-probe.json
+export TRIANGLE_CODEX_LIVE_PROBE_FILE=/tmp/triangle-live-shared-home-probe.json
+export TRIANGLE_CODEX_POOL_ENABLE=1
+export TRIANGLE_CODEX_POOL_SIZE=2
+# optional idle-only handoff API (still never on wake)
+export TRIANGLE_DESKTOP_HANDOFF_ENABLE=1
+```
+
 ## Phase 5 status (migration machinery; production defaults still safe)
 
 | Item | Status |

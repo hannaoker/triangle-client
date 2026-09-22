@@ -12,9 +12,8 @@
  */
 
 import { createCodexAppServerProcess, createFakeAppServerStdioProgram } from "./app-server-process.mjs";
-import { isShadowHeadlessTestProfile } from "./config-guards.mjs";
-import { resolveCodexPoolGuards } from "./runtime-home.mjs";
-import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
+import { resolveDesktopHandoffGate } from "./config-guards.mjs";
+import { loadRuntimeManifest } from "./runtime-manifest.mjs";
 import { NON_IDLE_EXECUTION_STATES } from "./execution-state.mjs";
 
 function createCodedError(code, message, extra = {}) {
@@ -25,17 +24,20 @@ function createCodedError(code, message, extra = {}) {
 }
 
 /**
- * Shadow / test opt-in for Phase 4 handoff experiments.
+ * Shadow / production-headless opt-in for Phase 4 handoff experiments.
  *
  * Production defaults remain off. Activation requires:
  * 1. Shared-home probe passed, AND
  * 2. Either:
  *    - `enableHandoff: true` (unit/integration injection), OR
- *    - `TRIANGLE_DESKTOP_HANDOFF_ENABLE=1` on a shadow test profile, OR
+ *    - `TRIANGLE_DESKTOP_HANDOFF_ENABLE=1` on a shadow or production
+ *      headless App Server profile, OR
  *    - both `featureFlags.desktopHandoff` and
- *      `sharedHomeConcurrency.desktopHandoffEnabled` true (operator shadow only).
+ *      `sharedHomeConcurrency.desktopHandoffEnabled` true.
  *
- * Manifest defaults keep both handoff flags **false**.
+ * Manifest defaults keep both handoff flags **false**. mcp-interactive
+ * desktop and grok-bot are ineligible. Dual-claimer stays fail-closed via
+ * the idle-only CAS transfer in this module.
  */
 export function resolvePhase4DesktopHandoffConfig(
   profileConfig = {},
@@ -45,46 +47,7 @@ export function resolvePhase4DesktopHandoffConfig(
     enableHandoff = false,
   } = {},
 ) {
-  const flags = getFeatureFlags(manifest);
-  const envEnable = env.TRIANGLE_DESKTOP_HANDOFF_ENABLE === "1";
-  const shadowShape = isShadowHeadlessTestProfile(profileConfig);
-  const manifestGate =
-    flags.desktopHandoff === true &&
-    manifest.sharedHomeConcurrency?.desktopHandoffEnabled === true;
-  const requested = enableHandoff === true || (envEnable && shadowShape) || manifestGate;
-
-  const pool = resolveCodexPoolGuards({
-    preferredSize: profileConfig.codexPool?.preferredSize ?? 2,
-    maxSize: profileConfig.codexPool?.maxSize ?? 4,
-    desktopHandoffRequested: requested,
-    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
-    manifest,
-  });
-
-  const probePassed = manifest.sharedHomeConcurrency?.status === "passed";
-  // Injection / TRIANGLE_DESKTOP_HANDOFF_ENABLE allow shadow tests without
-  // flipping the on-disk manifest (defaults stay false).
-  const shadowOptIn = enableHandoff === true || (envEnable && shadowShape);
-  const active =
-    probePassed && (shadowOptIn || pool.desktopHandoffEnabled === true);
-
-  let inactiveReason = null;
-  if (!probePassed) inactiveReason = "shared_home_concurrency_unproved";
-  else if (!requested && !shadowOptIn) inactiveReason = "desktop_handoff_not_enabled";
-  else if (!active) inactiveReason = "desktop_handoff_manifest_disabled";
-
-  return Object.freeze({
-    active,
-    inactiveReason: active ? null : inactiveReason,
-    shadowTestProfile: shadowShape,
-    desktopHandoffEnabled: active,
-    pool,
-    featureFlags: flags,
-    manifestDesktopHandoffEnabled:
-      manifest.sharedHomeConcurrency?.desktopHandoffEnabled === true,
-    globalDesktopHandoffFlag: flags.desktopHandoff === true,
-    manifest,
-  });
+  return resolveDesktopHandoffGate(profileConfig, { manifest, env, enableHandoff });
 }
 
 /**
