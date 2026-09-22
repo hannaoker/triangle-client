@@ -458,8 +458,10 @@ export function createInstalledHeadlessDrain(config, {
     enabled: true,
   });
   const runtimeEnv = { ...(normalized.env ?? {}) };
-  // Pool size stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1 is already in env.
-  // Do not hardcode preferredSize 1 here — that would swallow the opt-in.
+  // Mini supervisor drain has no env field, so runtimeEnv stays {}. Dedicated
+  // drain CLI may forward process.env. ENABLE still cannot raise the pool
+  // without a live shared-home probe in this process/run; on-disk passed is
+  // not enough. Keep Mini launchd free of ENABLE.
   const runtime = createHeadlessCodexRuntime({
     profileConfig: {
       profileId: normalized.profile,

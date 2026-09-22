@@ -10,14 +10,17 @@
  * Product default (2026-09-21): Codex profiles use headless App Server. grok-bot
  * never enters this pool. Mini-only profile/room allowlists are not the product
  * gate. Production pool size stays 1 unless an operator sets
- * TRIANGLE_CODEX_POOL_ENABLE=1 (still probe-gated, cap 4). Desktop handoff stays
- * off unless TRIANGLE_DESKTOP_HANDOFF_ENABLE=1 or the Phase 4 injection path.
+ * TRIANGLE_CODEX_POOL_ENABLE=1 *and* a live shared-home probe just passed in
+ * this process/run (cap 4). On-disk `sharedHomeConcurrency.status: passed` is
+ * not live proof. Desktop handoff stays off unless
+ * TRIANGLE_DESKTOP_HANDOFF_ENABLE=1 or the Phase 4 injection path.
  * Existing mcp-interactive Codex stays desktop until migrated so desktop +
  * headless never share a mailbox. Do not silently raise Mini live pool size.
  */
 
 import { getFeatureFlags, loadRuntimeManifest } from "./runtime-manifest.mjs";
 import { resolveCodexPoolGuards } from "./runtime-home.mjs";
+import { resolveLiveSharedHomeProbe } from "./shared-home-concurrency-probe.mjs";
 
 export function isHelperConversationStoreEnabled(manifest = loadRuntimeManifest()) {
   return getFeatureFlags(manifest).helperConversationStore === true;
@@ -68,7 +71,11 @@ function parseCodexPoolSizeEnv(env = process.env) {
 /**
  * Production multi-slot opt-in. Default remains 1 even when the on-disk probe
  * status is `passed`. Raising the pool requires TRIANGLE_CODEX_POOL_ENABLE=1
- * (or enableProductionPool injection). An unproved/failed probe still forces 1.
+ * (or enableProductionPool injection) *and* a successful live shared-home
+ * probe in this process/run (`liveSharedHomeProbe` or
+ * TRIANGLE_CODEX_LIVE_PROBE_FILE). Missing/expired/stale/synthetic artifacts
+ * stay at 1. ENABLE without SIZE on a drain-shaped profile also stays at 1
+ * unless that live probe just passed.
  */
 export function resolveProductionCodexPoolConfig(
   profileConfig = {},
@@ -76,10 +83,17 @@ export function resolveProductionCodexPoolConfig(
     manifest = loadRuntimeManifest(),
     env = process.env,
     enableProductionPool = false,
+    liveSharedHomeProbe = null,
+    now = Date.now(),
   } = {},
 ) {
   const optIn = enableProductionPool === true || env.TRIANGLE_CODEX_POOL_ENABLE === "1";
   const parsedSize = parseCodexPoolSizeEnv(env);
+  const liveProbe = resolveLiveSharedHomeProbe({
+    liveSharedHomeProbe,
+    env,
+    now,
+  });
   let preferredSize = 1;
   let maxSize = 1;
   let inactiveReason = "production_pool_not_enabled";
@@ -88,6 +102,10 @@ export function resolveProductionCodexPoolConfig(
     preferredSize = 1;
     maxSize = 1;
     inactiveReason = "pool_size_env_invalid";
+  } else if (optIn && liveProbe.passed !== true) {
+    preferredSize = 1;
+    maxSize = 1;
+    inactiveReason = liveProbe.reason ?? "live_shared_home_probe_missing";
   } else if (optIn) {
     preferredSize =
       parsedSize.present && parsedSize.size != null
@@ -97,12 +115,23 @@ export function resolveProductionCodexPoolConfig(
     inactiveReason = null;
   }
 
+  // Live probe is the production gate. Do not treat committed
+  // sharedHomeConcurrency.status=passed as this-run proof.
   const pool = resolveCodexPoolGuards({
     preferredSize,
     maxSize,
     desktopHandoffRequested: false,
-    probeStatus: manifest.sharedHomeConcurrency?.status ?? "unproved",
-    manifest,
+    probeStatus: liveProbe.passed === true ? "passed" : "unproved",
+    manifest:
+      liveProbe.passed === true
+        ? {
+            ...manifest,
+            sharedHomeConcurrency: {
+              ...(manifest.sharedHomeConcurrency ?? {}),
+              status: "passed",
+            },
+          }
+        : manifest,
   });
 
   if (optIn && inactiveReason == null && pool.forcedByProbe === true) {
@@ -113,6 +142,7 @@ export function resolveProductionCodexPoolConfig(
     ...pool,
     productionPoolOptIn: optIn,
     productionPoolInactiveReason: inactiveReason,
+    liveSharedHomeProbe: liveProbe,
   });
 }
 
@@ -278,8 +308,9 @@ export function resolvePhase1ShadowRuntimeConfig(
  * Product activation: headless App Server shape, not Mini-only allowlist.
  * grok-bot never activates. Desktop mcp-interactive stays inactive so this
  * path cannot silently dual-claim with Shared App Server. Production pool
- * stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1 (probe still gates). Desktop
- * handoff stays off unless the Phase 4 opt-in is set.
+ * stays 1 unless TRIANGLE_CODEX_POOL_ENABLE=1 and a live shared-home probe
+ * just passed in this process/run. Desktop handoff stays off unless the
+ * Phase 4 opt-in is set.
  */
 export function resolveHeadlessRuntimeConfig(
   profileConfig = {},
@@ -290,6 +321,8 @@ export function resolveHeadlessRuntimeConfig(
     enablePhase5Migration = false,
     enableProductionPool = false,
     enableHandoff = false,
+    liveSharedHomeProbe = null,
+    now = Date.now(),
   } = {},
 ) {
   const shadow = resolvePhase1ShadowRuntimeConfig(profileConfig, {
@@ -326,6 +359,8 @@ export function resolveHeadlessRuntimeConfig(
     manifest,
     env,
     enableProductionPool,
+    liveSharedHomeProbe,
+    now,
   });
   const handoff = resolveDesktopHandoffGate(profileConfig, {
     manifest,

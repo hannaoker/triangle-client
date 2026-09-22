@@ -5,7 +5,8 @@
  * (`runtimeAdapter: codex-app-server`, `runtimeMode: headless`,
  * `executionKind: headless-app-server`). Desktop `mcp-interactive` is opt-in.
  * grok-bot is not a Codex factory path. Factory pool size stays 1; raising it
- * requires TRIANGLE_CODEX_POOL_ENABLE=1 at runtime. Desktop handoff stays off.
+ * requires TRIANGLE_CODEX_POOL_ENABLE=1 *and* a live shared-home probe at runtime.
+ * Desktop handoff stays off.
  */
 
 import {
