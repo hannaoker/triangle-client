@@ -85,7 +85,7 @@ public enum TriangleClientCLIContractCases {
         _ = try await service.execute(.add(profile: fixture.profile, adapter: .codex))
         try clientExpect(fixture.events.values == ["credential", "runtime:codex", "create"], "add mutation occurred before verification/readiness: \(fixture.events.values)")
         try clientExpect(fixture.serviceControl.reloadCount == 1, "first add did not activate the staged client")
-        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true:worker"]], "first activation did not use the exact committed profile")
+        try clientExpect(fixture.serviceControl.snapshots == [["alpha-profile:true:headless-app-server"]], "first activation did not use the exact committed profile")
 
         let failed = try Fixture()
         let failing = failed.service(readiness: { _ in throw TriangleClientOperationError.runtimeUnavailable })

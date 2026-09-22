@@ -159,12 +159,12 @@ test("client plist is one fixed secret-free supervisor service", (t) => {
   assert.equal(spawnSync("/usr/bin/plutil", ["-lint", "-"], { input: result.stdout, encoding: "utf8" }).status, 0);
 });
 
-test("install prepares a v4 runtime and creates a private fixed plist", (t) => {
+test("install prepares a runtime manifest and creates a private fixed plist", (t) => {
   const f = fixture(t);
   const result = run("install", f.env);
   assert.equal(result.status, 0, result.stderr);
   const runtime = JSON.parse(fs.readFileSync(path.join(f.app, "worker-runtime", "codex.manifest.json"), "utf8"));
-  assert.equal(runtime.version, 4);
+  assert.equal(runtime.version, 5);
   const plist = path.join(f.home, "Library", "LaunchAgents", "dev.thetriangle.client.plist");
   assert.equal(mode(plist), 0o600);
   assert.equal(mode(path.join(f.home, "Library", "Logs", "the-triangle")), 0o700);

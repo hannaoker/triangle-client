@@ -272,9 +272,11 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         guard !instances.isEmpty else { throw WorkerLauncherError.invalidManifest }
         var attempted = Set<WorkerKind>()
         for instance in instances {
-            let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
+            guard let worker = WorkerKind(rawValue: instance.runtimeAdapter.rawValue) else { continue }
             guard attempted.insert(worker).inserted else { continue }
-            let base = try resolve(worker, instance: instance)
+            let base: WorkerCommand
+            do { base = try resolve(worker, instance: instance) }
+            catch { continue }
             let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
             let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
             try checkedFile(manifestURL, beneath: runtime, exactMode: 0o600, executable: false)
@@ -294,6 +296,31 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 workingDirectory: base.workingDirectory,
                 environment: environment
             )
+        }
+        if attempted.isEmpty {
+            for worker in WorkerKind.allCases {
+                let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
+                let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
+                guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
+                guard let manifest = try? JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)),
+                      manifest.version == 4 || manifest.version == 5
+                else { continue }
+                guard let canonicalProject = try? checkedDirectory(URL(fileURLWithPath: manifest.projectRoot, isDirectory: true), exactMode: 0o700) else { continue }
+                let node = canonicalProject.appendingPathComponent("bin/node")
+                guard FileManager.default.isExecutableFile(atPath: node.path) else { continue }
+                let script = canonicalProject.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
+                guard FileManager.default.isReadableFile(atPath: script.path) else { continue }
+                var environment: [String: String] = [:]
+                for key in ["PATH", "LANG", "LC_ALL", "NO_COLOR"] {
+                    if let value = manifest.environment[key] { environment[key] = value }
+                }
+                return WorkerCommand(
+                    executable: node,
+                    arguments: [script.path],
+                    workingDirectory: canonicalProject,
+                    environment: environment
+                )
+            }
         }
         throw WorkerLauncherError.invalidManifest
     }
