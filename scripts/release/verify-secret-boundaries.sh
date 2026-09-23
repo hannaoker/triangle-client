@@ -61,14 +61,19 @@ while IFS= read -r -d '' file; do
   fi
 done < <(/usr/bin/find "${scan_paths[@]}" -type f -print0 2>/dev/null)
 
-# LaunchAgent templates: no EnvironmentVariables credential keys
+# LaunchAgent templates: no credential keys. The client template may export only
+# the production pool/handoff opt-in (values 1 or 2). No probe-file override.
 for plist in deploy/launchd/*.plist.template; do
   [[ -f "$plist" ]] || continue
-  if /usr/bin/grep -E -qi 'MESH_AGENT_TOKEN|mesh_watch_|admissionToken|EnvironmentVariables' "$plist"; then
-    # EnvironmentVariables key itself is suspicious in our templates (we don't use it)
-    if /usr/bin/grep -E -qi 'MESH_AGENT_TOKEN|mesh_watch_|admissionToken' "$plist" \
-      || /usr/bin/grep -F 'EnvironmentVariables' "$plist" >/dev/null; then
-      fail "LaunchAgent template must stay credential-free: $plist"
+  if /usr/bin/grep -E -qi 'MESH_AGENT_TOKEN|mesh_watch_|admissionToken|TRIANGLE_CODEX_LIVE_PROBE|OPENAI_API_KEY' "$plist"; then
+    fail "LaunchAgent template must stay credential-free: $plist"
+  elif /usr/bin/grep -F 'EnvironmentVariables' "$plist" >/dev/null; then
+    if /usr/bin/grep -F 'TRIANGLE_CODEX_POOL_ENABLE' "$plist" >/dev/null \
+      && /usr/bin/grep -F 'TRIANGLE_CODEX_POOL_SIZE' "$plist" >/dev/null \
+      && /usr/bin/grep -F 'TRIANGLE_DESKTOP_HANDOFF_ENABLE' "$plist" >/dev/null; then
+      ok "LaunchAgent template opt-in is non-secret: $plist"
+    else
+      fail "LaunchAgent EnvironmentVariables is not the pool/handoff allowlist: $plist"
     fi
   else
     ok "LaunchAgent template clean: $plist"

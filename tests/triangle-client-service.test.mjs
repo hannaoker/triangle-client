@@ -154,6 +154,10 @@ test("client plist is one fixed secret-free supervisor service", (t) => {
   assert.match(result.stdout, /<string>dev\.thetriangle\.client<\/string>/);
   assert.match(result.stdout, /<string>run-supervisor<\/string>/);
   assert.doesNotMatch(result.stdout, /profile|token|agent[_-]?id|run-worker|codex-test-cli|hermes/i);
+  assert.match(result.stdout, /<key>TRIANGLE_CODEX_POOL_ENABLE<\/key>\s*<string>1<\/string>/);
+  assert.match(result.stdout, /<key>TRIANGLE_CODEX_POOL_SIZE<\/key>\s*<string>2<\/string>/);
+  assert.match(result.stdout, /<key>TRIANGLE_DESKTOP_HANDOFF_ENABLE<\/key>\s*<string>1<\/string>/);
+  assert.doesNotMatch(result.stdout, /TRIANGLE_CODEX_LIVE_PROBE_FILE|MESH_|OPENAI/);
   const args = [...result.stdout.matchAll(/<string>([^<]+)<\/string>/g)].map((match) => match[1]);
   assert.deepEqual(args.slice(1, 3), [f.helper, "run-supervisor"]);
   assert.equal(spawnSync("/usr/bin/plutil", ["-lint", "-"], { input: result.stdout, encoding: "utf8" }).status, 0);

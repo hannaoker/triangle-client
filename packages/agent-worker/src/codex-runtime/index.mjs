@@ -154,7 +154,10 @@ export {
   assertHeadlessDrainIdentity,
   assertPinnedHeadlessDrainAllowlist,
   createHeadlessClaimerGuard,
+  PRODUCTION_CUTOVER_POOL,
   createInstalledHeadlessDrain,
+  runtimeEnvForHeadlessWake,
+  supervisorRuntimeEnv,
   dedicatedHeadlessDrainLaunchAgentLabel,
   deriveProfileInstanceId,
   hasHeadlessWakeKeys,
@@ -167,5 +170,6 @@ export {
 export {
   createDesktopHandoffController,
   createFakeDesktopOwner,
+  createLatentProductionDesktopOwner,
   resolvePhase4DesktopHandoffConfig,
 } from "./desktop-handoff.mjs";

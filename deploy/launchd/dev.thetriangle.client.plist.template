@@ -19,5 +19,14 @@
   <string>__LOG_DIR__/client.log</string>
   <key>StandardErrorPath</key>
   <string>__LOG_DIR__/client.error.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TRIANGLE_CODEX_POOL_ENABLE</key>
+    <string>1</string>
+    <key>TRIANGLE_CODEX_POOL_SIZE</key>
+    <string>2</string>
+    <key>TRIANGLE_DESKTOP_HANDOFF_ENABLE</key>
+    <string>1</string>
+  </dict>
 </dict>
 </plist>
