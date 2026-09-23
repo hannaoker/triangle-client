@@ -79,7 +79,28 @@ public struct PreparedClientSupervisorLaunch: Sendable, CustomStringConvertible,
 public struct ClientSupervisor: Sendable {
     public static let maximumBootstrapBytes = 1024 * 1024
     private static let maximumRunnerTimeoutMilliseconds = 600_000
-    private static let coordinatorEnvironmentKeys: Set<String> = ["PATH", "LANG", "LC_ALL", "NO_COLOR"]
+    private static let coordinatorEnvironmentKeys: Set<String> = [
+        "PATH", "LANG", "LC_ALL", "NO_COLOR",
+        "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
+    ]
+    private static let productionOptInEnvironmentKeys: Set<String> = [
+        "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
+    ]
+
+    /// Forwards only the production pool and idle-handoff opt-in from the helper
+    /// process. Launchd exports those keys on the helper, and the coordinator
+    /// child otherwise starts with a replaced environment that drops them.
+    /// Values are a single digit so a secret or path cannot ride along.
+    public static func productionOptInEnvironment(from environment: [String: String]) -> [String: String] {
+        var forwarded: [String: String] = [:]
+        for key in productionOptInEnvironmentKeys.sorted() {
+            guard let value = environment[key],
+                  value.range(of: "^[0-9]$", options: .regularExpression) != nil
+            else { continue }
+            forwarded[key] = value
+        }
+        return forwarded
+    }
 
     private let instanceStore: any ClientInstanceStore
     private let gate: VerifiedCredentialGate
@@ -98,6 +119,7 @@ public struct ClientSupervisor: Sendable {
     private let grokBotWebhookKeyPath: URL
     private let headlessRuntimeBindingURL: URL
     private let isDedicatedHeadlessDrainLoaded: @Sendable (String) -> Bool
+    private let parentEnvironment: [String: String]
 
     public init(
         instanceStore: any ClientInstanceStore,
@@ -116,7 +138,8 @@ public struct ClientSupervisor: Sendable {
         grokBotWebhookURLPath: URL? = nil,
         grokBotWebhookKeyPath: URL? = nil,
         headlessRuntimeBindingURL: URL? = nil,
-        isDedicatedHeadlessDrainLoaded: (@Sendable (String) -> Bool)? = nil
+        isDedicatedHeadlessDrainLoaded: (@Sendable (String) -> Bool)? = nil,
+        parentEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
@@ -157,6 +180,7 @@ public struct ClientSupervisor: Sendable {
         self.headlessRuntimeBindingURL = headlessRuntimeBindingURL
             ?? clientRoot.appendingPathComponent("headless-runtime-binding.json")
         self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
+        self.parentEnvironment = parentEnvironment
     }
 
     private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
@@ -247,7 +271,15 @@ public struct ClientSupervisor: Sendable {
         guard !coordinatorSources.isEmpty else { throw ClientSupervisorError.noEligibleInstances }
         let coordinator: WorkerCommand
         do {
-            coordinator = try resolver.resolveCoordinator(for: coordinatorSources)
+            let resolvedCoordinator = try resolver.resolveCoordinator(for: coordinatorSources)
+            let optIn = Self.productionOptInEnvironment(from: parentEnvironment)
+            let coordinatorEnvironment = resolvedCoordinator.environment.merging(optIn) { _, forwarded in forwarded }
+            coordinator = WorkerCommand(
+                executable: resolvedCoordinator.executable,
+                arguments: resolvedCoordinator.arguments,
+                workingDirectory: resolvedCoordinator.workingDirectory,
+                environment: coordinatorEnvironment
+            )
             try validateCoordinator(coordinator)
         } catch {
             throw ClientSupervisorError.runtimeUnavailable
