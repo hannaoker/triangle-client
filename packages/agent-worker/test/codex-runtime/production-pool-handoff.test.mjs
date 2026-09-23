@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { createFakeAppServerStdioProgram } from "../../src/codex-runtime/app-server-process.mjs";
+import { createDurableConversationStore } from "../../src/codex-runtime/durable-conversation-store.mjs";
 import {
+  PRODUCTION_CUTOVER_POOL,
   createDefaultCodexProfileConfig,
   createHeadlessCodexRuntime,
   isDesktopHandoffEnabled,
@@ -16,6 +18,8 @@ import {
   resolveLiveSharedHomeProbe,
   resolvePhase4DesktopHandoffConfig,
   resolveProductionCodexPoolConfig,
+  runtimeEnvForHeadlessWake,
+  supervisorRuntimeEnv,
 } from "../../src/codex-runtime/index.mjs";
 
 const PASSED_MANIFEST = Object.freeze({
@@ -400,5 +404,189 @@ test("production opt-in starts two pool slots; default production stays one", as
   } finally {
     await opted.stop({ signal: "SIGKILL", timeoutMs: 1_000 }).catch(() => {});
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Mini headless wake with no env field still reads the supervisor process env and caps the pool at 2", () => {
+  const wake = { profile: "codex-headless", profileInstanceId: "a".repeat(64) };
+  assert.equal(Object.hasOwn(wake, "env"), false);
+  const env = runtimeEnvForHeadlessWake(wake, {
+    HOME: "/Users/zhenyuhou",
+    PATH: "/usr/bin",
+    TRIANGLE_CODEX_POOL_ENABLE: "1",
+    TRIANGLE_CODEX_POOL_SIZE: "4",
+    TRIANGLE_DESKTOP_HANDOFF_ENABLE: "1",
+    TRIANGLE_CODEX_LIVE_PROBE_FILE: "/tmp/should-not-copy",
+    MESH_TOKEN: "mesh_should_not_copy",
+  });
+  assert.equal(env.TRIANGLE_CODEX_POOL_ENABLE, "1");
+  assert.equal(env.TRIANGLE_CODEX_POOL_SIZE, "2");
+  assert.equal(env.TRIANGLE_DESKTOP_HANDOFF_ENABLE, "1");
+  assert.equal(env.TRIANGLE_CODEX_LIVE_PROBE_FILE, undefined);
+  assert.equal(env.MESH_TOKEN, undefined);
+  assert.equal(PRODUCTION_CUTOVER_POOL.maxSize, 2);
+  assert.equal(PRODUCTION_CUTOVER_POOL.preferredSize, 2);
+
+  const explicit = supervisorRuntimeEnv({
+    HOME: "/Users/zhenyuhou",
+    TRIANGLE_CODEX_POOL_ENABLE: "1",
+    TRIANGLE_CODEX_POOL_SIZE: "9",
+  });
+  assert.equal(explicit.TRIANGLE_CODEX_POOL_SIZE, "9");
+});
+
+test("supervisor start runs an in-process probe, admits pool 2, and constructs idle-only handoff without attaching desktop", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "triangle-prod-pool-"));
+  const storeRoot = mkdtempSync(path.join(tmpdir(), "triangle-prod-store-"));
+  const instanceId = "d".repeat(64);
+  const roomId = `room_${"e".repeat(32)}`;
+  const fake = createFakeAppServerStdioProgram({
+    serverIdentity: "fake-production-pool",
+    idPrefix: "prod",
+    requireMaterializedRollout: true,
+    materializedStorePath: path.join(home, "materialized"),
+  });
+  let probeCalls = 0;
+  let desktopStarts = 0;
+  const env = runtimeEnvForHeadlessWake({}, {
+    HOME: path.dirname(home),
+    PATH: process.env.PATH,
+    TRIANGLE_CODEX_POOL_ENABLE: "1",
+    TRIANGLE_CODEX_POOL_SIZE: "4",
+    TRIANGLE_DESKTOP_HANDOFF_ENABLE: "1",
+  });
+  const durableStore = createDurableConversationStore({ root: storeRoot, enabled: true });
+  const runtime = createHeadlessCodexRuntime({
+    profileConfig: productionProfile({
+      profileInstanceId: instanceId,
+      workingDirectory: home,
+      codexPool: PRODUCTION_CUTOVER_POOL,
+    }),
+    durableStore,
+    profileInstanceId: instanceId,
+    ownerInstanceId: "headless-production-owner",
+    command: fake.command,
+    args: fake.args,
+    codexHome: home,
+    env,
+    runLiveSharedHomeProbe: async () => {
+      probeCalls += 1;
+      return { status: "passed", live: true, finishedAt: new Date().toISOString() };
+    },
+    createDesktopProcess: () => {
+      desktopStarts += 1;
+      throw new Error("desktop attach is not automatic");
+    },
+    statusFile: path.join(storeRoot, "production-pool-handoff.json"),
+    logger: { info() {}, error() {} },
+  });
+  try {
+    assert.equal(runtime.active, true);
+    const started = await runtime.start();
+    assert.equal(probeCalls, 1);
+    assert.equal(started.productionProbe.status, "passed");
+    assert.equal(started.productionProbe.live, true);
+    assert.equal(started.pool.size, 2);
+    assert.equal(started.handoffControllerConstructed, true);
+    assert.equal(started.wakeInvoked, false);
+    assert.equal(desktopStarts, 0);
+    assert.equal(typeof runtime.desktopOwner.wake, "undefined");
+    assert.equal(runtime.desktopOwner.status().chatgptAttached, false);
+    assert.equal(runtime.desktopOwner.status().latent, true);
+
+    runtime.registry.upsert(instanceId, roomId, {
+      executionState: "admitted",
+      activeDeliveryId: "delivery_active_turn",
+    });
+    runtime.registry.upsert(instanceId, roomId, { executionState: "running" });
+    await assert.rejects(
+      () => runtime.handoff.handoffToDesktop({ threadId: "thread-bound" }),
+      (error) => error?.code === "handoff_not_idle",
+    );
+    assert.equal(desktopStarts, 0);
+
+    runtime.registry.upsert(instanceId, roomId, {
+      executionState: "idle",
+      activeDeliveryId: null,
+    });
+    runtime.desktopOwner.setPendingApproval(true);
+    await assert.rejects(
+      () => runtime.handoff.handoffToDesktop({ threadId: "thread-bound" }),
+      (error) => error?.code === "handoff_approval_pending",
+    );
+    assert.equal(desktopStarts, 0);
+
+    const grok = resolveHeadlessRuntimeConfig(
+      {
+        profileId: "bob",
+        runtimeAdapter: "grok-bot",
+        deliveryMode: "grok-bot",
+        runtimeMode: "headless",
+        executionKind: "headless-app-server",
+      },
+      { manifest: PASSED_MANIFEST, env, liveSharedHomeProbe: livePassedProbe() },
+    );
+    assert.equal(grok.active, false);
+    assert.equal(grok.inactiveReason, "grok_bot_not_in_codex_pool");
+    assert.equal(grok.desktopHandoffEnabled, false);
+  } finally {
+    await runtime.stop({ signal: "SIGKILL", timeoutMs: 1_000 }).catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+    rmSync(storeRoot, { recursive: true, force: true });
+  }
+});
+
+test("a failed in-process probe keeps production at pool 1 and leaves handoff unconstructed", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "triangle-prod-pool-fail-"));
+  const storeRoot = mkdtempSync(path.join(tmpdir(), "triangle-prod-store-fail-"));
+  const instanceId = "f".repeat(64);
+  const fake = createFakeAppServerStdioProgram({
+    serverIdentity: "fake-production-pool-fail",
+    idPrefix: "fail",
+    requireMaterializedRollout: true,
+    materializedStorePath: path.join(home, "materialized"),
+  });
+  let desktopStarts = 0;
+  const runtime = createHeadlessCodexRuntime({
+    profileConfig: productionProfile({
+      profileInstanceId: instanceId,
+      workingDirectory: home,
+      codexPool: PRODUCTION_CUTOVER_POOL,
+    }),
+    durableStore: createDurableConversationStore({ root: storeRoot, enabled: true }),
+    profileInstanceId: instanceId,
+    ownerInstanceId: "headless-production-owner",
+    command: fake.command,
+    args: fake.args,
+    codexHome: home,
+    env: supervisorRuntimeEnv({
+      HOME: path.dirname(home),
+      PATH: process.env.PATH,
+      TRIANGLE_CODEX_POOL_ENABLE: "1",
+      TRIANGLE_DESKTOP_HANDOFF_ENABLE: "1",
+    }),
+    runLiveSharedHomeProbe: async () => ({
+      status: "failed",
+      live: true,
+      finishedAt: new Date().toISOString(),
+      error: { code: "probe_failed" },
+    }),
+    createDesktopProcess: () => {
+      desktopStarts += 1;
+      throw new Error("desktop attach is not automatic");
+    },
+    logger: { info() {}, error() {} },
+  });
+  try {
+    const started = await runtime.start();
+    assert.equal(started.productionProbe.status, "failed");
+    assert.equal(started.pool.size, 1);
+    assert.equal(started.handoffControllerConstructed, false);
+    assert.equal(runtime.handoff, null);
+    assert.equal(desktopStarts, 0);
+  } finally {
+    await runtime.stop({ signal: "SIGKILL", timeoutMs: 1_000 }).catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+    rmSync(storeRoot, { recursive: true, force: true });
   }
 });

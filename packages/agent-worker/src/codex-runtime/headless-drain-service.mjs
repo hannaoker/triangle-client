@@ -20,6 +20,7 @@ import {
 import { createDurableConversationStore } from "./durable-conversation-store.mjs";
 import { createHeadlessCodexDrain } from "./headless-drain.mjs";
 import { createHeadlessCodexRuntime } from "./headless-runtime.mjs";
+import { runSharedHomeConcurrencyProbe } from "./shared-home-concurrency-probe.mjs";
 
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const INSTANCE = /^[a-f0-9]{64}$/;
@@ -421,9 +422,50 @@ export function loadHeadlessDrainConfig({ profile, env = process.env } = {}) {
   });
 }
 
+/**
+ * Env the Mini supervisor actually applies. Launchd plist exports are ignored
+ * unless this reads process.env: headless wake config has no env field.
+ * This cutover caps the production pool at 2 (3 and 4 clamp to 2).
+ */
+export function supervisorRuntimeEnv(source = process.env) {
+  const env = {
+    HOME: source?.HOME,
+    PATH: source?.PATH,
+    LANG: source?.LANG,
+    LC_ALL: source?.LC_ALL,
+    TMPDIR: source?.TMPDIR,
+    USER: source?.USER,
+    LOGNAME: source?.LOGNAME,
+  };
+  if (source?.TRIANGLE_CODEX_POOL_ENABLE === "1") {
+    env.TRIANGLE_CODEX_POOL_ENABLE = "1";
+    const raw = source.TRIANGLE_CODEX_POOL_SIZE;
+    if (raw == null || String(raw).trim() === "" || raw === "3" || raw === "4") {
+      env.TRIANGLE_CODEX_POOL_SIZE = "2";
+    } else {
+      env.TRIANGLE_CODEX_POOL_SIZE = String(raw);
+    }
+  }
+  if (source?.TRIANGLE_DESKTOP_HANDOFF_ENABLE === "1") {
+    env.TRIANGLE_DESKTOP_HANDOFF_ENABLE = "1";
+  }
+  for (const key of Object.keys(env)) {
+    if (env[key] == null) delete env[key];
+  }
+  return Object.freeze(env);
+}
+
+export const PRODUCTION_CUTOVER_POOL = Object.freeze({ preferredSize: 2, maxSize: 2 });
+
+/** Mini wake records omit env. Fall back to the supervisor process environment. */
+export function runtimeEnvForHeadlessWake(config = {}, processEnvironment = process.env) {
+  return supervisorRuntimeEnv(config?.env ?? processEnvironment);
+}
+
 export function createInstalledHeadlessDrain(config, {
   logger = console,
   ownerInstanceId = `headless-drain-${process.pid}`,
+  runLiveSharedHomeProbe = runSharedHomeConcurrencyProbe,
 } = {}) {
   const normalized = config.profileInstanceId
     ? {
@@ -457,11 +499,11 @@ export function createInstalledHeadlessDrain(config, {
     root: normalized.stateRoot,
     enabled: true,
   });
-  const runtimeEnv = { ...(normalized.env ?? {}) };
-  // Mini supervisor drain has no env field, so runtimeEnv stays {}. Dedicated
-  // drain CLI may forward process.env. ENABLE still cannot raise the pool
-  // without a live shared-home probe in this process/run; on-disk passed is
-  // not enough. Keep Mini launchd free of ENABLE.
+  // Mini headless wake config has no env field. Read the supervisor process
+  // environment (launchd) instead of pretending a missing field is empty.
+  // ENABLE still cannot raise the pool without a live shared-home probe in
+  // this process. A failed probe stays at pool 1 and does not construct handoff.
+  const runtimeEnv = runtimeEnvForHeadlessWake(normalized, process.env);
   const runtime = createHeadlessCodexRuntime({
     profileConfig: {
       profileId: normalized.profile,
@@ -474,6 +516,7 @@ export function createInstalledHeadlessDrain(config, {
       maxInFlightPerProfile: 1,
       shadowTestProfile: false,
       workingDirectory: normalized.workingDirectory,
+      codexPool: PRODUCTION_CUTOVER_POOL,
     },
     transactionProxy,
     codexHome: normalized.codexHome,
@@ -485,6 +528,10 @@ export function createInstalledHeadlessDrain(config, {
     profileInstanceId: normalized.profileInstanceId,
     ownerInstanceId,
     logger,
+    runLiveSharedHomeProbe: runtimeEnv.TRIANGLE_CODEX_POOL_ENABLE === "1"
+      ? runLiveSharedHomeProbe
+      : null,
+    statusFile: path.join(normalized.stateRoot, "production-pool-handoff.json"),
   });
   if (!runtime.active) {
     throw Object.assign(new Error("headless runtime activation rejected"), {

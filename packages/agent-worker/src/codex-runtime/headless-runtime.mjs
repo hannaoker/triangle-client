@@ -24,8 +24,11 @@
  * No MESH credentials. Dedicated TRIANGLE_CODEX_HOME only.
  */
 
+import { writeFileSync } from "node:fs";
+
 import { assertNoSecretMaterial } from "./app-server-protocol.mjs";
-import { waitForAppServerTurnCompleted } from "./app-server-process.mjs";
+import { createCodexAppServerProcess, waitForAppServerTurnCompleted } from "./app-server-process.mjs";
+import { createDesktopHandoffController, createLatentProductionDesktopOwner } from "./desktop-handoff.mjs";
 import {
   buildCompletionIdempotencyKey,
   recordOrReplayCompletion,
@@ -184,6 +187,10 @@ export function createHeadlessCodexRuntime({
   enableProductionPool = false,
   enableHandoff = false,
   liveSharedHomeProbe = null,
+  runLiveSharedHomeProbe = null,
+  createProcess = createCodexAppServerProcess,
+  createDesktopProcess = createCodexAppServerProcess,
+  statusFile = null,
   registry = null,
   pool = null,
   durableStore = null,
@@ -200,15 +207,42 @@ export function createHeadlessCodexRuntime({
   logger = console,
   now = () => Date.now(),
 } = {}) {
-  const resolved = resolveHeadlessRuntimeConfig(profileConfig, {
+  let productionProbe = liveSharedHomeProbe;
+  let resolved = resolveHeadlessRuntimeConfig(profileConfig, {
     enableShadow,
     enablePhase5Migration,
     enableProductionPool,
     enableHandoff,
-    liveSharedHomeProbe,
+    liveSharedHomeProbe: productionProbe,
     env,
     now: now(),
   });
+
+  function probePassed(report) {
+    return report?.live === true && report?.status === "passed";
+  }
+
+  function poolManifest(report) {
+    if (!probePassed(report)) return resolved.manifest;
+    const shared = resolved.manifest?.sharedHomeConcurrency ?? {};
+    return {
+      ...resolved.manifest,
+      sharedHomeConcurrency: { ...shared, status: "passed" },
+    };
+  }
+
+  function makePool(configResolved, report) {
+    return createCodexWorkerPool({
+      codexHome,
+      command,
+      args,
+      env,
+      preferredSize: configResolved.pool.preferredSize,
+      maxSize: configResolved.pool.maxSize,
+      manifest: poolManifest(report),
+      createProcess,
+    });
+  }
 
   const resolvedRegistry =
     registry ??
@@ -231,17 +265,8 @@ export function createHeadlessCodexRuntime({
   }
 
   const validatedConfig = validateHeadlessCodexConfig(profileConfig);
-  const workerPool =
-    pool ??
-    createCodexWorkerPool({
-      codexHome,
-      command,
-      args,
-      env,
-      preferredSize: resolved.pool.preferredSize,
-      maxSize: resolved.pool.maxSize,
-      manifest: resolved.manifest,
-    });
+  const poolInjected = pool != null;
+  let workerPool = pool ?? makePool(resolved, productionProbe);
 
   const resolvedLeaseManager =
     leaseManager ??
@@ -252,6 +277,39 @@ export function createHeadlessCodexRuntime({
           now,
         })
       : null);
+
+  let handoffController = null;
+  let desktopOwner = null;
+
+  function maybeConstructHandoff() {
+    if (handoffController != null) return;
+    if (resolved.activationMode !== "headless_app_server") return;
+    if (resolved.desktopHandoffEnabled !== true) return;
+    if (!probePassed(productionProbe)) return;
+    if (durableStore?.enabled !== true || resolvedLeaseManager == null) return;
+    const instanceId = profileInstanceId ?? profileConfig.profileInstanceId ?? null;
+    if (typeof instanceId !== "string" || !/^[a-f0-9]{64}$/.test(instanceId)) return;
+    desktopOwner = createLatentProductionDesktopOwner({
+      ownerInstanceId: `desktop:${ownerInstanceId}`,
+      codexHome,
+      command,
+      args,
+      env,
+      createProcess: createDesktopProcess,
+    });
+    handoffController = createDesktopHandoffController({
+      store: durableStore,
+      leaseManager: resolvedLeaseManager,
+      registry: resolvedRegistry,
+      profileInstanceId: instanceId,
+      headlessOwnerInstanceId: ownerInstanceId,
+      desktopOwner,
+      enabled: true,
+      now,
+    });
+  }
+
+  maybeConstructHandoff();
 
   let started = false;
   /** @type {string[]} */
@@ -273,16 +331,78 @@ export function createHeadlessCodexRuntime({
    */
   let activeDelivery = null;
 
+  function writeProductionStatus(snapshot) {
+    if (typeof statusFile !== "string" || statusFile.length === 0) return;
+    const body = {
+      writtenAt: new Date().toISOString(),
+      probeStatus: snapshot.productionProbe?.status ?? null,
+      probeLive: snapshot.productionProbe?.live === true,
+      probeFinishedAt: snapshot.productionProbe?.finishedAt ?? null,
+      probeErrorCode: snapshot.productionProbe?.error?.code ?? null,
+      poolSize: snapshot.pool?.size ?? null,
+      poolMaxSize: resolved.pool?.maxSize ?? null,
+      handoffControllerConstructed: snapshot.handoffControllerConstructed === true,
+      wakeInvoked: false,
+      command,
+      codexHome,
+    };
+    writeFileSync(statusFile, `${JSON.stringify(body)}\n`, { mode: 0o600 });
+  }
+
   async function start() {
     if (started) return status();
+    if (
+      !poolInjected
+      && productionProbe == null
+      && env?.TRIANGLE_CODEX_POOL_ENABLE === "1"
+      && typeof runLiveSharedHomeProbe === "function"
+    ) {
+      try {
+        productionProbe = await runLiveSharedHomeProbe({
+          live: true,
+          command,
+          args,
+          codexHome,
+          env,
+        });
+      } catch (error) {
+        productionProbe = {
+          status: "failed",
+          live: true,
+          finishedAt: new Date().toISOString(),
+          error: { code: error?.code ?? "probe_failed" },
+        };
+      }
+      resolved = resolveHeadlessRuntimeConfig(profileConfig, {
+        enableShadow,
+        enablePhase5Migration,
+        enableProductionPool,
+        enableHandoff,
+        liveSharedHomeProbe: productionProbe,
+        env,
+        now: now(),
+      });
+      workerPool = makePool(resolved, productionProbe);
+      maybeConstructHandoff();
+    }
     await workerPool.start();
     started = true;
-    logger.info?.("triangle_headless_shadow_started", {
+    const snapshot = status();
+    try {
+      writeProductionStatus(snapshot);
+    } catch (error) {
+      logger.error?.("triangle_production_pool_status_write_failed", {
+        code: error?.code ?? "status_write_failed",
+      });
+    }
+    logger.info?.("triangle_production_pool_handoff", {
       profileId: resolved.profileId,
-      pool: workerPool.status(),
-      durable: resolvedRegistry.kind === "durable",
+      probeStatus: snapshot.productionProbe?.status ?? null,
+      poolSize: snapshot.pool?.size ?? null,
+      handoffControllerConstructed: snapshot.handoffControllerConstructed === true,
+      wakeInvoked: false,
     });
-    return status();
+    return snapshot;
   }
 
   async function stop(options) {
@@ -988,6 +1108,18 @@ export function createHeadlessCodexRuntime({
       profileId: resolved.profileId,
       config: resolved,
       pool: workerPool.status(),
+      productionProbe: productionProbe == null
+        ? null
+        : Object.freeze({
+          status: productionProbe.status ?? null,
+          live: productionProbe.live === true,
+          finishedAt: productionProbe.finishedAt ?? null,
+          error: productionProbe.error?.code
+            ? Object.freeze({ code: productionProbe.error.code })
+            : null,
+        }),
+      handoffControllerConstructed: handoffController != null,
+      wakeInvoked: false,
       conversations: resolvedRegistry.size(),
       registryKind: resolvedRegistry.kind,
       durableStoreEnabled: durableStore?.enabled === true,
@@ -1002,7 +1134,9 @@ export function createHeadlessCodexRuntime({
   return Object.freeze({
     active: true,
     reason: null,
-    config: resolved,
+    get config() {
+      return resolved;
+    },
     start,
     stop,
     runDelivery,
@@ -1013,7 +1147,15 @@ export function createHeadlessCodexRuntime({
     restartSlot,
     status,
     registry: resolvedRegistry,
-    pool: workerPool,
+    get pool() {
+      return workerPool;
+    },
+    get handoff() {
+      return handoffController;
+    },
+    get desktopOwner() {
+      return desktopOwner;
+    },
     leaseManager: resolvedLeaseManager,
     durableStore: durableStore?.enabled === true ? durableStore : null,
   });

@@ -355,6 +355,11 @@ expected={
     "ThrottleInterval": 10,
     "StandardOutPath": os.path.join(logs, "client.log"),
     "StandardErrorPath": os.path.join(logs, "client.error.log"),
+    "EnvironmentVariables": {
+        "TRIANGLE_CODEX_POOL_ENABLE": "1",
+        "TRIANGLE_CODEX_POOL_SIZE": "2",
+        "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+    },
 }
 if value != expected:
     raise SystemExit("Triangle Client plist arguments or service contract mismatch")

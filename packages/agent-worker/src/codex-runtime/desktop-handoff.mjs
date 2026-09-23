@@ -242,6 +242,106 @@ export function createFakeDesktopOwner({
 }
 
 /**
+ * Production desktop owner. Stays latent until an explicit attachAndVerify.
+ * Construction does not spawn Codex, launch ChatGPT.app, or rebind a thread.
+ * There is no wake method.
+ */
+export function createLatentProductionDesktopOwner({
+  ownerInstanceId,
+  codexHome,
+  command = "codex",
+  args = ["app-server"],
+  env = {},
+  createProcess = createCodexAppServerProcess,
+} = {}) {
+  if (typeof ownerInstanceId !== "string" || ownerInstanceId.length === 0) {
+    throw new TypeError("ownerInstanceId is required");
+  }
+  if (typeof codexHome !== "string" || !codexHome.startsWith("/")) {
+    throw new TypeError("codexHome must be an absolute dedicated Triangle home");
+  }
+  if (codexHome.includes("/.codex") && !codexHome.includes("codex-runtime")) {
+    throw createCodedError(
+      "handoff_user_codex_home_forbidden",
+      "desktop handoff must not use ~/.codex",
+    );
+  }
+
+  let processHandle = null;
+  let pendingApproval = false;
+  let idle = true;
+  let lastVerifiedThreadId = null;
+
+  return {
+    ownerInstanceId,
+    serverIdentity: "triangle-production-desktop",
+    pauseAdmission() {},
+    resumeAdmission() {},
+    isAdmissionOpen() {
+      return false;
+    },
+    isIdle() {
+      return idle === true;
+    },
+    hasPendingApproval() {
+      return pendingApproval === true;
+    },
+    setPendingApproval(value) {
+      pendingApproval = value === true;
+    },
+    async health() {
+      return {
+        appServerHealthy: processHandle != null,
+        chatgptAttached: false,
+        serverIdentity: "triangle-production-desktop",
+      };
+    },
+    async attachAndVerify({ threadId } = {}) {
+      if (processHandle == null) {
+        processHandle = createProcess({ command, args, codexHome, env });
+        await processHandle.start();
+        await processHandle.initialize({
+          name: "triangle-production-desktop",
+          version: "0.1.0",
+        });
+      }
+      const resumed = await processHandle.threadResume({ threadId });
+      const resumedId = resumed?.thread?.id ?? null;
+      if (resumedId !== threadId) {
+        throw createCodedError("handoff_thread_mismatch", "desktop resume mismatch", {
+          expected: threadId,
+          actual: resumedId,
+        });
+      }
+      lastVerifiedThreadId = threadId;
+      return {
+        threadId,
+        serverIdentity: "triangle-production-desktop",
+        chatgptAttached: false,
+      };
+    },
+    status() {
+      return {
+        ownerInstanceId,
+        serverIdentity: "triangle-production-desktop",
+        chatgptAttached: false,
+        latent: processHandle == null,
+        pendingApproval,
+        idle,
+        lastVerifiedThreadId,
+        pid: processHandle?.status?.().pid ?? null,
+      };
+    },
+    async close() {
+      if (processHandle != null) {
+        await processHandle.close({ signal: "SIGTERM", timeoutMs: 1_000 });
+        processHandle = null;
+      }
+    },
+  };
+}
+
+/**
  * @param {object} options
  * @param {ReturnType<import('./durable-conversation-store.mjs').createDurableConversationStore>} options.store
  * @param {ReturnType<import('./execution-lease.mjs').createExecutionLeaseManager>} options.leaseManager
