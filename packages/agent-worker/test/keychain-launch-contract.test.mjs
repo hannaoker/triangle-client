@@ -145,6 +145,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/codex-runtime/config-guards.mjs",
     "packages/agent-worker/src/codex-runtime/conversation-registry.mjs",
     "packages/agent-worker/src/codex-runtime/correlation.mjs",
+    "packages/agent-worker/src/codex-runtime/desktop-handoff.mjs",
     "packages/agent-worker/src/codex-runtime/durable-conversation-store.mjs",
     "packages/agent-worker/src/codex-runtime/execution-lease.mjs",
     "packages/agent-worker/src/codex-runtime/execution-state.mjs",
@@ -155,6 +156,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
     "packages/agent-worker/src/codex-runtime/runtime-home.mjs",
     "packages/agent-worker/src/codex-runtime/runtime-manifest.mjs",
+    "packages/agent-worker/src/codex-runtime/shared-home-concurrency-probe.mjs",
     "packages/agent-worker/src/codex-runtime/worker-pool.mjs",
   ].sort());
   for (const [relative, digest] of Object.entries(manifest.artifacts)) {
