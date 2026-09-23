@@ -24,6 +24,9 @@ struct ClientSupervisorTests {
     @Test("coordinator launch is clean")
     func cleanLaunch() async throws { try await ClientSupervisorContractCases.cleanCoordinatorLaunch() }
 
+    @Test("coordinator receives only the single-digit production pool opt-in")
+    func productionOptIn() async throws { try await ClientSupervisorContractCases.productionOptInReachesCoordinator() }
+
     @Test("diagnostics redact credentials")
     func redactedDiagnostics() async throws { try await ClientSupervisorContractCases.redactedDiagnostics() }
 

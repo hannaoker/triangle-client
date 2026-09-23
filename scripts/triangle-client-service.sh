@@ -244,6 +244,27 @@ except Exception: raise SystemExit(1)
 PY
 }
 
+wait_for_client_absence() {
+  local attempts=0 limit=40 pause=0.25
+  if [[ "${TRIANGLE_TEST_MODE:-}" == "1" ]]; then limit=2; pause=0.02; fi
+  while "$launchctl_command" print "${domain}/${label}" >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    [[ $attempts -le $limit ]] || return 1
+    /bin/sleep "$pause"
+  done
+}
+
+wait_for_recorded_supervisor_exit() {
+  local pid=$1 attempts=0
+  [[ "${TRIANGLE_TEST_MODE:-}" == "1" || -z "$pid" ]] && return 0
+  while /bin/kill -0 "$pid" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -eq 8 ]]; then /bin/kill -TERM "$pid" 2>/dev/null || true; fi
+    [[ $attempts -le 40 ]] || return 1
+    /bin/sleep 0.25
+  done
+}
+
 wait_for_readiness() {
   local started_ms=$1 timeout_ms=${TRIANGLE_READY_TIMEOUT_MS:-10000} stability_ms=500 deadline stable_deadline now output pid stable_output stable_pid
   if [[ "${TRIANGLE_TEST_MODE:-}" == "1" ]]; then stability_ms=${TRIANGLE_READY_STABILITY_MS:-500}; fi
@@ -481,7 +502,7 @@ install_service() {
   ensure_tree
   validate_helper
   runtime_records=(); legacy_codex_loaded=0; legacy_hermes_loaded=0
-  local staged_plist="" plist_record="" transaction_dir="" committed=0 new_was_loaded=0 new_bootstrapped=0 index record rollback_failed
+  local staged_plist="" plist_record="" transaction_dir="" committed=0 new_was_loaded=0 new_bootstrapped=0 index record rollback_failed prior_supervisor_pid=""
   rollback() {
     local result=$1
     trap - EXIT HUP INT TERM
@@ -501,7 +522,9 @@ install_service() {
       if [[ -n "$staged_plist" && -f "$staged_plist" ]]; then /bin/rm -f "$staged_plist"; fi
       rollback_runtime_records || rollback_failed=1
       if [[ $new_was_loaded -eq 1 && -f "$plist_path" ]]; then
-        if ! "$launchctl_command" print "${domain}/${label}" >/dev/null 2>&1; then
+        wait_for_client_absence || rollback_failed=1
+        wait_for_recorded_supervisor_exit "${prior_supervisor_pid:-}" || rollback_failed=1
+        if [[ $rollback_failed -eq 0 ]] && ! "$launchctl_command" print "${domain}/${label}" >/dev/null 2>&1; then
           "$launchctl_command" bootstrap "$domain" "$plist_path" >/dev/null 2>&1 || rollback_failed=1
         fi
         "$launchctl_command" print "${domain}/${label}" >/dev/null 2>&1 || rollback_failed=1
@@ -535,7 +558,18 @@ PY
   /bin/chmod 700 "$transaction_dir"
   copy_rollback_record "$plist_record" "${transaction_dir}/plist.record"
   for ((index=0; index<${#runtime_records[@]}; index++)); do copy_rollback_record "${runtime_records[$index]}" "${transaction_dir}/runtime-${index}.record"; done
+  if [[ "${TRIANGLE_TEST_MODE:-}" != "1" ]]; then
+    local supervisor_pids
+    supervisor_pids=$(/usr/bin/pgrep -f 'packages/agent-worker/src/client-supervisor-cli.mjs' || true)
+    if [[ -n "$supervisor_pids" && "$(printf '%s\n' "$supervisor_pids" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -gt 1 ]]; then
+      echo "Triangle Client refuses to restart while more than one supervisor is running" >&2
+      exit 1
+    fi
+    prior_supervisor_pid=$(printf '%s\n' "$supervisor_pids" | /usr/bin/head -n 1)
+  fi
   if [[ $new_was_loaded -eq 1 ]]; then "$launchctl_command" bootout "${domain}/${label}" >/dev/null; fi
+  wait_for_client_absence
+  wait_for_recorded_supervisor_exit "$prior_supervisor_pid"
   prepare_readiness
   local registry
   registry=$(registry_state)

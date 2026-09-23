@@ -19,6 +19,7 @@ public enum ClientSupervisorContractCases {
         .init(name: "no eligible profile fails with a bounded diagnostic", run: noEligibleProfile),
         .init(name: "bootstrap is bounded and reaches the child only through stdin", run: boundedAnonymousBootstrap),
         .init(name: "coordinator launch has credential-free argv and environment", run: cleanCoordinatorLaunch),
+        .init(name: "coordinator receives only the single-digit production pool opt-in", run: productionOptInReachesCoordinator),
         .init(name: "prepared launch diagnostics never describe credentials", run: redactedDiagnostics),
         .init(name: "host waits for coordinator shutdown and rejects failure", run: shutdownLifecycle),
         .init(name: "early child exit cannot terminate the Swift host with SIGPIPE", run: subprocessEarlyExitIsContained),
@@ -164,7 +165,7 @@ public enum ClientSupervisorContractCases {
         let resolver = RecordingSupervisorResolver(events: EventLog(), failureAt: nil, coordinatorFails: false)
         let process = RecordingSupervisorProcess()
         func makeSupervisor(_ store: any ClientInstanceStore) -> ClientSupervisor {
-            ClientSupervisor(instanceStore: store, gate: gate, resolver: resolver, processRunner: process)
+            ClientSupervisor(instanceStore: store, gate: gate, resolver: resolver, processRunner: process, parentEnvironment: [:])
         }
 
         var supervisor = makeSupervisor(instanceStore)
@@ -751,6 +752,51 @@ public enum ClientSupervisorContractCases {
         }
     }
 
+    public static func productionOptInReachesCoordinator() async throws {
+        let forwarded = ClientSupervisor.productionOptInEnvironment(from: [
+            "TRIANGLE_CODEX_POOL_ENABLE": "1",
+            "TRIANGLE_CODEX_POOL_SIZE": "2",
+            "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+            "TRIANGLE_CODEX_LIVE_PROBE_FILE": "/tmp/probe",
+            "MESH_AGENT_TOKEN": "secret",
+            "HOME": "/Users/zhenyuhou",
+        ])
+        let rejected = ClientSupervisor.productionOptInEnvironment(from: [
+            "TRIANGLE_CODEX_POOL_ENABLE": "1\n",
+            "TRIANGLE_CODEX_POOL_SIZE": "9",
+            "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "/tmp",
+        ])
+        try expect(forwarded == [
+            "TRIANGLE_CODEX_POOL_ENABLE": "1",
+            "TRIANGLE_CODEX_POOL_SIZE": "2",
+            "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+        ], "opt-in filter changed")
+        try expect(rejected == ["TRIANGLE_CODEX_POOL_SIZE": "9"], "invalid opt-in was forwarded")
+
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "opt-in", adapter: .codex, digit: "f"),
+            ],
+            parentEnvironment: [
+                "TRIANGLE_CODEX_POOL_ENABLE": "1",
+                "TRIANGLE_CODEX_POOL_SIZE": "4",
+                "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+                "MESH_AGENT_TOKEN": "secret-token",
+                "TRIANGLE_CODEX_LIVE_PROBE_FILE": "/tmp/probe",
+                "HOME": "/Users/zhenyuhou",
+            ]
+        )
+        try await fixture.supervisor.run()
+        let request = try require(fixture.process.request, "coordinator was not launched")
+        try expect(request.environment["TRIANGLE_CODEX_POOL_ENABLE"] == "1", "pool enable was dropped")
+        try expect(request.environment["TRIANGLE_CODEX_POOL_SIZE"] == "4", "pool size was dropped")
+        try expect(request.environment["TRIANGLE_DESKTOP_HANDOFF_ENABLE"] == "1", "handoff enable was dropped")
+        try expect(request.environment["MESH_AGENT_TOKEN"] == nil, "mesh token reached the coordinator")
+        try expect(request.environment["TRIANGLE_CODEX_LIVE_PROBE_FILE"] == nil, "probe file reached the coordinator")
+        try expect(request.environment["HOME"] == nil, "home reached the coordinator")
+        try expect(!request.environment.values.joined().contains("secret-token"), "token entered environment")
+    }
+
     public static func redactedDiagnostics() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "diagnostic", adapter: .codex, digit: "c"),
@@ -942,7 +988,8 @@ private final class SupervisorFixture: @unchecked Sendable {
         duplicateHeadlessInstanceID: Bool = false,
         headlessStateRoots: [String: String] = [:],
         headlessPollIntervalMs: Any = 1_000,
-        includeHeadlessAllowedRoomId: Bool = false
+        includeHeadlessAllowedRoomId: Bool = false,
+        parentEnvironment: [String: String] = [:]
     ) throws {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
@@ -1091,7 +1138,8 @@ private final class SupervisorFixture: @unchecked Sendable {
             headlessRuntimeBindingURL: headlessRuntimeBindingURL,
             isDedicatedHeadlessDrainLoaded: { profile in
                 dedicatedHeadlessDrainLoaded || dedicatedHeadlessDrainLoadedProfiles.contains(profile)
-            }
+            },
+            parentEnvironment: parentEnvironment
         )
     }
 
