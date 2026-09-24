@@ -12,6 +12,7 @@ import {
   createMemoryCursorStore,
   isWebhookQuotaExhaustion,
   parseRetryAfterMs,
+  parseQuotaResetUntilMs,
   readWebhookCredentials,
   validateGrokBotBinding,
 } from "../src/grok-bot-wake.mjs";
@@ -724,4 +725,130 @@ test("an in-flight quota retry cannot re-arm after bridge stop", async () => {
 
   assert.equal(timers.size, 0);
   assert.equal(bridge.getQuotaBackoffState(), null);
+});
+
+test("parseQuotaResetUntilMs detects multi-day reset timestamps", () => {
+  const futureIso = "2026-09-28T12:00:00.000Z";
+  const nowMs = Date.parse("2026-09-24T00:00:00.000Z");
+  const msg = `included usage limit reached, resets at ${futureIso}`;
+  const parsed = parseQuotaResetUntilMs(msg, { now: nowMs });
+  assert.equal(parsed, Date.parse(futureIso));
+
+  const invalid = "temporary rate limit exceeded";
+  assert.equal(parseQuotaResetUntilMs(invalid, { now: nowMs }), null);
+});
+
+test("pre-wake receipt filtering settles receipts via helper and suppresses wake", async () => {
+  let webhookCalls = 0;
+  const helperCalls = [];
+
+  const fakeProxy = {
+    async status() {
+      return { open: null };
+    },
+    async claimNext() {
+      helperCalls.push("claimNext");
+      if (helperCalls.length === 1) {
+        // Simulate receipt-only delivery settled by helper
+        return {
+          receiptOnly: true,
+          replyRequired: false,
+          open: null,
+        };
+      }
+      return null;
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 5, reason: "wake" });
+  assert.equal(res.status, "skipped_receipt_settled");
+  assert.equal(webhookCalls, 0, "webhook must not be called when receipts are settled");
+  assert.ok(helperCalls.length > 0);
+});
+
+test("pre-wake receipt filtering preserves wake for actionable work", async () => {
+  let webhookCalls = 0;
+  let claimCount = 0;
+
+  const fakeProxy = {
+    async status() {
+      return { open: null };
+    },
+    async claimNext() {
+      claimCount += 1;
+      if (claimCount === 1) {
+        // Receipt first
+        return { receiptOnly: true, replyRequired: false, open: null };
+      }
+      // Followed by actionable work
+      return { shouldStartModel: true, replyRequired: true, open: { deliveryId: 10 } };
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 6, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "webhook must be called when actionable work is present");
+  assert.equal(claimCount, 2);
+});
+
+test("pre-wake receipt filtering defers when Bob already holds open claim", async () => {
+  let webhookCalls = 0;
+
+  const fakeProxy = {
+    async status() {
+      return { open: { deliveryId: 42, state: "claimed" } };
+    },
+    async claimNext() {
+      throw new Error("should not be called when open claim exists");
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 7, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "webhook should proceed and defer to open claim");
 });

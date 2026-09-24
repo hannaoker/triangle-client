@@ -7,7 +7,7 @@
  * runs MESH claim/reply/ack.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from 'node:fs/promises';
 
 import {
   createFakeWatchTransport,
@@ -19,6 +19,9 @@ import {
   createMemoryCursorStore,
   createWakeClient,
 } from "./wake-client.mjs";
+import {
+  createHelperTrustedTransactionProxy,
+} from "./helper-transaction-proxy.mjs";
 
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -44,6 +47,27 @@ export const MAX_QUOTA_BACKOFF_MS = 15 * 60_000;
 const MAX_WEBHOOK_ERROR_BODY_CHARS = 4_096;
 const QUOTA_EXHAUSTION_BODY =
   /resource_exhausted|quota_exceeded|quota[\s_-]?exhaust|rate[\s_-]?limit/i;
+
+const MULTI_DAY_RESET_PATTERN =
+  /(?:included[\s\w-]*usage[\s\w-]*limit[\s\w-]*reached|quota[\s\w-]*exceeded)[\s\w-,.]*resets\s+(?:at\s+)?([^\n\r]+)/i;
+
+/**
+ * Parses multi-day reset timestamps from error messages or status payloads.
+ * Supports ISO-8601 strings, HTTP dates, or epoch timestamps.
+ * Returns reset timestamp in epoch ms if valid and future, otherwise null.
+ */
+function parseQuotaResetUntilMs(text, { now = Date.now() } = {}) {
+  if (typeof text !== "string") return null;
+  const match = text.match(MULTI_DAY_RESET_PATTERN);
+  if (!match || !match[1]) return null;
+  const rawDate = match[1].trim().replace(/[.,;]$/, "");
+  if (!rawDate) return null;
+  const parsed = Date.parse(rawDate);
+  if (Number.isFinite(parsed) && parsed > now) {
+    return parsed;
+  }
+  return null;
+}
 
 function hasExactKeys(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -273,6 +297,9 @@ export function createGrokBotWakeBridge({
   maxQuotaBackoffMs = MAX_QUOTA_BACKOFF_MS,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
+  filterReceipts = process.env.TRIANGLE_GROK_BOT_FILTER_RECEIPTS === "1",
+  createTransactionProxy = createHelperTrustedTransactionProxy,
+  quotaResetStorePath = null,
 } = {}) {
   const validated = validateGrokBotBinding(binding);
   if (!watchTransport || typeof watchTransport.poll !== "function") {
@@ -322,6 +349,49 @@ export function createGrokBotWakeBridge({
   /** One webhook attempt at a time across timer and MESH wake paths. */
   let wakeAttempt = null;
 
+  let helperProxy = null;
+  if (helperPath) {
+    try {
+      helperProxy = createTransactionProxy({
+        helperPath,
+        profile: validated.profile,
+        protocol: "self-serve-drain",
+      });
+    } catch {
+      helperProxy = null;
+    }
+  }
+
+  async function loadPersistedQuotaReset() {
+    if (!quotaResetStorePath) return null;
+    try {
+      const raw = await readFile(quotaResetStorePath, "utf8");
+      const data = JSON.parse(raw);
+      if (Number.isFinite(data?.resetsAt) && data.resetsAt > now()) {
+        return data.resetsAt;
+      }
+    } catch {}
+    return null;
+  }
+
+  async function persistQuotaReset(untilMs) {
+    if (!quotaResetStorePath || !Number.isFinite(untilMs)) return;
+    try {
+      await writeFile(
+        quotaResetStorePath,
+        JSON.stringify({ resetsAt: untilMs, updatedAt: new Date().toISOString() }),
+        { mode: 0o600 },
+      );
+    } catch {}
+  }
+
+  function clearQuotaResetFile() {
+    if (!quotaResetStorePath) return;
+    try {
+      writeFile(quotaResetStorePath, JSON.stringify({ resetsAt: null }), { mode: 0o600 }).catch(() => {});
+    } catch {}
+  }
+
   function clearPendingRetryTimer() {
     if (retryTimer != null) {
       clearTimeoutImpl(retryTimer);
@@ -338,6 +408,7 @@ export function createGrokBotWakeBridge({
   function clearQuotaBackoff() {
     quotaBackoff = null;
     cancelPendingRetry();
+    clearQuotaResetFile();
   }
 
   function deactivateRetries() {
@@ -346,25 +417,36 @@ export function createGrokBotWakeBridge({
     clearQuotaBackoff();
   }
 
-  function openQuotaBackoff({ retryAfterMs = null } = {}) {
+  function openQuotaBackoff({ retryAfterMs = null, customUntilMs = null } = {}) {
     const nowMs = now();
-    const previous = quotaBackoff?.instanceId === validated.instanceId
-      ? quotaBackoff.backoffMs
-      : null;
-    const exponential = previous == null
-      ? initialBackoff
-      : Math.min(maxBackoff, previous * 2);
-    const fromHeader = Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0
-      ? retryAfterMs
-      : 0;
-    // Fail-closed on quota: take the longer of exponential vs Retry-After, capped.
-    const backoffMs = Math.min(maxBackoff, Math.max(exponential, fromHeader));
+    let backoffMs;
+    let untilMs;
+
+    if (Number.isFinite(customUntilMs) && customUntilMs > nowMs) {
+      untilMs = customUntilMs;
+      backoffMs = untilMs - nowMs;
+      persistQuotaReset(untilMs);
+    } else {
+      const previous = quotaBackoff?.instanceId === validated.instanceId
+        ? quotaBackoff.backoffMs
+        : null;
+      const exponential = previous == null
+        ? initialBackoff
+        : Math.min(maxBackoff, previous * 2);
+      const fromHeader = Number.isSafeInteger(retryAfterMs) && retryAfterMs > 0
+        ? retryAfterMs
+        : 0;
+      // Fail-closed on quota: take the longer of exponential vs Retry-After, capped.
+      backoffMs = Math.min(maxBackoff, Math.max(exponential, fromHeader));
+      untilMs = nowMs + backoffMs;
+    }
+
     const alreadyOpen = quotaBackoff != null
       && quotaBackoff.instanceId === validated.instanceId
       && nowMs < quotaBackoff.untilMs;
     quotaBackoff = {
       instanceId: validated.instanceId,
-      untilMs: nowMs + backoffMs,
+      untilMs,
       backoffMs,
       // Preserve "already alerted" while the circuit remains open so routine
       // watch hints do not re-fire failure/alert logs.
@@ -444,6 +526,16 @@ export function createGrokBotWakeBridge({
       };
     }
 
+    // Filter receipt-only items before waking Bob's model session
+    const hasWork = await preflightAndSettleReceipts();
+    if (!hasWork) {
+      return {
+        status: "skipped_receipt_settled",
+        instanceId: validated.instanceId,
+        highWatermark,
+      };
+    }
+
     const payload = {
       source: "triangle-client",
       type: "mesh.mailbox.wake",
@@ -468,7 +560,11 @@ export function createGrokBotWakeBridge({
         || error?.status === 429;
       if (!quotaExhausted) throw error;
 
-      const state = openQuotaBackoff({ retryAfterMs: error?.retryAfterMs ?? null });
+      const resetUntilMs = parseQuotaResetUntilMs(error?.message) || parseQuotaResetUntilMs(error?.bodyText);
+      const state = openQuotaBackoff({
+        retryAfterMs: error?.retryAfterMs ?? null,
+        customUntilMs: resetUntilMs,
+      });
       scheduleQuotaRetry(highWatermark, state.untilMs);
       if (!state.alertLogged) {
         logger.error?.("triangle_grok_bot_quota_backoff", {
@@ -491,6 +587,43 @@ export function createGrokBotWakeBridge({
         backoffMs: state.backoffMs,
         pendingRetryWatermark,
       };
+    }
+  }
+
+  async function preflightAndSettleReceipts({ signal } = {}) {
+    if (!filterReceipts || !helperProxy) {
+      return true;
+    }
+    try {
+      const currentStatus = await helperProxy.status({ signal }).catch(() => null);
+      if (currentStatus?.open && currentStatus.open.state !== "replied") {
+        return true;
+      }
+
+      while (!signal?.aborted) {
+        const claimResult = await helperProxy.claimNext({ signal });
+        if (!claimResult || typeof claimResult !== "object") {
+          break;
+        }
+        if (claimResult.receiptOnly === true || claimResult.replyRequired === false) {
+          logger.info?.("triangle_grok_bot_settled_receipt", {
+            profile: validated.profile,
+            instanceId: validated.instanceId,
+          });
+          continue;
+        }
+        if (claimResult.shouldStartModel === true || claimResult.replyRequired === true || claimResult.open) {
+          return true;
+        }
+        break;
+      }
+      return false;
+    } catch (error) {
+      logger.warn?.("triangle_grok_bot_receipt_filter_failed", {
+        message: error?.message,
+        code: error?.code,
+      });
+      return true;
     }
   }
 
@@ -560,6 +693,10 @@ export function createGrokBotWakeBridge({
         deactivateRetries();
       };
       signal?.addEventListener?.("abort", onAbort, { once: true });
+      const persistedReset = await loadPersistedQuotaReset();
+      if (persistedReset) {
+        openQuotaBackoff({ customUntilMs: persistedReset });
+      }
       wakeClient = wakeClientFactory({
         profiles: wakeProfiles,
         transport: watchTransport,
@@ -621,4 +758,5 @@ export {
   createMemoryCursorStore,
   createAtomicFileCursorStore,
   ensureHelperWatchGrant,
+  parseQuotaResetUntilMs,
 };
