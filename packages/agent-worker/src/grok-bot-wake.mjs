@@ -7,7 +7,9 @@
  * runs MESH claim/reply/ack.
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, open, rename, unlink, mkdir } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 import {
   createFakeWatchTransport,
@@ -363,6 +365,51 @@ export function createGrokBotWakeBridge({
     }
   }
 
+  async function syncDirectory(directory) {
+    try {
+      const handle = await open(directory, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (
+        error?.code === "EINVAL"
+        || error?.code === "ENOTSUP"
+        || error?.code === "EISDIR"
+        || error?.code === "EPERM"
+      ) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function atomicWriteFile(filePath, content) {
+    const resolved = path.resolve(filePath);
+    const directory = path.dirname(resolved);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = path.join(directory, `.tmp-quota-reset-${randomUUID().toLowerCase()}`);
+    let installed = false;
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(`${content}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporary, resolved);
+      installed = true;
+      await syncDirectory(directory);
+    } finally {
+      if (!installed) {
+        await unlink(temporary).catch(() => {});
+      }
+    }
+  }
+
   async function loadPersistedQuotaReset() {
     if (!quotaResetStorePath) return null;
     try {
@@ -378,10 +425,9 @@ export function createGrokBotWakeBridge({
   async function persistQuotaReset(untilMs) {
     if (!quotaResetStorePath || !Number.isFinite(untilMs)) return;
     try {
-      await writeFile(
+      await atomicWriteFile(
         quotaResetStorePath,
         JSON.stringify({ resetsAt: untilMs, updatedAt: new Date().toISOString() }),
-        { mode: 0o600 },
       );
     } catch {}
   }
@@ -389,7 +435,7 @@ export function createGrokBotWakeBridge({
   function clearQuotaResetFile() {
     if (!quotaResetStorePath) return;
     try {
-      writeFile(quotaResetStorePath, JSON.stringify({ resetsAt: null }), { mode: 0o600 }).catch(() => {});
+      atomicWriteFile(quotaResetStorePath, JSON.stringify({ resetsAt: null })).catch(() => {});
     } catch {}
   }
 
@@ -605,18 +651,21 @@ export function createGrokBotWakeBridge({
       }
 
       while (!signal?.aborted) {
-        const claimResult = await helperProxy.claimNext({ signal });
-        if (!claimResult || typeof claimResult !== "object") {
+        const drainResult = typeof helperProxy.drainReceipts === "function"
+          ? await helperProxy.drainReceipts({ signal })
+          : await helperProxy.claimNext({ signal });
+
+        if (!drainResult || typeof drainResult !== "object") {
           break;
         }
-        if (claimResult.receiptOnly === true || claimResult.replyRequired === false) {
+        if (drainResult.receiptOnly === true || drainResult.replyRequired === false) {
           logger.info?.("triangle_grok_bot_settled_receipt", {
             profile: validated.profile,
             instanceId: validated.instanceId,
           });
           continue;
         }
-        if (claimResult.shouldStartModel === true || claimResult.replyRequired === true || claimResult.open) {
+        if (drainResult.actionableWorkPending === true || drainResult.shouldStartModel === true || drainResult.replyRequired === true || drainResult.open) {
           return true;
         }
         break;
@@ -738,7 +787,7 @@ export function createGrokBotWakeBridge({
         }
         wakeClient = null;
         started = false;
-        deactivateRetries();
+        deactivateRetries({ preservePersisted: true });
         signal?.removeEventListener?.("abort", onAbort);
         throw error;
       }

@@ -291,6 +291,13 @@ export function createHelperTrustedTransactionProxy({
       );
     },
 
+    async drainReceipts({ signal } = {}) {
+      return invoke(
+        ["transaction-drain-receipts", "--profile", profile, "--protocol", protocol],
+        { signal },
+      );
+    },
+
     async readInbound({ signal } = {}) {
       return invoke(
         ["transaction-read-inbound", "--profile", profile, "--protocol", protocol],

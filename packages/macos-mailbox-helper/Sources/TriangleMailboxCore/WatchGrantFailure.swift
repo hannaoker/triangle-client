@@ -419,7 +419,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             requires = ["--installation", "--cursor"]
             notes = ["Held poll for Node wake clients; credentials stay in the helper Keychain."]
         case .enroll, .status, .mcp, .runWorker, .runSupervisor, .preflightSupervisor,
-             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
+             .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionDrainReceipts, .transactionReply,
              .transactionReadInbound, .transactionAck, .transactionAbandon, .transactionRecordFailure:
             requires = []
             notes = []

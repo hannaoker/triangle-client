@@ -121,6 +121,85 @@ public struct MailboxTransactionService: Sendable {
         return payload
     }
 
+    public func drainReceipts(
+        instanceID: ClientInstanceID,
+        protocolOwnership: MailboxTransactionProtocol
+    ) async throws -> [String: Any] {
+        if let open = try store.readOpen(instanceID: instanceID) {
+            if open.protocolOwnership != protocolOwnership {
+                throw MailboxTransactionServiceError.protocolMismatch
+            }
+            if open.isStuck {
+                throw MailboxTransactionServiceError.transactionStuck
+            }
+            if open.replyRequired == false {
+                return try await settleReceiptOnly(
+                    instanceID: instanceID,
+                    open: open,
+                    quarantined: try store.listQuarantined(instanceID: instanceID)
+                )
+            }
+            // An open actionable claim exists: defer to it and do not claim/settle anything
+            let quarantined = try store.listQuarantined(instanceID: instanceID)
+            let evaluation = try MailboxPolicyEvaluator.evaluate(
+                protocolOwnership: protocolOwnership,
+                candidates: [],
+                open: open,
+                quarantined: quarantined
+            )
+            var payload = secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+            payload["replyRequired"] = true
+            payload["actionableWorkPending"] = true
+            return payload
+        }
+
+        let candidates: [MailboxDeliveryCandidate]
+        do {
+            candidates = try await transport.listPendingCandidates()
+        } catch {
+            throw MailboxTransactionServiceError.upstreamUnavailable
+        }
+        let quarantined = try store.listQuarantined(instanceID: instanceID)
+        let evaluation = try MailboxPolicyEvaluator.evaluate(
+            protocolOwnership: protocolOwnership,
+            candidates: candidates,
+            open: nil,
+            quarantined: quarantined
+        )
+
+        guard let next = evaluation.actionable.min(by: { $0.deliveryID < $1.deliveryID }) else {
+            return secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+        }
+
+        // Single-claimer invariant: If next item requires a reply, DO NOT CLAIM IT!
+        if next.replyRequired == true {
+            var payload = secretFreeStatus(evaluation: evaluation, quarantined: quarantined)
+            payload["replyRequired"] = true
+            payload["actionableWorkPending"] = true
+            if let admitText = next.admitText {
+                payload["admitText"] = admitText
+            }
+            return payload
+        }
+
+        // Receipt-only item: Claim and immediately acknowledge it
+        let claimed = try await claim(
+            instanceID: instanceID,
+            protocolOwnership: protocolOwnership,
+            deliveryID: next.deliveryID,
+            roomID: next.roomID,
+            inboundEventID: next.eventID,
+            inboundRoomSequence: next.roomSequence,
+            replyRequired: false
+        )
+        return try await settleReceiptOnly(
+            instanceID: instanceID,
+            open: claimed,
+            quarantined: quarantined,
+            remainingCandidates: candidates.filter { $0.deliveryID != next.deliveryID }
+        )
+    }
+
     /// List → preflight → claim the next actionable delivery, or resume an open claim.
     /// Used by App Server wake so a pending mailbox delivery can start a model turn.
     public func claimNext(
