@@ -119,7 +119,7 @@ enum TriangleMailboxCLI {
                 ).preflight()
             case .watchEnsure, .watchStatus, .watchRevoke, .watchPoll:
                 try await runWatch(command)
-            case .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionReply,
+            case .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionDrainReceipts, .transactionReply,
                  .transactionReadInbound, .transactionAck, .transactionAbandon, .transactionRecordFailure:
                 try await runTransaction(command)
             }
@@ -296,6 +296,11 @@ enum TriangleMailboxCLI {
                 instanceID: instanceID,
                 protocolOwnership: protocolOwnership,
                 allowedRoomID: command.roomID.flatMap(MailboxRoomID.init(rawValue:))
+            ))
+        case .transactionDrainReceipts:
+            writeJSON(try await service.drainReceipts(
+                instanceID: instanceID,
+                protocolOwnership: protocolOwnership
             ))
         case .transactionReadInbound:
             writeJSON(try await service.readInbound(instanceID: instanceID, protocolOwnership: protocolOwnership))

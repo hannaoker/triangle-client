@@ -83,10 +83,12 @@ public struct ClientSupervisor: Sendable {
         "PATH", "LANG", "LC_ALL", "NO_COLOR",
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
         "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
+        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
     private static let productionOptInEnvironmentKeys: Set<String> = [
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
         "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
+        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
 
     /// Forwards only the production pool and idle-handoff opt-in from the helper

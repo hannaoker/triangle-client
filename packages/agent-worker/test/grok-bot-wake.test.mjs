@@ -12,6 +12,7 @@ import {
   createMemoryCursorStore,
   isWebhookQuotaExhaustion,
   parseRetryAfterMs,
+  parseQuotaResetUntilMs,
   readWebhookCredentials,
   validateGrokBotBinding,
 } from "../src/grok-bot-wake.mjs";
@@ -724,4 +725,300 @@ test("an in-flight quota retry cannot re-arm after bridge stop", async () => {
 
   assert.equal(timers.size, 0);
   assert.equal(bridge.getQuotaBackoffState(), null);
+});
+
+test("parseQuotaResetUntilMs detects multi-day reset timestamps", () => {
+  const futureIso = "2026-09-28T12:00:00.000Z";
+  const nowMs = Date.parse("2026-09-24T00:00:00.000Z");
+  const msg = `included usage limit reached, resets at ${futureIso}`;
+  const parsed = parseQuotaResetUntilMs(msg, { now: nowMs });
+  assert.equal(parsed, Date.parse(futureIso));
+
+  const invalid = "temporary rate limit exceeded";
+  assert.equal(parseQuotaResetUntilMs(invalid, { now: nowMs }), null);
+});
+
+test("pre-wake receipt filtering settles receipts via helper and suppresses wake", async () => {
+  let webhookCalls = 0;
+  const helperCalls = [];
+
+  const fakeProxy = {
+    async status() {
+      return { open: null };
+    },
+    async drainReceipts() {
+      helperCalls.push("drainReceipts");
+      if (helperCalls.length === 1) {
+        // Simulate receipt-only delivery settled by helper
+        return {
+          receiptOnly: true,
+          replyRequired: false,
+          open: null,
+        };
+      }
+      return null;
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 5, reason: "wake" });
+  assert.equal(res.status, "skipped_receipt_settled");
+  assert.equal(webhookCalls, 0, "webhook must not be called when receipts are settled");
+  assert.ok(helperCalls.length > 0);
+});
+
+test("pre-wake receipt filtering preserves wake for actionable work", async () => {
+  let webhookCalls = 0;
+  let drainCount = 0;
+
+  const fakeProxy = {
+    async status() {
+      return { open: null };
+    },
+    async drainReceipts() {
+      drainCount += 1;
+      if (drainCount === 1) {
+        // Receipt first
+        return { receiptOnly: true, replyRequired: false, open: null };
+      }
+      // Followed by actionable work
+      return { actionableWorkPending: true, replyRequired: true };
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 6, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "webhook must be called when actionable work is present");
+  assert.equal(drainCount, 2);
+});
+
+test("pre-wake receipt filtering fails open to wake when helper lacks drainReceipts", async () => {
+  let webhookCalls = 0;
+
+  const legacyProxy = {
+    async status() {
+      return { open: null };
+    },
+    // No drainReceipts method
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => legacyProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 8, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "should fail-open and wake when helper lacks drainReceipts");
+});
+
+test("production webhook 429 carries bodyText with multi-day reset to bridge and persists across restart", async () => {
+  await withTempDir(async (dir) => {
+    let clock = 1_000_000;
+    const futureIso = new Date(clock + 3 * 24 * 3600 * 1000).toISOString();
+    const quotaResetStorePath = path.join(dir, `grok-bot-quota-reset.${instanceId}.json`);
+
+    await withWebhookServer(({ res }) => {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `included usage limit reached, resets at ${futureIso}` }));
+    }, async (httpUrl) => {
+      const createBridge = () => createGrokBotWakeBridge({
+        binding: validateGrokBotBinding(sampleBinding()),
+        watchTransport: createFakeWatchTransport({ polls: [] }),
+        now: () => clock,
+        quotaResetStorePath,
+        dispatcher: createGrokBotWakeDispatcher({
+          async readCredentials() {
+            return { url: httpUrl, key: "test-webhook-key-value" };
+          },
+          webhookUrlPath: "/private/grok-bot-webhook.url",
+          webhookKeyPath: "/private/grok-bot-webhook.key",
+          now: () => clock,
+        }),
+        logger: { info() {}, error() {} },
+      });
+
+      const bridge1 = createBridge();
+      const firstRes = await bridge1.handleWake({ instanceId, highWatermark: 10, reason: "wake" });
+      assert.equal(firstRes.status, "backoff");
+      assert.equal(firstRes.untilMs, Date.parse(futureIso));
+
+      // Verify file persistence
+      const savedRaw = await readFile(quotaResetStorePath, "utf8");
+      assert.equal(JSON.parse(savedRaw).resetsAt, Date.parse(futureIso));
+
+      // Stop bridge1 — should NOT erase persisted reset
+      await bridge1.stop();
+      const afterStopRaw = await readFile(quotaResetStorePath, "utf8");
+      assert.equal(JSON.parse(afterStopRaw).resetsAt, Date.parse(futureIso));
+
+      // Start bridge2 (simulating restart)
+      const bridge2 = createBridge();
+      await bridge2.loadPersistedQuotaReset();
+      const state = bridge2.getQuotaBackoffState();
+      assert.equal(state.untilMs, Date.parse(futureIso));
+
+      // A wake attempt on bridge2 is immediately skipped due to persisted backoff
+      const skippedRes = await bridge2.handleWake({ instanceId, highWatermark: 11, reason: "wake" });
+      assert.equal(skippedRes.status, "skipped_backoff");
+      assert.equal(skippedRes.untilMs, Date.parse(futureIso));
+
+      await bridge2.stop();
+    });
+  });
+});
+
+test("cooldown persisted while HTTP 200 deliver is in flight activates backoff and schedules retry", async () => {
+  await withTempDir(async (dir) => {
+    let clock = 1_000_000;
+    const futureIso = new Date(clock + 2 * 24 * 3600 * 1000).toISOString();
+    const futureMs = Date.parse(futureIso);
+    const quotaResetStorePath = path.join(dir, `grok-bot-quota-reset.${instanceId}.json`);
+
+    let deliverResolve;
+    const deliverPromise = new Promise((resolve) => {
+      deliverResolve = resolve;
+    });
+
+    const timers = new Map();
+    let nextTimerId = 1;
+    const fakeSetTimeout = (fn, delayMs) => {
+      const id = nextTimerId++;
+      timers.set(id, { fn, delayMs });
+      return id;
+    };
+    const fakeClearTimeout = (id) => {
+      timers.delete(id);
+    };
+
+    let deliverCalls = 0;
+    const fakeDispatcher = {
+      async deliver() {
+        deliverCalls += 1;
+        if (deliverCalls === 1) {
+          // Block in flight
+          await deliverPromise;
+          return { status: "accepted", httpStatus: 200 };
+        }
+        return { status: "accepted", httpStatus: 200 };
+      },
+    };
+
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({ polls: [] }),
+      now: () => clock,
+      quotaResetStorePath,
+      dispatcher: fakeDispatcher,
+      setTimeoutImpl: fakeSetTimeout,
+      clearTimeoutImpl: fakeClearTimeout,
+      logger: { info() {}, error() {} },
+    });
+
+    // Start handleWake — it blocks inside deliver
+    const wakePromise = bridge.handleWake({ instanceId, highWatermark: 42, reason: "wake" });
+
+    // While dispatch is in-flight, an asynchronous routine completion callback writes the cooldown
+    await writeFile(
+      quotaResetStorePath,
+      JSON.stringify({ resetsAt: futureMs, updatedAt: new Date().toISOString() }),
+    );
+
+    // Resolve the in-flight HTTP 200
+    deliverResolve();
+    const res = await wakePromise;
+
+    // Must transition to backoff and schedule retry at reset timestamp
+    assert.equal(res.status, "backoff");
+    assert.equal(res.untilMs, futureMs);
+    assert.equal(res.pendingRetryWatermark, 42);
+
+    // Verify timer was scheduled for the cooldown
+    assert.equal(timers.size, 1);
+    const scheduled = Array.from(timers.values())[0];
+    assert.equal(scheduled.delayMs, futureMs - clock);
+
+    // Advance clock to reset time and trigger scheduled retry
+    clock = futureMs;
+    // Clearing the reset file simulates reset expiry
+    await writeFile(quotaResetStorePath, JSON.stringify({ resetsAt: null }));
+    await scheduled.fn();
+
+    // Verify retry attempt ran
+    assert.equal(deliverCalls, 2);
+    assert.equal(bridge.getQuotaBackoffState(), null);
+
+    await bridge.stop();
+  });
+});
+
+test("pre-wake receipt filtering defers when Bob already holds open claim", async () => {
+  let webhookCalls = 0;
+
+  const fakeProxy = {
+    async status() {
+      return { open: { deliveryId: 42, state: "claimed" } };
+    },
+    async drainReceipts() {
+      throw new Error("should not be called when open claim exists");
+    },
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => fakeProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 7, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "webhook should proceed and defer to open claim");
 });
