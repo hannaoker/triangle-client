@@ -27,7 +27,7 @@
 import { writeFileSync } from "node:fs";
 
 import { assertNoSecretMaterial } from "./app-server-protocol.mjs";
-import { createCodexAppServerProcess, waitForAppServerTurnCompleted } from "./app-server-process.mjs";
+import { createCodexAppServerProcess } from "./app-server-process.mjs";
 import { createDesktopHandoffController, createLatentProductionDesktopOwner } from "./desktop-handoff.mjs";
 import {
   buildCompletionIdempotencyKey,
@@ -745,9 +745,10 @@ export function createHeadlessCodexRuntime({
         }
         if (event?.type !== "message" || event?.method !== "turn/completed") return;
         const evThreadId = event?.params?.threadId;
-        if (evThreadId && evThreadId !== threadId) return;
+        if (!evThreadId || evThreadId !== threadId) return;
 
         const evTurn = event?.params?.turn;
+        if (turnBuffer.length >= 32) turnBuffer.shift();
         if (startedTurnId) {
           if (evTurn?.id === startedTurnId) {
             settle(resolveDeferred, evTurn);
