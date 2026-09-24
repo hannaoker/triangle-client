@@ -456,3 +456,149 @@ test("durable delivery resolver fails closed when an older helper leaves a recei
   );
   assert.deepEqual(calls, ["transaction-claim-next"]);
 });
+
+test("durable delivery resolver acks verified replied open before admitting more work", async () => {
+  const calls = [];
+  let claimPhase = 0;
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "event-codex",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (args[0] === "transaction-claim-next") {
+        claimPhase += 1;
+        if (claimPhase === 1) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              shouldStartModel: false,
+              transactionStuck: false,
+              replyRequired: true,
+              open: {
+                deliveryId: 42,
+                roomId,
+                state: "replied",
+                inboundEventId: eventId,
+              },
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            shouldStartModel: true,
+            transactionStuck: false,
+            replyRequired: true,
+            admitText: "next turn after replied ack",
+            open: {
+              deliveryId: 43,
+              roomId,
+              state: "claimed",
+              inboundEventId: eventId,
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "transaction-ack") {
+        return { code: 0, stdout: JSON.stringify({ acknowledged: true }), stderr: "" };
+      }
+      throw new Error(`unexpected helper command ${args[0]}`);
+    },
+  });
+  const delivery = await resolveDelivery({ reason: "wake" });
+  assert.equal(delivery.deliveryId, "delivery_43");
+  assert.equal(delivery.text, "next turn after replied ack");
+  assert.deepEqual(calls, [
+    "transaction-claim-next",
+    "transaction-ack",
+    "transaction-claim-next",
+  ]);
+});
+
+test("durable delivery resolver crash-boundary: reply-committed before ack is settled on next poll", async () => {
+  const calls = [];
+  let claimPhase = 0;
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "cursor-acp-shadow-test",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      calls.push(args[0]);
+      if (args[0] === "transaction-claim-next") {
+        claimPhase += 1;
+        if (claimPhase === 1) {
+          // Crash window: reply persisted, ack never happened.
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              shouldStartModel: true,
+              transactionStuck: false,
+              replyRequired: true,
+              open: {
+                deliveryId: 9,
+                roomId,
+                state: "replied",
+                inboundEventId: eventId,
+              },
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            shouldStartModel: false,
+            transactionStuck: false,
+            replyRequired: true,
+            open: null,
+            status: "empty",
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "transaction-ack") {
+        return { code: 0, stdout: JSON.stringify({ acknowledged: true }), stderr: "" };
+      }
+      throw new Error(`unexpected helper command ${args[0]}`);
+    },
+  });
+  assert.equal(await resolveDelivery({ reason: "recover" }), null);
+  assert.deepEqual(calls, [
+    "transaction-claim-next",
+    "transaction-ack",
+    "transaction-claim-next",
+  ]);
+});
+
+test("durable delivery resolver crash-boundary: ack-committed before local clear is idle", async () => {
+  const calls = [];
+  const resolveDelivery = createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/triangle-mailbox",
+    profile: "cursor-acp-shadow-test",
+    protocol: "self-serve-drain",
+    createProxy: createTrustedTransactionProxy,
+    async run(_file, args) {
+      calls.push(args[0]);
+      assert.equal(args[0], "transaction-claim-next");
+      // Ack already committed in helper; open cleared; local process died before clear.
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          shouldStartModel: false,
+          transactionStuck: false,
+          replyRequired: true,
+          open: null,
+          status: "empty",
+        }),
+        stderr: "",
+      };
+    },
+  });
+  assert.equal(await resolveDelivery({ reason: "recover" }), null);
+  assert.deepEqual(calls, ["transaction-claim-next"]);
+});

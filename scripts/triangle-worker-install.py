@@ -34,6 +34,17 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/app-server-bind-cli.mjs",
     "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/wake-client.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/config-guards.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-drain.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-runtime.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/index.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/runtime-home.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/session-registry.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
 ]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
 CODEX_HEADLESS_ARTIFACTS = [

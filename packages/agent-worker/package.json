@@ -12,15 +12,17 @@
     "./client-supervisor": "./src/client-supervisor.mjs",
     "./concurrency-gate": "./src/concurrency-gate.mjs",
     "./shared-codex-app-server": "./src/shared-codex-app-server.mjs",
+    "./cursor-acp-runtime": "./src/cursor-acp-runtime/index.mjs",
     "./grok-bot-wake": "./src/grok-bot-wake.mjs",
     "./wake-client": "./src/wake-client.mjs",
     "./profile-scheduler": "./src/profile-scheduler.mjs",
     "./outbound-client": "./src/outbound-client.mjs"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs test/codex-runtime/*.test.mjs",
-    "test:triangle-client": "node --test test/cli.test.mjs test/client-source-contract.test.mjs test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/helper-watch-transport.test.mjs test/helper-transaction-proxy.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/mailbox-harness.test.mjs test/native-desktop-wake-experiment.test.mjs test/phase2-verification.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs test/shared-codex-app-server.test.mjs test/authenticated-app-server-transport.test.mjs test/wake-scheduler.test.mjs test/grok-bot-wake.test.mjs test/codex-runtime/*.test.mjs",
+    "test": "node --test test/*.test.mjs test/codex-runtime/*.test.mjs test/cursor-acp-runtime/*.test.mjs",
+    "test:triangle-client": "node --test test/cli.test.mjs test/client-source-contract.test.mjs test/client-supervisor-cli.test.mjs test/client-supervisor.test.mjs test/command-runner.test.mjs test/helper-watch-transport.test.mjs test/helper-transaction-proxy.test.mjs test/keychain-launch-contract.test.mjs test/mailbox-client.test.mjs test/mailbox-harness.test.mjs test/native-desktop-wake-experiment.test.mjs test/phase2-verification.test.mjs test/runner-adapters.test.mjs test/runtime.test.mjs test/shared-codex-app-server.test.mjs test/authenticated-app-server-transport.test.mjs test/wake-scheduler.test.mjs test/grok-bot-wake.test.mjs test/codex-runtime/*.test.mjs test/cursor-acp-runtime/*.test.mjs",
     "test:codex-runtime": "node --test test/codex-runtime/*.test.mjs",
+    "test:cursor-acp-runtime": "node --test test/cursor-acp-runtime/*.test.mjs",
     "generate:codex-runtime-manifest": "node ./scripts/generate-codex-runtime-manifest.mjs",
     "soak:fake-wake": "node ../../scripts/soak-fake-wake.mjs"
   }

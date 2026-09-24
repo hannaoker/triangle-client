@@ -82,9 +82,13 @@ public struct ClientSupervisor: Sendable {
     private static let coordinatorEnvironmentKeys: Set<String> = [
         "PATH", "LANG", "LC_ALL", "NO_COLOR",
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
+        "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
+        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
     private static let productionOptInEnvironmentKeys: Set<String> = [
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
+        "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
+        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
 
     /// Forwards only the production pool and idle-handoff opt-in from the helper
@@ -118,7 +122,9 @@ public struct ClientSupervisor: Sendable {
     private let grokBotWebhookURLPath: URL
     private let grokBotWebhookKeyPath: URL
     private let headlessRuntimeBindingURL: URL
+    private let cursorAcpRuntimeBindingURL: URL
     private let isDedicatedHeadlessDrainLoaded: @Sendable (String) -> Bool
+    private let isDedicatedCursorAcpDrainLoaded: @Sendable (String) -> Bool
     private let parentEnvironment: [String: String]
 
     public init(
@@ -138,7 +144,9 @@ public struct ClientSupervisor: Sendable {
         grokBotWebhookURLPath: URL? = nil,
         grokBotWebhookKeyPath: URL? = nil,
         headlessRuntimeBindingURL: URL? = nil,
+        cursorAcpRuntimeBindingURL: URL? = nil,
         isDedicatedHeadlessDrainLoaded: (@Sendable (String) -> Bool)? = nil,
+        isDedicatedCursorAcpDrainLoaded: (@Sendable (String) -> Bool)? = nil,
         parentEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.instanceStore = instanceStore
@@ -179,13 +187,33 @@ public struct ClientSupervisor: Sendable {
             ?? clientRoot.appendingPathComponent("grok-bot-webhook.key")
         self.headlessRuntimeBindingURL = headlessRuntimeBindingURL
             ?? clientRoot.appendingPathComponent("headless-runtime-binding.json")
+        self.cursorAcpRuntimeBindingURL = cursorAcpRuntimeBindingURL
+            ?? clientRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
         self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
+        self.isDedicatedCursorAcpDrainLoaded = isDedicatedCursorAcpDrainLoaded ?? Self.probeDedicatedCursorAcpDrain
         self.parentEnvironment = parentEnvironment
     }
 
     private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
         let uid = getuid()
         let label = "dev.thetriangle.codex-headless-drain.\(profile)"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", "gui/\(uid)/\(label)"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private static func probeDedicatedCursorAcpDrain(_ profile: String) -> Bool {
+        let uid = getuid()
+        let label = "dev.thetriangle.cursor-acp-drain.\(profile)"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = ["print", "gui/\(uid)/\(label)"]
@@ -219,6 +247,9 @@ public struct ClientSupervisor: Sendable {
             case .headlessAppServer:
                 // Recorded as omitted from worker/eventWake; may still feed headlessWake.
                 return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_headless_app_server")
+            case .headlessCursorAcp:
+                // Recorded as omitted from worker/eventWake; may still feed cursorAcpWakes.
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_headless_cursor_acp")
             case .eventDriven, .worker:
                 return nil
             }
@@ -228,17 +259,20 @@ public struct ClientSupervisor: Sendable {
         let appServerMembers = allInstances.filter(\.participatesInAppServerWake)
         let grokBotMembers = allInstances.filter(\.participatesInGrokBotWake)
         let headlessMembers = allInstances.filter(\.participatesInHeadlessWake)
-        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty || !grokBotMembers.isEmpty || !headlessMembers.isEmpty),
+        let cursorAcpMembers = allInstances.filter(\.participatesInCursorAcpWake)
+        guard (!workers.isEmpty || !wakeMembers.isEmpty || !appServerMembers.isEmpty || !grokBotMembers.isEmpty || !headlessMembers.isEmpty || !cursorAcpMembers.isEmpty),
               Set(workers.map(\.profile)).count == workers.count,
               Set(wakeMembers.map(\.profile)).count == wakeMembers.count,
               Set(appServerMembers.map(\.profile)).count == appServerMembers.count,
               Set(grokBotMembers.map(\.profile)).count == grokBotMembers.count,
               Set(headlessMembers.map(\.profile)).count == headlessMembers.count,
+              Set(cursorAcpMembers.map(\.profile)).count == cursorAcpMembers.count,
               workers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               wakeMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               appServerMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
               grokBotMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
-              headlessMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
+              headlessMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) }),
+              cursorAcpMembers.allSatisfy({ $0.instanceID == .derive(profile: $0.profile) })
         else { throw ClientSupervisorError.noEligibleInstances }
 
         // This entire resolution phase deliberately precedes the first
@@ -265,6 +299,8 @@ public struct ClientSupervisor: Sendable {
             coordinatorSources = appServerMembers
         } else if !headlessMembers.isEmpty {
             coordinatorSources = headlessMembers
+        } else if !cursorAcpMembers.isEmpty {
+            coordinatorSources = cursorAcpMembers
         } else {
             coordinatorSources = grokBotMembers
         }
@@ -359,7 +395,16 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil || !headlessWakes.isEmpty else {
+        let cursorAcpWakes: [PreparedCursorAcpWakeBootstrap]
+        do {
+            cursorAcpWakes = try await prepareCursorAcpWakes(members: cursorAcpMembers, omitted: &omitted)
+        } catch let error as ClientSupervisorError {
+            throw error
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        guard !prepared.isEmpty || eventWake != nil || appServerWake != nil || grokBotWake != nil || !headlessWakes.isEmpty || !cursorAcpWakes.isEmpty else {
             throw ClientSupervisorError.noEligibleInstances
         }
 
@@ -403,6 +448,19 @@ public struct ClientSupervisor: Sendable {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
+        for cursorAcpWake in cursorAcpWakes {
+            let workerIds = Set(prepared.map(\.instanceId))
+            let wakeIds = Set(eventWake?.profiles.map(\.instanceId) ?? [])
+            let headlessIds = Set(headlessWakes.map(\.profileInstanceId))
+            guard !workerIds.contains(cursorAcpWake.profileInstanceId),
+                  !wakeIds.contains(cursorAcpWake.profileInstanceId),
+                  !headlessIds.contains(cursorAcpWake.profileInstanceId),
+                  appServerWake?.binding.instanceId != cursorAcpWake.profileInstanceId,
+                  grokBotWake?.binding.instanceId != cursorAcpWake.profileInstanceId
+            else {
+                throw ClientSupervisorError.invalidBootstrap
+            }
+        }
 
         var allMailboxTokens = prepared.map(\.mailbox.meshToken)
         if let eventWake {
@@ -419,7 +477,8 @@ public struct ClientSupervisor: Sendable {
             eventWake: eventWake,
             appServerWake: appServerWake,
             grokBotWake: grokBotWake,
-            headlessWakes: headlessWakes
+            headlessWakes: headlessWakes,
+            cursorAcpWakes: cursorAcpWakes
         )
         let data: Data
         do {
@@ -906,6 +965,186 @@ public struct ClientSupervisor: Sendable {
         return prepared
     }
 
+    private func prepareCursorAcpWakes(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> [PreparedCursorAcpWakeBootstrap] {
+        guard !members.isEmpty else { return [] }
+        guard helperExecutableURL.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+        else { throw ClientSupervisorError.runtimeUnavailable }
+        guard cursorAcpRuntimeBindingURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
+
+        guard FileManager.default.isReadableFile(atPath: cursorAcpRuntimeBindingURL.path) else {
+            for instance in members {
+                omitted.append(.init(
+                    instanceID: instance.instanceID.value,
+                    reasonCode: "cursor_acp_runtime_binding_missing"
+                ))
+            }
+            return []
+        }
+
+        let bindingData: Data
+        do {
+            bindingData = try Data(contentsOf: cursorAcpRuntimeBindingURL)
+        } catch {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        guard let object = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any] else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        let installationID: InstallationID
+        do {
+            installationID = try installationIdentity.resolve()
+        } catch {
+            throw ClientSupervisorError.runtimeUnavailable
+        }
+
+        let topLevelKeys: Set<String> = ["version", "common", "profiles"]
+        let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", "cursorHome", "command", "pollIntervalMs"]
+        let profileKeys: Set<String> = ["profile", "instanceId", "stateRoot", "shadowTestProfile"]
+        guard Set(object.keys) == topLevelKeys,
+              object["version"] as? Int == 1,
+              let common = object["common"] as? [String: Any],
+              Set(common.keys) == commonKeys,
+              let profileObjects = object["profiles"] as? [[String: Any]],
+              !profileObjects.isEmpty,
+              profileObjects.count <= 100,
+              profileObjects.allSatisfy({ Set($0.keys) == profileKeys })
+        else { throw ClientSupervisorError.invalidBootstrap }
+
+        let pollIntervalMs: Int
+        if let number = common["pollIntervalMs"] as? NSNumber,
+           number.doubleValue.isFinite,
+           number.doubleValue.rounded(.towardZero) == number.doubleValue,
+           number.doubleValue >= Double(Int.min),
+           number.doubleValue <= Double(Int.max) {
+            pollIntervalMs = number.intValue
+        } else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+
+        guard let adapterVersion = common["adapterVersion"] as? String,
+              adapterVersion == "1",
+              let bindingInstallationId = common["installationId"] as? String,
+              bindingInstallationId == installationID.value,
+              let workingDirectory = common["workingDirectory"] as? String,
+              workingDirectory.hasPrefix("/"),
+              !workingDirectory.contains("\0"),
+              let cursorHome = common["cursorHome"] as? String,
+              cursorHome.hasPrefix("/"),
+              !cursorHome.contains("\0"),
+              let command = common["command"] as? String,
+              command.hasPrefix("/"),
+              !command.contains("\0"),
+              (100...60_000).contains(pollIntervalMs)
+        else { throw ClientSupervisorError.invalidBootstrap }
+
+        struct BindingEntry {
+            let profile: String
+            let instanceId: String
+            let stateRoot: String
+            let shadowTestProfile: Bool
+        }
+        func containsSymlinkComponent(_ path: String) -> Bool {
+            var current = "/"
+            for component in (path as NSString).pathComponents.dropFirst() {
+                current = (current as NSString).appendingPathComponent(component)
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: current) else {
+                    continue
+                }
+                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                    return true
+                }
+            }
+            return false
+        }
+        let entries: [BindingEntry] = try profileObjects.map { entry in
+            guard let profile = entry["profile"] as? String,
+                  let instanceId = entry["instanceId"] as? String,
+                  let stateRoot = entry["stateRoot"] as? String,
+                  let shadowTestProfile = entry["shadowTestProfile"] as? Bool,
+                  stateRoot.hasPrefix("/"),
+                  !stateRoot.contains("\0")
+            else { throw ClientSupervisorError.invalidBootstrap }
+            let standardizedStateRoot = URL(fileURLWithPath: stateRoot).standardizedFileURL.path
+            guard stateRoot == standardizedStateRoot,
+                  !containsSymlinkComponent(standardizedStateRoot)
+            else { throw ClientSupervisorError.invalidBootstrap }
+            return BindingEntry(
+                profile: profile,
+                instanceId: instanceId,
+                stateRoot: standardizedStateRoot,
+                shadowTestProfile: shadowTestProfile
+            )
+        }
+        guard Set(entries.map(\.profile)).count == entries.count,
+              Set(entries.map(\.instanceId)).count == entries.count,
+              Set(entries.map(\.stateRoot)).count == entries.count
+        else { throw ClientSupervisorError.invalidBootstrap }
+
+        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
+        let memberProfiles = Set(sortedMembers.map { $0.profile.value })
+        guard entries.allSatisfy({ memberProfiles.contains($0.profile) }) else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        var prepared: [PreparedCursorAcpWakeBootstrap] = []
+        var credentialTokens: Set<String> = []
+        var credentialAgentIds: Set<String> = []
+        for member in sortedMembers {
+            guard member.runtimeAdapter == .cursorAcp else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_adapter_mismatch"))
+                continue
+            }
+            guard let entry = entries.first(where: { $0.profile == member.profile.value }),
+                  entry.instanceId == member.instanceID.value
+            else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_runtime_binding_mismatch"))
+                continue
+            }
+            guard entry.shadowTestProfile else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_not_shadow_test_profile"))
+                continue
+            }
+            if isDedicatedCursorAcpDrainLoaded(member.profile.value) {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "dedicated_cursor_acp_drain_loaded"))
+                continue
+            }
+            if isDedicatedHeadlessDrainLoaded(member.profile.value) {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "codex_drain_blocks_cursor_acp"))
+                continue
+            }
+            let credential: VerifiedCredential
+            do {
+                credential = try await gate.credential(for: member.profile)
+            } catch {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
+                continue
+            }
+            guard !credential.agentID.value.isEmpty else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
+                continue
+            }
+            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+                  credentialAgentIds.insert(credential.agentID.value).inserted
+            else { throw ClientSupervisorError.invalidBootstrap }
+            prepared.append(PreparedCursorAcpWakeBootstrap(
+                profile: member.profile.value,
+                profileInstanceId: member.instanceID.value,
+                helperPath: helperExecutableURL.path,
+                workingDirectory: workingDirectory,
+                cursorHome: cursorHome,
+                stateRoot: entry.stateRoot,
+                command: command,
+                pollIntervalMs: pollIntervalMs,
+                shadowTestProfile: true
+            ))
+        }
+        return prepared
+    }
+
     public func run() async throws {
         let launch = try await prepareEnabledInstances()
         let request = ClientSupervisorProcessRequest(
@@ -970,9 +1209,10 @@ private struct PreparedBootstrap: Encodable {
     let appServerWake: PreparedAppServerWakeBootstrap?
     let grokBotWake: PreparedGrokBotWakeBootstrap?
     let headlessWakes: [PreparedHeadlessWakeBootstrap]
+    let cursorAcpWakes: [PreparedCursorAcpWakeBootstrap]
 
     private enum CodingKeys: String, CodingKey {
-        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes
     }
 
     func encode(to encoder: Encoder) throws {
@@ -984,6 +1224,7 @@ private struct PreparedBootstrap: Encodable {
         try container.encodeIfPresent(appServerWake, forKey: .appServerWake)
         try container.encodeIfPresent(grokBotWake, forKey: .grokBotWake)
         try container.encode(headlessWakes, forKey: .headlessWakes)
+        try container.encode(cursorAcpWakes, forKey: .cursorAcpWakes)
     }
 }
 private struct PreparedBootstrapInstance: Encodable {
@@ -1121,6 +1362,18 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
         try container.encode(command, forKey: .command)
         try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
     }
+}
+
+private struct PreparedCursorAcpWakeBootstrap: Encodable {
+    let profile: String
+    let profileInstanceId: String
+    let helperPath: String
+    let workingDirectory: String
+    let cursorHome: String
+    let stateRoot: String
+    let command: String
+    let pollIntervalMs: Int
+    let shadowTestProfile: Bool
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {

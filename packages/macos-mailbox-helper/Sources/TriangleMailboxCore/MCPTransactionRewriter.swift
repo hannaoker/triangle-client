@@ -209,7 +209,36 @@ public struct MCPTransactionRewriter: Sendable {
 
     private func rewriteAck(arguments: [String: Any], raw: Data) async -> RewriteOutcome {
         let deliveryID = intValue(arguments["delivery_id"] ?? arguments["deliveryId"])
+            ?? (arguments["delivery_ids"] as? [Any])?.compactMap(intValue).first
         let modelDelivery = intValue(arguments["delivery_id"] ?? arguments["deliveryId"])
+            ?? (arguments["delivery_ids"] as? [Any])?.compactMap(intValue).first
+
+        // When no drain transaction is open, forward standalone ack (receipt / out-of-band dismiss)
+        // to upstream MCP. Keep claim->reply->ack gated when a local transaction is open.
+        do {
+            if try store.readOpen(instanceID: instanceID) == nil {
+                if arguments["delivery_ids"] != nil {
+                    return .forward(raw)
+                }
+                guard let deliveryID,
+                      var object = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+                      var params = object["params"] as? [String: Any],
+                      var args = params["arguments"] as? [String: Any]
+                else {
+                    return .forward(raw)
+                }
+                args["delivery_ids"] = [deliveryID]
+                args.removeValue(forKey: "delivery_id")
+                args.removeValue(forKey: "deliveryId")
+                params["arguments"] = args
+                object["params"] = params
+                let rewritten = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                return .forward(rewritten)
+            }
+        } catch {
+            return .reject(code: -32603, message: "ack_failed")
+        }
+
         do {
             try await service.acknowledge(
                 instanceID: instanceID,

@@ -80,6 +80,7 @@ test("package and CLI source contain no deprecated gateway transport", async () 
     ".",
     "./client-supervisor",
     "./concurrency-gate",
+    "./cursor-acp-runtime",
     "./grok-bot-wake",
     "./mailbox-client",
     "./outbound-client",

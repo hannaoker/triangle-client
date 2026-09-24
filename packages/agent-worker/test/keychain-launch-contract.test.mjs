@@ -139,6 +139,17 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/runtime.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/wake-client.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/config-guards.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-drain.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/headless-runtime.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/index.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/runtime-home.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/session-registry.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
+    "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
     "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",
@@ -202,7 +213,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     delete manifest.artifacts[relative];
     fs.rmSync(path.join(manifest.projectRoot, relative));
   }
-  for (const relative of Object.keys(manifest.artifacts).filter((name) => name.includes("/codex-runtime/"))) {
+  for (const relative of Object.keys(manifest.artifacts).filter((name) => name.includes("/codex-runtime/") || name.includes("/cursor-acp-runtime/"))) {
     delete manifest.artifacts[relative];
     fs.rmSync(path.join(manifest.projectRoot, relative));
   }

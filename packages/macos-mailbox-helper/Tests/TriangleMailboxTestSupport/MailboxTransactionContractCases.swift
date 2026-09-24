@@ -34,12 +34,14 @@ public enum MailboxTransactionContractCases {
         .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
         .init(name: "claimNext scopes selection to the allowed room", run: claimNextScopesAllowedRoom),
         .init(name: "claimNext receipt-only acks without starting model", run: claimNextReceiptOnlyAcksWithoutModel),
+        .init(name: "drainReceipts acks receipts and yields on actionable work", run: drainReceiptsAcksReceiptsAndYieldsOnWork),
         .init(name: "claimNext resumes receipt-only ack after crash", run: claimNextReceiptOnlyResumesAfterCrash),
         .init(name: "claimed inbound survives resume and is read exactly", run: claimedInboundSurvivesResume),
         .init(name: "authenticated inbound read validates exact event contract", run: authenticatedInboundReadContract),
         .init(name: "mailbox list resolves omitted replyRequired from exact room event", run: mailboxListReplyRequiredFallback),
         .init(name: "authenticated reply body includes threading fields", run: authenticatedReplyBodyThreadingFields),
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
+        .init(name: "MCP rewriter handles standalone ack when no transaction open", run: mcpRewriterStandaloneAck),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
         .init(name: "no message content in storage or status", run: noContentInStorage),
     ]
@@ -827,6 +829,53 @@ public enum MailboxTransactionContractCases {
         try expect(payload["admitText"] == nil, "receipt returned admitText")
     }
 
+    public static func drainReceiptsAcksReceiptsAndYieldsOnWork() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        let instanceID = ClientInstanceID.derive(profile: profile)
+
+        // Case 1: Receipt-only candidate is claimed and acked
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 71,
+                roomID: room,
+                eventID: event,
+                roomSequence: 5,
+                replyRequired: false
+            ),
+        ]
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let receiptPayload = try await service.drainReceipts(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport.claims.map(\.0) == [71], "drainReceipts did not claim receipt")
+        try expect(transport.acks == [71], "drainReceipts did not ack receipt")
+        try expect(receiptPayload["receiptOnly"] as? Bool == true, "receiptPayload missing receiptOnly")
+
+        // Case 2: Actionable work (replyRequired: true) is NOT claimed by drainReceipts
+        let store2 = InMemoryMailboxTransactionStore()
+        let transport2 = RecordingMailboxTransactionTransport()
+        transport2.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 72,
+                roomID: room,
+                eventID: event,
+                roomSequence: 6,
+                replyRequired: true
+            ),
+        ]
+        let service2 = MailboxTransactionService(store: store2, transport: transport2)
+        let workPayload = try await service2.drainReceipts(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport2.claims.isEmpty, "drainReceipts claimed actionable work!")
+        try expect(transport2.acks.isEmpty, "drainReceipts acked actionable work!")
+        try expect(workPayload["actionableWorkPending"] as? Bool == true, "workPayload missing actionableWorkPending")
+        try expect(workPayload["replyRequired"] as? Bool == true, "workPayload missing replyRequired")
+    }
+
     public static func claimNextReceiptOnlyResumesAfterCrash() async throws {
         let store = InMemoryMailboxTransactionStore()
         let transport = RecordingMailboxTransactionTransport()
@@ -1026,6 +1075,97 @@ public enum MailboxTransactionContractCases {
         let claimID = result?["claimId"] as? String
         try expect(claimID != modelClaim, "model claim id was honored")
         try expect(claimID == MailboxTransactionIdentifier.claimId(instanceID: instanceID, deliveryID: 30), "deterministic claim missing")
+    }
+
+    public static func mcpRewriterStandaloneAck() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        let rewriter = MCPTransactionRewriter(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            store: store,
+            transport: transport
+        )
+
+        // 1. When no transaction is open, singular delivery_id rewrites to delivery_ids array and forwards
+        let rawSingular = Data(#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"mesh.mailbox.ack","arguments":{"delivery_id":42}}}"#.utf8)
+        let outcomeSingular = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.ack",
+                "arguments": ["delivery_id": 42],
+            ],
+            raw: rawSingular
+        )
+        guard case .forward(let forwardedData) = outcomeSingular else {
+            throw ContractFailure("standalone ack with delivery_id was not forwarded")
+        }
+        let forwardedObj = try JSONSerialization.jsonObject(with: forwardedData) as? [String: Any]
+        let forwardedParams = forwardedObj?["params"] as? [String: Any]
+        let forwardedArgs = forwardedParams?["arguments"] as? [String: Any]
+        try expect((forwardedArgs?["delivery_ids"] as? [Int]) == [42], "delivery_ids array missing in rewritten forwarded ack")
+        try expect(forwardedArgs?["delivery_id"] == nil, "singular delivery_id was not removed")
+        try expect(forwardedArgs?["deliveryId"] == nil, "singular deliveryId was not removed")
+
+        // 2. When no transaction is open, plural delivery_ids forwards raw
+        let rawPlural = Data(#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mesh.mailbox.ack","arguments":{"delivery_ids":[42],"status":"processed"}}}"#.utf8)
+        let outcomePlural = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.ack",
+                "arguments": ["delivery_ids": [42], "status": "processed"],
+            ],
+            raw: rawPlural
+        )
+        guard case .forward(let pluralData) = outcomePlural else {
+            throw ContractFailure("standalone ack with delivery_ids was not forwarded")
+        }
+        try expect(pluralData == rawPlural, "raw plural ack was not forwarded directly")
+
+        // 3. When a transaction IS open in state .prepared, ack is rejected
+        _ = try await rewriter.service.claim(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            deliveryID: 42,
+            roomID: room
+        )
+        let outcomeBlocked = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.ack",
+                "arguments": ["delivery_ids": [42]],
+            ],
+            raw: rawPlural
+        )
+        guard case .reject(let code, let message) = outcomeBlocked else {
+            throw ContractFailure("ack during claimed-but-unreplied transaction was not rejected")
+        }
+        try expect(code == -32000 && message == "invalid_transaction_state", "wrong rejection for unreplied ack")
+
+        // 4. When a transaction IS open in state .replied, ack is processed and clears store
+        _ = try await rewriter.service.reply(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            roomID: room,
+            text: "done"
+        )
+        let outcomeAck = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.ack",
+                "arguments": ["delivery_ids": [42]],
+            ],
+            raw: rawPlural
+        )
+        guard case .respond(let respData) = outcomeAck else {
+            throw ContractFailure("replied ack did not respond")
+        }
+        let respObj = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
+        let respResult = respObj?["result"] as? [String: Any]
+        try expect(respResult?["acknowledged"] as? Bool == true, "ack response missing acknowledged: true")
+        try expect(try store.readOpen(instanceID: instanceID) == nil, "open transaction was not cleared after ack")
+        try expect(transport.acks == [42], "transport ack was not recorded")
     }
 
     public static func transactionCommandParser() async throws {
