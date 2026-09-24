@@ -92,4 +92,8 @@ the exact stdin/result protocol above. A release integrator must also add:
 
 This release intentionally does not accept arbitrary adapter commands or
 plugins from profile records. Codex and Hermes remain the only recognized
-runtime values until a reviewed release expands that enum.
+stdin worker-runtime values until a reviewed release expands that enum.
+Headless Cursor ACP (`runtimeAdapter: "cursor-acp"`) is a separate supervised
+stdio JSON-RPC lane under `packages/agent-worker/src/cursor-acp-runtime/` — it
+does not use this stdin adapter protocol and must never join the Codex App
+Server pool (see `docs/triangle-client/cursor-acp-adapter.md`).

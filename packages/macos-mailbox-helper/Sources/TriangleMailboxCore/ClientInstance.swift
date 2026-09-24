@@ -6,6 +6,7 @@ public enum RuntimeAdapter: String, Codable, CaseIterable, Sendable {
     case hermes
     case antigravity
     case grokBot = "grok-bot"
+    case cursorAcp = "cursor-acp"
 }
 
 public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
@@ -14,6 +15,7 @@ public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
     case eventDriven = "event-driven"
     case grokBot = "grok-bot"
     case headlessAppServer = "headless-app-server"
+    case headlessCursorAcp = "headless-cursor-acp"
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {
@@ -67,6 +69,10 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public var participatesInHeadlessWake: Bool {
         enabled && deliveryMode == .headlessAppServer && runtimeAdapter == .codex
     }
+    /// Dedicated Cursor ACP drain lane (out of Codex pool). Never matches grok-bot / Codex.
+    public var participatesInCursorAcpWake: Bool {
+        enabled && deliveryMode == .headlessCursorAcp && runtimeAdapter == .cursorAcp
+    }
     /// LaunchAgent `dev.thetriangle.client` must stay loaded for any supervisor-owned wake.
     public var participatesInClientSupervisor: Bool {
         participatesInWorkerPolling
@@ -74,6 +80,7 @@ public struct ClientInstance: Codable, Equatable, Sendable {
             || participatesInAppServerWake
             || participatesInGrokBotWake
             || participatesInHeadlessWake
+            || participatesInCursorAcpWake
     }
     /// Installation watch grant notify members: event-driven drains + App Server + Grok Bot hosts.
     /// Headless App Server admission is helper-transaction poll, not watch-grant notify.
@@ -103,6 +110,7 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         switch runtimeAdapter {
         case .codex: return .headlessAppServer
         case .grokBot: return .grokBot
+        case .cursorAcp: return .headlessCursorAcp
         case .hermes, .antigravity: return .worker
         }
     }

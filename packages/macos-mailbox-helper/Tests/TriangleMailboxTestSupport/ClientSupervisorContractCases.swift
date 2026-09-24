@@ -35,6 +35,8 @@ public enum ClientSupervisorContractCases {
         .init(name: "grok-bot emits grokBotWake when binding present", run: grokBotWakeBootstrap),
         .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
         .init(name: "headless-app-server emits sorted headlessWakes for every Codex profile", run: headlessWakeBootstrap),
+        .init(name: "cursor-acp emits cursorAcpWakes for shadow test profile", run: cursorAcpWakeBootstrap),
+        .init(name: "cursor-acp stays out of Codex headless pool beside grok-bot", run: cursorAcpWakeIsolatedFromCodexAndGrok),
         .init(name: "headless-app-server records every missing v2 binding entry", run: headlessWakeBindingEntryMissing),
         .init(name: "headless-app-server rejects duplicate v2 instance IDs", run: headlessWakeDuplicateInstanceRejected),
         .init(name: "headless-app-server rejects shared mailbox identities", run: headlessWakeSharedCredentialRejected),
@@ -710,6 +712,53 @@ public enum ClientSupervisorContractCases {
         try expect(bootstrap.headlessWakes.first?.profileInstanceId != bootstrap.grokBotWake?.binding.instanceId, "grok-bot entered the Codex pool")
     }
 
+    public static func cursorAcpWakeBootstrap() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "cursor-acp-shadow-test", adapter: .cursorAcp, digit: "a"),
+            ],
+            provisionCursorAcpRuntimeBinding: true,
+            cursorAcpBindingProfiles: ["cursor-acp-shadow-test"]
+        )
+        try fixture.instanceStore.setDeliveryMode(.headlessCursorAcp, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "worker count wrong with cursorAcpWakes")
+        try expect(bootstrap.cursorAcpWakes.map(\.profile) == ["cursor-acp-shadow-test"], "cursorAcpWakes wrong")
+        try expect(bootstrap.cursorAcpWakes.first?.shadowTestProfile == true, "shadowTestProfile missing")
+        try expect(bootstrap.headlessWakes.isEmpty, "cursor-acp leaked into Codex headlessWakes")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let raw = String(decoding: encoded, as: UTF8.self)
+        try expect(!raw.contains(fixture.specifications[1].token), "cursor-acp mailbox token leaked")
+        try expect(raw.contains("cursorAcpWakes"), "cursorAcpWakes key missing")
+    }
+
+    public static func cursorAcpWakeIsolatedFromCodexAndGrok() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "bob", adapter: .grokBot, digit: "b"),
+                .init(profile: "codex-headless", adapter: .codex, digit: "c"),
+                .init(profile: "cursor-acp-shadow-test", adapter: .cursorAcp, digit: "a"),
+            ],
+            provisionGrokBotBinding: true,
+            provisionHeadlessRuntimeBinding: true,
+            provisionCursorAcpRuntimeBinding: true,
+            cursorAcpBindingProfiles: ["cursor-acp-shadow-test"]
+        )
+        try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[0].profile)
+        try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
+        try fixture.instanceStore.setDeliveryMode(.headlessCursorAcp, profile: fixture.specifications[2].profile)
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
+        try expect(bootstrap.headlessWakes.map(\.profile) == ["codex-headless"], "Codex wake drifted")
+        try expect(bootstrap.cursorAcpWakes.map(\.profile) == ["cursor-acp-shadow-test"], "Cursor ACP wake drifted")
+        let cursorId = try require(bootstrap.cursorAcpWakes.first?.profileInstanceId, "cursor instance missing")
+        try expect(bootstrap.headlessWakes.first?.profileInstanceId != cursorId, "Cursor ACP shared Codex instance id")
+        try expect(bootstrap.grokBotWake?.binding.instanceId != cursorId, "Cursor ACP shared grok-bot instance id")
+    }
+
     public static func noEligibleProfile() async throws {
         let fixture = try SupervisorFixture(specifications: [
             .init(profile: "bad-only", adapter: .codex, digit: "9", verificationFails: true),
@@ -981,10 +1030,12 @@ private final class SupervisorFixture: @unchecked Sendable {
         provisionAppServerBinding: Bool = false,
         provisionGrokBotBinding: Bool = false,
         provisionHeadlessRuntimeBinding: Bool = false,
+        provisionCursorAcpRuntimeBinding: Bool = false,
         dedicatedHeadlessDrainLoaded: Bool = false,
         dedicatedHeadlessDrainLoadedProfiles: Set<String> = [],
         headlessBindingProfile: String? = nil,
         headlessBindingProfiles: [String]? = nil,
+        cursorAcpBindingProfiles: [String]? = nil,
         duplicateHeadlessInstanceID: Bool = false,
         headlessStateRoots: [String: String] = [:],
         headlessPollIntervalMs: Any = 1_000,
@@ -1010,6 +1061,7 @@ private final class SupervisorFixture: @unchecked Sendable {
         let grokBotWebhookURLPath = helperRoot.appendingPathComponent("grok-bot-webhook.url")
         let grokBotWebhookKeyPath = helperRoot.appendingPathComponent("grok-bot-webhook.key")
         let headlessRuntimeBindingURL = helperRoot.appendingPathComponent("headless-runtime-binding.json")
+        let cursorAcpRuntimeBindingURL = helperRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
         let installationID = try InstallationID("inst_N7VhDq3mQ2")
         var bindings: [ProfileName: CredentialBinding] = [:]
         var identities: [String: IdentityResult] = [:]
@@ -1113,6 +1165,35 @@ private final class SupervisorFixture: @unchecked Sendable {
             try bindingData.write(to: headlessRuntimeBindingURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: headlessRuntimeBindingURL.path)
         }
+        if provisionCursorAcpRuntimeBinding {
+            let selectedProfiles = cursorAcpBindingProfiles ?? ["cursor-acp-shadow-test"]
+            let selected = try selectedProfiles.map { profile in
+                try require(
+                    specifications.first(where: { $0.profile.value == profile }),
+                    "cursor-acp specification required for binding"
+                )
+            }
+            let common: [String: Any] = [
+                "adapterVersion": "1",
+                "installationId": installationID.value,
+                "workingDirectory": "/srv/triangle-cursor-work",
+                "cursorHome": "/private/cursor-acp-home",
+                "command": "/trusted/bin/agent",
+                "pollIntervalMs": 1_000,
+            ]
+            let profiles: [[String: Any]] = selected.map { entry in
+                [
+                    "profile": entry.profile.value,
+                    "instanceId": ClientInstanceID.derive(profile: entry.profile).value,
+                    "stateRoot": "/private/cursor-acp-state/\(entry.profile.value)",
+                    "shadowTestProfile": true,
+                ]
+            }
+            let bindingObject: [String: Any] = ["version": 1, "common": common, "profiles": profiles]
+            let bindingData = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
+            try bindingData.write(to: cursorAcpRuntimeBindingURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cursorAcpRuntimeBindingURL.path)
+        }
         credentials = RecordingMultiCredentialStore(bindings: bindings, events: events)
         let gate = VerifiedCredentialGate(
             store: credentials,
@@ -1136,6 +1217,7 @@ private final class SupervisorFixture: @unchecked Sendable {
             grokBotWebhookURLPath: grokBotWebhookURLPath,
             grokBotWebhookKeyPath: grokBotWebhookKeyPath,
             headlessRuntimeBindingURL: headlessRuntimeBindingURL,
+            cursorAcpRuntimeBindingURL: cursorAcpRuntimeBindingURL,
             isDedicatedHeadlessDrainLoaded: { profile in
                 dedicatedHeadlessDrainLoaded || dedicatedHeadlessDrainLoadedProfiles.contains(profile)
             },
@@ -1272,6 +1354,23 @@ private struct TestBootstrap: Decodable {
     let appServerWake: TestAppServerWake?
     let grokBotWake: TestGrokBotWake?
     let headlessWakes: [TestHeadlessWake]
+    let cursorAcpWakes: [TestCursorAcpWake]
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(Int.self, forKey: .version)
+        maxConcurrentReasoners = try values.decode(Int.self, forKey: .maxConcurrentReasoners)
+        instances = try values.decode([TestBootstrapInstance].self, forKey: .instances)
+        eventWake = try values.decodeIfPresent(TestEventWake.self, forKey: .eventWake)
+        appServerWake = try values.decodeIfPresent(TestAppServerWake.self, forKey: .appServerWake)
+        grokBotWake = try values.decodeIfPresent(TestGrokBotWake.self, forKey: .grokBotWake)
+        headlessWakes = try values.decodeIfPresent([TestHeadlessWake].self, forKey: .headlessWakes) ?? []
+        cursorAcpWakes = try values.decodeIfPresent([TestCursorAcpWake].self, forKey: .cursorAcpWakes) ?? []
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes
+    }
 }
 private struct TestBootstrapInstance: Decodable {
     let instanceId: String
@@ -1347,6 +1446,17 @@ private struct TestHeadlessWake: Decodable {
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
+}
+private struct TestCursorAcpWake: Decodable {
+    let profile: String
+    let profileInstanceId: String
+    let helperPath: String
+    let workingDirectory: String
+    let cursorHome: String
+    let stateRoot: String
+    let command: String
+    let pollIntervalMs: Int
+    let shadowTestProfile: Bool
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

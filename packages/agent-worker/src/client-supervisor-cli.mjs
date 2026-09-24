@@ -16,13 +16,14 @@ import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
 import { hasHeadlessWakeKeys, normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
+import { hasCursorAcpWakeKeys, normalizeCursorAcpWakeConfig } from "./cursor-acp-runtime/headless-drain-service.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWakes"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWakes", "cursorAcpWakes"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -320,7 +321,20 @@ function headlessWakeOutsideValues(headlessWake) {
   ].filter((value) => typeof value === "string");
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWakes) {
+function cursorAcpWakeOutsideValues(cursorAcpWake) {
+  if (!cursorAcpWake) return [];
+  return [
+    cursorAcpWake.profile,
+    cursorAcpWake.profileInstanceId,
+    cursorAcpWake.helperPath,
+    cursorAcpWake.workingDirectory,
+    cursorAcpWake.cursorHome,
+    cursorAcpWake.stateRoot,
+    cursorAcpWake.command,
+  ].filter((value) => typeof value === "string");
+}
+
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -357,6 +371,11 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
       }
       for (const headlessWake of headlessWakes ?? []) {
         for (const candidate of headlessWakeOutsideValues(headlessWake)) {
+          if (candidate.includes(secret)) throw invalidBootstrap();
+        }
+      }
+      for (const cursorAcpWake of cursorAcpWakes ?? []) {
+        for (const candidate of cursorAcpWakeOutsideValues(cursorAcpWake)) {
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
       }
@@ -534,7 +553,7 @@ function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWak
   }
 }
 
-function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerWake, grokBotWake) {
+function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerWake, grokBotWake, cursorAcpWakes = []) {
   if (!hasHeadlessWakeKeys(headlessWake)) throw invalidBootstrap();
   let normalized;
   try {
@@ -547,6 +566,26 @@ function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerW
     || eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
     || appServerWake?.binding?.instanceId === normalized.profileInstanceId
     || grokBotWake?.binding?.instanceId === normalized.profileInstanceId
+    || cursorAcpWakes.some((wake) => wake.profileInstanceId === normalized.profileInstanceId)
+  ) {
+    throw invalidBootstrap();
+  }
+}
+
+function validateCursorAcpWake(cursorAcpWake, seenWorkerIds, eventWake, appServerWake, grokBotWake, headlessWakes = []) {
+  if (!hasCursorAcpWakeKeys(cursorAcpWake)) throw invalidBootstrap();
+  let normalized;
+  try {
+    normalized = normalizeCursorAcpWakeConfig(cursorAcpWake);
+  } catch {
+    throw invalidBootstrap();
+  }
+  if (
+    seenWorkerIds.has(normalized.profileInstanceId)
+    || eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
+    || appServerWake?.binding?.instanceId === normalized.profileInstanceId
+    || grokBotWake?.binding?.instanceId === normalized.profileInstanceId
+    || headlessWakes.some((wake) => wake.profileInstanceId === normalized.profileInstanceId)
   ) {
     throw invalidBootstrap();
   }
@@ -585,12 +624,19 @@ export function parseClientSupervisorBootstrap(text) {
       );
     }
     if (Object.hasOwn(bootstrap, "headlessWakes")) {
-      if (!Array.isArray(bootstrap.headlessWakes) || bootstrap.headlessWakes.length < 1 || bootstrap.headlessWakes.length > 100) throw invalidBootstrap();
+      if (!Array.isArray(bootstrap.headlessWakes) || bootstrap.headlessWakes.length > 100) throw invalidBootstrap();
       const profiles = new Set();
       const instanceIds = new Set();
       const stateRoots = new Set();
       for (const wake of bootstrap.headlessWakes) {
-        validateHeadlessWake(wake, seen, bootstrap.eventWake, bootstrap.appServerWake, bootstrap.grokBotWake);
+        validateHeadlessWake(
+          wake,
+          seen,
+          bootstrap.eventWake,
+          bootstrap.appServerWake,
+          bootstrap.grokBotWake,
+          bootstrap.cursorAcpWakes ?? [],
+        );
         const normalized = normalizeHeadlessWakeConfig(wake);
         if (profiles.has(normalized.profile) || instanceIds.has(normalized.profileInstanceId) || stateRoots.has(normalized.stateRoot)) throw invalidBootstrap();
         profiles.add(normalized.profile); instanceIds.add(normalized.profileInstanceId); stateRoots.add(normalized.stateRoot);
@@ -600,12 +646,36 @@ export function parseClientSupervisorBootstrap(text) {
         .sort((a, b) => a.profile.localeCompare(b.profile));
       Object.freeze(bootstrap.headlessWakes);
     }
+    if (Object.hasOwn(bootstrap, "cursorAcpWakes")) {
+      if (!Array.isArray(bootstrap.cursorAcpWakes) || bootstrap.cursorAcpWakes.length > 100) throw invalidBootstrap();
+      const profiles = new Set();
+      const instanceIds = new Set();
+      const stateRoots = new Set();
+      for (const wake of bootstrap.cursorAcpWakes) {
+        validateCursorAcpWake(
+          wake,
+          seen,
+          bootstrap.eventWake,
+          bootstrap.appServerWake,
+          bootstrap.grokBotWake,
+          bootstrap.headlessWakes ?? [],
+        );
+        const normalized = normalizeCursorAcpWakeConfig(wake);
+        if (profiles.has(normalized.profile) || instanceIds.has(normalized.profileInstanceId) || stateRoots.has(normalized.stateRoot)) throw invalidBootstrap();
+        profiles.add(normalized.profile); instanceIds.add(normalized.profileInstanceId); stateRoots.add(normalized.stateRoot);
+      }
+      bootstrap.cursorAcpWakes = bootstrap.cursorAcpWakes
+        .map((wake) => Object.freeze(normalizeCursorAcpWakeConfig(wake)))
+        .sort((a, b) => a.profile.localeCompare(b.profile));
+      Object.freeze(bootstrap.cursorAcpWakes);
+    }
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")
       && !Object.hasOwn(bootstrap, "appServerWake")
       && !Object.hasOwn(bootstrap, "grokBotWake")
       && !Object.hasOwn(bootstrap, "headlessWakes")
+      && !Object.hasOwn(bootstrap, "cursorAcpWakes")
     ) {
       throw invalidBootstrap();
     }
@@ -615,6 +685,7 @@ export function parseClientSupervisorBootstrap(text) {
       bootstrap.appServerWake,
       bootstrap.grokBotWake,
       bootstrap.headlessWakes,
+      bootstrap.cursorAcpWakes,
     );
     return bootstrap;
   } catch {
@@ -745,6 +816,7 @@ export async function runClientSupervisorCLI({
         appServerWake: bootstrap.appServerWake ?? null,
         grokBotWake: bootstrap.grokBotWake ?? null,
         headlessWakes: bootstrap.headlessWakes ?? [],
+        cursorAcpWakes: bootstrap.cursorAcpWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake
