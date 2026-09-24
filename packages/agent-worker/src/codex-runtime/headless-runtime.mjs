@@ -154,7 +154,7 @@ function inactiveRuntime({ resolved, registry, reason }) {
   });
 }
 
-export const DEFAULT_HEADLESS_TURN_TIMEOUT_MS = 180_000;
+export const DEFAULT_HEADLESS_TURN_TIMEOUT_MS = 300_000;
 
 /**
  * Create the Phase 1–3 shadow headless runtime.
@@ -693,12 +693,71 @@ export function createHeadlessCodexRuntime({
       );
 
       resolvedRegistry.upsert(instanceId, roomId, { executionState: "running" });
-      const pending = waitForAppServerTurnCompleted(slotLease.processHandle, {
-        threadId,
-        timeoutMs: turnTimeoutMs,
+
+      // Arm waiter BEFORE turn/start to avoid missing completions on fast or synchronous servers.
+      // Wait for any terminal notification or child exit on this process/thread.
+      // Buffer thread notifications and match the exact turnId once turn/start resolves.
+      let startedTurnId = null;
+      let settled = false;
+      const turnBuffer = [];
+      let unsubscribeProcessEvents = null;
+      let timer = null;
+
+      let resolveDeferred;
+      let rejectDeferred;
+      const deferredPromise = new Promise((res, rej) => {
+        resolveDeferred = res;
+        rejectDeferred = rej;
       });
-      // Always attach a sink so a crash-before-response cannot become unhandled.
-      const pendingResult = pending.then(
+
+      const settle = (fn, val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { unsubscribeProcessEvents?.(); } catch {}
+        fn(val);
+      };
+
+      timer = setTimeout(() => {
+        settle(
+          rejectDeferred,
+          createCodedError("seed_turn_timeout", "seed turn completion timed out", {
+            threadId,
+            turnId: startedTurnId,
+            outcome: "unknown",
+          }),
+        );
+      }, turnTimeoutMs);
+
+      unsubscribeProcessEvents = slotLease.processHandle.onEvent((event) => {
+        if (event?.type === "exit") {
+          settle(
+            rejectDeferred,
+            createCodedError("child_exited", "App Server child exited before turn completed", {
+              code: event.code,
+              signal: event.signal,
+              threadId,
+              turnId: startedTurnId,
+              outcome: "unknown",
+            }),
+          );
+          return;
+        }
+        if (event?.type !== "message" || event?.method !== "turn/completed") return;
+        const evThreadId = event?.params?.threadId;
+        if (evThreadId && evThreadId !== threadId) return;
+
+        const evTurn = event?.params?.turn;
+        if (startedTurnId) {
+          if (evTurn?.id === startedTurnId) {
+            settle(resolveDeferred, evTurn);
+          }
+        } else {
+          turnBuffer.push(evTurn);
+        }
+      });
+
+      const pendingResult = deferredPromise.then(
         (value) => ({ ok: true, value }),
         (error) => ({ ok: false, error }),
       );
@@ -739,6 +798,13 @@ export function createHeadlessCodexRuntime({
         }
         throw quarantineError;
       }
+
+      startedTurnId = turnId;
+      const buffered = turnBuffer.find((t) => t?.id === turnId);
+      if (buffered) {
+        settle(resolveDeferred, buffered);
+      }
+
       let completed = await pendingResult;
       if (!completed.ok && completed.error?.code === "seed_turn_timeout") {
         // A lost terminal notification is not proof that the turn failed.
@@ -748,9 +814,11 @@ export function createHeadlessCodexRuntime({
             threadId,
             includeTurns: true,
           });
-          const exactTurn = read?.thread?.turns?.find((entry) => entry?.id === turnId);
-          if (exactTurn?.status === "completed" && extractAssistantText(exactTurn)) {
-            completed = { ok: true, value: exactTurn };
+          if (read?.thread?.id === threadId) {
+            const exactTurn = read?.thread?.turns?.find((entry) => entry?.id === turnId);
+            if (exactTurn?.status === "completed" && extractAssistantText(exactTurn)) {
+              completed = { ok: true, value: exactTurn };
+            }
           }
         } catch (error) {
           logger.info?.("triangle_headless_timeout_readback_failed", {
@@ -773,6 +841,23 @@ export function createHeadlessCodexRuntime({
         throw completed.error;
       }
       const completedTurn = completed.value;
+      if (completedTurn?.id !== turnId) {
+        const mismatchError = createCodedError(
+          "turn_id_mismatch",
+          `completed turn id ${completedTurn?.id} does not match expected turn ${turnId}`,
+          { outcome: "unknown", turnId, completedTurnId: completedTurn?.id },
+        );
+        const q = await quarantineUnknownTurnOutcome({
+          slotLease,
+          threadId,
+          error: mismatchError,
+        });
+        if (q.slotReleased) {
+          unknownOutcomeQuarantined = true;
+          slotReleased = true;
+        }
+        throw mismatchError;
+      }
       // Stale-epoch guard: ignore late completions that do not match admitted epoch.
       if (
         completedTurn?.executionEpoch != null &&
@@ -1169,6 +1254,9 @@ export function createHeadlessCodexRuntime({
     restartSlot,
     status,
     registry: resolvedRegistry,
+    get turnTimeoutMs() {
+      return turnTimeoutMs;
+    },
     get pool() {
       return workerPool;
     },

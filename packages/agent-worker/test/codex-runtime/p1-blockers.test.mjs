@@ -50,8 +50,13 @@ function createProxyRecorder({ replyEventId = INBOUND_EVENT_ID } = {}) {
   };
 }
 
-test("production headless turn timeout permits at least three minutes", () => {
-  assert.ok(DEFAULT_HEADLESS_TURN_TIMEOUT_MS >= 180_000);
+test("production headless turn timeout permits at least five minutes", () => {
+  assert.ok(DEFAULT_HEADLESS_TURN_TIMEOUT_MS >= 300_000);
+  const runtime = createHeadlessCodexRuntime({
+    profileConfig: shadowProfile(),
+    enableShadow: true,
+  });
+  assert.equal(runtime.turnTimeoutMs, 300_000);
 });
 
 test("P1 cancel: interrupt uses owning handle without a second pool acquire", async () => {
@@ -298,6 +303,90 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
     assert.equal(result.status, "completed");
     assert.deepEqual(proxy.calls.map((call) => call.op), ["reply", "ack"]);
     assert.equal(proxy.calls[0].text, "review completed");
+    assert.equal(runtime.registry.get(PROFILE_INSTANCE_ID, ROOM_ID).executionState, "idle");
+  } finally {
+    await runtime.stop({ signal: "SIGKILL", timeoutMs: 500 }).catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("P1 stale notification: late completion from prior turn does not settle new turn", async () => {
+  const home = tempHome();
+  const source = `
+import { createInterface } from "node:readline";
+function write(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }
+let turnCount = 0;
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  let message;
+  try { message = JSON.parse(line); } catch { continue; }
+  if (message.id === undefined) continue;
+  const { id, method } = message;
+  let result = {};
+  if (method === "initialize") result = { serverInfo: { name: "fake-stale-terminal", version: "0" } };
+  if (method === "thread/start") result = { thread: { id: "thread-stale-terminal" } };
+  if (method === "turn/start") {
+    turnCount += 1;
+    const currentTurnId = "turn-" + turnCount;
+    result = { turn: { id: currentTurnId, status: "in_progress" } };
+    write({ jsonrpc: "2.0", id, result });
+    // Immediately emit a stale turn/completed notification for an old turn ID
+    write({
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: {
+        threadId: "thread-stale-terminal",
+        turn: {
+          id: "turn-stale-prior",
+          status: "completed",
+          items: [{ type: "agentMessage", text: "stale prior answer" }],
+        },
+      },
+    });
+    // Then after a short delay emit the real matching turn/completed notification
+    setTimeout(() => {
+      write({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: {
+          threadId: "thread-stale-terminal",
+          turn: {
+            id: currentTurnId,
+            status: "completed",
+            items: [{ type: "agentMessage", text: "correct current answer" }],
+          },
+        },
+      });
+    }, 20);
+    continue;
+  }
+  write({ jsonrpc: "2.0", id, result });
+}
+`;
+  const proxy = createProxyRecorder();
+  const runtime = createHeadlessCodexRuntime({
+    profileConfig: shadowProfile({ workingDirectory: home }),
+    enableShadow: true,
+    transactionProxy: proxy,
+    command: process.execPath,
+    args: ["--input-type=module", "-e", source],
+    codexHome: home,
+    env: { ...process.env, HOME: path.dirname(home) },
+    turnTimeoutMs: 500,
+    logger: { info() {}, error() {} },
+  });
+  try {
+    await runtime.start();
+    const result = await runtime.runDelivery({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+      roomId: ROOM_ID,
+      deliveryId: "delivery_63",
+      numericDeliveryId: 63,
+      text: "test stale turn notification",
+      inboundEventId: INBOUND_EVENT_ID,
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(proxy.calls.map((call) => call.op), ["reply", "ack"]);
+    assert.equal(proxy.calls[0].text, "correct current answer", "stale turn answer must be ignored");
     assert.equal(runtime.registry.get(PROFILE_INSTANCE_ID, ROOM_ID).executionState, "idle");
   } finally {
     await runtime.stop({ signal: "SIGKILL", timeoutMs: 500 }).catch(() => {});
