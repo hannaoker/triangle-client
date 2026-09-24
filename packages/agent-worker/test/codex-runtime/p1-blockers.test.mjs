@@ -5,7 +5,10 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDurableConversationStore } from "../../src/codex-runtime/durable-conversation-store.mjs";
-import { createHeadlessCodexRuntime } from "../../src/codex-runtime/headless-runtime.mjs";
+import {
+  createHeadlessCodexRuntime,
+  DEFAULT_HEADLESS_TURN_TIMEOUT_MS,
+} from "../../src/codex-runtime/headless-runtime.mjs";
 import { createFakeAppServerStdioProgram } from "../../src/codex-runtime/app-server-process.mjs";
 
 const PROFILE_INSTANCE_ID = "a".repeat(64);
@@ -46,6 +49,10 @@ function createProxyRecorder({ replyEventId = INBOUND_EVENT_ID } = {}) {
     },
   };
 }
+
+test("production headless turn timeout permits at least three minutes", () => {
+  assert.ok(DEFAULT_HEADLESS_TURN_TIMEOUT_MS >= 180_000);
+});
 
 test("P1 cancel: interrupt uses owning handle without a second pool acquire", async () => {
   const home = tempHome();
@@ -165,6 +172,12 @@ async function handle(message) {
     // Intentionally never emit turn/completed.
     return;
   }
+  if (method === "thread/read") {
+    write({ jsonrpc: "2.0", id, result: { thread: { id: params.threadId, turns: [{
+      id: "turn-other", status: "completed", items: [{ type: "agentMessage", text: "stale reply" }],
+    }] } } });
+    return;
+  }
   if (method === "turn/interrupt") {
     write({ jsonrpc: "2.0", id, result: {} });
     return;
@@ -236,6 +249,58 @@ for await (const line of rl) {
     assert.equal(report.quarantined, 1);
   } finally {
     await runtime.stop({ signal: "SIGKILL", timeoutMs: 1_000 }).catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("P1 timeout: exact completed turn readback settles once when notification is lost", async () => {
+  const home = tempHome();
+  const source = `
+import { createInterface } from "node:readline";
+function write(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  let message;
+  try { message = JSON.parse(line); } catch { continue; }
+  if (message.id === undefined) continue;
+  const { id, method } = message;
+  let result = {};
+  if (method === "initialize") result = { serverInfo: { name: "fake-lost-terminal", version: "0" } };
+  if (method === "thread/start") result = { thread: { id: "thread-lost-terminal" } };
+  if (method === "turn/start") result = { turn: { id: "turn-lost-terminal", status: "in_progress" } };
+  if (method === "thread/read") result = { thread: { id: "thread-lost-terminal", turns: [{
+    id: "turn-lost-terminal", status: "completed", items: [{ type: "agentMessage", text: "review completed" }],
+  }] } };
+  write({ jsonrpc: "2.0", id, result });
+}
+`;
+  const proxy = createProxyRecorder();
+  const runtime = createHeadlessCodexRuntime({
+    profileConfig: shadowProfile({ workingDirectory: home }),
+    enableShadow: true,
+    transactionProxy: proxy,
+    command: process.execPath,
+    args: ["--input-type=module", "-e", source],
+    codexHome: home,
+    env: { ...process.env, HOME: path.dirname(home) },
+    turnTimeoutMs: 50,
+    logger: { info() {}, error() {} },
+  });
+  try {
+    await runtime.start();
+    const result = await runtime.runDelivery({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+      roomId: ROOM_ID,
+      deliveryId: "delivery_62",
+      numericDeliveryId: 62,
+      text: "review request",
+      inboundEventId: INBOUND_EVENT_ID,
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(proxy.calls.map((call) => call.op), ["reply", "ack"]);
+    assert.equal(proxy.calls[0].text, "review completed");
+    assert.equal(runtime.registry.get(PROFILE_INSTANCE_ID, ROOM_ID).executionState, "idle");
+  } finally {
+    await runtime.stop({ signal: "SIGKILL", timeoutMs: 500 }).catch(() => {});
     rmSync(home, { recursive: true, force: true });
   }
 });

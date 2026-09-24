@@ -154,6 +154,8 @@ function inactiveRuntime({ resolved, registry, reason }) {
   });
 }
 
+export const DEFAULT_HEADLESS_TURN_TIMEOUT_MS = 180_000;
+
 /**
  * Create the Phase 1–3 shadow headless runtime.
  *
@@ -198,7 +200,7 @@ export function createHeadlessCodexRuntime({
   ownerInstanceId = `owner-${process.pid}`,
   profileInstanceId = null,
   correlationMode = selectCorrelationMode({ metadataFieldSurvivesThreadRead: true }),
-  turnTimeoutMs = 30_000,
+  turnTimeoutMs = DEFAULT_HEADLESS_TURN_TIMEOUT_MS,
   /**
    * Pool acquire wait. Default 0 = fail closed on saturation (leave MESH work
    * durable / unclaimed). Bounded waits are FIFO inside the pool.
@@ -737,7 +739,27 @@ export function createHeadlessCodexRuntime({
         }
         throw quarantineError;
       }
-      const completed = await pendingResult;
+      let completed = await pendingResult;
+      if (!completed.ok && completed.error?.code === "seed_turn_timeout") {
+        // A lost terminal notification is not proof that the turn failed.
+        // Read only this turn before replacing the slot or touching MESH.
+        try {
+          const read = await slotLease.processHandle.threadRead({
+            threadId,
+            includeTurns: true,
+          });
+          const exactTurn = read?.thread?.turns?.find((entry) => entry?.id === turnId);
+          if (exactTurn?.status === "completed" && extractAssistantText(exactTurn)) {
+            completed = { ok: true, value: exactTurn };
+          }
+        } catch (error) {
+          logger.info?.("triangle_headless_timeout_readback_failed", {
+            code: error?.code ?? null,
+            threadId,
+            turnId,
+          });
+        }
+      }
       if (!completed.ok) {
         const q = await quarantineUnknownTurnOutcome({
           slotLease,
