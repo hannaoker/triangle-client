@@ -625,17 +625,23 @@ export function createCursorAcpProcess({
     if (!authenticated) await authenticate();
   }
 
-  async function sessionNew({ cwd = resolvedHome } = {}) {
+  async function sessionNew({ cwd = resolvedHome, mcpServers = [] } = {}) {
     await ensureReady();
-    return call("session/new", { cwd });
+    if (!Array.isArray(mcpServers)) {
+      throw new TypeError("mcpServers must be an array");
+    }
+    return call("session/new", { cwd, mcpServers });
   }
 
-  async function sessionLoad({ sessionId, cwd = resolvedHome } = {}) {
+  async function sessionLoad({ sessionId, cwd = resolvedHome, mcpServers = [] } = {}) {
     await ensureReady();
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw new TypeError("sessionId is required");
     }
-    return call("session/load", { sessionId, cwd });
+    if (!Array.isArray(mcpServers)) {
+      throw new TypeError("mcpServers must be an array");
+    }
+    return call("session/load", { sessionId, cwd, mcpServers });
   }
 
   async function setConfigOption({ sessionId, configId, value }) {

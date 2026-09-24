@@ -56,6 +56,9 @@ function inactiveRuntime({ resolved, registry, reason }) {
     async restartSlot() {
       throw createCodedError("cursor_acp_runtime_inactive", "Cursor ACP runtime inactive");
     },
+    async recoverAfterRestart() {
+      return Object.freeze({ quarantined: 0 });
+    },
     status() {
       return Object.freeze({
         active: false,
@@ -369,6 +372,11 @@ export function createHeadlessCursorAcpRuntime({
     return workerPool.restartSlot(slotId);
   }
 
+  async function recoverAfterRestart() {
+    // Shadow Cursor ACP lane has no durable quarantine store yet.
+    return Object.freeze({ quarantined: 0 });
+  }
+
   function status() {
     return Object.freeze({
       active: true,
@@ -387,6 +395,7 @@ export function createHeadlessCursorAcpRuntime({
     runDelivery,
     runReceiptOnly,
     restartSlot,
+    recoverAfterRestart,
     status,
     registry: resolvedRegistry,
     pool: workerPool,

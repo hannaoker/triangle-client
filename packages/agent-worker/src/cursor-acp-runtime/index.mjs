@@ -58,3 +58,22 @@ export { createMemoryCursorSessionRegistry } from "./session-registry.mjs";
 export { createCursorAcpWorkerPool } from "./worker-pool.mjs";
 
 export { createHeadlessCursorAcpRuntime } from "./headless-runtime.mjs";
+
+export { createHeadlessCursorAcpDrain } from "./headless-drain.mjs";
+
+export {
+  CLIENT_SUPERVISOR_CLAIMER_OWNER,
+  CURSOR_ACP_WAKE_KEYS,
+  CURSOR_ACP_WAKE_OPTIONAL_KEYS,
+  CURSOR_ACP_WAKE_REQUIRED_KEYS,
+  DEDICATED_CURSOR_ACP_DRAIN_CLAIMER_OWNER,
+  assertCursorAcpDrainIdentity,
+  createCursorAcpClaimerGuard,
+  createInstalledCursorAcpDrain,
+  dedicatedCursorAcpDrainLaunchAgentLabel,
+  defaultCursorAcpClaimerLockPath,
+  deriveProfileInstanceId,
+  hasCursorAcpWakeKeys,
+  normalizeCursorAcpWakeConfig,
+  probeDedicatedCursorAcpDrainLoaded,
+} from "./headless-drain-service.mjs";
