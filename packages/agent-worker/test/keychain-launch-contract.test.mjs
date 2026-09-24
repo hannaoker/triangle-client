@@ -213,7 +213,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     delete manifest.artifacts[relative];
     fs.rmSync(path.join(manifest.projectRoot, relative));
   }
-  for (const relative of Object.keys(manifest.artifacts).filter((name) => name.includes("/codex-runtime/"))) {
+  for (const relative of Object.keys(manifest.artifacts).filter((name) => name.includes("/codex-runtime/") || name.includes("/cursor-acp-runtime/"))) {
     delete manifest.artifacts[relative];
     fs.rmSync(path.join(manifest.projectRoot, relative));
   }
