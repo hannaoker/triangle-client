@@ -638,6 +638,10 @@ export function createClientSupervisor({
       installationId: grokBotConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: grokBotConfig.cursorPath });
+    const quotaResetStorePath = path.join(
+      path.dirname(grokBotConfig.cursorPath),
+      `grok-bot-quota-reset.${grokBotConfig.binding.instanceId}.json`,
+    );
     grokBotBridge = createGrokBotBridge({
       binding: grokBotConfig.binding,
       watchTransport,
@@ -650,6 +654,7 @@ export function createClientSupervisor({
       webhookUrlPath: grokBotConfig.webhookUrlPath,
       webhookKeyPath: grokBotConfig.webhookKeyPath,
       logger,
+      quotaResetStorePath,
     });
     if (!grokBotBridge || typeof grokBotBridge.start !== "function") {
       throw new TypeError("createGrokBotBridge must return a Grok Bot wake bridge");

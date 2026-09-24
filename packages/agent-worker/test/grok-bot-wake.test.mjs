@@ -821,6 +821,62 @@ test("pre-wake receipt filtering preserves wake for actionable work", async () =
   assert.equal(claimCount, 2);
 });
 
+test("production webhook 429 carries bodyText with multi-day reset to bridge and persists across restart", async () => {
+  await withTempDir(async (dir) => {
+    let clock = 1_000_000;
+    const futureIso = new Date(clock + 3 * 24 * 3600 * 1000).toISOString();
+    const quotaResetStorePath = path.join(dir, `grok-bot-quota-reset.${instanceId}.json`);
+
+    await withWebhookServer(({ res }) => {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `included usage limit reached, resets at ${futureIso}` }));
+    }, async (httpUrl) => {
+      const createBridge = () => createGrokBotWakeBridge({
+        binding: validateGrokBotBinding(sampleBinding()),
+        watchTransport: createFakeWatchTransport({ polls: [] }),
+        now: () => clock,
+        quotaResetStorePath,
+        dispatcher: createGrokBotWakeDispatcher({
+          async readCredentials() {
+            return { url: httpUrl, key: "test-webhook-key-value" };
+          },
+          webhookUrlPath: "/private/grok-bot-webhook.url",
+          webhookKeyPath: "/private/grok-bot-webhook.key",
+          now: () => clock,
+        }),
+        logger: { info() {}, error() {} },
+      });
+
+      const bridge1 = createBridge();
+      const firstRes = await bridge1.handleWake({ instanceId, highWatermark: 10, reason: "wake" });
+      assert.equal(firstRes.status, "backoff");
+      assert.equal(firstRes.untilMs, Date.parse(futureIso));
+
+      // Verify file persistence
+      const savedRaw = await readFile(quotaResetStorePath, "utf8");
+      assert.equal(JSON.parse(savedRaw).resetsAt, Date.parse(futureIso));
+
+      // Stop bridge1 — should NOT erase persisted reset
+      await bridge1.stop();
+      const afterStopRaw = await readFile(quotaResetStorePath, "utf8");
+      assert.equal(JSON.parse(afterStopRaw).resetsAt, Date.parse(futureIso));
+
+      // Start bridge2 (simulating restart)
+      const bridge2 = createBridge();
+      await bridge2.loadPersistedQuotaReset();
+      const state = bridge2.getQuotaBackoffState();
+      assert.equal(state.untilMs, Date.parse(futureIso));
+
+      // A wake attempt on bridge2 is immediately skipped due to persisted backoff
+      const skippedRes = await bridge2.handleWake({ instanceId, highWatermark: 11, reason: "wake" });
+      assert.equal(skippedRes.status, "skipped_backoff");
+      assert.equal(skippedRes.untilMs, Date.parse(futureIso));
+
+      await bridge2.stop();
+    });
+  });
+});
+
 test("pre-wake receipt filtering defers when Bob already holds open claim", async () => {
   let webhookCalls = 0;
 

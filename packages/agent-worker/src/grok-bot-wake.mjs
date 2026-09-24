@@ -49,7 +49,7 @@ const QUOTA_EXHAUSTION_BODY =
   /resource_exhausted|quota_exceeded|quota[\s_-]?exhaust|rate[\s_-]?limit/i;
 
 const MULTI_DAY_RESET_PATTERN =
-  /(?:included[\s\w-]*usage[\s\w-]*limit[\s\w-]*reached|quota[\s\w-]*exceeded)[\s\w-,.]*resets\s+(?:at\s+)?([^\n\r]+)/i;
+  /(?:included[\s\w-]*usage[\s\w-]*limit[\s\w-]*reached|quota[\s\w-]*exceeded)[\s\w-,.]*resets\s+(?:at\s+)?([A-Za-z0-9_.:+-]+)/i;
 
 /**
  * Parses multi-day reset timestamps from error messages or status payloads.
@@ -60,7 +60,7 @@ function parseQuotaResetUntilMs(text, { now = Date.now() } = {}) {
   if (typeof text !== "string") return null;
   const match = text.match(MULTI_DAY_RESET_PATTERN);
   if (!match || !match[1]) return null;
-  const rawDate = match[1].trim().replace(/[.,;]$/, "");
+  const rawDate = match[1].trim().replace(/["'.,;}\]]+$/, "");
   if (!rawDate) return null;
   const parsed = Date.parse(rawDate);
   if (Number.isFinite(parsed) && parsed > now) {
@@ -240,6 +240,7 @@ export function createGrokBotWakeDispatcher({
               : `grok-bot webhook rejected with status ${status ?? "unknown"}`,
           );
           error.status = status ?? null;
+          error.bodyText = bodyText;
           error.retryAfterMs = retryAfterMs;
           error.quotaExhausted = quotaExhausted;
           throw error;
@@ -405,19 +406,21 @@ export function createGrokBotWakeBridge({
     pendingRetryUntilMs = null;
   }
 
-  function clearQuotaBackoff() {
+  function clearQuotaBackoff({ clearPersisted = true } = {}) {
     quotaBackoff = null;
     cancelPendingRetry();
-    clearQuotaResetFile();
+    if (clearPersisted) {
+      clearQuotaResetFile();
+    }
   }
 
-  function deactivateRetries() {
+  function deactivateRetries({ preservePersisted = false } = {}) {
     retriesEnabled = false;
     retryGeneration += 1;
-    clearQuotaBackoff();
+    clearQuotaBackoff({ clearPersisted: !preservePersisted });
   }
 
-  function openQuotaBackoff({ retryAfterMs = null, customUntilMs = null } = {}) {
+  async function openQuotaBackoff({ retryAfterMs = null, customUntilMs = null } = {}) {
     const nowMs = now();
     let backoffMs;
     let untilMs;
@@ -425,7 +428,7 @@ export function createGrokBotWakeBridge({
     if (Number.isFinite(customUntilMs) && customUntilMs > nowMs) {
       untilMs = customUntilMs;
       backoffMs = untilMs - nowMs;
-      persistQuotaReset(untilMs);
+      await persistQuotaReset(untilMs);
     } else {
       const previous = quotaBackoff?.instanceId === validated.instanceId
         ? quotaBackoff.backoffMs
@@ -560,8 +563,9 @@ export function createGrokBotWakeBridge({
         || error?.status === 429;
       if (!quotaExhausted) throw error;
 
-      const resetUntilMs = parseQuotaResetUntilMs(error?.message) || parseQuotaResetUntilMs(error?.bodyText);
-      const state = openQuotaBackoff({
+      const resetUntilMs = parseQuotaResetUntilMs(error?.message, { now: now() })
+        || parseQuotaResetUntilMs(error?.bodyText, { now: now() });
+      const state = await openQuotaBackoff({
         retryAfterMs: error?.retryAfterMs ?? null,
         customUntilMs: resetUntilMs,
       });
@@ -690,12 +694,12 @@ export function createGrokBotWakeBridge({
         });
       }
       const onAbort = () => {
-        deactivateRetries();
+        deactivateRetries({ preservePersisted: true });
       };
       signal?.addEventListener?.("abort", onAbort, { once: true });
       const persistedReset = await loadPersistedQuotaReset();
       if (persistedReset) {
-        openQuotaBackoff({ customUntilMs: persistedReset });
+        await openQuotaBackoff({ customUntilMs: persistedReset });
       }
       wakeClient = wakeClientFactory({
         profiles: wakeProfiles,
@@ -741,11 +745,19 @@ export function createGrokBotWakeBridge({
     },
 
     async stop() {
-      deactivateRetries();
+      deactivateRetries({ preservePersisted: true });
       await wakeClient?.stop();
       wakeClient = null;
       started = false;
       return { status: "stopped" };
+    },
+
+    async loadPersistedQuotaReset() {
+      const persistedReset = await loadPersistedQuotaReset();
+      if (persistedReset) {
+        await openQuotaBackoff({ customUntilMs: persistedReset });
+      }
+      return persistedReset;
     },
 
     handleWake,
