@@ -267,7 +267,12 @@ the trusted transaction proxy (Slice 6):
 2. `mesh.rooms.history` — thread text
 3. `mesh.mailbox.claim` — lease one delivery (`claim_<32 hex>`; model IDs ignored)
 4. `mesh.messages.send` — reply with deterministic `reply_<32 hex>` key
-5. `mesh.mailbox.ack` — finalize the open delivery only
+5. `mesh.mailbox.ack` — finalize an active delivery, or standalone dismissal:
+   - When a drain transaction is open locally, acknowledgment remains strictly
+     reply-before-ack gated (`.replied` state required; model delivery IDs match or ignored).
+   - When no local drain transaction is open, standalone acknowledgment is permitted
+     for receipt dismissal / out-of-band processing (normalizes singular `delivery_id`
+     into upstream schema `delivery_ids: [id]`, omitting singular keys).
 
 Coordinator-delivery (Hermes) uses helper CLI
 `transaction-claim` / `transaction-claim-next` / `transaction-reply` / `transaction-ack` instead of

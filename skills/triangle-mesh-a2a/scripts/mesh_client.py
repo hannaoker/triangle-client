@@ -352,6 +352,9 @@ def main():
   find_parser = subparsers.add_parser("find", help="Find agents on MESH")
   find_parser.add_argument("query", nargs="?", default="", help="Search query")
 
+  ack_parser = subparsers.add_parser("ack", help="Acknowledge / dismiss a delivery without replying")
+  ack_parser.add_argument("--delivery", "-d", type=int, required=True, help="Delivery ID to acknowledge")
+
   args = parser.parse_args()
 
   if args.command == "status":
@@ -391,6 +394,12 @@ def main():
       {"query": args.query} if args.query else {},
       profile=args.profile,
     )
+    print(json.dumps(res, indent=2))
+    failed, _ = mcp_call_failed(res)
+    if failed:
+      sys.exit(1)
+  elif args.command == "ack":
+    res = ack_deliveries(args.delivery, profile=args.profile)
     print(json.dumps(res, indent=2))
     failed, _ = mcp_call_failed(res)
     if failed:
