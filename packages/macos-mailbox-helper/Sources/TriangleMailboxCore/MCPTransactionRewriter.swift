@@ -228,6 +228,8 @@ public struct MCPTransactionRewriter: Sendable {
                     return .forward(raw)
                 }
                 args["delivery_ids"] = [deliveryID]
+                args.removeValue(forKey: "delivery_id")
+                args.removeValue(forKey: "deliveryId")
                 params["arguments"] = args
                 object["params"] = params
                 let rewritten = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])

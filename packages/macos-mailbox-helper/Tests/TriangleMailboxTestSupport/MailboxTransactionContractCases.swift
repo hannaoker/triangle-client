@@ -1057,6 +1057,8 @@ public enum MailboxTransactionContractCases {
         let forwardedParams = forwardedObj?["params"] as? [String: Any]
         let forwardedArgs = forwardedParams?["arguments"] as? [String: Any]
         try expect((forwardedArgs?["delivery_ids"] as? [Int]) == [42], "delivery_ids array missing in rewritten forwarded ack")
+        try expect(forwardedArgs?["delivery_id"] == nil, "singular delivery_id was not removed")
+        try expect(forwardedArgs?["deliveryId"] == nil, "singular deliveryId was not removed")
 
         // 2. When no transaction is open, plural delivery_ids forwards raw
         let rawPlural = Data(#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mesh.mailbox.ack","arguments":{"delivery_ids":[42],"status":"processed"}}}"#.utf8)
