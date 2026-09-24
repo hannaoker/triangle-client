@@ -907,6 +907,90 @@ test("production webhook 429 carries bodyText with multi-day reset to bridge and
   });
 });
 
+test("cooldown persisted while HTTP 200 deliver is in flight activates backoff and schedules retry", async () => {
+  await withTempDir(async (dir) => {
+    let clock = 1_000_000;
+    const futureIso = new Date(clock + 2 * 24 * 3600 * 1000).toISOString();
+    const futureMs = Date.parse(futureIso);
+    const quotaResetStorePath = path.join(dir, `grok-bot-quota-reset.${instanceId}.json`);
+
+    let deliverResolve;
+    const deliverPromise = new Promise((resolve) => {
+      deliverResolve = resolve;
+    });
+
+    const timers = new Map();
+    let nextTimerId = 1;
+    const fakeSetTimeout = (fn, delayMs) => {
+      const id = nextTimerId++;
+      timers.set(id, { fn, delayMs });
+      return id;
+    };
+    const fakeClearTimeout = (id) => {
+      timers.delete(id);
+    };
+
+    let deliverCalls = 0;
+    const fakeDispatcher = {
+      async deliver() {
+        deliverCalls += 1;
+        if (deliverCalls === 1) {
+          // Block in flight
+          await deliverPromise;
+          return { status: "accepted", httpStatus: 200 };
+        }
+        return { status: "accepted", httpStatus: 200 };
+      },
+    };
+
+    const bridge = createGrokBotWakeBridge({
+      binding: validateGrokBotBinding(sampleBinding()),
+      watchTransport: createFakeWatchTransport({ polls: [] }),
+      now: () => clock,
+      quotaResetStorePath,
+      dispatcher: fakeDispatcher,
+      setTimeoutImpl: fakeSetTimeout,
+      clearTimeoutImpl: fakeClearTimeout,
+      logger: { info() {}, error() {} },
+    });
+
+    // Start handleWake — it blocks inside deliver
+    const wakePromise = bridge.handleWake({ instanceId, highWatermark: 42, reason: "wake" });
+
+    // While dispatch is in-flight, an asynchronous routine completion callback writes the cooldown
+    await writeFile(
+      quotaResetStorePath,
+      JSON.stringify({ resetsAt: futureMs, updatedAt: new Date().toISOString() }),
+    );
+
+    // Resolve the in-flight HTTP 200
+    deliverResolve();
+    const res = await wakePromise;
+
+    // Must transition to backoff and schedule retry at reset timestamp
+    assert.equal(res.status, "backoff");
+    assert.equal(res.untilMs, futureMs);
+    assert.equal(res.pendingRetryWatermark, 42);
+
+    // Verify timer was scheduled for the cooldown
+    assert.equal(timers.size, 1);
+    const scheduled = Array.from(timers.values())[0];
+    assert.equal(scheduled.delayMs, futureMs - clock);
+
+    // Advance clock to reset time and trigger scheduled retry
+    clock = futureMs;
+    // Clearing the reset file simulates reset expiry
+    await writeFile(quotaResetStorePath, JSON.stringify({ resetsAt: null }));
+    await scheduled.fn();
+
+    // Verify retry attempt ran
+    assert.equal(deliverCalls, 2);
+    assert.equal(bridge.getQuotaBackoffState(), null);
+
+    await bridge.stop();
+  });
+});
+
 test("pre-wake receipt filtering defers when Bob already holds open claim", async () => {
   let webhookCalls = 0;
 
@@ -914,7 +998,7 @@ test("pre-wake receipt filtering defers when Bob already holds open claim", asyn
     async status() {
       return { open: { deliveryId: 42, state: "claimed" } };
     },
-    async claimNext() {
+    async drainReceipts() {
       throw new Error("should not be called when open claim exists");
     },
   };

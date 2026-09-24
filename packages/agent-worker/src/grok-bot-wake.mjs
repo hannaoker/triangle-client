@@ -606,12 +606,22 @@ export function createGrokBotWakeBridge({
     try {
       const result = await wakeDispatcher.deliver(payload);
       if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
-      // Check if a long-horizon quota cooldown was persisted while dispatch was in-flight.
-      // If so, do not erase it!
+      // Check if a long-horizon quota cooldown was persisted while dispatch was in-flight
+      // (e.g. routine accepted via HTTP 200, then reported quota exhaustion asynchronously).
       const currentCooldown = await loadPersistedQuotaReset();
-      if (!currentCooldown) {
-        clearQuotaBackoff();
+      if (currentCooldown) {
+        const state = await openQuotaBackoff({ customUntilMs: currentCooldown });
+        scheduleQuotaRetry(highWatermark, state.untilMs);
+        return {
+          status: "backoff",
+          code: "webhook_quota_exhausted",
+          instanceId: validated.instanceId,
+          untilMs: state.untilMs,
+          backoffMs: state.backoffMs,
+          pendingRetryWatermark,
+        };
       }
+      clearQuotaBackoff();
       return result;
     } catch (error) {
       if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
