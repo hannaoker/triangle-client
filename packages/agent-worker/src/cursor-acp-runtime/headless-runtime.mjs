@@ -57,7 +57,7 @@ function inactiveRuntime({ resolved, registry, reason }) {
       throw createCodedError("cursor_acp_runtime_inactive", "Cursor ACP runtime inactive");
     },
     async recoverAfterRestart() {
-      return Object.freeze({ quarantined: 0 });
+      return Object.freeze({ quarantined: 0, reconciledAck: 0 });
     },
     status() {
       return Object.freeze({
@@ -372,9 +372,60 @@ export function createHeadlessCursorAcpRuntime({
     return workerPool.restartSlot(slotId);
   }
 
-  async function recoverAfterRestart() {
-    // Shadow Cursor ACP lane has no durable quarantine store yet.
-    return Object.freeze({ quarantined: 0 });
+  async function recoverAfterRestart({ profileInstanceId: instanceId = null } = {}) {
+    // Prefer the durable helper path: a reply-persisted / ack-missing transaction
+    // is reconciled by createHelperDurableDeliveryResolver on the next claim-next.
+    // When a proxy is present, also settle a verified replied open via status→ack
+    // before the drain admits more work after restart.
+    let reconciledAck = 0;
+    if (
+      transactionProxy != null
+      && typeof transactionProxy.status === "function"
+      && typeof transactionProxy.ack === "function"
+    ) {
+      try {
+        const status = await transactionProxy.status();
+        const open = status?.open;
+        if (
+          open
+          && typeof open === "object"
+          && open.state === "replied"
+          && Number.isSafeInteger(open.deliveryId)
+          && open.deliveryId > 0
+        ) {
+          await transactionProxy.ack({ resumeOnly: true });
+          reconciledAck = 1;
+          logger.info?.({
+            msg: "cursor_acp_replied_reconciled",
+            deliveryId: open.deliveryId,
+            path: "ack_only",
+          });
+        }
+      } catch (error) {
+        logger.error?.({
+          msg: "cursor_acp_recover_after_restart_failed",
+          code: error?.code ?? null,
+        });
+        throw error;
+      }
+    }
+
+    // Ack already committed in helper but local clear never ran: return memory
+    // registry rows to idle without posting another MESH reply.
+    if (instanceId != null && typeof resolvedRegistry.listForProfile === "function") {
+      for (const row of resolvedRegistry.listForProfile(instanceId)) {
+        const roomId = row.meshRoomId ?? row.mesh_room_id ?? row.roomId;
+        if (typeof roomId !== "string") continue;
+        if (row.executionState === "acked") {
+          resolvedRegistry.upsert(instanceId, roomId, {
+            executionState: "idle",
+            activeDeliveryId: null,
+          });
+        }
+      }
+    }
+
+    return Object.freeze({ quarantined: 0, reconciledAck });
   }
 
   function status() {

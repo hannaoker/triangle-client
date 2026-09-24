@@ -590,6 +590,27 @@ export function createClientSupervisor({
     }
   }
 
+  for (const cursorAcpConfig of cursorAcpConfigs) {
+    if (seen.has(cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
+      throw new TypeError("cursorAcpWake instanceId collides with an appServerWake profile");
+    }
+    if (grokBotConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
+      throw new TypeError("cursorAcpWake instanceId collides with a grokBotWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profileInstanceId === cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with a headlessWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profile === cursorAcpConfig.profile)) {
+      throw new TypeError("cursorAcpWake profile collides with a headlessWake profile");
+    }
+  }
+
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
     ? sharedWatchTransport({
@@ -710,6 +731,8 @@ export function createClientSupervisor({
       if (
         error?.code === "dedicated_headless_drain_loaded"
         || error?.code === "supervisor_headless_claimer_active"
+        || error?.code === "cursor_acp_claimer_blocks_codex"
+        || error?.code === "cursor_acp_drain_blocks_codex"
       ) {
         headlessWakeSkipReasons[headlessConfig.profile] = error.code;
         logger.error?.("triangle_client_headless_wake_skipped", {
@@ -758,6 +781,7 @@ export function createClientSupervisor({
         error?.code === "dedicated_cursor_acp_drain_loaded"
         || error?.code === "supervisor_cursor_acp_claimer_active"
         || error?.code === "codex_drain_blocks_cursor_acp"
+        || error?.code === "codex_claimer_blocks_cursor_acp"
       ) {
         cursorAcpWakeSkipReasons[cursorAcpConfig.profile] = error.code;
         logger.error?.("triangle_client_cursor_acp_wake_skipped", {

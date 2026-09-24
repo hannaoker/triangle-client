@@ -76,4 +76,5 @@ export {
   hasCursorAcpWakeKeys,
   normalizeCursorAcpWakeConfig,
   probeDedicatedCursorAcpDrainLoaded,
+  probeDedicatedCodexHeadlessDrainLoaded,
 } from "./headless-drain-service.mjs";

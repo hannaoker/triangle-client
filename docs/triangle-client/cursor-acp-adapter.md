@@ -32,9 +32,14 @@ Settlement mirrors Codex: helper transaction proxy owns claim/reply/ack. Node ne
 
 ## Tests
 
-- `npm run test:cursor-acp-runtime` — 18 passing (fake ACP + drain/claimer)
+- `npm run test:cursor-acp-runtime` — 22 passing (fake ACP + drain/claimer + crash-boundary)
 - Swift host contracts for `cursorAcpWakes` isolation
 - Mini live: see Project store `docs/cursor-acp-live-test.md` (**PASS**)
+
+## MESH Codex review blockers (fixed on this branch)
+
+1. **Cross-runtime claimer** — both lock families acquired in order (Codex then Cursor ACP); default Codex/Cursor LaunchAgent probes; peer live-lock fail-closed (`claimer-cross-runtime.mjs`).
+2. **Replied-before-ack** — durable delivery resolver acks verified `replied` before re-claim; Cursor `recoverAfterRestart` reconciles; crash-boundary unit tests added.
 
 ## Out of scope (still)
 

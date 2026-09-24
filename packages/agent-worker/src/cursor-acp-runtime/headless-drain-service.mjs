@@ -1,8 +1,9 @@
 /**
  * Supervisor-owned Cursor ACP drain install + dual-claimer guards.
  *
- * Separate claimer lock family from Codex headless so the lanes cannot
- * dual-claim the same profile mailbox. Shadow profiles only.
+ * Cursor ACP and Codex headless each keep a lock family, but both families are
+ * acquired together (Codex lock first, then Cursor ACP) so the same profile
+ * mailbox cannot be dual-claimed across runtimes. Shadow profiles only.
  */
 
 import crypto from "node:crypto";
@@ -18,6 +19,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { orderedClaimerLockPaths, peerClaimerLockPath } from "../claimer-cross-runtime.mjs";
 import {
   createHelperDurableDeliveryResolver,
   createHelperTrustedTransactionProxy,
@@ -184,6 +186,21 @@ export function probeDedicatedCursorAcpDrainLoaded(profile, {
   return result?.status === 0;
 }
 
+/** Fail-closed LaunchAgent probe for the sibling Codex headless drain lane. */
+export function probeDedicatedCodexHeadlessDrainLoaded(profile, {
+  spawnSync = defaultSpawnSync,
+  uid = typeof process.getuid === "function" ? process.getuid() : null,
+} = {}) {
+  if (typeof profile !== "string" || !PROFILE.test(profile)) return false;
+  if (uid == null || !Number.isSafeInteger(uid)) return false;
+  const label = `dev.thetriangle.codex-headless-drain.${profile}`;
+  const result = spawnSync("launchctl", ["print", `gui/${uid}/${label}`], {
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+  return result?.status === 0;
+}
+
 export function createCursorAcpClaimerGuard({
   profile,
   runtimeAdapter = CURSOR_ACP_RUNTIME_ADAPTER,
@@ -193,33 +210,57 @@ export function createCursorAcpClaimerGuard({
   pid = process.pid,
   lockPath = defaultCursorAcpClaimerLockPath(env, profile, helperPath),
   probeDedicatedDrain = probeDedicatedCursorAcpDrainLoaded,
-  probeCodexDrain = null,
+  probeCodexDrain = probeDedicatedCodexHeadlessDrainLoaded,
   pidAlive = isPidAlive,
   createLockExclusive = ({ lockPath: target, document, create }) => create(target, document),
 } = {}) {
   assertCursorAcpDrainIdentity({ profile, runtimeAdapter, shadowTestProfile });
+  const codexLockPath = peerClaimerLockPath(lockPath, profile, "codex");
+  const orderedLockPaths = orderedClaimerLockPaths({
+    lockPath,
+    profile,
+    primaryFamily: "cursor-acp",
+  });
 
-  function liveLock() {
-    const lock = readClaimerLock(lockPath);
+  function liveLockAt(targetPath) {
+    const lock = readClaimerLock(targetPath);
     if (lock == null || lock.profile !== profile) return null;
     if (!pidAlive(lock.pid)) return null;
     return lock;
   }
 
+  function liveLock() {
+    return liveLockAt(lockPath);
+  }
+
+  function classifyForeignLock(existing) {
+    if (existing?.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER) {
+      return "supervisor_cursor_acp_claimer_active";
+    }
+    if (existing?.owner === DEDICATED_CURSOR_ACP_DRAIN_CLAIMER_OWNER) {
+      return "dedicated_cursor_acp_drain_loaded";
+    }
+    return "codex_claimer_blocks_cursor_acp";
+  }
+
   return Object.freeze({
     lockPath,
+    codexLockPath,
     inspect() {
       const dedicatedDrainLoaded = probeDedicatedDrain(profile) === true;
       const codexDrainLoaded = typeof probeCodexDrain === "function"
         ? probeCodexDrain(profile) === true
         : false;
       const lock = liveLock();
+      const codexLock = liveLockAt(codexLockPath);
       return Object.freeze({
         dedicatedDrainLoaded,
         codexDrainLoaded,
+        codexClaimerLockActive: codexLock != null && codexLock.pid !== pid,
         supervisorLockActive: lock?.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER,
         dedicatedDrainLockActive: lock?.owner === DEDICATED_CURSOR_ACP_DRAIN_CLAIMER_OWNER,
         lock,
+        codexLock,
       });
     },
     assertSupervisorMayClaim() {
@@ -229,6 +270,13 @@ export function createCursorAcpClaimerGuard({
           "codex_drain_blocks_cursor_acp",
           "Codex headless drain LaunchAgent is loaded for this profile; refusing Cursor ACP claim",
           { profile },
+        );
+      }
+      if (state.codexClaimerLockActive) {
+        throw codedError(
+          "codex_claimer_blocks_cursor_acp",
+          "Codex headless claimer lock is active for this profile; refusing Cursor ACP claim",
+          { profile, codexLockPath },
         );
       }
       if (state.dedicatedDrainLoaded) {
@@ -262,35 +310,54 @@ export function createCursorAcpClaimerGuard({
         owner,
         pid,
       };
+      const created = [];
       try {
-        createLockExclusive({ lockPath, document, create: writeClaimerLockExclusive });
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-        const existing = readClaimerLock(lockPath);
-        if (existing && pidAlive(existing.pid)) {
-          throw codedError(
-            existing.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER
-              ? "supervisor_cursor_acp_claimer_active"
-              : "dedicated_cursor_acp_drain_loaded",
-            "another process already owns the Cursor ACP claimer lock",
-          );
+        for (const target of orderedLockPaths) {
+          try {
+            createLockExclusive({ lockPath: target, document, create: writeClaimerLockExclusive });
+            created.push(target);
+          } catch (error) {
+            if (error?.code !== "EEXIST") throw error;
+            const existing = readClaimerLock(target);
+            if (existing && pidAlive(existing.pid)) {
+              throw codedError(
+                classifyForeignLock(existing),
+                "another process already owns a cross-runtime claimer lock for this profile",
+                { lockPath: target, profile },
+              );
+            }
+            throw codedError(
+              "cursor_acp_claimer_lock_stale",
+              "an existing stale Cursor ACP claimer lock requires operator cleanup",
+              { lockPath: target },
+            );
+          }
         }
-        throw codedError(
-          "cursor_acp_claimer_lock_stale",
-          "an existing stale Cursor ACP claimer lock requires operator cleanup",
-        );
+      } catch (error) {
+        for (const target of [...created].reverse()) {
+          try {
+            unlinkSync(target);
+          } catch {
+            // Best-effort rollback of partial dual-lock acquire.
+          }
+        }
+        throw error;
       }
     },
     release({ owner } = {}) {
-      const lock = readClaimerLock(lockPath);
-      if (lock == null) return false;
-      if (lock.profile !== profile || lock.owner !== owner || lock.pid !== pid) return false;
-      try {
-        unlinkSync(lockPath);
-        return true;
-      } catch {
-        return false;
+      let released = false;
+      for (const target of [...orderedLockPaths].reverse()) {
+        const lock = readClaimerLock(target);
+        if (lock == null) continue;
+        if (lock.profile !== profile || lock.owner !== owner || lock.pid !== pid) continue;
+        try {
+          unlinkSync(target);
+          released = true;
+        } catch {
+          // Keep trying remaining locks.
+        }
       }
+      return released;
     },
   });
 }

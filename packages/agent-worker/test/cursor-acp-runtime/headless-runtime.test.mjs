@@ -240,3 +240,144 @@ test("shadow runtime: start, prompt, reply-before-ack; excludes Codex/Bob", asyn
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("crash-boundary: reply-committed before ack leaves registry recoverable; recover acks", async () => {
+  const home = tempHome();
+  try {
+    const fake = createFakeAcpStdioProgram({ idPrefix: "crash-reply" });
+    const calls = [];
+    let failAckOnce = true;
+    const proxy = {
+      calls,
+      async reply(args) {
+        calls.push({ op: "reply", ...args });
+        return { replyEventId: INBOUND_EVENT_ID, state: "replied" };
+      },
+      async ack(args = {}) {
+        calls.push({ op: "ack", ...args });
+        if (failAckOnce) {
+          failAckOnce = false;
+          const error = new Error("crash after reply before ack");
+          error.code = "ack_failed";
+          throw error;
+        }
+        return { acknowledged: true };
+      },
+      async status() {
+        calls.push({ op: "status" });
+        return {
+          open: {
+            deliveryId: 1,
+            roomId: ROOM_ID,
+            state: "replied",
+          },
+        };
+      },
+    };
+    const runtime = createHeadlessCursorAcpRuntime({
+      profileConfig: createDefaultCursorAcpShadowProfile({
+        workingDirectory: path.join(home, "cwd"),
+      }),
+      enableShadow: true,
+      transactionProxy: proxy,
+      command: fake.command,
+      args: fake.args,
+      cursorHome: path.join(home, "cursor-home"),
+      env: { HOME: home, PATH: process.env.PATH },
+      logger: { info() {}, error() {} },
+    });
+    await runtime.start();
+    await assert.rejects(
+      () => runtime.runDelivery({
+        profileInstanceId: PROFILE_INSTANCE_ID,
+        roomId: ROOM_ID,
+        deliveryId: "delivery_1",
+        numericDeliveryId: 1,
+        text: "reply then crash",
+        inboundEventId: INBOUND_EVENT_ID,
+      }),
+      (error) => error.code === "ack_failed",
+    );
+    assert.deepEqual(
+      proxy.calls.map((call) => call.op),
+      ["reply", "ack"],
+    );
+    const recovered = await runtime.recoverAfterRestart({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+    });
+    assert.equal(recovered.reconciledAck, 1);
+    assert.ok(proxy.calls.some((call) => call.op === "status"));
+    assert.equal(proxy.calls.filter((call) => call.op === "ack").length, 2);
+    await runtime.stop();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("crash-boundary: ack-committed before local clear recovers to idle", async () => {
+  const home = tempHome();
+  try {
+    const fake = createFakeAcpStdioProgram({ idPrefix: "crash-ack" });
+    const proxy = {
+      async reply() {
+        return { replyEventId: INBOUND_EVENT_ID, state: "replied" };
+      },
+      async ack() {
+        return { acknowledged: true };
+      },
+      async status() {
+        // Helper already cleared open after ack; local clear never ran.
+        return { open: null };
+      },
+    };
+    const runtime = createHeadlessCursorAcpRuntime({
+      profileConfig: createDefaultCursorAcpShadowProfile({
+        workingDirectory: path.join(home, "cwd"),
+      }),
+      enableShadow: true,
+      transactionProxy: proxy,
+      command: fake.command,
+      args: fake.args,
+      cursorHome: path.join(home, "cursor-home"),
+      env: { HOME: home, PATH: process.env.PATH },
+      logger: { info() {}, error() {} },
+    });
+    await runtime.start();
+    const result = await runtime.runDelivery({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+      roomId: ROOM_ID,
+      deliveryId: "delivery_1",
+      numericDeliveryId: 1,
+      text: "complete settlement",
+      inboundEventId: INBOUND_EVENT_ID,
+    });
+    assert.equal(result.status, "completed");
+    // Simulate local crash after ack: leave registry at acked (valid path),
+    // then recover clears to idle without a second helper ack.
+    runtime.registry.upsert(PROFILE_INSTANCE_ID, ROOM_ID, {
+      executionState: "admitted",
+      activeDeliveryId: "delivery_1",
+    });
+    runtime.registry.upsert(PROFILE_INSTANCE_ID, ROOM_ID, { executionState: "running" });
+    runtime.registry.upsert(PROFILE_INSTANCE_ID, ROOM_ID, { executionState: "result_ready" });
+    runtime.registry.upsert(PROFILE_INSTANCE_ID, ROOM_ID, {
+      executionState: "reply_persisted",
+      lastReplyEventId: INBOUND_EVENT_ID,
+    });
+    runtime.registry.upsert(PROFILE_INSTANCE_ID, ROOM_ID, { executionState: "acked" });
+    assert.equal(
+      runtime.registry.get(PROFILE_INSTANCE_ID, ROOM_ID).executionState,
+      "acked",
+    );    const recovered = await runtime.recoverAfterRestart({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+    });
+    assert.equal(recovered.reconciledAck, 0);
+    assert.equal(recovered.quarantined, 0);
+    // Helper open is already null (ack committed); local acked → idle without re-ack.
+    const record = runtime.registry.get(PROFILE_INSTANCE_ID, ROOM_ID);
+    assert.equal(record.executionState, "idle");
+    assert.equal(record.activeDeliveryId, null);    await runtime.stop();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

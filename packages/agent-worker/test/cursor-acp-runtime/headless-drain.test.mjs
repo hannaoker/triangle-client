@@ -61,7 +61,9 @@ test("cursor ACP claimer fail-closed on dual claim", () => {
   });
   assert.throws(
     () => second.assertSupervisorMayClaim(),
-    (error) => error.code === "supervisor_cursor_acp_claimer_active",
+    (error) =>
+      error.code === "supervisor_cursor_acp_claimer_active"
+      || error.code === "codex_claimer_blocks_cursor_acp",
   );
   first.release({ owner: "dev.thetriangle.client" });
   fs.rmSync(root, { recursive: true, force: true });
@@ -79,6 +81,68 @@ test("cursor ACP claimer fails closed when Codex drain is loaded", () => {
   assert.throws(
     () => guard.assertSupervisorMayClaim(),
     (error) => error.code === "codex_drain_blocks_cursor_acp",
+  );
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("cursor ACP claimer acquires Codex lock family and blocks Codex claimer", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-cross-runtime-"));
+  const cursorLock = path.join(root, `cursor-acp-claimer.${PROFILE}.json`);
+  const codexLock = path.join(root, `headless-claimer.${PROFILE}.json`);
+  const cursor = createCursorAcpClaimerGuard({
+    profile: PROFILE,
+    lockPath: cursorLock,
+    probeDedicatedDrain: () => false,
+    probeCodexDrain: () => false,
+  });
+  cursor.acquire({ owner: "dev.thetriangle.client" });
+  assert.equal(fs.existsSync(cursorLock), true);
+  assert.equal(fs.existsSync(codexLock), true);
+
+  const { createHeadlessClaimerGuard } = await import("../../src/codex-runtime/headless-drain-service.mjs");
+  const codex = createHeadlessClaimerGuard({
+    profile: PROFILE,
+    lockPath: codexLock,
+    probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
+    pid: process.pid + 7,
+  });
+  assert.throws(
+    () => codex.assertSupervisorMayClaim(),
+    (error) =>
+      error.code === "cursor_acp_claimer_blocks_codex"
+      || error.code === "supervisor_headless_claimer_active",
+  );
+  cursor.release({ owner: "dev.thetriangle.client" });
+  assert.equal(fs.existsSync(cursorLock), false);
+  assert.equal(fs.existsSync(codexLock), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("cursor ACP claimer fails closed when live Codex claimer lock exists", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-codex-lock-"));
+  const cursorLock = path.join(root, `cursor-acp-claimer.${PROFILE}.json`);
+  const codexLock = path.join(root, `headless-claimer.${PROFILE}.json`);
+  fs.writeFileSync(
+    codexLock,
+    `${JSON.stringify({
+      version: 1,
+      profile: PROFILE,
+      owner: "dev.thetriangle.client",
+      pid: process.pid + 11,
+    })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  const guard = createCursorAcpClaimerGuard({
+    profile: PROFILE,
+    lockPath: cursorLock,
+    probeDedicatedDrain: () => false,
+    probeCodexDrain: () => false,
+    pidAlive: (candidate) => candidate === process.pid + 11,
+  });
+  assert.throws(
+    () => guard.assertSupervisorMayClaim(),
+    (error) => error.code === "codex_claimer_blocks_cursor_acp",
   );
   fs.rmSync(root, { recursive: true, force: true });
 });
