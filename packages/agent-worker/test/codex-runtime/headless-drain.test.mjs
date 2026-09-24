@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createHeadlessCodexDrain } from "../../src/codex-runtime/headless-drain.mjs";
@@ -228,15 +230,46 @@ test("drain passes each delivery roomId through as the conversation key", async 
   ]);
 });
 
+test("claimer guard refuses Cursor ACP ownership of the same profile", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "codex-cursor-cross-"));
+  const profile = "codex-headless";
+  const lockPath = path.join(root, `headless-claimer.${profile}.json`);
+  const cursorLock = path.join(root, `cursor-acp-claimer.${profile}.json`);
+  writeFileSync(
+    cursorLock,
+    `${JSON.stringify({
+      version: 1,
+      profile,
+      owner: "dev.thetriangle.client",
+      pid: 9_001,
+    })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  const guard = createHeadlessClaimerGuard({
+    profile,
+    lockPath,
+    probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
+    pidAlive: (candidate) => candidate === 9_001,
+  });
+  assert.throws(
+    () => guard.assertSupervisorMayClaim(),
+    (error) => error.code === "cursor_acp_claimer_blocks_codex",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("claimer guard refuses dual consumers on the same profile", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "codex-dual-claimer-"));
   const profile = PINNED_HEADLESS_DRAIN_PROFILE;
-  const lockPath = `/tmp/triangle-headless-claimer-${process.pid}.json`;
+  const lockPath = path.join(root, `headless-claimer.${profile}.json`);
   const supervisor = createHeadlessClaimerGuard({
     profile,
     allowedRoomId: PINNED_HEADLESS_DRAIN_ROOM_ID,
     pid: 4_001,
     lockPath,
     probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
     pidAlive: (candidate) => candidate === 4_001 || candidate === 4_002,
   });
   supervisor.acquire({ owner: "dev.thetriangle.client" });
@@ -247,6 +280,7 @@ test("claimer guard refuses dual consumers on the same profile", () => {
       pid: 4_002,
       lockPath,
       probeDedicatedDrain: () => false,
+      probeCursorAcpDrain: () => false,
       pidAlive: (candidate) => candidate === 4_001 || candidate === 4_002,
     });
     assert.throws(
@@ -259,6 +293,7 @@ test("claimer guard refuses dual consumers on the same profile", () => {
       pid: 4_003,
       lockPath,
       probeDedicatedDrain: () => true,
+      probeCursorAcpDrain: () => false,
       pidAlive: () => false,
     });
     assert.equal(
@@ -271,6 +306,7 @@ test("claimer guard refuses dual consumers on the same profile", () => {
     );
   } finally {
     supervisor.release({ owner: "dev.thetriangle.client" });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -279,12 +315,14 @@ test("claimer guard uses exclusive creation so a check-then-create race has one 
   const first = createHeadlessClaimerGuard({
     profile: "codex-headless", pid: 5_001, lockPath,
     probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
     pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
   });
   let raced = false;
   const second = createHeadlessClaimerGuard({
     profile: "codex-headless", pid: 5_002, lockPath,
     probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
     pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
     createLockExclusive(args) {
       raced = true;
@@ -311,6 +349,7 @@ test("claimer guard never unlinks or replaces an existing stale lock during acqu
   const guard = createHeadlessClaimerGuard({
     profile: "codex-headless", pid: 5_555, lockPath,
     probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
     pidAlive: () => false,
   });
   try {

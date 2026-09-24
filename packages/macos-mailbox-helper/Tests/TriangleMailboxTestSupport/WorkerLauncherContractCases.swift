@@ -377,6 +377,17 @@ private final class ResolverFixture {
         }
         if manifestVersion == 5 {
             artifactNames += [
+                "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/config-guards.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/headless-drain.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/headless-runtime.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/index.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/runtime-home.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/session-registry.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
+                "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
                 "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
                 "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
                 "packages/agent-worker/src/codex-runtime/completion-reconciler.mjs",

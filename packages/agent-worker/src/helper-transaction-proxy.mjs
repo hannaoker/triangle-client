@@ -417,6 +417,9 @@ export function resolveTrustedTransactionProxy({
  *
  * Calls `transaction-claim-next` so a pending mailbox delivery can be listed,
  * preflighted, selected, and claimed before the App Server bridge starts a turn.
+ * When the helper already has a verified `replied` open transaction (reply
+ * persisted, ack missing), ack it before admitting more work so a crash between
+ * reply and ack cannot permanently block the mailbox.
  * Returns `{ deliveryId, text }` when the helper reports `shouldStartModel` with
  * an open claim that requires a reply; otherwise `null` (empty / receipt-only → skip turn).
  */
@@ -438,22 +441,65 @@ export function createHelperDurableDeliveryResolver({
 
   const proxy = createProxy({ helperPath, profile, protocol, run });
 
-  return Object.freeze(async function resolveDelivery({ signal } = {}) {
+  function isVerifiedRepliedOpen(open) {
+    return (
+      open &&
+      typeof open === "object" &&
+      !Array.isArray(open) &&
+      open.state === "replied" &&
+      Number.isSafeInteger(open.deliveryId) &&
+      open.deliveryId > 0
+    );
+  }
+
+  async function acknowledgeVerifiedReplied({ open, signal } = {}) {
+    if (!isVerifiedRepliedOpen(open)) return false;
+    if (typeof proxy.ack !== "function") {
+      throw createCodedError(
+        "ack_required",
+        "helper cannot acknowledge a verified replied transaction",
+      );
+    }
+    await proxy.ack({ signal });
+    return true;
+  }
+
+  async function claimNextStatus({ signal } = {}) {
     if (typeof proxy.claimNext !== "function") return null;
-    let status;
     try {
-      status = await proxy.claimNext({ roomId: allowedRoomId, signal });
+      return await proxy.claimNext({ roomId: allowedRoomId, signal });
     } catch (error) {
       if (error?.code === "slice6_required" || error?.code === "helper_unavailable") {
         return null;
       }
       throw error;
     }
+  }
+
+  return Object.freeze(async function resolveDelivery({ signal } = {}) {
+    let status = await claimNextStatus({ signal });
     if (!status || typeof status !== "object") {
       return null;
     }
     if (status.transactionStuck === true) {
       throw createCodedError("transaction_stuck", "transaction is stuck");
+    }
+
+    // Reply already durable in the helper: ack before admitting new work.
+    if (await acknowledgeVerifiedReplied({ open: status.open, signal })) {
+      status = await claimNextStatus({ signal });
+      if (!status || typeof status !== "object") {
+        return null;
+      }
+      if (status.transactionStuck === true) {
+        throw createCodedError("transaction_stuck", "transaction is stuck");
+      }
+      if (isVerifiedRepliedOpen(status.open)) {
+        throw createCodedError(
+          "replied_ack_did_not_clear",
+          "helper still reports a replied open transaction after ack",
+        );
+      }
     }
 
     // Absent replyRequired → true (older helpers). False / receiptOnly → never admit.

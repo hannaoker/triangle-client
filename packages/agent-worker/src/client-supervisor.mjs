@@ -32,6 +32,12 @@ import {
   createInstalledHeadlessDrain,
   normalizeHeadlessWakeConfig,
 } from "./codex-runtime/headless-drain-service.mjs";
+import {
+  CLIENT_SUPERVISOR_CLAIMER_OWNER as CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER,
+  createCursorAcpClaimerGuard,
+  createInstalledCursorAcpDrain,
+  normalizeCursorAcpWakeConfig,
+} from "./cursor-acp-runtime/headless-drain-service.mjs";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
@@ -377,12 +383,32 @@ function validateHeadlessWakes(headlessWakes) {
   return Object.freeze(normalized);
 }
 
+function validateCursorAcpWake(cursorAcpWake) {
+  if (cursorAcpWake == null) return null;
+  return normalizeCursorAcpWakeConfig(cursorAcpWake);
+}
+
+function validateCursorAcpWakes(cursorAcpWakes) {
+  const values = cursorAcpWakes ?? [];
+  if (!Array.isArray(values) || values.length > 100) throw new TypeError("cursorAcpWakes must contain between 0 and 100 entries");
+  const normalized = values.map(validateCursorAcpWake).sort((a, b) => a.profile.localeCompare(b.profile));
+  const profiles = new Set(); const instanceIds = new Set(); const stateRoots = new Set();
+  for (const wake of normalized) {
+    if (profiles.has(wake.profile)) throw new TypeError("duplicate cursor-acp profile");
+    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate cursor-acp instanceId");
+    if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate cursor-acp stateRoot");
+    profiles.add(wake.profile); instanceIds.add(wake.profileInstanceId); stateRoots.add(wake.stateRoot);
+  }
+  return Object.freeze(normalized);
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
   appServerWake = null,
   grokBotWake = null,
   headlessWakes = null,
+  cursorAcpWakes = null,
   headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
@@ -400,6 +426,8 @@ export function createClientSupervisor({
   createGrokBotBridge = createGrokBotWakeBridge,
   createHeadlessDrain = createInstalledHeadlessDrain,
   createClaimerGuard = createHeadlessClaimerGuard,
+  createCursorAcpDrain = createInstalledCursorAcpDrain,
+  createCursorAcpClaimer = createCursorAcpClaimerGuard,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -419,7 +447,15 @@ export function createClientSupervisor({
   const appServerConfig = validateAppServerWake(appServerWake);
   const grokBotConfig = validateGrokBotWake(grokBotWake);
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
-  if (instances.length < 1 && !wakeConfig && !appServerConfig && !grokBotConfig && headlessConfigs.length === 0) {
+  const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
+  if (
+    instances.length < 1
+    && !wakeConfig
+    && !appServerConfig
+    && !grokBotConfig
+    && headlessConfigs.length === 0
+    && cursorAcpConfigs.length === 0
+  ) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
@@ -554,6 +590,27 @@ export function createClientSupervisor({
     }
   }
 
+  for (const cursorAcpConfig of cursorAcpConfigs) {
+    if (seen.has(cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
+      throw new TypeError("cursorAcpWake instanceId collides with an appServerWake profile");
+    }
+    if (grokBotConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
+      throw new TypeError("cursorAcpWake instanceId collides with a grokBotWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profileInstanceId === cursorAcpConfig.profileInstanceId)) {
+      throw new TypeError("cursorAcpWake instanceId collides with a headlessWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profile === cursorAcpConfig.profile)) {
+      throw new TypeError("cursorAcpWake profile collides with a headlessWake profile");
+    }
+  }
+
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
   const transport = wakeConfig
     ? sharedWatchTransport({
@@ -679,6 +736,8 @@ export function createClientSupervisor({
       if (
         error?.code === "dedicated_headless_drain_loaded"
         || error?.code === "supervisor_headless_claimer_active"
+        || error?.code === "cursor_acp_claimer_blocks_codex"
+        || error?.code === "cursor_acp_drain_blocks_codex"
       ) {
         headlessWakeSkipReasons[headlessConfig.profile] = error.code;
         logger.error?.("triangle_client_headless_wake_skipped", {
@@ -708,17 +767,69 @@ export function createClientSupervisor({
     }
   }
 
+  const cursorAcpEntries = [];
+  const cursorAcpWakeSkipReasons = {};
+  const cursorAcpAdmissions = [];
+  for (const cursorAcpConfig of cursorAcpConfigs) {
+    const lockDirectory = path.resolve(path.dirname(cursorAcpConfig.helperPath), "..", "client");
+    const lockPath = path.join(lockDirectory, `cursor-acp-claimer.${cursorAcpConfig.profile}.json`);
+    const cursorAcpClaimer = createCursorAcpClaimer({
+      profile: cursorAcpConfig.profile,
+      shadowTestProfile: true,
+      helperPath: cursorAcpConfig.helperPath,
+      lockPath,
+    });
+    try {
+      cursorAcpClaimer.assertSupervisorMayClaim();
+    } catch (error) {
+      if (
+        error?.code === "dedicated_cursor_acp_drain_loaded"
+        || error?.code === "supervisor_cursor_acp_claimer_active"
+        || error?.code === "codex_drain_blocks_cursor_acp"
+        || error?.code === "codex_claimer_blocks_cursor_acp"
+      ) {
+        cursorAcpWakeSkipReasons[cursorAcpConfig.profile] = error.code;
+        logger.error?.("triangle_client_cursor_acp_wake_skipped", {
+          error: "Refusing dual Cursor ACP mailbox claimers",
+          code: error.code,
+        });
+      } else {
+        throw error;
+      }
+    }
+    cursorAcpAdmissions.push({ config: cursorAcpConfig, claimer: cursorAcpClaimer });
+  }
+  if (Object.keys(cursorAcpWakeSkipReasons).length > 0) {
+    for (const config of cursorAcpConfigs) {
+      cursorAcpWakeSkipReasons[config.profile] ??= "cursor_acp_pool_admission_failed";
+    }
+  } else {
+    for (const { config: cursorAcpConfig, claimer: cursorAcpClaimer } of cursorAcpAdmissions) {
+      const drain = createCursorAcpDrain(cursorAcpConfig, {
+        logger,
+        ownerInstanceId: `client-supervisor-${process.pid}`,
+      });
+      if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
+        throw new TypeError("createCursorAcpDrain must return a drain");
+      }
+      cursorAcpEntries.push(Object.freeze({ config: cursorAcpConfig, drain, claimer: cursorAcpClaimer }));
+    }
+  }
+
   return Object.freeze({
     instanceIds: Object.freeze(entries.map(({ instanceId }) => instanceId)),
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
     appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
     grokBotInstanceId: grokBotConfig?.binding.instanceId ?? null,
     headlessInstanceIds: Object.freeze(headlessConfigs.map((config) => config.profileInstanceId)),
+    cursorAcpInstanceIds: Object.freeze(cursorAcpConfigs.map((config) => config.profileInstanceId)),
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
     grokBotWake: grokBotConfig,
     headlessWakes: headlessConfigs,
+    cursorAcpWakes: cursorAcpConfigs,
     headlessWakeSkipReasons: Object.freeze({ ...headlessWakeSkipReasons }),
+    cursorAcpWakeSkipReasons: Object.freeze({ ...cursorAcpWakeSkipReasons }),
 
     async runOnce({ signal } = {}) {
       const results = await Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -945,12 +1056,67 @@ export function createClientSupervisor({
             : [],
         );
 
-      const [instances, wakeResult, appServerResult, grokBotResult, headlessResult] = await Promise.all([
+      const cursorAcpLoop = cursorAcpEntries.length
+        ? runDurableWakeLoop({
+          start: async () => {
+            const acquired = [];
+            try {
+              for (const entry of cursorAcpEntries) {
+                entry.claimer.acquire({ owner: CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER });
+                acquired.push(entry);
+              }
+              const starts = cursorAcpEntries.map((entry) => entry.drain.start({ runLoop: true }));
+              try {
+                await Promise.all(starts);
+              } catch (error) {
+                await Promise.allSettled(starts);
+                throw error;
+              }
+              await waitForAbort(signal);
+              return cursorAcpEntries.map(({ config }) => ({
+                status: "stopped",
+                skipped: false,
+                profileInstanceId: config.profileInstanceId,
+              }));
+            } finally {
+              for (const entry of [...cursorAcpEntries].reverse()) {
+                try { await entry.drain.stop(); } catch {}
+              }
+              for (const entry of [...acquired].reverse()) {
+                entry.claimer.release({ owner: CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER });
+              }
+            }
+          },
+          stop: async () => {
+            for (const entry of [...cursorAcpEntries].reverse()) {
+              try { await entry.drain.stop(); } catch {}
+            }
+            for (const entry of [...cursorAcpEntries].reverse()) {
+              entry.claimer.release({ owner: CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER });
+            }
+          },
+          logEvent: "triangle_client_cursor_acp_wake_failed",
+          logMessage: "Cursor ACP drain failed",
+        })
+        : Promise.resolve(
+          cursorAcpConfigs.length
+            ? cursorAcpConfigs.map((config) => cursorAcpWakeSkipReasons[config.profile]
+              ? {
+                skipped: true,
+                reason: cursorAcpWakeSkipReasons[config.profile],
+                profileInstanceId: config.profileInstanceId,
+              }
+              : null)
+            : [],
+        );
+
+      const [instances, wakeResult, appServerResult, grokBotResult, headlessResult, cursorAcpResult] = await Promise.all([
         workerLoop,
         wakeLoop,
         appServerLoop,
         grokBotLoop,
         headlessLoop,
+        cursorAcpLoop,
       ]);
       return {
         instances,
@@ -958,6 +1124,7 @@ export function createClientSupervisor({
         appServerWake: appServerResult,
         grokBotWake: grokBotResult,
         headlessWakes: Array.isArray(headlessResult) ? headlessResult : [headlessResult].filter(Boolean),
+        cursorAcpWakes: Array.isArray(cursorAcpResult) ? cursorAcpResult : [cursorAcpResult].filter(Boolean),
       };
     },
   });
