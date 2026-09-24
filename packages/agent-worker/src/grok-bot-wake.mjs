@@ -562,6 +562,13 @@ export function createGrokBotWakeBridge({
     const generation = retryGeneration;
     const highWatermark = wake.highWatermark;
 
+    // Refresh persisted cooldown live in case an external script or asynchronous
+    // completion callback recorded a new reset timestamp while the bridge was running.
+    const persistedReset = await loadPersistedQuotaReset();
+    if (persistedReset) {
+      await openQuotaBackoff({ customUntilMs: persistedReset });
+    }
+
     const open = activeQuotaBackoff();
     if (open) {
       scheduleQuotaRetry(highWatermark, open.untilMs);
@@ -599,8 +606,12 @@ export function createGrokBotWakeBridge({
     try {
       const result = await wakeDispatcher.deliver(payload);
       if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
-      // Successful delivery clears circuit + alert/logging state + armed retry.
-      clearQuotaBackoff();
+      // Check if a long-horizon quota cooldown was persisted while dispatch was in-flight.
+      // If so, do not erase it!
+      const currentCooldown = await loadPersistedQuotaReset();
+      if (!currentCooldown) {
+        clearQuotaBackoff();
+      }
       return result;
     } catch (error) {
       if (!retriesEnabled || generation !== retryGeneration) return { status: "stopped" };
@@ -644,6 +655,16 @@ export function createGrokBotWakeBridge({
     if (!filterReceipts || !helperProxy) {
       return true;
     }
+    // Single-claimer protection: drainReceipts is required to inspect before claiming.
+    // If the helper proxy lacks drainReceipts, fail-open to wake Bob rather than risking
+    // an unsafe claimNext call that claims actionable work before Bob wakes.
+    if (typeof helperProxy.drainReceipts !== "function") {
+      logger.warn?.("triangle_grok_bot_receipt_filter_unsupported_helper", {
+        profile: validated.profile,
+        instanceId: validated.instanceId,
+      });
+      return true;
+    }
     try {
       const currentStatus = await helperProxy.status({ signal }).catch(() => null);
       if (currentStatus?.open && currentStatus.open.state !== "replied") {
@@ -651,9 +672,7 @@ export function createGrokBotWakeBridge({
       }
 
       while (!signal?.aborted) {
-        const drainResult = typeof helperProxy.drainReceipts === "function"
-          ? await helperProxy.drainReceipts({ signal })
-          : await helperProxy.claimNext({ signal });
+        const drainResult = await helperProxy.drainReceipts({ signal });
 
         if (!drainResult || typeof drainResult !== "object") {
           break;

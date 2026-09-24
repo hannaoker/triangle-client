@@ -746,8 +746,8 @@ test("pre-wake receipt filtering settles receipts via helper and suppresses wake
     async status() {
       return { open: null };
     },
-    async claimNext() {
-      helperCalls.push("claimNext");
+    async drainReceipts() {
+      helperCalls.push("drainReceipts");
       if (helperCalls.length === 1) {
         // Simulate receipt-only delivery settled by helper
         return {
@@ -783,20 +783,20 @@ test("pre-wake receipt filtering settles receipts via helper and suppresses wake
 
 test("pre-wake receipt filtering preserves wake for actionable work", async () => {
   let webhookCalls = 0;
-  let claimCount = 0;
+  let drainCount = 0;
 
   const fakeProxy = {
     async status() {
       return { open: null };
     },
-    async claimNext() {
-      claimCount += 1;
-      if (claimCount === 1) {
+    async drainReceipts() {
+      drainCount += 1;
+      if (drainCount === 1) {
         // Receipt first
         return { receiptOnly: true, replyRequired: false, open: null };
       }
       // Followed by actionable work
-      return { shouldStartModel: true, replyRequired: true, open: { deliveryId: 10 } };
+      return { actionableWorkPending: true, replyRequired: true };
     },
   };
 
@@ -818,7 +818,37 @@ test("pre-wake receipt filtering preserves wake for actionable work", async () =
   const res = await bridge.handleWake({ instanceId, highWatermark: 6, reason: "wake" });
   assert.equal(res.ok, true);
   assert.equal(webhookCalls, 1, "webhook must be called when actionable work is present");
-  assert.equal(claimCount, 2);
+  assert.equal(drainCount, 2);
+});
+
+test("pre-wake receipt filtering fails open to wake when helper lacks drainReceipts", async () => {
+  let webhookCalls = 0;
+
+  const legacyProxy = {
+    async status() {
+      return { open: null };
+    },
+    // No drainReceipts method
+  };
+
+  const bridge = createGrokBotWakeBridge({
+    binding: validateGrokBotBinding(sampleBinding()),
+    watchTransport: createFakeWatchTransport({ polls: [] }),
+    filterReceipts: true,
+    helperPath: "/dummy/path/triangle-mailbox",
+    createTransactionProxy: () => legacyProxy,
+    dispatcher: {
+      async deliver() {
+        webhookCalls += 1;
+        return { ok: true };
+      },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const res = await bridge.handleWake({ instanceId, highWatermark: 8, reason: "wake" });
+  assert.equal(res.ok, true);
+  assert.equal(webhookCalls, 1, "should fail-open and wake when helper lacks drainReceipts");
 });
 
 test("production webhook 429 carries bodyText with multi-day reset to bridge and persists across restart", async () => {

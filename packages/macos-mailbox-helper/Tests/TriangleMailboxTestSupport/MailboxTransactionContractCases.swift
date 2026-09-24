@@ -34,6 +34,7 @@ public enum MailboxTransactionContractCases {
         .init(name: "claimNext lists preflights and claims pending delivery", run: claimNextFromPendingDelivery),
         .init(name: "claimNext scopes selection to the allowed room", run: claimNextScopesAllowedRoom),
         .init(name: "claimNext receipt-only acks without starting model", run: claimNextReceiptOnlyAcksWithoutModel),
+        .init(name: "drainReceipts acks receipts and yields on actionable work", run: drainReceiptsAcksReceiptsAndYieldsOnWork),
         .init(name: "claimNext resumes receipt-only ack after crash", run: claimNextReceiptOnlyResumesAfterCrash),
         .init(name: "claimed inbound survives resume and is read exactly", run: claimedInboundSurvivesResume),
         .init(name: "authenticated inbound read validates exact event contract", run: authenticatedInboundReadContract),
@@ -825,6 +826,53 @@ public enum MailboxTransactionContractCases {
         try expect(payload["open"] is NSNull, "receipt left open transaction")
         try expect(try store.readOpen(instanceID: instanceID) == nil, "receipt left local open.json")
         try expect(payload["admitText"] == nil, "receipt returned admitText")
+    }
+
+    public static func drainReceiptsAcksReceiptsAndYieldsOnWork() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        let instanceID = ClientInstanceID.derive(profile: profile)
+
+        // Case 1: Receipt-only candidate is claimed and acked
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 71,
+                roomID: room,
+                eventID: event,
+                roomSequence: 5,
+                replyRequired: false
+            ),
+        ]
+        let service = MailboxTransactionService(store: store, transport: transport)
+        let receiptPayload = try await service.drainReceipts(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport.claims.map(\.0) == [71], "drainReceipts did not claim receipt")
+        try expect(transport.acks == [71], "drainReceipts did not ack receipt")
+        try expect(receiptPayload["receiptOnly"] as? Bool == true, "receiptPayload missing receiptOnly")
+
+        // Case 2: Actionable work (replyRequired: true) is NOT claimed by drainReceipts
+        let store2 = InMemoryMailboxTransactionStore()
+        let transport2 = RecordingMailboxTransactionTransport()
+        transport2.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 72,
+                roomID: room,
+                eventID: event,
+                roomSequence: 6,
+                replyRequired: true
+            ),
+        ]
+        let service2 = MailboxTransactionService(store: store2, transport: transport2)
+        let workPayload = try await service2.drainReceipts(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain
+        )
+        try expect(transport2.claims.isEmpty, "drainReceipts claimed actionable work!")
+        try expect(transport2.acks.isEmpty, "drainReceipts acked actionable work!")
+        try expect(workPayload["actionableWorkPending"] as? Bool == true, "workPayload missing actionableWorkPending")
+        try expect(workPayload["replyRequired"] as? Bool == true, "workPayload missing replyRequired")
     }
 
     public static func claimNextReceiptOnlyResumesAfterCrash() async throws {
