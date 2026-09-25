@@ -848,30 +848,56 @@ export function createClientSupervisor({
     },
 
     async watch({ signal, sleep } = {}) {
+      async function ensureWithBackoff(fn) {
+        let attempts = 0;
+        while (!signal?.aborted) {
+          try {
+            return await fn();
+          } catch (error) {
+            if (signal?.aborted || error?.name === "AbortError") throw error;
+            const status = error?.status ?? error?.httpStatus;
+            if (status === 402 || status === 429) {
+              attempts += 1;
+              logger.error?.("triangle_client_watch_ensure_failed", {
+                error: "Watch grant ensure rejected",
+                status,
+                code: error?.code,
+                rejectedCode: error?.rejectedCode,
+              });
+              let delayMs = status === 402 ? 15 * 60_000 : 30_000;
+              const jitter = Math.floor(random() * delayMs * 0.1);
+              await sleepBeforeWakeRetry(delayMs + jitter);
+              continue;
+            }
+            throw error;
+          }
+        }
+      }
+
       if (wakeRuntime && wakeConfig.ensureBeforeWatch) {
-        await ensureWatchGrant({
+        await ensureWithBackoff(() => ensureWatchGrant({
           helperPath: wakeConfig.helperPath,
           installationId: wakeConfig.installationId,
           actorProfile: wakeConfig.actorProfile,
           signal,
-        });
+        }));
       } else if (appServerBridge && appServerConfig.ensureBeforeWatch && wakeConfig?.actorProfile) {
         // App Server actorProfile is mcp-interactive (claim/reply owner). Grant
         // ensure must use an event-driven actor so notify members can refresh.
-        await ensureWatchGrant({
+        await ensureWithBackoff(() => ensureWatchGrant({
           helperPath: appServerConfig.helperPath,
           installationId: appServerConfig.installationId,
           actorProfile: wakeConfig.actorProfile,
           signal,
-        });
+        }));
       } else if (grokBotBridge && grokBotConfig.ensureBeforeWatch) {
         // Grok Bot Bob may act as grant actor (unlike mcp-interactive).
-        await ensureWatchGrant({
+        await ensureWithBackoff(() => ensureWatchGrant({
           helperPath: grokBotConfig.helperPath,
           installationId: grokBotConfig.installationId,
           actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
           signal,
-        });
+        }));
       }
 
       const workerLoop = Promise.all(entries.map(async ({ instanceId, worker }) => {
@@ -889,17 +915,21 @@ export function createClientSupervisor({
       // Keep wake loops independent and durable: a listener failure must not
       // resolve Promise.all and exit the supervisor (LaunchAgent KeepAlive thrash).
       // Retry until abort instead of returning.
-      async function sleepBeforeWakeRetry() {
+      async function sleepBeforeWakeRetry(delayMs = 5_000) {
         if (typeof sleep === "function") {
-          await sleep(5_000, { signal });
+          await sleep(delayMs, { signal });
           return;
         }
         await new Promise((resolve) => {
-          const timer = setTimeout(resolve, 5_000);
+          const timer = setTimeout(resolve, delayMs);
           signal?.addEventListener?.("abort", () => {
             clearTimeout(timer);
             resolve();
           }, { once: true });
+          if (signal?.aborted) {
+            clearTimeout(timer);
+            resolve();
+          }
         });
       }
 
@@ -910,14 +940,18 @@ export function createClientSupervisor({
         logEvent,
         logMessage,
       }) {
+        let consecutiveFailures = 0;
         while (!signal?.aborted) {
           const observedGeneration = renewal
             ? watchGrantState(renewal.installationId).generation
             : null;
           try {
-            return await start();
+            const result = await start();
+            consecutiveFailures = 0;
+            return result;
           } catch (error) {
             if (signal?.aborted || error?.name === "AbortError") return null;
+            consecutiveFailures += 1;
             logger.error?.(logEvent, {
               error: logMessage,
               code: error?.code,
@@ -934,11 +968,13 @@ export function createClientSupervisor({
                 /* ignore stop errors during restart */
               }
             }
+            let activeError = error;
             if (renewal && isRenewableWatchCredentialError(error)) {
               try {
                 await renewWatchGrant({ ...renewal, signal }, observedGeneration);
               } catch (renewalError) {
                 if (signal?.aborted || renewalError?.name === "AbortError") return null;
+                activeError = renewalError;
                 logger.error?.("triangle_client_watch_grant_renewal_failed", {
                   error: "Watch grant renewal failed",
                   code: renewalError?.code,
@@ -951,7 +987,23 @@ export function createClientSupervisor({
                 });
               }
             }
-            await sleepBeforeWakeRetry();
+            const code = activeError?.code;
+            if (code === "binding_endpoint_changed" || code === "binding_server_identity_changed") {
+              await new Promise((resolve) => {
+                signal?.addEventListener?.("abort", resolve, { once: true });
+                if (signal?.aborted) resolve();
+              });
+              return null;
+            }
+            const status = activeError?.status ?? activeError?.httpStatus;
+            let delayMs = Math.min(maxBackoffMs, 5_000 * Math.pow(2, Math.min(consecutiveFailures - 1, 6)));
+            if (status === 402) {
+              delayMs = Math.max(delayMs, 15 * 60_000);
+            } else if (status === 429) {
+              delayMs = Math.max(delayMs, 30_000);
+            }
+            const jitter = Math.floor(random() * delayMs * 0.1);
+            await sleepBeforeWakeRetry(delayMs + jitter);
           }
         }
         return null;

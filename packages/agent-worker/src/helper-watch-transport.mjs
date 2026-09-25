@@ -36,6 +36,10 @@ function createHelperUnavailableError(message = "watch helper is unavailable", d
     error.diagnosis = diagnosis;
     if (failureCode) error.failureCode = failureCode;
     if (rejectedCode) error.rejectedCode = rejectedCode;
+    if (Number.isSafeInteger(diagnosis.rejectedStatusCode)) {
+      error.httpStatus = diagnosis.rejectedStatusCode;
+      error.status = diagnosis.rejectedStatusCode;
+    }
     if (typeof diagnosis.gate === "string") error.gate = diagnosis.gate;
     if (typeof diagnosis.operatorAction === "string") error.operatorAction = diagnosis.operatorAction;
   }

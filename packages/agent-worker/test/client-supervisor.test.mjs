@@ -1475,3 +1475,116 @@ test("supervisor rejects canonical state-root collisions and room-pinned v2 wake
     headlessWakes: [headlessWakeFixture({ allowedRoomId: "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })],
   }), /allowedRoomId|schema/i);
 });
+
+test("supervisor parks wake loop on binding_endpoint_changed terminal error without repeating retries", async () => {
+  let attempts = 0;
+  const controller = new AbortController();
+  const errors = [];
+  const supervisor = createClientSupervisor({
+    instances: [],
+    eventWake: {
+      ...eventWakeFixture(2),
+      ensureBeforeWatch: false,
+    },
+    createWake: () => ({
+      async start() {
+        attempts += 1;
+        const err = new Error("endpoint changed");
+        err.code = "binding_endpoint_changed";
+        throw err;
+      },
+    }),
+    logger: {
+      error(event, detail) {
+        errors.push({ event, code: detail.code });
+      },
+    },
+  });
+
+  const watchPromise = supervisor.watch({ signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(attempts, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "binding_endpoint_changed");
+  controller.abort();
+  await watchPromise;
+});
+
+test("supervisor enforces cooldown backoff on HTTP 402 payment required / deployment disabled", async () => {
+  let attempts = 0;
+  const sleeps = [];
+  const controller = new AbortController();
+  const supervisor = createClientSupervisor({
+    instances: [],
+    eventWake: {
+      ...eventWakeFixture(2),
+      ensureBeforeWatch: false,
+    },
+    createWake: () => ({
+      async start() {
+        attempts += 1;
+        const err = new Error("deployment disabled");
+        err.httpStatus = 402;
+        throw err;
+      },
+    }),
+    logger: { error() {} },
+  });
+
+  await supervisor.watch({
+    signal: controller.signal,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      controller.abort();
+    },
+  });
+  assert.equal(attempts, 1);
+  assert.equal(sleeps.length, 1);
+  assert.equal(sleeps[0] >= 15 * 60_000, true);
+});
+
+test("supervisor enforces cooldown backoff when grant renewal receives HTTP 402", async () => {
+  let attempts = 0;
+  let renewals = 0;
+  const sleeps = [];
+  const controller = new AbortController();
+  const supervisor = createClientSupervisor({
+    instances: [],
+    eventWake: {
+      ...eventWakeFixture(2),
+      ensureBeforeWatch: true,
+    },
+    createWake: () => ({
+      async start() {
+        attempts += 1;
+        const err = new Error("watch grant invalid");
+        err.rejectedCode = "watch_credential_invalid";
+        throw err;
+      },
+    }),
+    ensureWatchGrant: async () => {
+      renewals += 1;
+      if (renewals === 1) {
+        // Initial ensureBeforeWatch succeeds
+        return { ensured: true };
+      }
+      // Renewal attempt fails with 402
+      const err = new Error("payment required");
+      err.status = 402;
+      throw err;
+    },
+    logger: { error() {} },
+  });
+
+  await supervisor.watch({
+    signal: controller.signal,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      controller.abort();
+    },
+  });
+  assert.equal(attempts, 1);
+  assert.equal(renewals, 2);
+  assert.equal(sleeps.length, 1);
+  assert.equal(sleeps[0] >= 15 * 60_000, true);
+});
