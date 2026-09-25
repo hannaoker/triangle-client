@@ -18,8 +18,22 @@ function positiveInteger(value, name, minimum = 0) {
   return value;
 }
 
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleepMs(ms, { signal } = {}) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      resolve();
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
 }
 
 export function createMemoryCursorStore(initial = 0) {
@@ -140,6 +154,9 @@ export function createWakeClient({
   transport,
   cursorStore = createMemoryCursorStore(0),
   coalesceMs = 300,
+  idlePollIntervalMs = 5_000,
+  idleJitterRatio = 0.1,
+  random = Math.random,
   onWake,
   sleep = sleepMs,
   now = () => Date.now(),
@@ -257,8 +274,14 @@ export function createWakeClient({
       let cycles = 0;
       while (!stopped && !signal?.aborted && cycles < maxCycles) {
         cycles += 1;
-        await this.runOnce({ signal });
+        const result = await this.runOnce({ signal });
         if (flushTimer) await flushTimer;
+        if (cycles < maxCycles && !stopped && !signal?.aborted) {
+          if (result && result.events === 0 && idlePollIntervalMs > 0) {
+            const jitter = Math.floor(random() * idlePollIntervalMs * idleJitterRatio);
+            await sleep(idlePollIntervalMs + jitter, { signal });
+          }
+        }
       }
       return { cycles, cursor: await cursorStore.read() };
     },

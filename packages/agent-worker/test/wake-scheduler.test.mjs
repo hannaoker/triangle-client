@@ -129,6 +129,29 @@ test("wake client advances cursor on empty event batches", async () => {
   assert.deepEqual(wakes, []);
 });
 
+test("wake client spaces empty polls without delaying a nonempty batch", async () => {
+  const delays = [];
+  let polls = 0;
+  const client = createWakeClient({
+    profiles: [{ instanceId: id(1), agentId: "agent_a" }],
+    transport: {
+      async poll() {
+        polls += 1;
+        return { cursor: polls, events: polls === 2
+          ? [{ agent_id: "agent_foreign", high_watermark: polls }]
+          : [] };
+      },
+    },
+    idlePollIntervalMs: 5_000,
+    idleJitterRatio: 0,
+    sleep: async (ms) => { delays.push(ms); },
+    onWake: async () => {},
+  });
+  await client.watch({ maxCycles: 3 });
+  assert.deepEqual(delays, [5_000]);
+  assert.equal(polls, 3);
+});
+
 test("wake client matching events still wake and advance via flush highWatermark", async () => {
   const wakes = [];
   const store = createMemoryCursorStore(25);
