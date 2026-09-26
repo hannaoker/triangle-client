@@ -439,8 +439,11 @@ test("supervisor launches eventWake listener beside worker loops with shared gat
   assert.equal(result.eventWake?.cursor, 0);
 });
 
-test("supervisor fails closed when watch-ensure preflight fails before worker loops", async () => {
+test("supervisor scopes ensure preflight failure to the wake loop so workers still start", async () => {
   let workerStarted = false;
+  let wakeStarted = false;
+  const ensureErrors = [];
+  const controller = new AbortController();
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
@@ -454,8 +457,9 @@ test("supervisor fails closed when watch-ensure preflight fails before worker lo
     createWorker() {
       return {
         async runOnce() { return { found: 0, processed: 0 }; },
-        async watch() {
+        async watch({ signal }) {
           workerStarted = true;
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
           return { processed: 0, stopped: true };
         },
       };
@@ -464,6 +468,7 @@ test("supervisor fails closed when watch-ensure preflight fails before worker lo
     async ensureWatchGrant() {
       const error = new Error("watch helper ensure failed");
       error.code = "helper_unavailable";
+      ensureErrors.push(error.code);
       throw error;
     },
     createHarness: () => ({
@@ -471,16 +476,108 @@ test("supervisor fails closed when watch-ensure preflight fails before worker lo
       async run() { return { status: "drained" }; },
     }),
     createWake: () => ({
-      async start() { throw new Error("wake must not start"); },
+      async start() {
+        wakeStarted = true;
+        throw new Error("wake must not start before ensure succeeds");
+      },
     }),
     logger: { error() {} },
   });
 
-  await assert.rejects(
-    () => supervisor.watch({ signal: new AbortController().signal }),
-    (error) => error.code === "helper_unavailable",
-  );
-  assert.equal(workerStarted, false);
+  const watching = supervisor.watch({
+    signal: controller.signal,
+    sleep: async () => { controller.abort(); },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(workerStarted, true);
+  assert.equal(wakeStarted, false);
+  assert.equal(ensureErrors[0], "helper_unavailable");
+  await watching;
+  assert.equal(wakeStarted, false);
+});
+
+test("supervisor starts independent drains while initial watch-grant 402 backoff is in flight", async () => {
+  let workerStarted = false;
+  let headlessStarted = false;
+  let wakeStarted = false;
+  let ensureAttempts = 0;
+  const sleeps = [];
+  const controller = new AbortController();
+  const fixture = headlessWakeFixture();
+  const claimer = fakeClaimerGuard();
+  const supervisor = createClientSupervisor({
+    instances: [{
+      instanceId: id(1),
+      mailbox: { meshToken: "worker-secret" },
+      runner: { command: "/trusted/runner", args: [] },
+      runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
+    }],
+    eventWake: eventWakeFixture(2),
+    headlessWakes: [fixture],
+    createDeliveryClient: () => ({}),
+    createRunner: () => ({ async run() { return { status: "completed", text: "ok" }; } }),
+    createWorker() {
+      return {
+        async runOnce() { return { found: 0, processed: 0 }; },
+        async watch({ signal }) {
+          workerStarted = true;
+          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          return { processed: 0, stopped: true };
+        },
+      };
+    },
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    async ensureWatchGrant() {
+      ensureAttempts += 1;
+      const error = new Error("payment required");
+      error.status = 402;
+      throw error;
+    },
+    createHarness: () => ({
+      async preflight() { return false; },
+      async run() { return { status: "drained" }; },
+    }),
+    createWake: () => ({
+      async start() {
+        wakeStarted = true;
+        throw new Error("wake must not start while ensure is 402-backed-off");
+      },
+    }),
+    createHeadlessDrain() {
+      return {
+        async start() {
+          headlessStarted = true;
+          return { started: true };
+        },
+        async stop() {
+          return { started: false };
+        },
+      };
+    },
+    createClaimerGuard: claimer.create,
+    logger: { error() {} },
+  });
+
+  const watching = supervisor.watch({
+    signal: controller.signal,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      // Worker + headless must already be running before the wake-loop 402 sleep.
+      assert.equal(workerStarted, true);
+      assert.equal(headlessStarted, true);
+      assert.equal(wakeStarted, false);
+      assert.equal(ensureAttempts >= 1, true);
+      controller.abort();
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(workerStarted, true);
+  assert.equal(headlessStarted, true);
+  assert.equal(wakeStarted, false);
+  await watching;
+  assert.equal(sleeps.length, 1);
+  assert.equal(sleeps[0] >= 15 * 60_000, true);
+  assert.equal(wakeStarted, false);
 });
 
 test("supervisor rejects eventWake collision with worker instance ids", () => {

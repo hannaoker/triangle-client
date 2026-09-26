@@ -848,57 +848,41 @@ export function createClientSupervisor({
     },
 
     async watch({ signal, sleep } = {}) {
-      async function ensureWithBackoff(fn) {
-        let attempts = 0;
-        while (!signal?.aborted) {
-          try {
-            return await fn();
-          } catch (error) {
-            if (signal?.aborted || error?.name === "AbortError") throw error;
-            const status = error?.status ?? error?.httpStatus;
-            if (status === 402 || status === 429) {
-              attempts += 1;
-              logger.error?.("triangle_client_watch_ensure_failed", {
-                error: "Watch grant ensure rejected",
-                status,
-                code: error?.code,
-                rejectedCode: error?.rejectedCode,
-              });
-              let delayMs = status === 402 ? 15 * 60_000 : 30_000;
-              const jitter = Math.floor(random() * delayMs * 0.1);
-              await sleepBeforeWakeRetry(delayMs + jitter);
-              continue;
-            }
-            throw error;
-          }
-        }
-      }
-
-      if (wakeRuntime && wakeConfig.ensureBeforeWatch) {
-        await ensureWithBackoff(() => ensureWatchGrant({
+      // Initial watch-grant ensure is scoped to the affected wake loop below so
+      // worker / headless / Cursor ACP drains start independently. Persistent
+      // 402/429 backoff must not serialize ahead of unrelated mailbox lanes.
+      // Preference matches prior supervisor ensure: eventWake > appServer (with
+      // event-driven actor) > grokBot. Shared grant renewal stays installation-scoped.
+      const wakeEnsure = wakeRuntime && wakeConfig.ensureBeforeWatch
+        ? {
           helperPath: wakeConfig.helperPath,
           installationId: wakeConfig.installationId,
           actorProfile: wakeConfig.actorProfile,
-          signal,
-        }));
-      } else if (appServerBridge && appServerConfig.ensureBeforeWatch && wakeConfig?.actorProfile) {
-        // App Server actorProfile is mcp-interactive (claim/reply owner). Grant
-        // ensure must use an event-driven actor so notify members can refresh.
-        await ensureWithBackoff(() => ensureWatchGrant({
+        }
+        : null;
+      const appServerEnsure = !wakeEnsure
+        && appServerBridge
+        && appServerConfig.ensureBeforeWatch
+        && wakeConfig?.actorProfile
+        ? {
+          // App Server actorProfile is mcp-interactive (claim/reply owner). Grant
+          // ensure must use an event-driven actor so notify members can refresh.
           helperPath: appServerConfig.helperPath,
           installationId: appServerConfig.installationId,
           actorProfile: wakeConfig.actorProfile,
-          signal,
-        }));
-      } else if (grokBotBridge && grokBotConfig.ensureBeforeWatch) {
-        // Grok Bot Bob may act as grant actor (unlike mcp-interactive).
-        await ensureWithBackoff(() => ensureWatchGrant({
+        }
+        : null;
+      const grokBotEnsure = !wakeEnsure
+        && !appServerEnsure
+        && grokBotBridge
+        && grokBotConfig.ensureBeforeWatch
+        ? {
+          // Grok Bot Bob may act as grant actor (unlike mcp-interactive).
           helperPath: grokBotConfig.helperPath,
           installationId: grokBotConfig.installationId,
           actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
-          signal,
-        }));
-      }
+        }
+        : null;
 
       const workerLoop = Promise.all(entries.map(async ({ instanceId, worker }) => {
         try {
@@ -937,28 +921,45 @@ export function createClientSupervisor({
         start,
         stop = null,
         renewal = null,
+        ensure = null,
         logEvent,
         logMessage,
       }) {
         let consecutiveFailures = 0;
+        let initialEnsureDone = false;
         while (!signal?.aborted) {
           const observedGeneration = renewal
             ? watchGrantState(renewal.installationId).generation
             : null;
           try {
+            if (ensure && !initialEnsureDone) {
+              await ensureWatchGrant({ ...ensure, signal });
+              initialEnsureDone = true;
+            }
             const result = await start();
             consecutiveFailures = 0;
             return result;
           } catch (error) {
             if (signal?.aborted || error?.name === "AbortError") return null;
             consecutiveFailures += 1;
-            logger.error?.(logEvent, {
-              error: logMessage,
-              code: error?.code,
-              rejectedCode: typeof error?.rejectedCode === "string" ? error.rejectedCode : undefined,
-              failureCode: typeof error?.failureCode === "string" ? error.failureCode : undefined,
-              message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
-            });
+            const ensureFailed = Boolean(ensure) && !initialEnsureDone;
+            const status = error?.status ?? error?.httpStatus;
+            if (ensureFailed && (status === 402 || status === 429)) {
+              logger.error?.("triangle_client_watch_ensure_failed", {
+                error: "Watch grant ensure rejected",
+                status,
+                code: error?.code,
+                rejectedCode: error?.rejectedCode,
+              });
+            } else {
+              logger.error?.(logEvent, {
+                error: logMessage,
+                code: error?.code,
+                rejectedCode: typeof error?.rejectedCode === "string" ? error.rejectedCode : undefined,
+                failureCode: typeof error?.failureCode === "string" ? error.failureCode : undefined,
+                message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
+              });
+            }
             // Clear sticky started/session state before retry so the next
             // start() cannot spam already_started after a watch-poll failure.
             if (typeof stop === "function") {
@@ -995,11 +996,11 @@ export function createClientSupervisor({
               });
               return null;
             }
-            const status = activeError?.status ?? activeError?.httpStatus;
+            const activeStatus = activeError?.status ?? activeError?.httpStatus;
             let delayMs = Math.min(maxBackoffMs, 5_000 * Math.pow(2, Math.min(consecutiveFailures - 1, 6)));
-            if (status === 402) {
+            if (activeStatus === 402) {
               delayMs = Math.max(delayMs, 15 * 60_000);
-            } else if (status === 429) {
+            } else if (activeStatus === 429) {
               delayMs = Math.max(delayMs, 30_000);
             }
             const jitter = Math.floor(random() * delayMs * 0.1);
@@ -1018,6 +1019,7 @@ export function createClientSupervisor({
             installationId: wakeConfig.installationId,
             actorProfile: wakeConfig.actorProfile,
           } : null,
+          ensure: wakeEnsure,
           logEvent: "triangle_client_event_wake_failed",
           logMessage: "Event-driven wake listener failed",
         })
@@ -1032,6 +1034,7 @@ export function createClientSupervisor({
             installationId: appServerConfig.installationId,
             actorProfile: wakeConfig.actorProfile,
           } : null,
+          ensure: appServerEnsure,
           logEvent: "triangle_client_app_server_wake_failed",
           logMessage: "App Server bound wake listener failed",
         })
@@ -1046,6 +1049,7 @@ export function createClientSupervisor({
             installationId: grokBotConfig.installationId,
             actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
           } : null,
+          ensure: grokBotEnsure,
           logEvent: "triangle_client_grok_bot_wake_failed",
           logMessage: "Grok Bot wake listener failed",
         })
