@@ -129,7 +129,7 @@ test("wake client advances cursor on empty event batches", async () => {
   assert.deepEqual(wakes, []);
 });
 
-test("wake client spaces empty polls without delaying a nonempty batch", async () => {
+test("wake client defaults to a quota-safe idle interval without delaying a nonempty batch", async () => {
   const delays = [];
   let polls = 0;
   const client = createWakeClient({
@@ -142,13 +142,12 @@ test("wake client spaces empty polls without delaying a nonempty batch", async (
           : [] };
       },
     },
-    idlePollIntervalMs: 5_000,
     idleJitterRatio: 0,
     sleep: async (ms) => { delays.push(ms); },
     onWake: async () => {},
   });
   await client.watch({ maxCycles: 3 });
-  assert.deepEqual(delays, [5_000]);
+  assert.deepEqual(delays, [30_000]);
   assert.equal(polls, 3);
 });
 

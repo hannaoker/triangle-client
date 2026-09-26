@@ -140,6 +140,20 @@ test("runtime preparation canonicalizes Node and Codex CLI inputs into a strict 
   assert.equal(mode(path.join(manifest.projectRoot, "bin", "node")), 0o500);
 });
 
+test("prepared supervisor bundle contains every relative module import", (t) => {
+  const manifest = prepare(makeFixture(t));
+  const artifacts = new Set(Object.keys(manifest.artifacts));
+  for (const name of artifacts) {
+    if (!name.endsWith(".mjs")) continue;
+    const source = fs.readFileSync(path.join(manifest.projectRoot, name), "utf8");
+    const imports = source.matchAll(/\b(?:from\s*|import\s*\()\s*["'](\.{1,2}\/[^"']+)["']/g);
+    for (const [, relative] of imports) {
+      const target = path.normalize(path.join(path.dirname(name), relative));
+      assert.equal(artifacts.has(target), true, `${name} imports absent bundle module ${target}`);
+    }
+  }
+});
+
 test("runtime preparation ignores hostile model overrides and rejects a symlinked application root", (t) => {
   const fixture = makeFixture(t);
   const outside = path.join(fixture.home, "outside-model"); fs.mkdirSync(outside);

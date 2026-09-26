@@ -377,6 +377,7 @@ private final class ResolverFixture {
         }
         if manifestVersion == 5 {
             artifactNames += [
+                "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/config-guards.mjs",

@@ -193,7 +193,8 @@ def expected_artifacts(agent, version=5):
     common = LEGACY_COMMON_ARTIFACTS if version == 3 else COMMON_ARTIFACTS if version in {4, 5} else None
     if common is None:
         fail("unsupported manifest version")
-    extras = CODEX_HEADLESS_ARTIFACTS if version == 5 and agent == "codex" else []
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version == 5 else [])
+    extras += CODEX_HEADLESS_ARTIFACTS if version == 5 and agent == "codex" else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",

@@ -154,7 +154,7 @@ export function createWakeClient({
   transport,
   cursorStore = createMemoryCursorStore(0),
   coalesceMs = 300,
-  idlePollIntervalMs = 5_000,
+  idlePollIntervalMs = 30_000,
   idleJitterRatio = 0.1,
   random = Math.random,
   onWake,

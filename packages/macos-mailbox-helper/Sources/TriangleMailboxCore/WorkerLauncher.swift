@@ -118,6 +118,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
                 "packages/agent-worker/src/client-supervisor.mjs",
+                "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/concurrency-gate.mjs",
                 "packages/agent-worker/src/helper-transaction-proxy.mjs",
                 "packages/agent-worker/src/helper-watch-transport.mjs",
