@@ -256,7 +256,7 @@ test("plan flips remaining mcp-interactive Codex and leaves grok-bot untouched",
       workingDirectory: f.workdir,
       codexHome: f.codexHome,
       command: f.command,
-      pollIntervalMs: 1000,
+      pollIntervalMs: 30_000,
     },
     profiles: [
       {
@@ -301,6 +301,7 @@ test("apply writes an unpinned binding, stops desktop, flips Codex, and bootouts
   assert.deepEqual(Object.keys(binding.common).sort(), [
     "adapterVersion", "codexHome", "command", "installationId", "pollIntervalMs", "workingDirectory",
   ]);
+  assert.equal(binding.common.pollIntervalMs, 30_000);
   assert.deepEqual(binding.profiles.map(({ profile }) => profile), ["codex-bob-test", "codex-headless"]);
   assert.equal(new Set(binding.profiles.map(({ stateRoot }) => stateRoot)).size, 2);
   assert.doesNotMatch(fs.readFileSync(bindingPath, "utf8"), /allowedRoomId|room_77|room_8594/);
