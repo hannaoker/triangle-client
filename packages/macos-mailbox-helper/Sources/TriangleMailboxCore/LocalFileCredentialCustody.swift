@@ -289,7 +289,7 @@ public final class FileWatchGrantStore: WatchGrantStore, @unchecked Sendable {
     }
 }
 
-private extension NSLock {
+extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
