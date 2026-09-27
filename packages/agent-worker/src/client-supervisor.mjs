@@ -8,6 +8,7 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
+  INSTALL_WATCH_SAFE_IDLE_POLL_MS,
   createInstallWatchDispatcher,
   resolveInstallWatchCursorPath,
 } from "./install-watch-dispatcher.mjs";
@@ -852,6 +853,8 @@ export function createClientSupervisor({
       try {
         return await grokBotBridge.handleWake(wake);
       } catch (error) {
+        // D3: must reject the fan-out barrier so the install cursor does not
+        // advance past a failed Bob wake (at-least-once replay on next poll).
         logger.error?.("triangle_grok_bot_wake_failed", {
           code: error?.code,
           message: error?.message,
@@ -859,7 +862,7 @@ export function createClientSupervisor({
           httpStatus: error?.status ?? null,
           reason: typeof wake?.reason === "string" ? wake.reason.slice(0, 64) : undefined,
         });
-        return { status: "failed", code: error?.code ?? null };
+        throw error;
       }
     });
     laneCursorStores.push(createCursorStore({ filePath: grokBotConfig.cursorPath }));
@@ -882,7 +885,7 @@ export function createClientSupervisor({
             message: error?.message,
             instanceId: wake?.instanceId,
           });
-          return { status: "failed", code: error?.code ?? null };
+          throw error;
         }
       });
       laneCursorStores.push(createCursorStore({ filePath: appServerConfig.cursorPath }));
@@ -923,6 +926,9 @@ export function createClientSupervisor({
       transport: watchTransport,
       cursorStore: createCursorStore({ filePath: installCursorPath }),
       laneCursorStores,
+      // Keep 30s idle until Phase 0.5 proves held-poll (empty tip ≥~20s).
+      // Short 2s idle under immediate-empty polls is a Hobby cost anti-pattern.
+      idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
       logger,
     });
     if (!installDispatcher || typeof installDispatcher.start !== "function") {

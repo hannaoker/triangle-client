@@ -18,11 +18,34 @@ import {
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 
+/**
+ * Safe reconnect idle while MESH held-poll is unproven (Hobby anti-pattern if
+ * empty polls return immediately). Switch to HELD_POLL only after Phase 0.5
+ * measures a real hold (≥~20s empty tip poll).
+ */
+export const INSTALL_WATCH_SAFE_IDLE_POLL_MS = 30_000;
+/** Short reconnect backoff only after held-poll is live. */
+export const INSTALL_WATCH_HELD_POLL_IDLE_MS = 2_000;
+
 function positiveInteger(value, name, minimum = 0) {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw new TypeError(`${name} must be an integer >= ${minimum}`);
   }
   return value;
+}
+
+/**
+ * D3: a returned `{ status: "failed" }` must not count as fan-out accept.
+ * Handlers should prefer throwing; this is defense in depth for soft fails.
+ */
+export function assertFanOutAccepted(result, wake = null) {
+  if (result && typeof result === "object" && result.status === "failed") {
+    const error = new Error("fan-out handler failed");
+    error.code = typeof result.code === "string" ? result.code : "fan_out_failed";
+    if (wake?.instanceId) error.instanceId = wake.instanceId;
+    throw error;
+  }
+  return result;
 }
 
 /**
@@ -90,7 +113,8 @@ export function createInstallWatchDispatcher({
   laneCursorStores = [],
   migrateLaneCursors = true,
   coalesceMs = 300,
-  idlePollIntervalMs = 2_000,
+  // Default safe cadence until held-poll is measured (see Phase 0.5 note).
+  idlePollIntervalMs = INSTALL_WATCH_SAFE_IDLE_POLL_MS,
   wakeClientFactory = createWakeClient,
   logger = console,
 } = {}) {
@@ -159,11 +183,13 @@ export function createInstallWatchDispatcher({
     if (typeof handler !== "function") {
       return { status: "ignored_profile" };
     }
-    return handler(wake);
+    const result = await handler(wake);
+    return assertFanOutAccepted(result, wake);
   }
 
   return Object.freeze({
     profileCount: byAgent.size,
+    idlePollIntervalMs,
     cursorStore: resolvedStore,
     profiles: Object.freeze(profiles.map((profile) => Object.freeze({
       instanceId: profile.instanceId,

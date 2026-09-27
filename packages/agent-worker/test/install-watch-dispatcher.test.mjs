@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+  assertFanOutAccepted,
   createInstallWatchDispatcher,
   createMemoryCursorStore,
   migrateInstallWatchCursor,
@@ -131,6 +133,104 @@ test("install dispatcher does not advance cursor when a handler throws", async (
     /kick failed/,
   );
   assert.equal(await cursorStore.read(), 0);
+});
+
+test("assertFanOutAccepted rejects soft {status:failed} results", () => {
+  assert.throws(
+    () => assertFanOutAccepted({ status: "failed", code: "webhook_failed" }),
+    (error) => error?.code === "webhook_failed",
+  );
+  assert.deepEqual(assertFanOutAccepted({ status: "accepted" }), { status: "accepted" });
+});
+
+test("install dispatcher rejects soft failed status and does not advance cursor", async () => {
+  const cursorStore = createMemoryCursorStore(0);
+  const transport = {
+    async poll() {
+      return {
+        cursor: 6,
+        events: [{ agent_id: "agent_bob", high_watermark: 6 }],
+      };
+    },
+  };
+  const dispatcher = createInstallWatchDispatcher({
+    profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],
+    handlers: {
+      [INSTANCE_A]: async () => ({ status: "failed", code: "webhook_failed" }),
+    },
+    transport,
+    cursorStore,
+    coalesceMs: 1,
+    idlePollIntervalMs: 0,
+  });
+
+  await assert.rejects(
+    () => dispatcher.start({ maxCycles: 1, reconcile: false }),
+    (error) => error?.code === "webhook_failed",
+  );
+  assert.equal(await cursorStore.read(), 0);
+});
+
+test("failed fan-out leaves cursor unadvanced so a later poll can replay", async () => {
+  const cursorStore = createMemoryCursorStore(0);
+  let attempts = 0;
+  const handled = [];
+  const transport = {
+    async poll({ cursor }) {
+      if (cursor >= 8) return { cursor, events: [] };
+      return {
+        cursor: 8,
+        events: [{ agent_id: "agent_bob", high_watermark: 8 }],
+      };
+    },
+  };
+  const handlers = {
+    [INSTANCE_A]: async (wake) => {
+      attempts += 1;
+      handled.push(wake.highWatermark);
+      if (attempts === 1) {
+        throw Object.assign(new Error("webhook down"), { code: "webhook_failed" });
+      }
+      return { status: "accepted" };
+    },
+  };
+
+  const first = createInstallWatchDispatcher({
+    profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],
+    handlers,
+    transport,
+    cursorStore,
+    coalesceMs: 1,
+    idlePollIntervalMs: 0,
+  });
+  await assert.rejects(
+    () => first.start({ maxCycles: 1, reconcile: false }),
+    /webhook down/,
+  );
+  assert.equal(await cursorStore.read(), 0);
+
+  const second = createInstallWatchDispatcher({
+    profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],
+    handlers,
+    transport,
+    cursorStore,
+    coalesceMs: 1,
+    idlePollIntervalMs: 0,
+    migrateLaneCursors: false,
+  });
+  await second.start({ maxCycles: 1, reconcile: false });
+  assert.equal(await cursorStore.read(), 8);
+  assert.deepEqual(handled, [8, 8]);
+});
+
+test("install dispatcher defaults to safe 30s idle until held-poll is proven", () => {
+  const dispatcher = createInstallWatchDispatcher({
+    profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],
+    handlers: { [INSTANCE_A]: async () => ({ status: "ok" }) },
+    transport: { async poll() { return { cursor: 0, events: [] }; } },
+  });
+  assert.equal(dispatcher.idlePollIntervalMs, INSTALL_WATCH_SAFE_IDLE_POLL_MS);
+  assert.equal(INSTALL_WATCH_SAFE_IDLE_POLL_MS, 30_000);
 });
 
 test("install dispatcher migrates lane cursors from disk before first poll", async () => {

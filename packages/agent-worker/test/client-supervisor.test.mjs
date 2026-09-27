@@ -882,6 +882,83 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
   assert.ok(result.installWatch?.cycles >= 1 || result.grokBotWake != null);
 });
 
+test("install dispatcher uses safe 30s idle until held-poll is proven", () => {
+  const supervisor = createClientSupervisor({
+    instances: [],
+    grokBotWake: grokBotWakeFixture(4),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createGrokBotBridge: () => ({
+      async start() { return { status: "handler_ready" }; },
+      async stop() {},
+      async handleWake() { return { status: "accepted" }; },
+    }),
+    createInstallDispatcher: (options) => {
+      assert.equal(options.idlePollIntervalMs, 30_000);
+      return {
+        profiles: options.profiles,
+        async start() { return { cycles: 0 }; },
+        async stop() {},
+      };
+    },
+    logger: { error() {} },
+  });
+  assert.equal(supervisor.installWatchDispatcherEnabled, true);
+});
+
+test("install dispatcher does not advance cursor when Bob wake throws; replay succeeds", async () => {
+  const cursorByPath = new Map();
+  let bobAttempts = 0;
+  const bobAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    grokBotWake: grokBotWakeFixture(4),
+    createWatchTransport: () => ({
+      async poll({ cursor }) {
+        if (cursor >= 15) return { cursor, events: [] };
+        return {
+          cursor: 15,
+          events: [{ agent_id: bobAgent, high_watermark: 15 }],
+        };
+      },
+    }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createCursorStore: ({ filePath } = {}) => {
+      const key = filePath ?? "default";
+      if (!cursorByPath.has(key)) cursorByPath.set(key, 0);
+      return {
+        async read() { return cursorByPath.get(key); },
+        async write(next) { cursorByPath.set(key, next); return next; },
+      };
+    },
+    createGrokBotBridge: () => ({
+      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+      async stop() {},
+      async handleWake(wake) {
+        bobAttempts += 1;
+        if (bobAttempts === 1) {
+          const error = new Error("webhook failed");
+          error.code = "webhook_failed";
+          throw error;
+        }
+        return { status: "accepted", highWatermark: wake.highWatermark };
+      },
+    }),
+    logger: { error() {} },
+  });
+
+  const installPath = "/private/install-wake-cursor.json";
+  // First watch cycle: durable loop will retry after Bob failure.
+  const result = await supervisor.watch({
+    signal: AbortSignal.timeout(2_000),
+    sleep: async () => {},
+  });
+  assert.ok(bobAttempts >= 2);
+  assert.equal(cursorByPath.get(installPath), 15);
+  assert.ok(result.installWatch != null || result.grokBotWake != null);
+});
+
 test("install dispatcher fans out Bob webhook and headless kick from one cursor", async () => {
   const bobWakes = [];
   const kicks = [];
