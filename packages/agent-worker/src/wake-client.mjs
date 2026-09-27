@@ -154,6 +154,8 @@ export function createWakeClient({
   transport,
   cursorStore = createMemoryCursorStore(0),
   coalesceMs = 300,
+  // Safe default for non-held / unknown transports. Install dispatcher passes
+  // INSTALL_WATCH_HELD_POLL_IDLE_MS (2s) explicitly after hold is proven.
   idlePollIntervalMs = 30_000,
   idleJitterRatio = 0.1,
   random = Math.random,
@@ -197,10 +199,11 @@ export function createWakeClient({
     }));
     pending = new Map();
     const maxCursor = Math.max(...batch.map((entry) => entry.highWatermark));
-    await cursorStore.write(maxCursor);
+    // D5: persist install cursor only after fan-out handlers accept / schedule.
     for (const wake of batch) {
       await onWake(wake);
     }
+    await cursorStore.write(maxCursor);
   }
 
   function scheduleFlush() {

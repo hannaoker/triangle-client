@@ -75,7 +75,7 @@ test("empty and receipt-only helper results never admit a model turn", async () 
   });
 
   await drain.start({ runLoop: false });
-  assert.deepEqual(await drain.drainOnce(), { status: "idle" });
+  assert.equal((await drain.drainOnce()).status, "idle");
   assert.equal(runs, 0);
   await drain.stop();
 });
@@ -109,9 +109,45 @@ test("concurrent wakeups single-flight and a failed turn remains unacknowledged"
   const second = drain.drainOnce();
   release();
   await assert.rejects(first, (error) => error.code === "child_exited");
-  assert.deepEqual(await second, { status: "already_draining" });
+  assert.equal((await second).status, "already_draining");
   assert.equal(resolves, 1);
   assert.equal(runs, 1);
+  await drain.stop();
+});
+
+test("watch kick while draining arms one trailing drain", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let resolves = 0;
+  const runtime = {
+    async start() {},
+    async recoverAfterRestart() { return { quarantined: 0 }; },
+    async runDelivery() {
+      await blocked;
+      return { status: "completed" };
+    },
+    async stop() {},
+  };
+  const drain = createHeadlessCodexDrain({
+    runtime,
+    resolveDelivery: async () => {
+      resolves += 1;
+      return delivery({ deliveryId: `delivery_${resolves}`, numericDeliveryId: resolves });
+    },
+    profileInstanceId: INSTANCE,
+  });
+
+  await drain.start({ runLoop: false });
+  const first = drain.drainOnce("timer");
+  const kicked = drain.kick({ reason: "watch_hint" });
+  assert.equal((await kicked).status, "pending");
+  assert.equal(drain.status().pendingKick, true);
+  release();
+  await first;
+  // Allow microtask trailing drain to run.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(resolves, 2);
+  assert.equal(drain.status().pendingKick, false);
   await drain.stop();
 });
 

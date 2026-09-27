@@ -82,14 +82,14 @@ public struct ClientInstance: Codable, Equatable, Sendable {
             || participatesInHeadlessWake
             || participatesInCursorAcpWake
     }
-    /// Installation watch grant notify members: event-driven drains + App Server + Grok Bot hosts.
-    /// Headless App Server admission is helper-transaction poll, not watch-grant notify.
+    /// Installation watch grant notify members: event-driven drains, bound App Server /
+    /// Grok Bot hosts, and bound headless Codex App Server drains (supervisor kick path).
+    /// Cursor ACP stays out until it has a routable kick (#57).
     public var participatesInWatchGrantNotify: Bool {
-        enabled && (
-            deliveryMode == .eventDriven
-            || deliveryMode == .mcpInteractive
-            || deliveryMode == .grokBot
-        )
+        participatesInEventDrivenWake
+            || participatesInAppServerWake
+            || participatesInGrokBotWake
+            || participatesInHeadlessWake
     }
 
     public init(

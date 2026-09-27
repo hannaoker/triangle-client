@@ -47,11 +47,16 @@ export const HEADLESS_WAKE_REQUIRED_KEYS = Object.freeze([
   "command",
   "pollIntervalMs",
 ]);
-export const HEADLESS_WAKE_OPTIONAL_KEYS = Object.freeze([]);
+/** Optional: MESH agent id for install-watch fan-out (Phase 2). Absent → timer-only. */
+export const HEADLESS_WAKE_OPTIONAL_KEYS = Object.freeze([
+  "agentId",
+]);
 export const HEADLESS_WAKE_KEYS = Object.freeze([
   ...HEADLESS_WAKE_REQUIRED_KEYS,
   ...HEADLESS_WAKE_OPTIONAL_KEYS,
 ]);
+
+const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 
 function codedError(code, message, extra = {}) {
   const error = new Error(message);
@@ -446,6 +451,13 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
     || headlessWake.pollIntervalMs > 60_000) {
     throw new TypeError("headlessWake.pollIntervalMs is invalid");
   }
+  let agentId = null;
+  if (Object.hasOwn(headlessWake, "agentId")) {
+    if (typeof headlessWake.agentId !== "string" || !AGENT_ID.test(headlessWake.agentId)) {
+      throw new TypeError("headlessWake.agentId is invalid");
+    }
+    agentId = headlessWake.agentId;
+  }
   return Object.freeze({
     profile: headlessWake.profile,
     profileInstanceId: headlessWake.profileInstanceId,
@@ -455,6 +467,7 @@ export function normalizeHeadlessWakeConfig(headlessWake) {
     stateRoot: path.resolve(requiredAbsolute(headlessWake.stateRoot, "headlessWake.stateRoot")),
     command: requiredAbsolute(headlessWake.command, "headlessWake.command"),
     pollIntervalMs: headlessWake.pollIntervalMs,
+    ...(agentId != null ? { agentId } : {}),
   });
 }
 

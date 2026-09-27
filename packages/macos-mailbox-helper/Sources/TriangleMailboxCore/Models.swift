@@ -360,6 +360,8 @@ public struct ParsedCommand: Equatable, Sendable {
     public let eventID: String?
     public let failureReason: String?
     public let confirmAbandon: Bool
+    /// Optional explicit watch-ensure notify set (must include actor). Nil = auto membership.
+    public let memberProfiles: [ProfileName]?
 
     public init(
         command: HelperCommand,
@@ -373,7 +375,8 @@ public struct ParsedCommand: Equatable, Sendable {
         roomID: String? = nil,
         eventID: String? = nil,
         failureReason: String? = nil,
-        confirmAbandon: Bool = false
+        confirmAbandon: Bool = false,
+        memberProfiles: [ProfileName]? = nil
     ) {
         self.command = command
         self.profile = profile
@@ -387,6 +390,7 @@ public struct ParsedCommand: Equatable, Sendable {
         self.eventID = eventID
         self.failureReason = failureReason
         self.confirmAbandon = confirmAbandon
+        self.memberProfiles = memberProfiles
     }
 }
 
@@ -623,6 +627,7 @@ public enum CommandParser {
         }
 
         var flagValues: [String: String] = [:]
+        var memberProfileValues: [String] = []
         var index = 0
         while index < flags.count {
             let argument = flags[index]
@@ -630,7 +635,18 @@ public enum CommandParser {
                 throw CommandParseError.unknownOrDuplicateFlag
             }
             let value = flags[index + 1]
-            guard !value.hasPrefix("--"), flagValues[argument] == nil else {
+            guard !value.hasPrefix("--") else {
+                throw CommandParseError.unknownOrDuplicateFlag
+            }
+            if argument == "--member-profile" {
+                guard command == .watchEnsure else {
+                    throw CommandParseError.unknownOrDuplicateFlag
+                }
+                memberProfileValues.append(value)
+                index += 2
+                continue
+            }
+            guard flagValues[argument] == nil else {
                 throw CommandParseError.unknownOrDuplicateFlag
             }
             flagValues[argument] = value
@@ -668,11 +684,30 @@ public enum CommandParser {
                 throw CommandParseError.missingRequiredFlag
             }
             do {
+                let actor = try ProfileName(actorValue)
+                let members: [ProfileName]?
+                if memberProfileValues.isEmpty {
+                    members = nil
+                } else {
+                    var parsed: [ProfileName] = []
+                    var seen = Set<String>()
+                    for raw in memberProfileValues {
+                        let name = try ProfileName(raw)
+                        guard seen.insert(name.value).inserted else {
+                            throw CommandParseError.unknownOrDuplicateFlag
+                        }
+                        parsed.append(name)
+                    }
+                    members = parsed
+                }
                 return ParsedCommand(
                     command: command,
-                    profile: try ProfileName(actorValue),
-                    installationID: installationID
+                    profile: actor,
+                    installationID: installationID,
+                    memberProfiles: members
                 )
+            } catch let error as CommandParseError {
+                throw error
             } catch {
                 throw CommandParseError.invalidFlagValue
             }

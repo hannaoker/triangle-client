@@ -372,6 +372,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/shared-codex-app-server.mjs",
                 "packages/agent-worker/src/app-server-bind-cli.mjs",
                 "packages/agent-worker/src/grok-bot-wake.mjs",
+                "packages/agent-worker/src/install-watch-dispatcher.mjs",
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }

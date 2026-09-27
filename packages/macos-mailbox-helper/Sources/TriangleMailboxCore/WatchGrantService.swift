@@ -249,12 +249,15 @@ public struct WatchGrantService: Sendable {
                 throw ClientInstanceStoreError.unsafeStorage
             }
             // Auto membership: event-driven drains + App Server-bound
-            // mcp-interactive + Grok Bot-bound hosts (when bindings are present).
-            // Do not pull every mcp-interactive / grok-bot profile into the grant.
+            // mcp-interactive + Grok Bot-bound + headless-runtime-bound Codex
+            // (when bindings are present). Do not pull every mcp-interactive /
+            // grok-bot / headless profile into the grant — binding gates apply.
+            // Cursor ACP is never auto-included (no kick path yet).
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
             let boundGrokBot = Self.grokBotBoundMembers(from: instances)
-            profiles = (eventDriven + boundInteractive + boundGrokBot).map(\.profile)
+            let boundHeadless = Self.headlessBoundCodexMembers(from: instances)
+            profiles = (eventDriven + boundInteractive + boundGrokBot + boundHeadless).map(\.profile)
         } else {
             profiles = [actorProfile]
         }
@@ -414,6 +417,39 @@ public struct WatchGrantService: Sendable {
               !boundInstanceId.isEmpty
         else { return [] }
         return grokBots.filter { $0.instanceID.value == boundInstanceId }
+    }
+
+    /// Headless Codex profiles whose instanceId appears in headless-runtime-binding.json.
+    /// When file-credential custody is enabled, also require a local workload key file so
+    /// auto-ensure does not fail closed on a bound profile that cannot join yet.
+    private static func headlessBoundCodexMembers(from instances: [ClientInstance]) -> [ClientInstance] {
+        let headless = instances.filter(\.participatesInHeadlessWake)
+        guard !headless.isEmpty else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let clientRoot = home.appendingPathComponent("Library/Application Support/The Triangle/client")
+        let bindingURL = clientRoot.appendingPathComponent("headless-runtime-binding.json")
+        guard FileManager.default.isReadableFile(atPath: bindingURL.path),
+              let data = try? Data(contentsOf: bindingURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let profileObjects = object["profiles"] as? [[String: Any]]
+        else { return [] }
+        let boundInstanceIds = Set(profileObjects.compactMap { entry -> String? in
+            guard let instanceId = entry["instanceId"] as? String, !instanceId.isEmpty else { return nil }
+            return instanceId
+        })
+        guard !boundInstanceIds.isEmpty else { return [] }
+        let bound = headless.filter { boundInstanceIds.contains($0.instanceID.value) }
+        let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
+        let fileCustodyEnabled = FileManager.default.isReadableFile(
+            atPath: credentialsRoot.appendingPathComponent("ENABLED").path
+        )
+        guard fileCustodyEnabled else { return bound }
+        return bound.filter { instance in
+            let workloadURL = credentialsRoot
+                .appendingPathComponent("workload")
+                .appendingPathComponent("\(instance.profile.value).json")
+            return FileManager.default.isReadableFile(atPath: workloadURL.path)
+        }
     }
 }
 

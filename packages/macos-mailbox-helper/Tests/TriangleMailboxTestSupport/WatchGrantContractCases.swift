@@ -188,6 +188,20 @@ public enum WatchGrantContractCases {
         try expect(ensure.command == .watchEnsure, "watch-ensure rejected")
         try expect(ensure.installationID?.value == "inst_N7VhDq3mQ2", "installation not parsed")
         try expect(ensure.profile?.value == "codex-mailbox-live", "actor profile not parsed")
+        try expect(ensure.memberProfiles == nil, "watch-ensure auto membership should omit memberProfiles")
+
+        let ensureMembers = try CommandParser.parse([
+            "watch-ensure",
+            "--installation", "inst_N7VhDq3mQ2",
+            "--actor-profile", "bob",
+            "--member-profile", "bob",
+            "--member-profile", "codex-headless",
+        ])
+        try expect(ensureMembers.command == .watchEnsure, "watch-ensure with members rejected")
+        try expect(
+            ensureMembers.memberProfiles?.map(\.value) == ["bob", "codex-headless"],
+            "watch-ensure member profiles not parsed"
+        )
 
         let status = try CommandParser.parse(["watch-status", "--installation", "inst_N7VhDq3mQ2"])
         try expect(status.command == .watchStatus, "watch-status rejected")

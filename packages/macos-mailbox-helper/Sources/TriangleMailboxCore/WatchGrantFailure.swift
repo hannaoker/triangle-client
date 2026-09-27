@@ -406,7 +406,8 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             requires = ["--installation", "--actor-profile"]
             notes = [
                 "Creates/joins/finalizes an installation-scoped watch grant for notify members.",
-                "mcp-interactive and grok-bot profiles may be notify members (App Server / Grok Bot wake); mcp-interactive cannot act as the grant actor.",
+                "Optional repeatable --member-profile selects an explicit notify set (must include the actor); omit for auto membership.",
+                "Bound headless Codex, mcp-interactive, and grok-bot profiles may be notify members; mcp-interactive cannot act as the grant actor; Cursor ACP is excluded until a kick path exists.",
                 "Failures emit secret-free JSON on stderr with code, gate, and operatorAction.",
             ]
         case .watchStatus:

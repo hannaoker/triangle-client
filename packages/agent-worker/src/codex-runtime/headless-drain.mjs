@@ -54,15 +54,15 @@ export function createHeadlessCodexDrain({
   let timer = null;
   let inFlight = null;
   let lastResult = null;
+  /** @type {string | null} Coalesced trailing kick reason while a drain is in flight. */
+  let pendingKickReason = null;
 
-  async function drainOnce() {
-    if (!started || stopping) return Object.freeze({ status: "stopped" });
-    if (inFlight != null) return Object.freeze({ status: "already_draining" });
-
+  async function runDrainAttempt(reason = "timer") {
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
     const operation = (async () => {
       const delivery = await resolveDelivery();
       if (delivery == null) {
-        lastResult = Object.freeze({ status: "idle" });
+        lastResult = Object.freeze({ status: "idle", reason });
         return lastResult;
       }
       try {
@@ -70,8 +70,8 @@ export function createHeadlessCodexDrain({
           profileInstanceId,
           ...delivery,
         });
-        lastResult = result;
-        return result;
+        lastResult = Object.freeze({ ...result, reason });
+        return lastResult;
       } catch (error) {
         if (onDeliveryFailure != null) {
           try {
@@ -90,7 +90,60 @@ export function createHeadlessCodexDrain({
       return await operation;
     } finally {
       if (inFlight === operation) inFlight = null;
+      if (pendingKickReason && started && !stopping) {
+        const trailingReason = pendingKickReason;
+        pendingKickReason = null;
+        // Trailing kick: one follow-up drain after the in-flight attempt settles.
+        // Do not await inside finally of a nested call — schedule microtask.
+        queueMicrotask(() => {
+          if (!started || stopping || inFlight != null) return;
+          drainOnce(trailingReason).catch((error) => {
+            logger.error?.("triangle_headless_drain_trailing_failed", {
+              code: error?.code ?? null,
+              reason: trailingReason,
+            });
+          });
+        });
+      }
     }
+  }
+
+  async function drainOnce(reason = "timer") {
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
+    if (inFlight != null) {
+      // Only watch kicks arm a trailing drain. Timer/schedule callers already
+      // re-arm via schedule(); coalescing them would busy-loop after every turn.
+      if (reason === "watch_hint" || reason === "watch_hint_trailing") {
+        pendingKickReason = "watch_hint_trailing";
+        return Object.freeze({
+          status: "already_draining",
+          pendingKick: true,
+          reason: pendingKickReason,
+        });
+      }
+      return Object.freeze({
+        status: "already_draining",
+        pendingKick: pendingKickReason != null,
+        reason: pendingKickReason,
+      });
+    }
+    return runDrainAttempt(reason);
+  }
+
+  /**
+   * External watch/supervisor kick. Does not acquire a second claimer.
+   * Idle → start drainOnce; already draining → pending trailing kick.
+   */
+  function kick({ reason = "watch_hint" } = {}) {
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > 64) {
+      throw new TypeError("kick reason is invalid");
+    }
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
+    if (inFlight != null) {
+      pendingKickReason = reason === "watch_hint" ? "watch_hint_trailing" : reason;
+      return Object.freeze({ status: "pending", reason: pendingKickReason });
+    }
+    return drainOnce(reason);
   }
 
   function schedule() {
@@ -98,7 +151,7 @@ export function createHeadlessCodexDrain({
     timer = setTimer(async () => {
       timer = null;
       try {
-        await drainOnce();
+        await drainOnce("timer");
       } catch (error) {
         logger.error?.("triangle_headless_drain_failed", {
           code: error?.code ?? null,
@@ -113,6 +166,7 @@ export function createHeadlessCodexDrain({
   async function start({ runLoop = true } = {}) {
     if (started) return status();
     stopping = false;
+    pendingKickReason = null;
     await runtime.start();
     try {
       const recovered = await runtime.recoverAfterRestart({ profileInstanceId });
@@ -134,6 +188,7 @@ export function createHeadlessCodexDrain({
 
   async function stop(options = {}) {
     stopping = true;
+    pendingKickReason = null;
     if (timer != null) {
       clearTimer(timer);
       timer = null;
@@ -155,10 +210,12 @@ export function createHeadlessCodexDrain({
       started,
       stopping,
       draining: inFlight != null,
+      pendingKick: pendingKickReason != null,
+      pendingKickReason,
       profileInstanceId,
       lastResult,
     });
   }
 
-  return Object.freeze({ start, stop, drainOnce, status });
+  return Object.freeze({ start, stop, drainOnce, kick, status });
 }
