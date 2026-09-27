@@ -434,7 +434,12 @@ enum TriangleMailboxCLI {
 
     private static func runWatch(_ command: ParsedCommand) async throws {
         guard let installationID = command.installationID else { throw CommandParseError.missingRequiredFlag }
-        let transport = URLSessionMeshTransport()
+        // Held long-poll can run up to pollTimeoutSeconds (~25–55) on MESH; keep
+        // URLSession above that so the helper does not abort a valid hold.
+        let watchConfiguration = URLSessionConfiguration.ephemeral
+        watchConfiguration.timeoutIntervalForRequest = 60
+        watchConfiguration.timeoutIntervalForResource = 60
+        let transport = URLSessionMeshTransport(configuration: watchConfiguration)
         let gate = VerifiedCredentialGate(
             store: LocalCredentialStores.mailbox(),
             workloadKeyStore: LocalCredentialStores.workload(),

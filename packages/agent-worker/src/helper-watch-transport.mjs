@@ -262,7 +262,7 @@ export function createHelperWatchTransport({
   helperPath,
   installationId,
   run = runHelper,
-  timeoutMs = 35_000,
+  timeoutMs = 60_000,
 } = {}) {
   if (typeof helperPath !== "string" || helperPath.length === 0) {
     throw new TypeError("helperPath is required");
