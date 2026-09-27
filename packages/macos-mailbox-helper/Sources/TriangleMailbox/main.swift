@@ -459,7 +459,11 @@ enum TriangleMailboxCLI {
             switch command.command {
             case .watchEnsure:
                 guard let actor = command.profile else { throw CommandParseError.missingRequiredFlag }
-                let status = try await service.ensureGrant(installationID: installationID, actorProfile: actor)
+                let status = try await service.ensureGrant(
+                    installationID: installationID,
+                    actorProfile: actor,
+                    memberProfiles: command.memberProfiles
+                )
                 let rendered = try WatchGrantOperatorStatusRenderer.render(status)
                 FileHandle.standardOutput.write(rendered.stdout)
                 if rendered.exitCode != 0 { exit(rendered.exitCode) }

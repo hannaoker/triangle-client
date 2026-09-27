@@ -891,8 +891,8 @@ export function createClientSupervisor({
       laneCursorStores.push(createCursorStore({ filePath: appServerConfig.cursorPath }));
     }
 
-    // Membership inactive: register kick handlers only when agentId is present.
-    // Grant remains Bob-only until gated Phase 4 ensure — kicks stay inert without events.
+    // Register kick handlers when agentId is present. Events arrive only after
+    // Phase 4 ensure adds those agent ids to the install grant.
     for (const entry of headlessEntries) {
       const agentId = entry.config.agentId;
       if (typeof agentId !== "string" || agentId.length === 0) continue;
