@@ -92,13 +92,15 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 30
+        // Preserve caller timeouts (watch-poll sets 60s for held long-poll).
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
 
     public override convenience init() {
-        self.init(configuration: .ephemeral)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 30
+        self.init(configuration: configuration)
     }
 
     public init(configuration: URLSessionConfiguration) {

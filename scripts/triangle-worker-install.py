@@ -33,6 +33,7 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/app-server-bind-cli.mjs",
     "packages/agent-worker/src/grok-bot-wake.mjs",
+    "packages/agent-worker/src/install-watch-dispatcher.mjs",
     "packages/agent-worker/src/wake-client.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
