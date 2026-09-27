@@ -913,6 +913,10 @@ test("App Server keeps own watch loop when installation differs from Bob dispatc
     appServerWake: {
       ...appServerWakeFixture(3),
       installationId: "inst_OtherInstall01",
+      binding: {
+        ...appServerWakeFixture(3).binding,
+        installationId: "inst_OtherInstall01",
+      },
     },
     grokBotWake: grokBotWakeFixture(4),
     createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),

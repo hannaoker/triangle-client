@@ -337,6 +337,23 @@ public enum TriangleClientCLIContractCases {
         try clientExpect(crashing.loaded("dev.thetriangle.codex.worker"), "unstable client retired the legacy consumer")
         try clientExpect(!FileManager.default.fileExists(atPath: crashing.activationMarker.path), "successful rollback retained activation")
         try clientExpect(!FileManager.default.fileExists(atPath: crashing.readinessMarker.path), "successful rollback retained readiness")
+
+        let withEnv = try LaunchdFixture(environment: [
+            "TRIANGLE_CODEX_POOL_ENABLE": "1",
+            "TRIANGLE_CODEX_POOL_SIZE": "2",
+            "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+        ])
+        try withEnv.control.applyAndVerify(shouldRun: true)
+        try clientExpect(withEnv.loaded("dev.thetriangle.client"), "client with valid EnvironmentVariables failed to load")
+        try withEnv.control.applyAndVerify(shouldRun: false)
+
+        let invalidEnvKey = try LaunchdFixture(environment: ["INVALID_ENV_KEY": "1"])
+        do { try invalidEnvKey.control.applyAndVerify(shouldRun: true); throw TriangleClientContractFailure("invalid environment key accepted") }
+        catch TriangleClientLifecycleError.reloadFailed {}
+
+        let invalidEnvVal = try LaunchdFixture(environment: ["TRIANGLE_CODEX_POOL_ENABLE": "not-a-digit"])
+        do { try invalidEnvVal.control.applyAndVerify(shouldRun: true); throw TriangleClientContractFailure("non-digit environment value accepted") }
+        catch TriangleClientLifecycleError.reloadFailed {}
     }
 
     public static func launchdRollbackAvoidsDuplicates() async throws {
@@ -363,7 +380,7 @@ private final class LaunchdFixture {
     let readinessMarker: URL
     let control: LaunchdTriangleClientServiceControl
 
-    init() throws {
+    init(environment: [String: String]? = nil) throws {
         let manager = FileManager.default
         home = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("triangle-launchd-\(UUID().uuidString)", isDirectory: true)
         state = home.appendingPathComponent("state", isDirectory: true)
@@ -387,7 +404,7 @@ private final class LaunchdFixture {
         let hash = installManifest.appendingPathComponent("triangle-mailbox.sha256")
         try Data("\(digest)\n".utf8).write(to: hash, options: .atomic)
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: hash.path)
-        try Self.writeClientPlist(home: home, helper: helper)
+        try Self.writeClientPlist(home: home, helper: helper, environment: environment)
         let executable = home.appendingPathComponent("launchctl")
         try Data(Self.launchctlScript.utf8).write(to: executable, options: .atomic)
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
@@ -404,9 +421,9 @@ private final class LaunchdFixture {
         FileManager.default.createFile(atPath: state.appendingPathComponent(label).path, contents: Data())
     }
 
-    private static func writeClientPlist(home: URL, helper: URL) throws {
+    private static func writeClientPlist(home: URL, helper: URL, environment: [String: String]? = nil) throws {
         let logs = home.appendingPathComponent("Library/Logs/the-triangle")
-        let document: [String: Any] = [
+        var document: [String: Any] = [
             "Label": "dev.thetriangle.client",
             "ProgramArguments": [helper.path, "run-supervisor"],
             "RunAtLoad": true,
@@ -415,6 +432,9 @@ private final class LaunchdFixture {
             "StandardOutPath": logs.appendingPathComponent("client.log").path,
             "StandardErrorPath": logs.appendingPathComponent("client.error.log").path,
         ]
+        if let environment {
+            document["EnvironmentVariables"] = environment
+        }
         let plist = home.appendingPathComponent("Library/LaunchAgents/dev.thetriangle.client.plist")
         try PropertyListSerialization.data(fromPropertyList: document, format: .xml, options: 0).write(to: plist)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path)
