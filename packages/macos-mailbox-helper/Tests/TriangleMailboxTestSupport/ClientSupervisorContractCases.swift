@@ -457,6 +457,8 @@ public enum ClientSupervisorContractCases {
         try expect(Set(wakes.map(\.profileInstanceId)).count == 2, "headless instance IDs collided")
         try expect(Set(wakes.map(\.stateRoot)).count == 2, "headless state roots collided")
         try expect(wakes.allSatisfy { $0.allowedRoomId == nil }, "global room pin reached v2 headless wake")
+        try expect(wakes.allSatisfy { !$0.agentId.isEmpty }, "headless wake missing agentId for install dispatcher")
+        try expect(Set(wakes.map(\.agentId)).count == 2, "headless agent IDs collided")
         let headlessIds = Set(wakes.map(\.profileInstanceId))
         try expect(!bootstrap.instances.contains { headlessIds.contains($0.instanceId) }, "headless leaked into worker instances")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
@@ -1446,6 +1448,7 @@ private struct TestHeadlessWake: Decodable {
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
+    let agentId: String
 }
 private struct TestCursorAcpWake: Decodable {
     let profile: String

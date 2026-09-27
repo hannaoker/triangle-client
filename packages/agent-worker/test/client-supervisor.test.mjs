@@ -857,12 +857,16 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
       assert.equal(options.webhookUrlPath, "/private/grok-bot-webhook.url");
       assert.equal(options.webhookKeyPath, "/private/grok-bot-webhook.key");
       assert.equal(options.binding.wakeMode, "webhook");
+      assert.equal(options.ownWatchLoop, false);
       return {
         async start() {
           bridgeStarted = true;
-          return { status: "stopped", cycles: 1 };
+          return { status: "handler_ready", ownWatchLoop: false };
         },
         async stop() {},
+        async handleWake() {
+          return { status: "accepted" };
+        },
       };
     },
     logger: { error() {} },
@@ -870,10 +874,88 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
 
   assert.equal(supervisor.grokBotInstanceId, id(4));
   assert.equal(supervisor.grokBotWake.binding.grokAgentId, "12aedccc-8662-4a7f-84da-3d35c9e97842");
+  assert.equal(supervisor.installWatchDispatcherEnabled, true);
+  assert.deepEqual(supervisor.installWatchProfileIds, [id(4)]);
   const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
   assert.equal(bridgeStarted, true);
   assert.deepEqual(ensured, ["bob"]);
-  assert.equal(result.grokBotWake?.cycles, 1);
+  assert.ok(result.installWatch?.cycles >= 1 || result.grokBotWake != null);
+});
+
+test("install dispatcher fans out Bob webhook and headless kick from one cursor", async () => {
+  const bobWakes = [];
+  const kicks = [];
+  const polls = [];
+  const bobAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
+  const headlessAgent = "agent_headless_codex_001";
+  const headless = headlessWakeFixture({
+    agentId: headlessAgent,
+    pollIntervalMs: 30_000,
+  });
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    grokBotWake: grokBotWakeFixture(4),
+    headlessWakes: [headless],
+    createWatchTransport: () => ({
+      async poll({ cursor }) {
+        polls.push(cursor);
+        if (polls.length === 1) {
+          return {
+            cursor: 11,
+            events: [
+              { agent_id: bobAgent, high_watermark: 11 },
+              { agent_id: headlessAgent, high_watermark: 10 },
+            ],
+          };
+        }
+        return { cursor: 11, events: [] };
+      },
+    }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    createCursorStore: () => {
+      let cursor = 0;
+      return {
+        async read() { return cursor; },
+        async write(next) { cursor = next; return cursor; },
+      };
+    },
+    createGrokBotBridge: () => ({
+      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+      async stop() {},
+      async handleWake(wake) {
+        bobWakes.push(wake);
+        return { status: "accepted" };
+      },
+    }),
+    createClaimerGuard: fakeClaimerGuard().create,
+    createHeadlessDrain: () => ({
+      async start() { return { status: "running" }; },
+      async stop() {},
+      kick(options) {
+        kicks.push(options);
+        return { status: "started", reason: options.reason };
+      },
+    }),
+    logger: { error() {} },
+  });
+
+  assert.equal(supervisor.installWatchDispatcherEnabled, true);
+  assert.equal(supervisor.installWatchProfileIds.length, 2);
+  assert.ok(supervisor.installWatchProfileIds.includes(id(4)));
+  assert.ok(supervisor.installWatchProfileIds.includes(headless.profileInstanceId));
+
+  const controller = new AbortController();
+  const watching = supervisor.watch({ signal: controller.signal, sleep: async () => {} });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  controller.abort();
+  await watching;
+
+  assert.ok(bobWakes.length >= 1);
+  assert.ok(bobWakes.some((wake) => wake.highWatermark === 11 && wake.instanceId === id(4)));
+  assert.ok(kicks.length >= 1);
+  assert.ok(kicks.some((kick) => kick.reason === "watch_hint"));
+  assert.equal(polls[0], 0);
 });
 
 test("supervisor rejects grokBotWake collision with worker and appServerWake", () => {
@@ -928,6 +1010,7 @@ test("supervisor stops App Server and Grok Bot bridges before wake retry", async
     instances: [],
     appServerWake: appServerWakeFixture(3),
     grokBotWake: grokBotWakeFixture(4),
+    useInstallWatchDispatcher: false,
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
     createWorker: () => ({ async watch() {}, async runOnce() {} }),
@@ -1020,6 +1103,7 @@ test("supervisor shares one watch transport poll across App Server and Grok Bot 
     instances: [],
     appServerWake: appServerWakeFixture(3),
     grokBotWake: grokBotWakeFixture(4),
+    useInstallWatchDispatcher: false,
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
     createWorker: () => ({ async watch() {}, async runOnce() {} }),
@@ -1153,6 +1237,7 @@ test("supervisor renews one expired shared watch grant and resumes both wake cur
     instances: [],
     appServerWake: appServerWakeFixture(3),
     grokBotWake: grokBotWakeFixture(4),
+    useInstallWatchDispatcher: false,
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
     createWorker: () => ({ async watch() {}, async runOnce() {} }),

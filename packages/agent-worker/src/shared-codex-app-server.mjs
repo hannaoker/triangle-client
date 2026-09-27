@@ -1139,6 +1139,8 @@ export function createAppServerWakeBridge({
   resolveDelivery,
   coalesceMs = 300,
   wakeClientFactory = createWakeClient,
+  /** When false, bridge only exposes handleWake; install dispatcher owns the poll loop (D5). */
+  ownWatchLoop = true,
   logger = console,
 } = {}) {
   const validated = validateBinding(binding);
@@ -1150,6 +1152,9 @@ export function createAppServerWakeBridge({
   }
   if (!watchTransport || typeof watchTransport.poll !== "function") {
     throw new TypeError("watchTransport.poll is required");
+  }
+  if (typeof ownWatchLoop !== "boolean") {
+    throw new TypeError("ownWatchLoop must be a boolean");
   }
 
   const wakeProfiles = profiles ?? [
@@ -1216,6 +1221,10 @@ export function createAppServerWakeBridge({
         });
       }
       await session.connect();
+      started = true;
+      if (!ownWatchLoop) {
+        return { status: "handler_ready", ownWatchLoop: false };
+      }
       wakeClient = wakeClientFactory({
         profiles: wakeProfiles,
         transport: watchTransport,
@@ -1237,7 +1246,6 @@ export function createAppServerWakeBridge({
           }
         },
       });
-      started = true;
       try {
         await wakeClient.reconcileStartup({ signal });
         return await wakeClient.watch({ signal, maxCycles });

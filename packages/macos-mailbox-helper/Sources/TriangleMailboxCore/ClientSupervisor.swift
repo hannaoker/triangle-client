@@ -959,7 +959,8 @@ public struct ClientSupervisor: Sendable {
                 codexHome: codexHome,
                 stateRoot: entry.stateRoot,
                 command: command,
-                pollIntervalMs: pollIntervalMs
+                pollIntervalMs: pollIntervalMs,
+                agentId: credential.agentID.value
             ))
         }
         return prepared
@@ -1345,9 +1346,11 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
+    /// MESH agent id for install-watch fan-out (Phase 2). Membership stay gated.
+    let agentId: String
 
     private enum CodingKeys: String, CodingKey {
-        case profile, profileInstanceId, helperPath, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs
+        case profile, profileInstanceId, helperPath, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs, agentId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1361,6 +1364,7 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
         try container.encode(stateRoot, forKey: .stateRoot)
         try container.encode(command, forKey: .command)
         try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
+        try container.encode(agentId, forKey: .agentId)
     }
 }
 
