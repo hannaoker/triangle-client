@@ -132,23 +132,26 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
 
         let startingRedirectEpoch = redirectLock.withLock { redirectEpoch }
         do {
-            let (bytes, response) = try await session.bytes(for: urlRequest)
+            let (data, response): (Data, URLResponse) = try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: urlRequest) { data, response, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let response, let data {
+                        continuation.resume(returning: (data, response))
+                    } else {
+                        continuation.resume(throwing: MeshClientError.invalidResponse)
+                    }
+                }
+                task.resume()
+            }
             guard let http = response as? HTTPURLResponse, let finalURL = http.url else {
                 throw MeshClientError.invalidResponse
             }
             if (300...399).contains(http.statusCode) {
                 throw MeshClientError.redirectRejected
             }
-            if http.expectedContentLength > MeshClient.maximumResponseBytes {
+            if http.expectedContentLength > MeshClient.maximumResponseBytes || data.count > MeshClient.maximumResponseBytes {
                 throw MeshClientError.responseTooLargeAfterResponse(statusCode: http.statusCode)
-            }
-            var data = Data()
-            data.reserveCapacity(min(http.expectedContentLength > 0 ? Int(http.expectedContentLength) : 0, MeshClient.maximumResponseBytes))
-            for try await byte in bytes {
-                guard data.count < MeshClient.maximumResponseBytes else {
-                    throw MeshClientError.responseTooLargeAfterResponse(statusCode: http.statusCode)
-                }
-                data.append(byte)
             }
             let headers = responseHeaders(http)
             return MeshHTTPResponse(statusCode: http.statusCode, headers: headers, body: data, finalURL: finalURL)
