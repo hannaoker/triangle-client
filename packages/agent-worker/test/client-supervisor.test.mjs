@@ -882,7 +882,7 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
   assert.ok(result.installWatch?.cycles >= 1 || result.grokBotWake != null);
 });
 
-test("install dispatcher uses safe 30s idle until held-poll is proven", () => {
+test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
   const supervisor = createClientSupervisor({
     instances: [],
     grokBotWake: grokBotWakeFixture(4),
@@ -894,7 +894,7 @@ test("install dispatcher uses safe 30s idle until held-poll is proven", () => {
       async handleWake() { return { status: "accepted" }; },
     }),
     createInstallDispatcher: (options) => {
-      assert.equal(options.idlePollIntervalMs, 30_000);
+      assert.equal(options.idlePollIntervalMs, 2_000);
       return {
         profiles: options.profiles,
         async start() { return { cycles: 0 }; },

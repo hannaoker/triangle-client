@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  INSTALL_WATCH_HELD_POLL_IDLE_MS,
   INSTALL_WATCH_SAFE_IDLE_POLL_MS,
   assertFanOutAccepted,
   createInstallWatchDispatcher,
@@ -223,14 +224,16 @@ test("failed fan-out leaves cursor unadvanced so a later poll can replay", async
   assert.deepEqual(handled, [8, 8]);
 });
 
-test("install dispatcher defaults to safe 30s idle until held-poll is proven", () => {
+test("install dispatcher factory defaults to safe 30s; held-poll short idle is 2s", () => {
   const dispatcher = createInstallWatchDispatcher({
     profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],
     handlers: { [INSTANCE_A]: async () => ({ status: "ok" }) },
     transport: { async poll() { return { cursor: 0, events: [] }; } },
   });
+  // Factory default stays SAFE; supervisor opts into HELD after Phase 0.5 proof.
   assert.equal(dispatcher.idlePollIntervalMs, INSTALL_WATCH_SAFE_IDLE_POLL_MS);
   assert.equal(INSTALL_WATCH_SAFE_IDLE_POLL_MS, 30_000);
+  assert.equal(INSTALL_WATCH_HELD_POLL_IDLE_MS, 2_000);
 });
 
 test("install dispatcher migrates lane cursors from disk before first poll", async () => {

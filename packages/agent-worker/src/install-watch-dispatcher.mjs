@@ -19,12 +19,11 @@ const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
 
 /**
- * Safe reconnect idle while MESH held-poll is unproven (Hobby anti-pattern if
- * empty polls return immediately). Switch to HELD_POLL only after Phase 0.5
- * measures a real hold (≥~20s empty tip poll).
+ * Safe reconnect idle when MESH held-poll is down / unproven (Hobby anti-pattern
+ * if empty polls return immediately under short idle).
  */
 export const INSTALL_WATCH_SAFE_IDLE_POLL_MS = 30_000;
-/** Short reconnect backoff only after held-poll is live. */
+/** Short reconnect backoff after Phase 0.5 hold is live (empty tip ≥~20s). */
 export const INSTALL_WATCH_HELD_POLL_IDLE_MS = 2_000;
 
 function positiveInteger(value, name, minimum = 0) {

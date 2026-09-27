@@ -8,7 +8,7 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
-  INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+  INSTALL_WATCH_HELD_POLL_IDLE_MS,
   createInstallWatchDispatcher,
   resolveInstallWatchCursorPath,
 } from "./install-watch-dispatcher.mjs";
@@ -926,9 +926,9 @@ export function createClientSupervisor({
       transport: watchTransport,
       cursorStore: createCursorStore({ filePath: installCursorPath }),
       laneCursorStores,
-      // Keep 30s idle until Phase 0.5 proves held-poll (empty tip ≥~20s).
-      // Short 2s idle under immediate-empty polls is a Hobby cost anti-pattern.
-      idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+      // Phase 0.5 hold proven on Mini prod (~26s empty tip). Short reconnect
+      // backoff only — rollback to INSTALL_WATCH_SAFE_IDLE_POLL_MS if hold dies.
+      idlePollIntervalMs: INSTALL_WATCH_HELD_POLL_IDLE_MS,
       logger,
     });
     if (!installDispatcher || typeof installDispatcher.start !== "function") {
