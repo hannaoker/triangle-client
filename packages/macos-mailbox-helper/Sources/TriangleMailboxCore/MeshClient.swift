@@ -82,10 +82,44 @@ public enum MeshClientError: Error, Equatable, Sendable, CustomStringConvertible
     public var debugDescription: String { description }
 }
 
-public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionTaskDelegate, @unchecked Sendable {
+public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionTaskDelegate, URLSessionDataDelegate, @unchecked Sendable {
     private let configuration: URLSessionConfiguration
     private let redirectLock = NSLock()
     private var redirectEpoch = 0
+    private let taskLock = NSLock()
+    private var inFlight: [Int: InFlight] = [:]
+
+    private struct InFlight {
+        let startingRedirectEpoch: Int
+        let continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>
+        var response: HTTPURLResponse?
+        var accumulatedData = Data()
+        var responseTooLarge = false
+        var statusCode: Int = 0
+    }
+
+    private final class TaskCancelBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private weak var task: URLSessionDataTask?
+        private var isCancelled = false
+
+        func setTask(_ dataTask: URLSessionDataTask) {
+            lock.withLock {
+                self.task = dataTask
+                if isCancelled {
+                    dataTask.cancel()
+                }
+            }
+        }
+
+        func cancel() {
+            lock.withLock {
+                isCancelled = true
+                task?.cancel()
+            }
+        }
+    }
+
     private lazy var session: URLSession = {
         let configuration = configuration.copy() as! URLSessionConfiguration
         configuration.httpCookieStorage = nil
@@ -119,10 +153,97 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
         completionHandler(nil)
     }
 
+    public func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        if (300...399).contains(http.statusCode) {
+            completionHandler(.cancel)
+            return
+        }
+        if http.expectedContentLength > MeshClient.maximumResponseBytes {
+            taskLock.withLock {
+                inFlight[dataTask.taskIdentifier]?.responseTooLarge = true
+                inFlight[dataTask.taskIdentifier]?.statusCode = http.statusCode
+            }
+            completionHandler(.cancel)
+            return
+        }
+        taskLock.withLock {
+            inFlight[dataTask.taskIdentifier]?.response = http
+            inFlight[dataTask.taskIdentifier]?.statusCode = http.statusCode
+        }
+        completionHandler(.allow)
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        let shouldCancel: Bool = taskLock.withLock {
+            guard var state = inFlight[dataTask.taskIdentifier] else { return false }
+            if state.accumulatedData.count + data.count > MeshClient.maximumResponseBytes {
+                state.responseTooLarge = true
+                inFlight[dataTask.taskIdentifier] = state
+                return true
+            }
+            state.accumulatedData.append(data)
+            inFlight[dataTask.taskIdentifier] = state
+            return false
+        }
+        if shouldCancel {
+            dataTask.cancel()
+        }
+    }
+
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard let state = taskLock.withLock({ inFlight.removeValue(forKey: task.taskIdentifier) }) else {
+            return
+        }
+        if state.responseTooLarge {
+            state.continuation.resume(throwing: MeshClientError.responseTooLargeAfterResponse(statusCode: state.statusCode))
+            return
+        }
+        if redirectLock.withLock({ redirectEpoch > state.startingRedirectEpoch }) {
+            state.continuation.resume(throwing: MeshClientError.redirectRejected)
+            return
+        }
+        if let error = error as NSError?, error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
+            state.continuation.resume(throwing: CancellationError())
+            return
+        }
+        if let error {
+            state.continuation.resume(throwing: error)
+            return
+        }
+        guard let response = state.response, response.url != nil else {
+            state.continuation.resume(throwing: MeshClientError.invalidResponse)
+            return
+        }
+        if (300...399).contains(response.statusCode) {
+            state.continuation.resume(throwing: MeshClientError.redirectRejected)
+            return
+        }
+        state.continuation.resume(returning: (state.accumulatedData, response))
+    }
+
     public func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
         guard request.url.scheme?.lowercased() == "https" else {
             throw MeshClientError.plaintextOrigin
         }
+        try Task.checkCancellation()
+
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body.isEmpty ? nil : request.body
@@ -131,20 +252,25 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
         }
 
         let startingRedirectEpoch = redirectLock.withLock { redirectEpoch }
+        let cancelBox = TaskCancelBox()
         do {
-            let (data, response): (Data, URLResponse) = try await withCheckedThrowingContinuation { continuation in
-                let task = session.dataTask(with: urlRequest) { data, response, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if let response, let data {
-                        continuation.resume(returning: (data, response))
-                    } else {
-                        continuation.resume(throwing: MeshClientError.invalidResponse)
+            let (data, http): (Data, HTTPURLResponse) = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let dataTask = session.dataTask(with: urlRequest)
+                    let id = dataTask.taskIdentifier
+                    taskLock.withLock {
+                        inFlight[id] = InFlight(
+                            startingRedirectEpoch: startingRedirectEpoch,
+                            continuation: continuation
+                        )
                     }
+                    cancelBox.setTask(dataTask)
+                    dataTask.resume()
                 }
-                task.resume()
+            } onCancel: {
+                cancelBox.cancel()
             }
-            guard let http = response as? HTTPURLResponse, let finalURL = http.url else {
+            guard let finalURL = http.url else {
                 throw MeshClientError.invalidResponse
             }
             if (300...399).contains(http.statusCode) {
@@ -157,6 +283,8 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
             return MeshHTTPResponse(statusCode: http.statusCode, headers: headers, body: data, finalURL: finalURL)
         } catch let error as MeshClientError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             if redirectLock.withLock({ redirectEpoch > startingRedirectEpoch }) {
                 throw MeshClientError.redirectRejected

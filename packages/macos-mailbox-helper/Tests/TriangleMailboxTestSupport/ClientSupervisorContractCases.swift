@@ -3,6 +3,14 @@ import CryptoKit
 import Foundation
 @_spi(EnrollmentTesting) @_spi(ClientInstanceTesting) import TriangleMailboxCore
 
+extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
+    }
+}
+
 public enum ClientSupervisorContractCases {
     public struct ContractCase: Sendable {
         public let name: String
