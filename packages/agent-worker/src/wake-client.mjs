@@ -197,10 +197,11 @@ export function createWakeClient({
     }));
     pending = new Map();
     const maxCursor = Math.max(...batch.map((entry) => entry.highWatermark));
-    await cursorStore.write(maxCursor);
+    // D5: persist install cursor only after fan-out handlers accept / schedule.
     for (const wake of batch) {
       await onWake(wake);
     }
+    await cursorStore.write(maxCursor);
   }
 
   function scheduleFlush() {

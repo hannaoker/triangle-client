@@ -499,9 +499,9 @@ test("atomic file cursor store accepts legacy bare-integer seed files", async ()
   }
 });
 
-test("crash after cursor persist and before drain keeps the advanced cursor on restart", async () => {
-  // Expected: flush writes the cursor before onWake; a crash mid-drain must not
-  // roll the on-disk cursor backward, so restart resumes at the persisted watermark.
+test("crash after onWake and before cursor persist leaves cursor unadvanced (D5)", async () => {
+  // D5: fan-out commit barrier before cursor write. Crash mid-onWake must not
+  // advance the on-disk cursor so restart replays the batch (at-least-once).
   const fixture = tempCursorPath();
   try {
     const store = createAtomicFileCursorStore({ filePath: fixture.filePath });
@@ -525,14 +525,58 @@ test("crash after cursor persist and before drain keeps the advanced cursor on r
         await releaseDrain.promise;
       },
     });
-    await client.runOnce();
+    const run = client.runOnce();
     await enteredDrain.promise;
-    assert.equal(await store.read(), 9);
+    assert.equal(await store.read(), 2);
 
     const reloaded = createAtomicFileCursorStore({ filePath: fixture.filePath });
-    assert.equal(await reloaded.read(), 9);
+    assert.equal(await reloaded.read(), 2);
 
     releaseDrain.resolve();
+    await run;
+    // Coalesce flush continues after runOnce returns when pending was scheduled.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(await store.read(), 9);
+    await client.stop();
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("cursor persists only after onWake completes (D5 commit barrier)", async () => {
+  const fixture = tempCursorPath();
+  try {
+    const store = createAtomicFileCursorStore({ filePath: fixture.filePath });
+    await store.write(2);
+    const order = [];
+    const client = createWakeClient({
+      profiles: [{ instanceId: id(1), agentId: "agent_a" }],
+      transport: {
+        async poll() {
+          return {
+            cursor: 9,
+            events: [{ agent_id: "agent_a", high_watermark: 9 }],
+          };
+        },
+      },
+      cursorStore: {
+        async read() {
+          return store.read();
+        },
+        async write(next) {
+          order.push(`write:${next}`);
+          return store.write(next);
+        },
+      },
+      coalesceMs: 1,
+      onWake: async (wake) => {
+        order.push(`onWake:${wake.highWatermark}`);
+      },
+    });
+    await client.runOnce();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.deepEqual(order, ["onWake:9", "write:9"]);
+    assert.equal(await store.read(), 9);
     await client.stop();
   } finally {
     fixture.cleanup();
