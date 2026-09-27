@@ -129,7 +129,7 @@ test("wake client advances cursor on empty event batches", async () => {
   assert.deepEqual(wakes, []);
 });
 
-test("wake client defaults to a short reconnect idle after empty held polls", async () => {
+test("wake client defaults to safe 30s idle when caller omits interval", async () => {
   const delays = [];
   let polls = 0;
   const client = createWakeClient({
@@ -147,7 +147,7 @@ test("wake client defaults to a short reconnect idle after empty held polls", as
     onWake: async () => {},
   });
   await client.watch({ maxCycles: 3 });
-  assert.deepEqual(delays, [2_000]);
+  assert.deepEqual(delays, [30_000]);
   assert.equal(polls, 3);
 });
 

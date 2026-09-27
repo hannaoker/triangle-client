@@ -689,6 +689,11 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
+    // App Server joins the Bob install dispatcher only when it shares Bob's
+    // installationId. Otherwise it must keep its own watch loop.
+    const appServerCoveredByInstallDispatcher = installDispatcherEnabled
+      && grokBotConfig != null
+      && appServerConfig.installationId === grokBotConfig.installationId;
     appServerBridge = createWakeBridge({
       binding: appServerConfig.binding,
       session,
@@ -701,7 +706,7 @@ export function createClientSupervisor({
       // Bridge must not re-ensure using the mcp-interactive claim profile.
       ensureBeforeWatch: false,
       resolveDelivery: deliveryResolver,
-      ownWatchLoop: !installDispatcherEnabled,
+      ownWatchLoop: !appServerCoveredByInstallDispatcher,
       logger,
     });
     if (!appServerBridge || typeof appServerBridge.start !== "function") {

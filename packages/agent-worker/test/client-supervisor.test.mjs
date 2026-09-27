@@ -906,6 +906,53 @@ test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
   assert.equal(supervisor.installWatchDispatcherEnabled, true);
 });
 
+test("App Server keeps own watch loop when installation differs from Bob dispatcher", () => {
+  let appOwnWatchLoop;
+  createClientSupervisor({
+    instances: [],
+    appServerWake: {
+      ...appServerWakeFixture(3),
+      installationId: "inst_OtherInstall01",
+    },
+    grokBotWake: grokBotWakeFixture(4),
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createAuthResolver: () => ({
+      async resolveAuth() {
+        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
+      },
+    }),
+    createAppServerTransport: () => ({
+      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
+      async call() { return {}; },
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
+    createSession: () => ({
+      async connect() { return { status: "subscribed" }; },
+      async shutdown() { return { status: "disconnected" }; },
+      admit: async () => ({ status: "completed" }),
+      status: () => ({ status: "subscribed" }),
+    }),
+    createWakeBridge: (options) => {
+      appOwnWatchLoop = options.ownWatchLoop;
+      return {
+        async start() { return { status: "stopped", cycles: 1, ownWatchLoop: options.ownWatchLoop }; },
+        async stop() {},
+        async handleWake() { return { status: "accepted" }; },
+      };
+    },
+    createGrokBotBridge: () => ({
+      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+      async stop() {},
+      async handleWake() { return { status: "accepted" }; },
+    }),
+    logger: { error() {} },
+  });
+  assert.equal(appOwnWatchLoop, true);
+});
+
 test("install dispatcher does not advance cursor when Bob wake throws; replay succeeds", async () => {
   const cursorByPath = new Map();
   let bobAttempts = 0;
