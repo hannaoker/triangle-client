@@ -64,6 +64,8 @@ chatbot transcripts are not credential stores.
   ad-hoc, first-start, upgrade, uninstall, and security boundaries
 - [E2E operator runbook](e2e-operator-runbook.md) — clean-Mac path from install
   through enroll, runtime, event-driven watch, and App Server wake pointers
+- [Multi-Mac MESH deploy](multi-mac-mesh-deploy.md) — second-Mac readiness,
+  clean install steps, portable vs Mini-pinned (do not clone Mini)
 - [Release workflow](release-workflow.md) — risk-based gates and the release
   readiness checklist (`scripts/release/check-release-readiness.sh`)
 - [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —

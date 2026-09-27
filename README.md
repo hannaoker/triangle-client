@@ -11,9 +11,11 @@ See the [Triangle Client guide](docs/triangle-client/README.md) for supported
 modes, installation, enrollment, lifecycle, and security boundaries.
 
 **Release install on another Mac:** [release bundle](docs/triangle-client/release-bundle.md)
-(signing, layout, upgrade/uninstall) and the
+(signing, layout, upgrade/uninstall), the
 [E2E operator runbook](docs/triangle-client/e2e-operator-runbook.md)
-(install → enroll → runtime → event-driven watch). Preflight:
+(install → enroll → runtime → event-driven watch), and
+[multi-Mac MESH deploy](docs/triangle-client/multi-mac-mesh-deploy.md)
+(second-Mac readiness; do not clone Mini). Preflight:
 `./scripts/release/check-release-readiness.sh --mode docs`.
 
 The **macOS mailbox credential helper** (`triangle-mailbox`) is the Keychain
