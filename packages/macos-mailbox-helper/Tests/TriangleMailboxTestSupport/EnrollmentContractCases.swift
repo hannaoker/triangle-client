@@ -690,6 +690,10 @@ public enum EnrollmentContractCases {
                 MeshHTTPRequest(method: "GET", url: URL(string: "https://thetriangle.dev/api")!, headers: [:])
             )
         }
+        for _ in 0..<50 {
+            if FixtureURLProtocol.stopLoadingCallCount >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         try expect(FixtureURLProtocol.stopLoadingCallCount >= 1, "URLSession task was not cancelled when chunked response exceeded cap")
 
         FixtureURLProtocol.reset([.hanging])
@@ -713,6 +717,10 @@ public enum EnrollmentContractCases {
         } catch {
         }
         try expect(didCatchCancellation, "cancelled Swift task did not throw CancellationError")
+        for _ in 0..<50 {
+            if FixtureURLProtocol.stopLoadingCallCount >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         try expect(FixtureURLProtocol.stopLoadingCallCount >= 1, "URLSession task was not cancelled upon Swift task cancellation")
 
         FixtureURLProtocol.reset([
