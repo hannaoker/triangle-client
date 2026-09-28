@@ -80,21 +80,25 @@ export function saveConversationId(contextId, conversationId, env = process.env)
 }
 
 export function extractAntigravityResponse(stdoutText) {
-  if (typeof stdoutText !== "string") {
-    return { text: "", conversationId: null };
-  }
-  const trimmed = stdoutText.trim();
+  let parsed;
   try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed && typeof parsed === "object") {
-      const response = typeof parsed.response === "string" ? parsed.response.trim() : trimmed;
-      const conversationId = typeof parsed.conversation_id === "string" ? parsed.conversation_id : null;
-      return { text: response, conversationId };
-    }
+    parsed = typeof stdoutText === "string" ? JSON.parse(stdoutText) : null;
   } catch {
-    // If output is not JSON, fallback to raw text.
+    throw new Error("Antigravity CLI returned an invalid response");
   }
-  return { text: trimmed, conversationId: null };
+  // The invocation requests JSON. Metadata and failure envelopes must never
+  // become peer replies or advance the persisted conversation.
+  if (
+    !parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || parsed.status !== "SUCCESS"
+    || typeof parsed.response !== "string" || !parsed.response.trim()
+  ) {
+    throw new Error("Antigravity CLI returned an invalid response");
+  }
+  return {
+    text: parsed.response.trim(),
+    conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : null,
+  };
 }
 
 export function createAntigravityInvocation(prompt, env = process.env, { conversationId, format = "json" } = {}) {

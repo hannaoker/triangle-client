@@ -348,10 +348,27 @@ test("Antigravity adapter extracts response and conversation ID from JSON", () =
   assert.equal(extracted.text, "Hello from peer agent!");
   assert.equal(extracted.conversationId, "27ce945c-ec2c-4c89-80fd-285f291cca0b");
 
-  const plainOutput = "Just raw text output";
-  const fallback = extractAntigravityResponse(plainOutput);
-  assert.equal(fallback.text, "Just raw text output");
-  assert.equal(fallback.conversationId, null);
+});
+
+test("Antigravity adapter rejects output without a successful nonempty response", () => {
+  const invalidOutputs = [
+    JSON.stringify({ status: "ERROR", error: "resume failed", conversation_id: "old-session" }),
+    JSON.stringify({ status: "ERROR", response: "error details" }),
+    JSON.stringify({ status: "SUCCESS", conversation_id: "old-session" }),
+    JSON.stringify({ status: "SUCCESS", response: "  \n" }),
+    JSON.stringify({ status: "SUCCESS", response: 42 }),
+    JSON.stringify({ response: "missing status" }),
+    "Just raw text output",
+    '{"status":"SUCCESS",',
+    "null",
+    "[]",
+    '"text"',
+    "",
+    undefined,
+  ];
+  for (const output of invalidOutputs) {
+    assert.throws(() => extractAntigravityResponse(output), /Antigravity CLI returned an invalid response/);
+  }
 });
 
 test("Antigravity adapter persists and loads conversation ID per contextId", async () => {
