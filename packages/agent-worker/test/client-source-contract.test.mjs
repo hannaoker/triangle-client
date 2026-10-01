@@ -78,6 +78,7 @@ test("repository is the complete standalone client source and contains no MESH s
     "package.json",
     "packages/a2a-gateway/src/mesh-mailbox-bridge.mjs",
     "packages/agent-worker/src/client-supervisor.mjs",
+    "packages/agent-worker/src/client-supervisor-schema.mjs",
     "packages/macos-mailbox-helper/Package.swift",
     "agents/antigravity/worker/agent-worker.json",
     "agents/codex/package.json",
@@ -99,6 +100,7 @@ test("repository is the complete standalone client source and contains no MESH s
   const clientPackage = JSON.parse(readFileSync(path.join(root, "packages/agent-worker/package.json"), "utf8"));
   assert.deepEqual(Object.keys(clientPackage.exports).sort(), [
     ".",
+    "./app-server-host-support",
     "./client-supervisor",
     "./concurrency-gate",
     "./cursor-acp-runtime",

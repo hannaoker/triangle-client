@@ -1,4 +1,10 @@
 #!/bin/bash
+# RETIRED (2026-09-30): api2.cursor.sh Grok routine webhook wake is unstable
+# (routine/webhook flips to disabled; supervisor spam webhook_rejected/400).
+# Do not reinstall this route without an explicit new design.
+# This script refuses by default. Set TRIANGLE_ACK_GROK_WEBHOOK_RETIRED_OVERRIDE=1
+# only for emergency restore experiments.
+#
 # Install operator-owned Grok Bot wake binding files under Application Support.
 # Secrets (webhook URL/key) stay local — never commit them.
 #
@@ -14,6 +20,13 @@
 #   TRIANGLE_PROFILE              # default: bob
 #   TRIANGLE_CLIENT_ROOT          # default: ~/Library/Application Support/The Triangle/client
 set -euo pipefail
+
+if [[ "${TRIANGLE_ACK_GROK_WEBHOOK_RETIRED_OVERRIDE:-}" != "1" ]]; then
+  echo "REFUSED: Grok Bot webhook wake route is retired (unstable api2.cursor.sh automation)." >&2
+  echo "See docs/triangle-client/2026-09-30-grok-webhook-wake-retired.md" >&2
+  echo "Override only with TRIANGLE_ACK_GROK_WEBHOOK_RETIRED_OVERRIDE=1" >&2
+  exit 78
+fi
 
 PROFILE="${TRIANGLE_PROFILE:-bob}"
 CLIENT_ROOT="${TRIANGLE_CLIENT_ROOT:-$HOME/Library/Application Support/The Triangle/client}"

@@ -24,7 +24,7 @@ Replace Bob’s temporary host (`deliveryMode: event-driven` +
 | Swift `prepareGrokBotWake` + Node `grokBotWake` supervisor path | Shipped |
 | `packages/agent-worker/src/grok-bot-wake.mjs` + Node tests | Shipped |
 | `scripts/macos/install-grok-bot-wake-binding.sh` | Shipped (no secrets in git) |
-| Live LaunchAgent flip / webhook secret install / canary | **Operator / Tech Lead on Mini** — out of scope for cloud |
+| Live LaunchAgent flip / webhook secret install / canary | **Retired 2026-09-30** — `api2.cursor.sh` routine webhook unstable (`Automation … is disabled`); see [2026-09-30-grok-webhook-wake-retired.md](2026-09-30-grok-webhook-wake-retired.md) |
 
 Bob routine **`mesh-bob-wake-drain`** (webhook) is already saved on the Grok Bot
 side. Binding the triangle-client webhook URL/key to that routine is

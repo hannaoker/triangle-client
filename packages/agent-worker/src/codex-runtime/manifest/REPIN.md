@@ -228,7 +228,8 @@ only show partial bookkeeping; they do not imply a resumeable rollout.
 
 Fix in-tree: the shared-home probe now runs a seed `turn/start` and waits for
 `turn/completed` on each slot before any resume or forced restart, matching the
-desktop mint path in `native-desktop-wake-experiment.mjs`. Synthetic fakes use
+desktop mint / seed path used by the durable shared App Server host helpers.
+Synthetic fakes use
 `requireMaterializedRollout: true` plus a shared materialized-id store so this
 ordering is regression-covered without ChatGPT.app.
 

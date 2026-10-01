@@ -29,7 +29,7 @@ import {
   buildDesktopExperimentBinding,
   createDesktopResumeProbe,
   resolveDesktopExperimentThread,
-} from "../packages/agent-worker/src/native-desktop-wake-experiment.mjs";
+} from "../packages/agent-worker/src/app-server-host-support.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = path.resolve(__dirname, "..");

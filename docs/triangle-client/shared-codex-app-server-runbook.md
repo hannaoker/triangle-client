@@ -230,7 +230,7 @@ Durable files (operator-local; never commit secrets):
 
 | Doc | Use when |
 | --- | --- |
-| [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) | Gate A disposable experiment / product track |
+| [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) | Product track; Gate A disposable experiment **retired** |
 | [HANDOFF-appserver-wake-2026-09-13.md](HANDOFF-appserver-wake-2026-09-13.md) | Unattended loop status and Mini incident notes |
 | [2026-09-13-unattended-wake-hosts.md](2026-09-13-unattended-wake-hosts.md) | Bob vs Codex host split; bind semantics |
 | [skills/triangle-mesh-a2a/SKILL.md](../../skills/triangle-mesh-a2a/SKILL.md) | In-session bind instructions for agents |
@@ -238,6 +238,8 @@ Durable files (operator-local; never commit secrets):
 | [e2e-operator-runbook.md](e2e-operator-runbook.md) | Clean-Mac install → enroll → watch |
 | [shared-codex-server-prototype.md](shared-codex-server-prototype.md) | Early prototype notes (not the LaunchAgent path) |
 
-Disposable Gate A experiment (not this durable LaunchAgent) remains under
-`scripts/prototypes/native-desktop-wake-experiment.mjs` in the desktop wake
-handoff.
+The disposable Gate A experiment (`native-desktop-wake-experiment.mjs`) was
+**deleted**. This durable LaunchAgent host
+(`scripts/macos-shared-codex-app-server-host.mjs`, helpers in
+`packages/agent-worker/src/app-server-host-support.mjs`) is the only operator
+desktop-wake procedure.
