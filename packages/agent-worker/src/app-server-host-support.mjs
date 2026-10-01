@@ -1,9 +1,7 @@
 /**
- * Production-shaped native-desktop nonce wake helpers.
- *
- * Thin glue around createAuthenticatedAppServerTransport + createSharedCodexSession
- * for the Mac ChatGPT.app experiment. Linux unit tests cover guards, nonce text,
- * and the listener path with a scripted socket — they do not launch the desktop.
+ * Supported Shared App Server host helpers (binding, resume probe, thread mint/resume,
+ * debug-port check). Used by scripts/macos-shared-codex-app-server-host.mjs and the
+ * LaunchAgent-backed production host path.
  *
  * MESH mesh_ / mesh_watch_ secrets never enter this module. App Server capability
  * tokens stay in an absolute file or env *name* (same custody model as supervisor

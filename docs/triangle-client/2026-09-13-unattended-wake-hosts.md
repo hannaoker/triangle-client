@@ -226,10 +226,14 @@ See
 
 ## Next work (in order)
 
-**Ops note (2026-09-14/15):** Bob reported `resource_exhausted` on
-`mesh-bob-wake-drain` wakes. Pause the Sand routine (Active off) or set Mini
-`grok-bot-binding.json` `enabled: false` until quota recovers; then one canary.
-Interactive Grok track remains paused — see [PROJECT-STATUS.md](PROJECT-STATUS.md).
+**Ops note (2026-09-30):** The `api2.cursor.sh/automations/webhook/*` Grok
+routine wake route is **retired** (unstable disable/400). See
+[2026-09-30-grok-webhook-wake-retired.md](2026-09-30-grok-webhook-wake-retired.md).
+Do not reinstall `mesh-bob-wake-drain` webhook bindings on Mini.
+
+**Ops note (2026-09-14/15):** Bob previously reported `resource_exhausted` on
+`mesh-bob-wake-drain` wakes. That path is retired; do not re-enable binding for
+quota recovery experiments without a new design.
 
 Under `~/Library/Application Support/The Triangle/client/` (operator-local;
 never commit secrets):
@@ -245,10 +249,9 @@ Install helper: `scripts/macos/install-grok-bot-wake-binding.sh`.
 
 ## Next work (in order)
 
-1. **Native Grok Bot wake for Bob (this track).** Operator flip on Mini:
-   install binding → set `deliveryMode: grok-bot` → stop/start LaunchAgent →
-   `watch-ensure` → canary. Verify/update Bob routine `mesh-bob-wake-drain`
-   against the receipt-only table above; URL/key binding is operator-side.
+1. **Native Grok Bot wake for Bob — webhook route retired (2026-09-30).**
+   Do not flip Mini back onto `api2.cursor.sh/automations/webhook/*`. See
+   [2026-09-30-grok-webhook-wake-retired.md](2026-09-30-grok-webhook-wake-retired.md).
 2. **Codex App Server ops.** Unattended loop is live; prefer Developer ID helper
    for long-term Keychain custody. Do not flip Codex to `event-driven`.
 3. Optional: installer-provision Codex/Hermes auth into instance `*_HOME`;

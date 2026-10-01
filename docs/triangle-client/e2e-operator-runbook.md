@@ -12,6 +12,8 @@ Companion docs:
 - [Triangle Client guide](README.md) — product semantics and scaling
 - [Release workflow](release-workflow.md) — what must pass before calling a
   cut shippable to other machines
+- [Helper upgrade release gate (2026-09-30)](2026-09-30-helper-upgrade-release-gate.md) —
+  v4/v5→helper upgrade, fresh install, and live wake canary evidence
 - [Codex desktop wake handoff](codex-desktop-wake-handoff.md) — Codex App
   Server / desktop wake (Mac-only proofs)
 - [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —
@@ -116,8 +118,9 @@ credential fallback.
 
 ## 3. Prepare runtime (if not already done by install)
 
-`--install-client` prepares available v4 runtime bundles. If you installed
-CLIs later, or need to re-stage:
+`--install-client` prepares current runtime bundles (manifest **v6** on current
+main; v4/v5 bundles already on disk remain valid until re-prepared). If you
+installed CLIs later, or need to re-stage:
 
 ```sh
 ./scripts/triangle-client-service.sh prepare-runtime
@@ -225,7 +228,7 @@ operator** work:
 
 - Durable Shared App Server launch / bind / restart:
   [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md)
-- Product path and Gate A runbook:
+- Product path (Gate A disposable experiment **retired**):
   [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md)
 - Shared server prototype notes:
   [shared-codex-server-prototype.md](shared-codex-server-prototype.md)
@@ -235,7 +238,7 @@ Requirements for those proofs (not claimed from Linux):
 - ChatGPT.app on the Mac
 - App Server capability token via **file or env name** only (never put `mesh_` /
   `mesh_watch_` into Node)
-- Visual confirmation of renderer reply for Gate A
+- Visual confirmation of renderer reply on the durable shared thread
 
 This E2E runbook stops at “watch path documented and secret-free status OK.”
 Desktop admit is optional follow-on.

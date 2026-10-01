@@ -21,7 +21,7 @@ import {
   runNativeDesktopWakeListener,
   createDesktopResumeProbe,
   DESKTOP_EXPERIMENT_SEED_REPLY_MARKER,
-} from "../src/native-desktop-wake-experiment.mjs";
+} from "../src/app-server-host-support.mjs";
 
 const serverIdentity = "codex-app-server/desktop-experiment";
 const authorization = "Bearer capability-token-for-desktop-tests";

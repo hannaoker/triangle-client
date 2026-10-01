@@ -769,13 +769,21 @@ public struct ClientSupervisor: Sendable {
 
         guard let adapterVersion = object["adapterVersion"] as? String,
               adapterVersion == "1",
-              object["enabled"] as? Bool == true,
               let grokAgentId = object["grokAgentId"] as? String,
               !grokAgentId.isEmpty,
               let wakeMode = object["wakeMode"] as? String,
               wakeMode == "webhook"
         else {
             throw ClientSupervisorError.invalidBootstrap
+        }
+        // Operator soft-disable: do not fail the whole supervisor when the
+        // Cursor/Grok routine webhook route is retired or temporarily off.
+        guard object["enabled"] as? Bool == true else {
+            omitted.append(.init(
+                instanceID: primary.instanceID.value,
+                reasonCode: "grok_bot_wake_disabled"
+            ))
+            return nil
         }
 
         return PreparedGrokBotWakeBootstrap(

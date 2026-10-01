@@ -47,7 +47,12 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
 ]
+# Extracted supervisor schema lands in manifest v6 so existing v4/v5 bundles keep validating.
+SUPERVISOR_SCHEMA_ARTIFACTS = [
+    "packages/agent-worker/src/client-supervisor-schema.mjs",
+]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
+CURRENT_MANIFEST_VERSION = 6
 CODEX_HEADLESS_ARTIFACTS = [
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
@@ -188,14 +193,18 @@ def copy_regular(source, destination, destination_mode=0o600):
         os.close(destination_fd)
 
 
-def expected_artifacts(agent, version=5):
+def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     if agent not in AGENTS:
         fail("invalid worker kind")
-    common = LEGACY_COMMON_ARTIFACTS if version == 3 else COMMON_ARTIFACTS if version in {4, 5} else None
-    if common is None:
+    if version == 3:
+        common = LEGACY_COMMON_ARTIFACTS
+    elif version in {4, 5, 6}:
+        common = COMMON_ARTIFACTS
+    else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version == 5 else [])
-    extras += CODEX_HEADLESS_ARTIFACTS if version == 5 and agent == "codex" else []
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6} else [])
+    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6} and agent == "codex" else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version == 6 else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
@@ -264,7 +273,7 @@ def strict_manifest(path, agent):
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
         "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
-    if value["version"] not in {3, 4, 5} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in {3, 4, 5, 6} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")
@@ -361,7 +370,7 @@ def stage_runtime(args):
             ("CODEX_CLI" if args.agent == "codex" else ("HERMES_CLI" if args.agent == "hermes" else "ANTIGRAVITY_CLI")): cli,
         }
         manifest = {
-            "version": 5, "nodeSHA256": node_hash,
+            "version": CURRENT_MANIFEST_VERSION, "nodeSHA256": node_hash,
             "projectRoot": bundle, "environment": environment, "artifacts": artifacts,
         }
         manifest_path = os.path.join(runtime, f"{args.agent}.manifest.json")

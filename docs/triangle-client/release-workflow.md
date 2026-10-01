@@ -47,7 +47,8 @@ checked. Prefer the fail-closed driver (prints no secrets):
 | R5 | Runtime suite (code changes) | Applicable items 1–4 and 6 above; docs-only changes skip unrelated runtime suites |
 | R6 | Mac Keychain custody (public artifact) | Opt-in disposable Keychain lifecycle against the **signed** helper (`TRIANGLE_RUN_DISPOSABLE_KEYCHAIN_TEST=1`); see `KEYCHAIN_POLICY.md` |
 | R7 | E2E operator path | A clean Mac can follow the E2E runbook through install → enroll → prepare runtime → `agent add` → `event-driven` → `watch-ensure` / `watch-status` |
-| R8 | Explicit non-blockers recorded | Developer ID cert on build Mac, ChatGPT.app for desktop Gate A / Bob canary, and any live helper watch gaps are called out without claiming Linux completion |
+| R7b | Helper upgrade + wake canaries | When worker manifest or bundle composition changed: follow [2026-09-30-helper-upgrade-release-gate.md](2026-09-30-helper-upgrade-release-gate.md) — existing v4/v5 bundle upgrade, fresh v6 install, then repeated live headless / bound desktop / Bob / receipt-only / restart-recovery canaries with full evidence fields |
+| R8 | Explicit non-blockers recorded | Developer ID cert on build Mac, ChatGPT.app for durable App Server desktop canaries, and any live helper watch gaps are called out without claiming Linux completion |
 
 **Do not** mark public release ready from `--mode adhoc-dev`. Ad-hoc requires
 `TRIANGLE_ACK_ADHOC_NON_PUBLIC=1` and never satisfies R2 for distribution.
