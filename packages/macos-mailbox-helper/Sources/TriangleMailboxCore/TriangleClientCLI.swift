@@ -357,13 +357,23 @@ public struct LaunchdTriangleClientServiceControl: TriangleClientServiceControll
         guard expected.wholeMatch(of: /^[a-f0-9]{64}$/) != nil, expected == actual else { throw TriangleClientLifecycleError.reloadFailed }
         let object = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil)
         let logs = home.appendingPathComponent("Library/Logs/the-triangle", isDirectory: true)
-        let expectedKeys: Set<String> = ["Label", "ProgramArguments", "RunAtLoad", "KeepAlive", "ThrottleInterval", "StandardOutPath", "StandardErrorPath"]
+        let expectedKeys: Set<String> = [
+            "Label", "ProgramArguments", "RunAtLoad", "KeepAlive", "ThrottleInterval",
+            "StandardOutPath", "StandardErrorPath", "EnvironmentVariables",
+        ]
+        let allowedEnvironment: [String: String] = [
+            "TRIANGLE_CODEX_POOL_ENABLE": "1",
+            "TRIANGLE_CODEX_POOL_SIZE": "2",
+            "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+        ]
         guard let values = object as? [String: Any], Set(values.keys) == expectedKeys, values["Label"] as? String == Self.label,
               values["ProgramArguments"] as? [String] == [helper.path, "run-supervisor"],
               values["RunAtLoad"] as? Bool == true, values["KeepAlive"] as? Bool == true,
               values["ThrottleInterval"] as? Int == 10,
               values["StandardOutPath"] as? String == logs.appendingPathComponent("client.log").path,
-              values["StandardErrorPath"] as? String == logs.appendingPathComponent("client.error.log").path
+              values["StandardErrorPath"] as? String == logs.appendingPathComponent("client.error.log").path,
+              let environment = values["EnvironmentVariables"] as? [String: String],
+              environment == allowedEnvironment
         else { throw TriangleClientLifecycleError.reloadFailed }
     }
 
