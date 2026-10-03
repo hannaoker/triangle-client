@@ -421,3 +421,30 @@ test("defaultHeadlessClaimerLockPath derives client directory from helperPath wh
     "/Users/testuser/Library/Application Support/The Triangle/client/headless-claimer.codex-headless.json",
   );
 });
+
+
+test("idle watch kick admits immediately and records wake before blocked drain completes", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let wakes = 0;
+  const runtime = {
+    async start() {},
+    async recoverAfterRestart() { return { quarantined: 0 }; },
+    noteWakeInvoked() { wakes += 1; },
+    async runDelivery() { await blocked; return { status: "completed" }; },
+    async stop() {},
+  };
+  const drain = createHeadlessCodexDrain({
+    runtime,
+    resolveDelivery: async () => delivery(),
+    profileInstanceId: INSTANCE,
+  });
+  await drain.start({ runLoop: false });
+  const admitted = drain.kick({ reason: "watch_hint" });
+  assert.equal(admitted.status, "accepted");
+  assert.equal(typeof admitted.then, "undefined");
+  assert.equal(wakes, 1);
+  assert.equal(drain.status().draining, true);
+  release();
+  await drain.stop();
+});

@@ -1086,7 +1086,8 @@ public enum MailboxTransactionContractCases {
                 deliveryID: 31,
                 roomID: room,
                 eventID: MailboxEventID(rawValue: "event_" + String(repeating: "a", count: 32))!,
-                roomSequence: 1
+                roomSequence: 1,
+                replyRequired: false
             ),
         ]
         let instanceID = ClientInstanceID.derive(profile: profile)
@@ -1117,6 +1118,24 @@ public enum MailboxTransactionContractCases {
         try expect(transport.listCalls == 1, "pending list was not consulted for room resolution")
         let open = try store.readOpen(instanceID: instanceID)
         try expect(open?.roomID == room, "resolved room was not stored")
+        try expect(open?.inboundEventID == transport.pendingCandidates[0].eventID, "resolved event was not stored")
+        try expect(open?.inboundRoomSequence == 1, "resolved sequence was not stored")
+
+        try expect(open?.replyRequired == false, "receipt-only metadata was lost")
+
+        // Once claimed, the delivery is no longer returned by the server list.
+        transport.pendingCandidates = []
+        let retry = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: ["name": "mesh.mailbox.claim", "arguments": ["delivery_id": 31]],
+            raw: raw
+        )
+        guard case .respond(let retryBody) = retry else { throw ContractFailure("two-field claim retry did not resume") }
+        let retryObject = try JSONSerialization.jsonObject(with: retryBody) as? [String: Any]
+        let retryResult = retryObject?["result"] as? [String: Any]
+        try expect(retryResult?["claimed"] as? Bool == true, "claim retry failed")
+        try expect(transport.listCalls == 1, "claim retry consulted pending list")
+        try expect(transport.claims.count == 1, "claim retry repeated upstream claim")
     }
 
     public static func mcpRewriterStandaloneAck() async throws {
