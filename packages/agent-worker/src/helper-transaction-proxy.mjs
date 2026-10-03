@@ -140,10 +140,21 @@ export async function runHelper(
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     }
-    if (stdin != null) {
-      child.stdin.end(typeof stdin === "string" ? stdin : Buffer.from(stdin));
-    } else {
-      child.stdin.end();
+    // C4: child exit before stdin flush must not crash via unhandled EPIPE.
+    child.stdin.on("error", (error) => {
+      if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") return;
+      finish(createCodedError("helper_unavailable", "transaction helper stdin failed"));
+    });
+    try {
+      if (stdin != null) {
+        child.stdin.end(typeof stdin === "string" ? stdin : Buffer.from(stdin));
+      } else {
+        child.stdin.end();
+      }
+    } catch (error) {
+      if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+        finish(createCodedError("helper_unavailable", "transaction helper stdin failed"));
+      }
     }
   });
 }

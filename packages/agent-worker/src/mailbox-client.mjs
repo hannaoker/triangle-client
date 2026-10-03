@@ -567,12 +567,18 @@ export function createMailboxClient(
     };
     signal?.addEventListener?.("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    // Attach a rejection sink for the whole request so deadline rejections during
+    // token acquisition / body read never become unhandled rejections (C3).
+    const deadlineGuard = deadline.catch(() => {});
     try {
       let authHeader = `Bearer ${token}`;
       let dpopHeader;
       const fullUrl = new URL(path, `${origin}/`).toString();
       if (workloadTokenManager) {
-        const accessToken = await workloadTokenManager.fetchToken(controller.signal);
+        const accessToken = await Promise.race([
+          Promise.resolve(workloadTokenManager.fetchToken(controller.signal)),
+          deadline,
+        ]);
         authHeader = `Bearer ${accessToken}`;
         dpopHeader = workloadTokenManager.createDpopProof(method, fullUrl, accessToken);
       }
@@ -599,12 +605,14 @@ export function createMailboxClient(
       assertResponse(response, payload);
       return payload;
     } catch (error) {
+      await deadlineGuard;
       if (timedOut) {
         throw new MailboxRequestError("Mailbox request timed out");
       }
       if (callerAborted || error?.name === "AbortError") {
         throw new MailboxRequestError("Mailbox request aborted");
       }
+      if (error instanceof MailboxRequestError) throw error;
       if (String(error?.message ?? error).includes(token)) {
         throw new MailboxRequestError("Mailbox request failed");
       }

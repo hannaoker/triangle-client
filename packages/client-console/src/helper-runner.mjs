@@ -76,9 +76,21 @@ export function runHelper(file, args, options = {}) {
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let killTimer = null;
+
+    function terminate(signalName = "SIGTERM") {
+      try {
+        child.kill(signalName);
+      } catch {
+        // already exited
+      }
+      if (signalName === "SIGTERM" && killTimer == null) {
+        killTimer = setTimeout(() => terminate("SIGKILL"), 2_000);
+      }
+    }
 
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      terminate("SIGTERM");
       finish(Object.assign(new Error("helper timed out"), { code: "helper_timeout" }));
     }, timeoutMs);
 
@@ -86,12 +98,13 @@ export function runHelper(file, args, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (killTimer != null) clearTimeout(killTimer);
       if (error) reject(error);
       else resolve(value);
     }
 
     const onAbort = () => {
-      child.kill("SIGTERM");
+      terminate("SIGTERM");
       const error = new Error("aborted");
       error.name = "AbortError";
       finish(error);
@@ -99,8 +112,20 @@ export function runHelper(file, args, options = {}) {
     signal?.addEventListener("abort", onAbort, { once: true });
 
     if (stdin != null) {
-      child.stdin.write(stdin);
-      child.stdin.end();
+      // C4: EPIPE when the child exits before stdin is fully written must not
+      // become an unhandled 'error' that crashes the process.
+      child.stdin.on("error", (error) => {
+        if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") return;
+        finish(Object.assign(new Error("helper stdin failed"), { code: "helper_stdin_error", cause: error }));
+      });
+      try {
+        child.stdin.write(stdin);
+        child.stdin.end();
+      } catch (error) {
+        if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+          finish(Object.assign(new Error("helper stdin failed"), { code: "helper_stdin_error", cause: error }));
+        }
+      }
     }
 
     child.stdout.setEncoding("utf8");
@@ -108,14 +133,14 @@ export function runHelper(file, args, options = {}) {
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
       if (stdout.length > DEFAULT_STDOUT_LIMIT) {
-        child.kill("SIGTERM");
+        terminate("SIGTERM");
         finish(Object.assign(new Error("helper stdout exceeded limit"), { code: "helper_stdout_limit" }));
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
       if (stderr.length > DEFAULT_STDERR_LIMIT) {
-        child.kill("SIGTERM");
+        terminate("SIGTERM");
         finish(Object.assign(new Error("helper stderr exceeded limit"), { code: "helper_stderr_limit" }));
       }
     });
