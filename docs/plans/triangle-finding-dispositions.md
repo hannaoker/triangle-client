@@ -24,8 +24,8 @@ Updated: 2026-10-03 (Phase 0 start). Status values: `confirmed` | `rejected` | `
 | C3 | confirmed | Deadline rejection unhandled during token fetch | PR4 (pending) | timeout → request error | — |
 | C4 | confirmed | Child stdin EPIPE unhandled | PR4 (pending) | EPIPE handled; SIGKILL bound | — |
 | C5 | deferred | Grok webhook still wired at runtime | PR11 | — | Mini ops: webhook retired |
-| C6 | confirmed | Plist `EnvironmentVariables` vs exact key set | PR3 (pending) | agent add/enable with shipped template | — |
-| C7 | confirmed | WorkloadTokenManager single-flight race | PR3 (pending) | concurrent refresh shares one task | — |
+| C6 | fixed (PR3) | Plist `EnvironmentVariables` vs exact key set | PR3 (pending) | agent add/enable with shipped template | — |
+| C7 | fixed (PR3) | WorkloadTokenManager single-flight race | PR3 (pending) | concurrent refresh shares one task | — |
 
 ## Phase 0 test / tooling (from review §1)
 

@@ -414,6 +414,11 @@ private final class LaunchdFixture {
             "ThrottleInterval": 10,
             "StandardOutPath": logs.appendingPathComponent("client.log").path,
             "StandardErrorPath": logs.appendingPathComponent("client.error.log").path,
+            "EnvironmentVariables": [
+                "TRIANGLE_CODEX_POOL_ENABLE": "1",
+                "TRIANGLE_CODEX_POOL_SIZE": "2",
+                "TRIANGLE_DESKTOP_HANDOFF_ENABLE": "1",
+            ],
         ]
         let plist = home.appendingPathComponent("Library/LaunchAgents/dev.thetriangle.client.plist")
         try PropertyListSerialization.data(fromPropertyList: document, format: .xml, options: 0).write(to: plist)

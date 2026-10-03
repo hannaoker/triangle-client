@@ -52,24 +52,29 @@ public final class WorkloadTokenManager: @unchecked Sendable {
 
     func fetchToken() async throws -> String {
         let now = Date().timeIntervalSince1970
-        if let cached = lock.withLock({ () -> String? in
+        // Create/publish the refresh task in one critical section so a finished
+        // task cannot clear refreshTask before it is assigned (single-flight race).
+        let task: Task<String, Error> = lock.withLock {
             if let cachedToken, cachedTokenExpiresAt - 30 > now {
-                return cachedToken
+                let token = cachedToken
+                return Task { token }
             }
-            return nil
-        }) {
-            return cached
+            if let existing = refreshTask {
+                return existing
+            }
+            let created = Task<String, Error> {
+                do {
+                    let token = try await self.exchangeToken()
+                    self.lock.withLock { self.refreshTask = nil }
+                    return token
+                } catch {
+                    self.lock.withLock { self.refreshTask = nil }
+                    throw error
+                }
+            }
+            refreshTask = created
+            return created
         }
-
-        if let existing = lock.withLock({ refreshTask }) {
-            return try await existing.value
-        }
-
-        let task = Task<String, Error> {
-            defer { lock.withLock { refreshTask = nil } }
-            return try await exchangeToken()
-        }
-        lock.withLock { refreshTask = task }
         return try await task.value
     }
 
