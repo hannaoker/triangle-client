@@ -139,11 +139,27 @@ export function createHeadlessCodexDrain({
       throw new TypeError("kick reason is invalid");
     }
     if (!started || stopping) return Object.freeze({ status: "stopped", reason });
+    try {
+      runtime.noteWakeInvoked?.();
+    } catch {
+      // Diagnostic handoff only; never block watch fan-out.
+    }
     if (inFlight != null) {
       pendingKickReason = reason === "watch_hint" ? "watch_hint_trailing" : reason;
       return Object.freeze({ status: "pending", reason: pendingKickReason });
     }
-    return drainOnce(reason);
+    // Admit-only: install-watch fan-out must advance the cursor without waiting
+    // on mailbox claim/drain (helper contention would otherwise pin the cursor).
+    const startedDrain = drainOnce(reason);
+    if (startedDrain && typeof startedDrain.then === "function") {
+      startedDrain.catch((error) => {
+        logger.error?.("triangle_headless_drain_kick_failed", {
+          code: error?.code ?? null,
+          reason,
+        });
+      });
+    }
+    return Object.freeze({ status: "accepted", reason });
   }
 
   function schedule() {

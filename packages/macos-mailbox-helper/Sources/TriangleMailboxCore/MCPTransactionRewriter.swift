@@ -88,10 +88,42 @@ public struct MCPTransactionRewriter: Sendable {
     }
 
     private func rewriteClaim(arguments: [String: Any], raw: Data) async -> RewriteOutcome {
-        guard let deliveryID = intValue(arguments["delivery_id"] ?? arguments["deliveryId"]),
-              let roomRaw = arguments["room_id"] as? String ?? arguments["roomId"] as? String,
-              let roomID = MailboxRoomID(rawValue: roomRaw)
+        // MESH claim schema is delivery_id + claim_id only. room_id is optional helper
+        // metadata for the local transaction store; resolve it from pending list when omitted.
+        guard let deliveryID = intValue(arguments["delivery_id"] ?? arguments["deliveryId"])
         else { return .reject(code: -32602, message: "invalid params") }
+
+        let roomID: MailboxRoomID
+        var candidate: MailboxDeliveryCandidate?
+        if let roomRaw = arguments["room_id"] as? String ?? arguments["roomId"] as? String {
+            guard let parsed = MailboxRoomID(rawValue: roomRaw) else {
+                return .reject(code: -32602, message: "invalid params")
+            }
+            roomID = parsed
+        } else {
+            do {
+                if let existing = try store.readOpen(instanceID: instanceID) {
+                    guard existing.protocolOwnership == protocolOwnership else {
+                        return .reject(code: -32000, message: "protocol_mismatch")
+                    }
+                    guard existing.deliveryID == deliveryID else {
+                        return .reject(code: -32000, message: "nested_claim")
+                    }
+                    // Claimed deliveries are excluded from the pending list.
+                    // Resume using durable metadata, including prepared claims.
+                    roomID = existing.roomID
+                } else {
+                    let candidates = try await transport.listPendingCandidates()
+                    guard let match = candidates.first(where: { $0.deliveryID == deliveryID }) else {
+                        return .reject(code: -32602, message: "invalid params")
+                    }
+                    candidate = match
+                    roomID = match.roomID
+                }
+            } catch {
+                return .reject(code: -32603, message: "claim_failed")
+            }
+        }
 
         let modelClaim = arguments["claim_id"] as? String ?? arguments["claimId"] as? String
         do {
@@ -100,6 +132,9 @@ public struct MCPTransactionRewriter: Sendable {
                 protocolOwnership: protocolOwnership,
                 deliveryID: deliveryID,
                 roomID: roomID,
+                inboundEventID: candidate?.eventID,
+                inboundRoomSequence: candidate?.roomSequence,
+                replyRequired: candidate?.replyRequired ?? true,
                 modelSuppliedClaimID: modelClaim
             )
             // Replace claim_id in the forwarded MCP request with the deterministic value.

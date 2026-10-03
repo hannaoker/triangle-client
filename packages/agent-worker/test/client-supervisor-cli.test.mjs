@@ -200,6 +200,7 @@ test("CLI forwards eventWake into supervisor creation", async () => {
   });
   assert.equal(result, 0);
   assert.deepEqual(received.eventWake, eventWake());
+  assert.equal(received.useInstallWatchDispatcher, false);
   assert.equal(stderr.value(), "");
 });
 
@@ -650,6 +651,7 @@ test("CLI forwards appServerWake into supervisor creation", async () => {
   });
   assert.equal(result, 0);
   assert.deepEqual(received.appServerWake, appServerWake());
+  assert.equal(received.useInstallWatchDispatcher, true);
   assert.equal(stderr.value(), "");
 });
 
@@ -791,6 +793,27 @@ test("CLI forwards headlessWakes into supervisor creation", async () => {
   });
   assert.equal(result, 0);
   assert.deepEqual(received.headlessWakes, wakes);
+  assert.equal(received.useInstallWatchDispatcher, false);
+});
+
+test("CLI opts into install dispatcher for headlessWakes with agentId and installationId", async () => {
+  const wakes = [headlessWake({
+    stateRoot: "/private/headless-state/bob",
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  })];
+  let received;
+  const result = await runClientSupervisorCLI({
+    input: Readable.from([JSON.stringify(bootstrap({ headlessWakes: wakes }))]),
+    stderr: capture().stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], headlessWakes: [] }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.equal(received.useInstallWatchDispatcher, true);
 });
 
 test("bootstrap rejects canonical state-root collisions and every room-pinned v2 wake", () => {
