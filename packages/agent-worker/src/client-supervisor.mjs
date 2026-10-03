@@ -873,13 +873,20 @@ export function createClientSupervisor({
               }
             }
           },
-          renewal: (grokBotConfig ?? appServerConfig)?.ensureBeforeWatch ? {
-            helperPath: (grokBotConfig ?? appServerConfig).helperPath,
-            installationId: (grokBotConfig ?? appServerConfig).installationId,
-            actorProfile: wakeConfig?.actorProfile
-              ?? grokBotConfig?.actorProfile
-              ?? appServerConfig?.actorProfile,
-          } : null,
+          // Grant renewal must use an event-driven / notify actor. App Server's
+          // mcp-interactive profile owns claim/reply and must not refresh grants
+          // when it is the sole install-watch anchor after Grok retirement.
+          renewal: (() => {
+            const anchor = grokBotConfig ?? appServerConfig;
+            if (!anchor?.ensureBeforeWatch) return null;
+            const actorProfile = wakeConfig?.actorProfile ?? grokBotConfig?.actorProfile;
+            if (!actorProfile) return null;
+            return {
+              helperPath: anchor.helperPath,
+              installationId: anchor.installationId,
+              actorProfile,
+            };
+          })(),
           ensure: grokBotEnsure ?? appServerEnsure,
           logEvent: "triangle_client_install_watch_failed",
           logMessage: "Install watch dispatcher failed",
