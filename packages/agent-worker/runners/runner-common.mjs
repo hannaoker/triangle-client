@@ -347,7 +347,18 @@ export function invoke(command, args, { input, sandbox = sandboxCommand, env = p
       }
       resolve(text);
     });
-    child.stdin.end(input);
+    // C4: EPIPE when the child exits early must not become an unhandled rejection.
+    child.stdin.on("error", (error) => {
+      if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") return;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    });
+    try {
+      child.stdin.end(input);
+    } catch (error) {
+      if (error?.code !== "EPIPE" && error?.code !== "ERR_STREAM_DESTROYED") {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
   });
 }
 
