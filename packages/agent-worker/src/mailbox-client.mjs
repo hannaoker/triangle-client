@@ -8,6 +8,11 @@ const MAX_ID_BYTES = 120;
 const MAX_TEXT_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RECONCILIATION_PAGES = 12;
+const DEFAULT_MAX_DELIVERY_ATTEMPTS = 5;
+const DEFAULT_MAX_ACK_ATTEMPTS = 8;
+const DEFAULT_MAX_LIST_ATTEMPTS = 3;
+const LEASE_RENEW_MARGIN_MS = 15_000;
+const MIN_LEASE_RENEW_DELAY_MS = 250;
 const MAILBOX_DELIVERY_META = Symbol("mailboxDeliveryMeta");
 const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const ROOM_ID = /^room_[a-f0-9]{32}$/;
@@ -31,6 +36,13 @@ export class MailboxRequestError extends Error {
     this.mailboxError = ALLOWED_ERROR_CODES.has(mailboxError)
       ? mailboxError
       : undefined;
+  }
+}
+
+export class MailboxOwnershipError extends MailboxRequestError {
+  constructor(message = "Mailbox claim ownership was lost") {
+    super(message);
+    this.name = "MailboxOwnershipError";
   }
 }
 
@@ -512,7 +524,16 @@ export function createWorkloadTokenManager({
 
 export function createMailboxClient(
   options,
-  { fetchImpl = globalThis.fetch, requestTimeoutMs = REQUEST_TIMEOUT_MS } = {},
+  {
+    fetchImpl = globalThis.fetch,
+    requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    maxDeliveryAttempts = DEFAULT_MAX_DELIVERY_ATTEMPTS,
+    maxAckAttempts = DEFAULT_MAX_ACK_ATTEMPTS,
+    maxListAttempts = DEFAULT_MAX_LIST_ATTEMPTS,
+    now = () => Date.now(),
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {},
 ) {
   const {
     meshUrl: origin,
@@ -523,8 +544,17 @@ export function createMailboxClient(
     workloadPrivateKey,
   } = validateMailboxClientOptions(options);
   validatePositiveInteger(requestTimeoutMs, "requestTimeoutMs");
+  validatePositiveInteger(maxDeliveryAttempts, "maxDeliveryAttempts");
+  validatePositiveInteger(maxAckAttempts, "maxAckAttempts");
+  validatePositiveInteger(maxListAttempts, "maxListAttempts");
   if (typeof fetchImpl !== "function") {
     throw new TypeError("fetchImpl must be a function");
+  }
+  if (typeof now !== "function") {
+    throw new TypeError("now must be a function");
+  }
+  if (typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") {
+    throw new TypeError("setTimeoutFn and clearTimeoutFn must be functions");
   }
 
   let workloadTokenManager = null;
@@ -544,6 +574,11 @@ export function createMailboxClient(
   // memory-only: after a process crash the durable claim remains fail-closed and
   // is never released or exposed to a different worker automatically.
   const retryDeliveries = new Map();
+  // Poison deliveries are held locally for operator inspection and are skipped
+  // via the mailbox after-cursor so they cannot permanently head-of-line block.
+  const quarantinedDeliveries = new Map();
+  const listFailureCounts = new Map();
+  let listAfterCursor = 0;
 
   async function request(path, { method = "GET", body, signal } = {}) {
     const controller = new AbortController();
@@ -605,7 +640,9 @@ export function createMailboxClient(
       assertResponse(response, payload);
       return payload;
     } catch (error) {
-      await deadlineGuard;
+      // Keep a rejection sink so a late deadline reject cannot become unhandled,
+      // but do not await the full timeout window on ordinary request failures.
+      void deadlineGuard;
       if (timedOut) {
         throw new MailboxRequestError("Mailbox request timed out");
       }
@@ -775,13 +812,48 @@ export function createMailboxClient(
     return validateAppendResponse(message, replyText, replyMessageId, response);
   }
 
-  async function ackDelivery(deliveryId, signal) {
+  function advanceListCursor(deliveryId) {
+    if (Number.isSafeInteger(deliveryId) && deliveryId > listAfterCursor) {
+      listAfterCursor = deliveryId;
+    }
+  }
+
+  function quarantineDelivery(deliveryId, reason, message = null) {
+    retryDeliveries.delete(deliveryId);
+    listFailureCounts.delete(deliveryId);
+    advanceListCursor(deliveryId);
+    quarantinedDeliveries.set(deliveryId, {
+      deliveryId,
+      reason,
+      quarantinedAt: new Date(now()).toISOString(),
+      message,
+    });
+  }
+
+  function parseLeaseExpiresAt(value) {
+    if (value === undefined || value === null) return undefined;
+    if (
+      typeof value !== "string" ||
+      !CANONICAL_TIMESTAMP.test(value) ||
+      !Number.isFinite(Date.parse(value))
+    ) {
+      throw new MailboxRequestError("Mailbox claim response is invalid");
+    }
+    return value;
+  }
+
+  // Discard/unsupported paths may omit claims. Owned processing must bind claim_id.
+  async function ackDelivery(deliveryId, signal, claimId) {
+    const body = {
+      delivery_ids: [deliveryId],
+      status: "processed",
+    };
+    if (claimId !== undefined) {
+      body.claims = [{ delivery_id: deliveryId, claim_id: claimId }];
+    }
     const response = await request("/api/v1/mailbox/ack", {
       method: "POST",
-      body: {
-        delivery_ids: [deliveryId],
-        status: "processed",
-      },
+      body,
       signal,
     });
     if (
@@ -814,14 +886,24 @@ export function createMailboxClient(
       ) {
         throw new MailboxRequestError("Mailbox claim response is invalid");
       }
-      return true;
+      if (response.renewed !== undefined && typeof response.renewed !== "boolean") {
+        throw new MailboxRequestError("Mailbox claim response is invalid");
+      }
+      return {
+        claimed: true,
+        claimId: response.claimId,
+        claimedAt: response.claimedAt,
+        idempotent: response.idempotent,
+        renewed: response.renewed === true,
+        leaseExpiresAt: parseLeaseExpiresAt(response.leaseExpiresAt),
+      };
     } catch (error) {
       if (
         error instanceof MailboxRequestError &&
         error.status === 409 &&
         error.mailboxError === "delivery_claim_conflict"
       ) {
-        return false;
+        return null;
       }
       throw error;
     }
@@ -843,11 +925,16 @@ export function createMailboxClient(
     // that ambiguous outcome idempotently.
     retryDeliveries.set(metadata.id, message);
     try {
-      if (await claimDelivery(metadata.id, metadata.claimId, signal)) {
-        return true;
+      const claimed = await claimDelivery(metadata.id, metadata.claimId, signal);
+      if (!claimed) {
+        retryDeliveries.delete(metadata.id);
+        return false;
       }
-      retryDeliveries.delete(metadata.id);
-      return false;
+      metadata.owned = true;
+      if (claimed.leaseExpiresAt !== undefined) {
+        metadata.leaseExpiresAt = claimed.leaseExpiresAt;
+      }
+      return true;
     } catch (error) {
       if (isDefinitiveClaimDenial(error)) {
         retryDeliveries.delete(metadata.id);
@@ -856,13 +943,107 @@ export function createMailboxClient(
     }
   }
 
+  function renewDelayMs(leaseExpiresAt) {
+    const expiresMs = Date.parse(leaseExpiresAt);
+    if (!Number.isFinite(expiresMs)) return null;
+    const remaining = expiresMs - now();
+    if (remaining <= 0) return 0;
+    const halfLife = Math.floor(remaining / 2);
+    const marginDelay = remaining - LEASE_RENEW_MARGIN_MS;
+    const delay = Math.min(halfLife, marginDelay);
+    return Math.max(MIN_LEASE_RENEW_DELAY_MS, delay);
+  }
+
+  async function withClaimCustody(metadata, signal, work) {
+    const ownership = new AbortController();
+    const forwardAbort = () => ownership.abort();
+    signal?.addEventListener?.("abort", forwardAbort, { once: true });
+    if (signal?.aborted) ownership.abort();
+
+    let renewTimer;
+    let renewInFlight = false;
+    let stopped = false;
+
+    const stopRenewal = () => {
+      stopped = true;
+      if (renewTimer !== undefined) {
+        clearTimeoutFn(renewTimer);
+        renewTimer = undefined;
+      }
+    };
+
+    const markOwnershipLost = () => {
+      metadata.owned = false;
+      metadata.ownershipLost = true;
+      stopRenewal();
+      if (!ownership.signal.aborted) ownership.abort();
+    };
+
+    const scheduleRenew = () => {
+      if (stopped || !metadata.leaseExpiresAt || ownership.signal.aborted) return;
+      const delay = renewDelayMs(metadata.leaseExpiresAt);
+      if (delay === null) return;
+      renewTimer = setTimeoutFn(() => {
+        void (async () => {
+          if (stopped || renewInFlight || ownership.signal.aborted) return;
+          renewInFlight = true;
+          try {
+            const renewed = await claimDelivery(
+              metadata.id,
+              metadata.claimId,
+              ownership.signal,
+            );
+            if (!renewed) {
+              markOwnershipLost();
+              return;
+            }
+            if (renewed.leaseExpiresAt !== undefined) {
+              metadata.leaseExpiresAt = renewed.leaseExpiresAt;
+            }
+            renewInFlight = false;
+            scheduleRenew();
+          } catch (error) {
+            renewInFlight = false;
+            if (isDefinitiveClaimDenial(error) || error instanceof MailboxRequestError) {
+              markOwnershipLost();
+              return;
+            }
+            markOwnershipLost();
+          }
+        })();
+      }, delay);
+    };
+
+    scheduleRenew();
+    try {
+      return await work(ownership.signal);
+    } finally {
+      stopRenewal();
+      signal?.removeEventListener?.("abort", forwardAbort);
+    }
+  }
+
+  function assertStillOwner(metadata, ownedSignal) {
+    if (metadata.ownershipLost || metadata.owned === false) {
+      throw new MailboxOwnershipError();
+    }
+    if (ownedSignal?.aborted) {
+      throw new MailboxRequestError("Mailbox request aborted");
+    }
+  }
+
   async function listUnread({ signal } = {}) {
     await ensureActorIdentity(signal);
-    if (retryDeliveries.size > 0) {
-      return Array.from(retryDeliveries.values()).slice(0, pageLimit);
+    const retries = Array.from(retryDeliveries.values()).filter((message) => {
+      const id = message?.[MAILBOX_DELIVERY_META]?.id;
+      return Number.isSafeInteger(id) && !quarantinedDeliveries.has(id);
+    });
+    if (retries.length > 0) {
+      return retries.slice(0, pageLimit);
     }
+
     const query = new URLSearchParams({
-      after: "0",
+      after: String(listAfterCursor),
       limit: String(pageLimit),
     });
     const page = await request(`/api/v1/mailbox?${query}`, { signal });
@@ -873,6 +1054,11 @@ export function createMailboxClient(
     const messages = [];
     for (const delivery of page.items) {
       const normalizedDelivery = validateMailboxDelivery(delivery, workerId);
+      if (quarantinedDeliveries.has(normalizedDelivery.id)) {
+        advanceListCursor(normalizedDelivery.id);
+        continue;
+      }
+
       let normalizedEvent;
       try {
         normalizedEvent = await listRoomEvent(
@@ -881,9 +1067,21 @@ export function createMailboxClient(
           normalizedDelivery.eventId,
           signal,
         );
+        listFailureCounts.delete(normalizedDelivery.id);
       } catch (error) {
         if (isSkipEventError(error)) {
+          // Unsupported/discarded deliveries may ack without a claim.
           await ackDelivery(normalizedDelivery.id, signal);
+          advanceListCursor(normalizedDelivery.id);
+          continue;
+        }
+        const failures = (listFailureCounts.get(normalizedDelivery.id) ?? 0) + 1;
+        listFailureCounts.set(normalizedDelivery.id, failures);
+        if (failures >= maxListAttempts) {
+          quarantineDelivery(
+            normalizedDelivery.id,
+            error?.message ?? "list_validation_failed",
+          );
           continue;
         }
         throw error;
@@ -902,6 +1100,10 @@ export function createMailboxClient(
         value: {
           ...normalizedDelivery,
           claimId: `claim_${crypto.randomBytes(16).toString("hex")}`,
+          owned: false,
+          replyPersisted: false,
+          processingAttempts: 0,
+          ackAttempts: 0,
         },
         enumerable: false,
       });
@@ -909,6 +1111,23 @@ export function createMailboxClient(
     }
 
     return messages;
+  }
+
+  async function acknowledgeOwned(metadata, signal) {
+    assertStillOwner(metadata);
+    try {
+      await ackDelivery(metadata.id, signal, metadata.claimId);
+    } catch (error) {
+      metadata.ackAttempts = (metadata.ackAttempts ?? 0) + 1;
+      if (metadata.ackAttempts >= maxAckAttempts) {
+        quarantineDelivery(metadata.id, "ack_retry_exhausted");
+        return { quarantined: true, acknowledged: false };
+      }
+      throw error;
+    }
+    retryDeliveries.delete(metadata.id);
+    advanceListCursor(metadata.id);
+    return { quarantined: false, acknowledged: true };
   }
 
   async function executeDelivery(message, generate, signal) {
@@ -926,6 +1145,14 @@ export function createMailboxClient(
 
     if (!Number.isSafeInteger(metadata.id) || metadata.id <= 0) {
       throw new TypeError("Mailbox delivery metadata is invalid");
+    }
+    if (quarantinedDeliveries.has(metadata.id)) {
+      return {
+        claimed: false,
+        reconciled: false,
+        acknowledged: false,
+        quarantined: true,
+      };
     }
 
     const normalized = {
@@ -945,41 +1172,117 @@ export function createMailboxClient(
       );
     }
 
-    if (normalized.replyRequired === false) {
+    const recordProcessingFailure = (error) => {
+      // Ack-only failures after a durable reply must not burn the runner budget
+      // or re-enter model execution.
+      if (metadata.replyPersisted) return error;
+      metadata.processingAttempts = (metadata.processingAttempts ?? 0) + 1;
+      if (metadata.processingAttempts >= maxDeliveryAttempts) {
+        quarantineDelivery(
+          metadata.id,
+          error?.message ?? "processing_retry_exhausted",
+          message,
+        );
+        return null;
+      }
+      retryDeliveries.set(metadata.id, message);
+      return error;
+    };
+
+    try {
       if (!(await establishClaim(message, metadata, signal))) {
         return { claimed: false, reconciled: false, acknowledged: false };
       }
-      await ackDelivery(metadata.id, signal);
-      retryDeliveries.delete(metadata.id);
-      return {
-        reconciled: false,
-        acknowledged: true,
-      };
-    }
 
-    const replyMessageId = deterministicMailboxReplyMessageId(normalized);
-    if (!(await establishClaim(message, metadata, signal))) {
-      return { claimed: false, reconciled: false, acknowledged: false };
-    }
-    const existing = await findExistingReply(
-      normalized.contextId,
-      replyMessageId,
-      metadata.roomSequence,
-      signal,
-    );
-    if (!existing.found) {
-      // Runner calls are at-least-once; adapters must dedupe using messageId/taskId.
-      const replyText = validateResult(await generate(normalizedRequest(normalized), { signal }));
-      // Runner execution is at-least-once for mailbox polling; adapters must dedupe by message/task identity.
-      await appendReply(normalized, replyText, replyMessageId, signal);
-    }
+      return await withClaimCustody(metadata, signal, async (ownedSignal) => {
+        if (normalized.replyRequired === false) {
+          assertStillOwner(metadata, ownedSignal);
+          const ack = await acknowledgeOwned(metadata, signal);
+          if (ack.quarantined) {
+            return {
+              claimed: false,
+              reconciled: false,
+              acknowledged: false,
+              quarantined: true,
+            };
+          }
+          return {
+            reconciled: false,
+            acknowledged: true,
+          };
+        }
 
-    await ackDelivery(metadata.id, signal);
-    retryDeliveries.delete(metadata.id);
-    return {
-      reconciled: existing.found,
-      acknowledged: true,
-    };
+        const replyMessageId = deterministicMailboxReplyMessageId(normalized);
+        let reconciled = metadata.replyPersisted === true;
+        if (!metadata.replyPersisted) {
+          const existing = await findExistingReply(
+            normalized.contextId,
+            replyMessageId,
+            metadata.roomSequence,
+            ownedSignal,
+          );
+          if (existing.found) {
+            metadata.replyPersisted = true;
+            reconciled = true;
+          } else {
+            assertStillOwner(metadata, ownedSignal);
+            // Runner calls are at-least-once; adapters must dedupe using messageId/taskId.
+            const replyText = validateResult(
+              await generate(normalizedRequest(normalized), { signal: ownedSignal }),
+            );
+            assertStillOwner(metadata, ownedSignal);
+            await appendReply(normalized, replyText, replyMessageId, ownedSignal);
+            metadata.replyPersisted = true;
+            reconciled = false;
+          }
+        }
+
+        assertStillOwner(metadata, ownedSignal);
+        const ack = await acknowledgeOwned(metadata, signal);
+        if (ack.quarantined) {
+          return {
+            claimed: false,
+            reconciled,
+            acknowledged: false,
+            quarantined: true,
+          };
+        }
+        return {
+          reconciled,
+          acknowledged: true,
+        };
+      });
+    } catch (error) {
+      if (error instanceof MailboxOwnershipError || metadata.ownershipLost) {
+        // Never ack after ownership loss; durable replies remain idempotent for reclaim.
+        retryDeliveries.delete(metadata.id);
+        return {
+          claimed: false,
+          reconciled: metadata.replyPersisted === true,
+          acknowledged: false,
+          ownershipLost: true,
+        };
+      }
+      if (isDefinitiveClaimDenial(error)) {
+        retryDeliveries.delete(metadata.id);
+        throw error;
+      }
+      if (metadata.replyPersisted) {
+        // Ack failures are counted in acknowledgeOwned; keep custody for retry only.
+        retryDeliveries.set(metadata.id, message);
+        throw error;
+      }
+      const recorded = recordProcessingFailure(error);
+      if (recorded === null) {
+        return {
+          claimed: false,
+          reconciled: false,
+          acknowledged: false,
+          quarantined: true,
+        };
+      }
+      throw recorded;
+    }
   }
 
   function completeAndAcknowledge(message, generate, { signal } = {}) {
@@ -995,8 +1298,17 @@ export function createMailboxClient(
     return operation;
   }
 
+  function listQuarantined() {
+    return Array.from(quarantinedDeliveries.values()).map((entry) => ({
+      deliveryId: entry.deliveryId,
+      reason: entry.reason,
+      quarantinedAt: entry.quarantinedAt,
+    }));
+  }
+
   return {
     listUnread,
     completeAndAcknowledge,
+    listQuarantined,
   };
 }

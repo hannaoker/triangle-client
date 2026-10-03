@@ -1946,6 +1946,256 @@ test("ack failure retries the same claim and reconciles without regenerating", a
   assert.deepEqual(await scenario.client.listUnread(), []);
 });
 
+test("ack payloads include matching claims for owned deliveries (C1)", async () => {
+  const scenario = createRetryScenario();
+  const [message] = await scenario.client.listUnread();
+  await scenario.client.completeAndAcknowledge(message, async () => ({
+    status: "completed",
+    text: "claimed ack",
+  }));
+
+  const claimId = scenario.state.calls.find(
+    (call) => call.url.pathname === "/api/v1/mailbox/claim",
+  ).body.claim_id;
+  const ackBodies = scenario.state.calls
+    .filter((call) => call.url.pathname === "/api/v1/mailbox/ack")
+    .map((call) => call.body);
+  assert.equal(ackBodies.length, 1);
+  assert.deepEqual(ackBodies[0], {
+    delivery_ids: [101],
+    status: "processed",
+    claims: [{ delivery_id: 101, claim_id: claimId }],
+  });
+});
+
+test("unsupported deliveries still ack without claims", async () => {
+  const roomId = "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: {
+      items: [{
+        deliveryId: 7,
+        roomId,
+        eventId: "event_00000000000000000000000000000002",
+        roomSequence: 1,
+        state: "pending",
+        createdAt: "2026-08-07T00:00:00Z",
+      }],
+    },
+    roomHistoryByRoom: new Map([[roomId, [{
+      id: "event_00000000000000000000000000000002",
+      roomId,
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "room.member_added",
+      body: {},
+    }]]]),
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, { fetchImpl });
+
+  assert.deepEqual(await client.listUnread(), []);
+  const ackBody = state.calls.find((call) => call.url.pathname === "/api/v1/mailbox/ack").body;
+  assert.deepEqual(ackBody, {
+    delivery_ids: [7],
+    status: "processed",
+  });
+  assert.equal(ackBody.claims, undefined);
+});
+
+test("poison delivery retries are capped and quarantined without blocking later work (C2)", async () => {
+  const roomA = "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const roomB = "room_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const eventA = "event_00000000000000000000000000000002";
+  const eventB = "event_00000000000000000000000000000003";
+  const mailboxResponse = {
+    items: [{
+      deliveryId: 201,
+      roomId: roomA,
+      eventId: eventA,
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }],
+  };
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse,
+    roomHistoryByRoom: new Map([
+      [roomA, [canonicalEvent({
+        id: eventA,
+        roomId: roomA,
+        sequence: 1,
+        senderAgentId: "agent_22222222222222222222222222222222",
+        type: "message.created",
+        text: "poison",
+      })]],
+      [roomB, [canonicalEvent({
+        id: eventB,
+        roomId: roomB,
+        sequence: 1,
+        senderAgentId: "agent_22222222222222222222222222222222",
+        type: "message.created",
+        text: "healthy",
+      })]],
+    ]),
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, { fetchImpl, maxDeliveryAttempts: 2 });
+
+  const [poison] = await client.listUnread();
+  await assert.rejects(
+    client.completeAndAcknowledge(poison, async () => {
+      throw new Error("runner always fails");
+    }),
+    /runner always fails/,
+  );
+  const quarantined = await client.completeAndAcknowledge(poison, async () => {
+    throw new Error("runner always fails");
+  });
+  assert.deepEqual(quarantined, {
+    claimed: false,
+    reconciled: false,
+    acknowledged: false,
+    quarantined: true,
+  });
+  const listedQuarantine = client.listQuarantined();
+  assert.equal(listedQuarantine.length, 1);
+  assert.equal(listedQuarantine[0].deliveryId, 201);
+  assert.equal(listedQuarantine[0].reason, "runner always fails");
+  assert.equal(state.acknowledgeCount, 0);
+
+  mailboxResponse.items = [{
+    deliveryId: 202,
+    roomId: roomB,
+    eventId: eventB,
+    roomSequence: 1,
+    state: "pending",
+    createdAt: "2026-08-07T00:00:01Z",
+  }];
+  const [healthy] = await client.listUnread();
+  assert.equal(healthy.text, "healthy");
+  const healthyResult = await client.completeAndAcknowledge(healthy, async () => ({
+    status: "completed",
+    text: "ok",
+  }));
+  assert.equal(healthyResult.acknowledged, true);
+  assert.equal(state.acknowledgeCount, 1);
+  const healthyAck = state.calls.find((call) => (
+    call.url.pathname === "/api/v1/mailbox/ack" && call.body.delivery_ids[0] === 202
+  ));
+  assert.ok(healthyAck.body.claims);
+});
+
+test("claim lease renews during long processing and stops side effects after ownership loss", async () => {
+  const roomId = "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const eventId = "event_00000000000000000000000000000002";
+  let claimCount = 0;
+  let nowMs = Date.parse("2026-08-07T00:00:00.000Z");
+  const timers = [];
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: {
+      items: [{
+        deliveryId: 301,
+        roomId,
+        eventId,
+        roomSequence: 1,
+        state: "pending",
+        createdAt: "2026-08-07T00:00:00Z",
+      }],
+    },
+    roomHistoryByRoom: new Map([[roomId, [canonicalEvent({
+      id: eventId,
+      roomId,
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      text: "long running",
+    })]]]),
+    claim(body, claimState) {
+      claimCount += 1;
+      const existing = claimState.claims.get(body.delivery_id);
+      if (existing && existing !== body.claim_id) {
+        return json({ error: "delivery_claim_conflict" }, 409);
+      }
+      if (claimCount >= 3) {
+        return json({ error: "delivery_claim_conflict" }, 409);
+      }
+      claimState.claims.set(body.delivery_id, body.claim_id);
+      return {
+        claimed: true,
+        claimId: body.claim_id,
+        claimedAt: "2026-08-07T00:00:00.000Z",
+        idempotent: Boolean(existing),
+        renewed: claimCount > 1,
+        leaseExpiresAt: new Date(nowMs + 60_000).toISOString(),
+      };
+    },
+  });
+
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+  }, {
+    fetchImpl,
+    now: () => nowMs,
+    setTimeoutFn: (fn, delay) => {
+      const handle = { fn, delay, cleared: false };
+      timers.push(handle);
+      return handle;
+    },
+    clearTimeoutFn: (handle) => {
+      if (handle) handle.cleared = true;
+    },
+  });
+
+  const [message] = await client.listUnread();
+  let generateStarted;
+  const generateGate = new Promise((resolve) => {
+    generateStarted = resolve;
+  });
+  let releaseGenerate;
+  const generateHold = new Promise((resolve) => {
+    releaseGenerate = resolve;
+  });
+
+  const completionPromise = client.completeAndAcknowledge(message, async () => {
+    generateStarted();
+    await generateHold;
+    return { status: "completed", text: "should not persist after loss" };
+  });
+
+  await generateGate;
+  assert.equal(claimCount, 1);
+  assert.equal(timers.length, 1);
+
+  nowMs += timers[0].delay;
+  timers[0].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(claimCount, 2);
+
+  const secondTimer = timers.find((timer) => !timer.cleared && timer !== timers[0]);
+  assert.ok(secondTimer);
+  nowMs += secondTimer.delay;
+  secondTimer.fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(claimCount, 3);
+
+  releaseGenerate();
+  const result = await completionPromise;
+  assert.equal(result.ownershipLost, true);
+  assert.equal(result.acknowledged, false);
+  assert.equal(state.appendCount, 0);
+  assert.equal(state.acknowledgeCount, 0);
+});
+
 test("identity-v1 workload key exchanges token challenge and sends DPoP proof on mailbox calls", async () => {
   const rawKey = crypto.randomBytes(32);
   const pkcs8 = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), rawKey]);
