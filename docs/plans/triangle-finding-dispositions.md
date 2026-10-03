@@ -2,7 +2,7 @@
 
 Tracking sheet for [`codebase_review.md`](./codebase_review.md) under [`triangle_implementation_plan.md`](./triangle_implementation_plan.md).
 
-Updated: 2026-10-03 (PR11 remainder opened). Status values: `confirmed` | `rejected` | `deferred` | `fixed`.
+Updated: 2026-10-03 (merge stack; Bob webhook path removed). Status values: `confirmed` | `rejected` | `deferred` | `fixed` | `removed`.
 
 ## High priority
 
@@ -23,7 +23,7 @@ Updated: 2026-10-03 (PR11 remainder opened). Status values: `confirmed` | `rejec
 | C2 | fixed (PR6) | No retry cap / head-of-line block | [#68](https://github.com/hannaoker/triangle-client/pull/68) | poison → quarantine | — |
 | C3 | fixed (PR4) | Deadline rejection unhandled during token fetch | [#67](https://github.com/hannaoker/triangle-client/pull/67) | timeout → request error | — |
 | C4 | fixed (PR4) | Child stdin EPIPE unhandled | [#67](https://github.com/hannaoker/triangle-client/pull/67) | EPIPE handled; SIGKILL bound | — |
-| C5 | fixed (PR11) | Install dispatcher no longer hard-requires grokBotWake (appServerWake anchor OK); webhook opt-in only. Mini webhook re-arm deferred. | [#69](https://github.com/hannaoker/triangle-client/pull/69) | supervisor + host script | Do not re-arm Mini webhook | Install dispatcher no longer hard-requires grokBotWake (appServerWake anchor OK); webhook opt-in only. Mini webhook re-arm deferred. | MESH [#15](https://github.com/hannaoker/the-triangle/pull/15) + client [#69](https://github.com/hannaoker/triangle-client/pull/69) | supervisor + host script | Do not re-arm Mini webhook |
+| C5 | removed | Mini Bob / Grok webhook wake path is removed (not deferred). Install dispatcher anchors on `appServerWake` (or explicit event lanes); do not re-arm webhook. | [#69](https://github.com/hannaoker/triangle-client/pull/69) | supervisor without grokBotWake | Path retired |
 | C6 | fixed (PR3) | Plist `EnvironmentVariables` vs exact key set | [#66](https://github.com/hannaoker/triangle-client/pull/66) | agent add/enable with shipped template | — |
 | C7 | fixed (PR3) | WorkloadTokenManager single-flight race | [#66](https://github.com/hannaoker/triangle-client/pull/66) | concurrent refresh shares one task | — |
 
@@ -43,10 +43,10 @@ Updated: 2026-10-03 (PR11 remainder opened). Status values: `confirmed` | `rejec
 | Item | Status | Notes |
 | --- | --- | --- |
 | openDirectRoom returns closed rooms | **fixed (PR11 MESH)** | [#15](https://github.com/hannaoker/the-triangle/pull/15) — reject `state != active` before reuse |
-| Peer introspection ignores disabled senders | **fixed (PR11 MESH)** | [#15](https://github.com/hannaoker/the-triangle/pull/15) — D1 lookup requires sender status online/busy/offline |
+| Peer introspection ignores disabled senders | **fixed (PR11 MESH)** | [#15](https://github.com/hannaoker/the-triangle/pull/15) — reject `status === disabled` only (Codex P2: preserve idle/etc.) |
 | Registration challenge purpose binding | **deferred** | `registration_challenges` has no purpose column (schema.ts); needs migration + issuer/consumer CAS |
 | Production default IDs in macos-shared-codex-app-server-host | **fixed (PR11 client)** | [#69](https://github.com/hannaoker/triangle-client/pull/69) — require env or existing binding |
-| Mini ops webhook re-arm | **deferred** | Explicitly not re-armed in PR11 |
-| Lease enforcement | **not enabled** | Per plan; do not flip claim-lease enforcement flags |
+| Mini Bob / Grok webhook wake | **removed** | Path removed; not a deferred re-arm. Supervisor must not depend on `grokBotWake` |
+| Lease enforcement | **not enabled** | Per plan; do not flip claim-lease enforcement flags until NULL-lease backfill is zero and clients send claims |
 
 All other items from review §3 remain `deferred` pending later triage.

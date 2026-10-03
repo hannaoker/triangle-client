@@ -117,12 +117,17 @@ export function createClientSupervisor({
   if (headlessWake !== LEGACY_HEADLESS_WAKE_UNSET) {
     throw new TypeError("headlessWake is not supported; use headlessWakes");
   }
+  // Mini Bob / Grok webhook wake path is removed (not deferred). Callers must
+  // use appServerWake / eventWake / headlessWakes instead.
+  if (grokBotWake != null) {
+    throw new TypeError("grokBotWake was removed; Mini Bob webhook wake path is retired");
+  }
   if (!Array.isArray(instances) || instances.length > 100) {
     throw new TypeError("instances must contain between 0 and 100 entries");
   }
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
-  const grokBotConfig = validateGrokBotWake(grokBotWake);
+  const grokBotConfig = null;
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
   const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
   if (
@@ -145,15 +150,16 @@ export function createClientSupervisor({
   // fail together on one expired credential join (or observe) one renewal.
   const watchGrantRenewals = new Map();
   // Option A: install dispatcher. Skip when eventWake is also present (legacy
-  // multi-lane event path). Grok webhook is opt-in — dispatcher may run from
-  // appServerWake alone after Mini webhook retirement (headless lanes optional).
-  const hasInstallDispatcherAnchor = Boolean(grokBotConfig) || Boolean(appServerConfig);
+  // multi-lane event path). Anchor is appServerWake only — Bob webhook removed.
+  const hasInstallDispatcherAnchor = Boolean(appServerConfig);
+  // Bob webhook no longer auto-enables the dispatcher. Opt in explicitly with
+  // useInstallWatchDispatcher + appServerWake.
   const installDispatcherEnabled = useInstallWatchDispatcher == null
-    ? Boolean(grokBotConfig) && !wakeConfig
+    ? false
     : Boolean(useInstallWatchDispatcher);
   if (installDispatcherEnabled && !hasInstallDispatcherAnchor) {
     throw new TypeError(
-      "useInstallWatchDispatcher requires grokBotWake or appServerWake as the install watch anchor",
+      "useInstallWatchDispatcher requires appServerWake as the install watch anchor",
     );
   }
 
@@ -603,7 +609,7 @@ export function createClientSupervisor({
     const installAnchor = grokBotConfig ?? appServerConfig;
     if (!installAnchor) {
       throw new TypeError(
-        "useInstallWatchDispatcher requires grokBotWake or appServerWake as the install watch anchor",
+        "useInstallWatchDispatcher requires appServerWake as the install watch anchor",
       );
     }
     const installCursorPath = resolveInstallWatchCursorPath(installAnchor.cursorPath);

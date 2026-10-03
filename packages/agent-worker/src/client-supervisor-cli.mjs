@@ -23,7 +23,7 @@ const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "grokBotWake", "headlessWakes", "cursorAcpWakes"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "headlessWakes", "cursorAcpWakes"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -616,12 +616,8 @@ export function parseClientSupervisorBootstrap(text) {
       validateAppServerWake(bootstrap.appServerWake, seen, bootstrap.eventWake);
     }
     if (Object.hasOwn(bootstrap, "grokBotWake")) {
-      validateGrokBotWake(
-        bootstrap.grokBotWake,
-        seen,
-        bootstrap.eventWake,
-        bootstrap.appServerWake,
-      );
+      // Mini Bob / Grok webhook wake path is removed.
+      throw invalidBootstrap();
     }
     if (Object.hasOwn(bootstrap, "headlessWakes")) {
       if (!Array.isArray(bootstrap.headlessWakes) || bootstrap.headlessWakes.length > 100) throw invalidBootstrap();
