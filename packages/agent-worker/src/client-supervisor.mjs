@@ -117,12 +117,17 @@ export function createClientSupervisor({
   if (headlessWake !== LEGACY_HEADLESS_WAKE_UNSET) {
     throw new TypeError("headlessWake is not supported; use headlessWakes");
   }
+  // Mini Bob / Grok webhook wake path is removed (not deferred). Callers must
+  // use appServerWake / eventWake / headlessWakes instead.
+  if (grokBotWake != null) {
+    throw new TypeError("grokBotWake was removed; Mini Bob webhook wake path is retired");
+  }
   if (!Array.isArray(instances) || instances.length > 100) {
     throw new TypeError("instances must contain between 0 and 100 entries");
   }
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
-  const grokBotConfig = validateGrokBotWake(grokBotWake);
+  const grokBotConfig = null;
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
   const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
   if (
@@ -144,13 +149,18 @@ export function createClientSupervisor({
   // A grant is installation-scoped too. Track its generation so listeners that
   // fail together on one expired credential join (or observe) one renewal.
   const watchGrantRenewals = new Map();
-  // Option A: Bob-owned install dispatcher. Skip when eventWake is also present
-  // (legacy multi-lane event path); Mini production is grokBot ± headless.
+  // Option A: install dispatcher. Skip when eventWake is also present (legacy
+  // multi-lane event path). Anchor is appServerWake only — Bob webhook removed.
+  const hasInstallDispatcherAnchor = Boolean(appServerConfig);
+  // Bob webhook no longer auto-enables the dispatcher. Opt in explicitly with
+  // useInstallWatchDispatcher + appServerWake.
   const installDispatcherEnabled = useInstallWatchDispatcher == null
-    ? Boolean(grokBotConfig) && !wakeConfig
+    ? false
     : Boolean(useInstallWatchDispatcher);
-  if (installDispatcherEnabled && !grokBotConfig) {
-    throw new TypeError("useInstallWatchDispatcher requires grokBotWake");
+  if (installDispatcherEnabled && !hasInstallDispatcherAnchor) {
+    throw new TypeError(
+      "useInstallWatchDispatcher requires appServerWake as the install watch anchor",
+    );
   }
 
   function watchGrantState(installationId) {
@@ -354,11 +364,13 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
-    // App Server joins the Bob install dispatcher only when it shares Bob's
-    // installationId. Otherwise it must keep its own watch loop.
+    // App Server joins the install dispatcher when it shares Bob's installationId,
+    // or when it is the sole install-watch anchor after Grok webhook retirement.
     const appServerCoveredByInstallDispatcher = installDispatcherEnabled
-      && grokBotConfig != null
-      && appServerConfig.installationId === grokBotConfig.installationId;
+      && (
+        grokBotConfig == null
+        || appServerConfig.installationId === grokBotConfig.installationId
+      );
     appServerBridge = createWakeBridge({
       binding: appServerConfig.binding,
       session,
@@ -510,37 +522,42 @@ export function createClientSupervisor({
   }
 
   let installDispatcher = null;
-  if (installDispatcherEnabled && grokBotBridge && grokBotConfig) {
+  if (installDispatcherEnabled && hasInstallDispatcherAnchor) {
     const dispatcherProfiles = [];
     const dispatcherHandlers = new Map();
     const laneCursorStores = [];
 
-    dispatcherProfiles.push({
-      instanceId: grokBotConfig.binding.instanceId,
-      agentId: grokBotConfig.binding.agentId,
-    });
-    dispatcherHandlers.set(grokBotConfig.binding.instanceId, async (wake) => {
-      try {
-        return await grokBotBridge.handleWake(wake);
-      } catch (error) {
-        // D3: must reject the fan-out barrier so the install cursor does not
-        // advance past a failed Bob wake (at-least-once replay on next poll).
-        logger.error?.("triangle_grok_bot_wake_failed", {
-          code: error?.code,
-          message: error?.message,
-          instanceId: wake?.instanceId,
-          httpStatus: error?.status ?? null,
-          reason: typeof wake?.reason === "string" ? wake.reason.slice(0, 64) : undefined,
-        });
-        throw error;
-      }
-    });
-    laneCursorStores.push(createCursorStore({ filePath: grokBotConfig.cursorPath }));
+    if (grokBotBridge && grokBotConfig) {
+      dispatcherProfiles.push({
+        instanceId: grokBotConfig.binding.instanceId,
+        agentId: grokBotConfig.binding.agentId,
+      });
+      dispatcherHandlers.set(grokBotConfig.binding.instanceId, async (wake) => {
+        try {
+          return await grokBotBridge.handleWake(wake);
+        } catch (error) {
+          // D3: must reject the fan-out barrier so the install cursor does not
+          // advance past a failed Bob wake (at-least-once replay on next poll).
+          logger.error?.("triangle_grok_bot_wake_failed", {
+            code: error?.code,
+            message: error?.message,
+            instanceId: wake?.instanceId,
+            httpStatus: error?.status ?? null,
+            reason: typeof wake?.reason === "string" ? wake.reason.slice(0, 64) : undefined,
+          });
+          throw error;
+        }
+      });
+      laneCursorStores.push(createCursorStore({ filePath: grokBotConfig.cursorPath }));
+    }
 
     if (
       appServerBridge
       && appServerConfig
-      && appServerConfig.installationId === grokBotConfig.installationId
+      && (
+        !grokBotConfig
+        || appServerConfig.installationId === grokBotConfig.installationId
+      )
     ) {
       dispatcherProfiles.push({
         instanceId: appServerConfig.binding.instanceId,
@@ -585,10 +602,20 @@ export function createClientSupervisor({
       });
     }
 
-    const installCursorPath = resolveInstallWatchCursorPath(grokBotConfig.cursorPath);
+    if (dispatcherProfiles.length === 0) {
+      throw new TypeError("useInstallWatchDispatcher requires at least one wake lane profile");
+    }
+
+    const installAnchor = grokBotConfig ?? appServerConfig;
+    if (!installAnchor) {
+      throw new TypeError(
+        "useInstallWatchDispatcher requires appServerWake as the install watch anchor",
+      );
+    }
+    const installCursorPath = resolveInstallWatchCursorPath(installAnchor.cursorPath);
     const watchTransport = sharedWatchTransport({
-      helperPath: grokBotConfig.helperPath,
-      installationId: grokBotConfig.installationId,
+      helperPath: installAnchor.helperPath,
+      installationId: installAnchor.installationId,
     });
     installDispatcher = createInstallDispatcher({
       profiles: dispatcherProfiles,
@@ -852,12 +879,21 @@ export function createClientSupervisor({
               }
             }
           },
-          renewal: grokBotConfig.ensureBeforeWatch ? {
-            helperPath: grokBotConfig.helperPath,
-            installationId: grokBotConfig.installationId,
-            actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
-          } : null,
-          ensure: grokBotEnsure,
+          // Grant renewal must use an event-driven / notify actor. App Server's
+          // mcp-interactive profile owns claim/reply and must not refresh grants
+          // when it is the sole install-watch anchor after Grok retirement.
+          renewal: (() => {
+            const anchor = grokBotConfig ?? appServerConfig;
+            if (!anchor?.ensureBeforeWatch) return null;
+            const actorProfile = wakeConfig?.actorProfile ?? grokBotConfig?.actorProfile;
+            if (!actorProfile) return null;
+            return {
+              helperPath: anchor.helperPath,
+              installationId: anchor.installationId,
+              actorProfile,
+            };
+          })(),
+          ensure: grokBotEnsure ?? appServerEnsure,
           logEvent: "triangle_client_install_watch_failed",
           logMessage: "Install watch dispatcher failed",
         })

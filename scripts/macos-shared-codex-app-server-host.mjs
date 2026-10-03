@@ -48,12 +48,6 @@ const TOKEN_PATH = path.join(CLIENT_ROOT, "app-server-ws.token");
 const CURSOR_PATH = path.join(CLIENT_ROOT, "app-server-wake-cursor.json");
 const HOLD_PATH = path.join(HOST_ROOT, "hold.pids");
 
-const INSTALLATION_ID = process.env.MESH_INSTALLATION_ID || "inst_EaA3qkuzOuQwTSFw";
-const INSTANCE_ID =
-  process.env.MESH_CODEX_INSTANCE_ID ||
-  "8dc26a2fc9a622dc5ed9e3560fa0533a38b8f0998e7c34108cfb1301c6aaab64";
-const DEFAULT_AGENT_ID = "agent_98bba387b21046008b7836dadab3d6c2";
-const DEFAULT_ROOM_ID = "room_8bc8ad0e978c43dcbf9d217dade97035";
 const SERVER_IDENTITY =
   process.env.MESH_DESKTOP_SERVER_IDENTITY || "codex-app-server/desktop-experiment";
 
@@ -73,15 +67,32 @@ function readExistingBindingFields() {
   }
 }
 
+function requireConfiguredId(name, value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(
+      `${name} must be set via environment or existing binding at ${BINDING_PATH}; production defaults were removed`,
+    );
+  }
+  return value;
+}
+
 const existingBinding = readExistingBindingFields();
-const AGENT_ID =
-  process.env.MESH_CODEX_AGENT_ID || existingBinding.agentId || DEFAULT_AGENT_ID;
-const ROOM_ID =
-  process.env.MESH_CODEX_ROOM_ID || existingBinding.roomScope || DEFAULT_ROOM_ID;
-const EFFECTIVE_INSTANCE_ID =
-  process.env.MESH_CODEX_INSTANCE_ID || existingBinding.instanceId || INSTANCE_ID;
-const EFFECTIVE_INSTALLATION_ID =
-  process.env.MESH_INSTALLATION_ID || existingBinding.installationId || INSTALLATION_ID;
+const AGENT_ID = requireConfiguredId(
+  "MESH_CODEX_AGENT_ID",
+  process.env.MESH_CODEX_AGENT_ID || existingBinding.agentId,
+);
+const ROOM_ID = requireConfiguredId(
+  "MESH_CODEX_ROOM_ID",
+  process.env.MESH_CODEX_ROOM_ID || existingBinding.roomScope,
+);
+const EFFECTIVE_INSTANCE_ID = requireConfiguredId(
+  "MESH_CODEX_INSTANCE_ID",
+  process.env.MESH_CODEX_INSTANCE_ID || existingBinding.instanceId,
+);
+const EFFECTIVE_INSTALLATION_ID = requireConfiguredId(
+  "MESH_INSTALLATION_ID",
+  process.env.MESH_INSTALLATION_ID || existingBinding.installationId,
+);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

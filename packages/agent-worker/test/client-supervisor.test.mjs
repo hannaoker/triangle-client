@@ -830,10 +830,8 @@ function grokBotWakeFixture(instanceIndex = 4) {
   };
 }
 
-test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
-  const ensured = [];
-  let bridgeStarted = false;
-  const supervisor = createClientSupervisor({
+test("supervisor rejects removed grokBotWake path", () => {
+  assert.throws(() => createClientSupervisor({
     instances: [{
       instanceId: id(1),
       mailbox: { meshToken: "secret" },
@@ -843,52 +841,86 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
     grokBotWake: grokBotWakeFixture(4),
     createDeliveryClient: () => ({}),
     createRunner: () => ({ async run() {} }),
-    createWorker: () => ({
-      async watch() { return { processed: 0, stopped: true }; },
-      async runOnce() { return { found: null, processed: 0 }; },
-    }),
+    createWorker: () => ({ async watch() {}, async runOnce() {} }),
+  }), /grokBotWake was removed|webhook wake path is retired/i);
+});
+
+
+test("install dispatcher accepts appServerWake without grokBotWake", async () => {
+  let dispatcherStarted = false;
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    useInstallWatchDispatcher: true,
     createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    ensureWatchGrant: async (options) => {
-      ensured.push(options.actorProfile);
-      return { ensured: true };
-    },
     createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createGrokBotBridge: (options) => {
-      assert.equal(options.webhookUrlPath, "/private/grok-bot-webhook.url");
-      assert.equal(options.webhookKeyPath, "/private/grok-bot-webhook.key");
-      assert.equal(options.binding.wakeMode, "webhook");
+    createAuthResolver: () => ({ async resolve() { return "token"; } }),
+    createBindingStore: () => ({
+      async read() { return appServerWakeFixture(3).binding; },
+      async write() {},
+    }),
+    createSession: () => ({ async start() {}, async stop() {} }),
+    createWakeBridge: (options) => {
       assert.equal(options.ownWatchLoop, false);
       return {
-        async start() {
-          bridgeStarted = true;
-          return { status: "handler_ready", ownWatchLoop: false };
-        },
+        async start() { return { status: "handler_ready", ownWatchLoop: false }; },
         async stop() {},
-        async handleWake() {
-          return { status: "accepted" };
-        },
+        async handleWake() { return { status: "accepted" }; },
       };
     },
+    createInstallDispatcher: (options) => {
+      assert.equal(options.profiles.length, 1);
+      assert.equal(options.profiles[0].instanceId, id(3));
+      return {
+        profiles: options.profiles,
+        async start() {
+          dispatcherStarted = true;
+          return { status: "ok", cycles: 1 };
+        },
+        async stop() {},
+      };
+    },
+    ensureWatchGrant: async () => ({ ensured: true }),
     logger: { error() {} },
   });
 
-  assert.equal(supervisor.grokBotInstanceId, id(4));
-  assert.equal(supervisor.grokBotWake.binding.grokAgentId, "12aedccc-8662-4a7f-84da-3d35c9e97842");
   assert.equal(supervisor.installWatchDispatcherEnabled, true);
-  assert.deepEqual(supervisor.installWatchProfileIds, [id(4)]);
-  const result = await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
-  assert.equal(bridgeStarted, true);
-  assert.deepEqual(ensured, ["bob"]);
-  assert.ok(result.installWatch?.cycles >= 1 || result.grokBotWake != null);
+  assert.equal(supervisor.grokBotInstanceId, null);
+  assert.deepEqual(supervisor.installWatchProfileIds, [id(3)]);
+  assert.throws(
+    () => createClientSupervisor({
+      instances: [{
+        instanceId: id(1),
+        mailbox: { meshToken: "secret" },
+        runner: { command: "/trusted/runner", args: [] },
+        runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+      }],
+      useInstallWatchDispatcher: true,
+      createDeliveryClient: () => ({}),
+      createRunner: () => ({ async run() {} }),
+      createWorker: () => ({ async watch() {}, async runOnce() {} }),
+      logger: { error() {} },
+    }),
+    /appServerWake as the install watch anchor/,
+  );
+  await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
+  assert.equal(dispatcherStarted, true);
 });
 
 test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
   const supervisor = createClientSupervisor({
     instances: [],
-    grokBotWake: grokBotWakeFixture(4),
+    appServerWake: appServerWakeFixture(3),
+    useInstallWatchDispatcher: true,
     createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
     createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createGrokBotBridge: () => ({
+    createAuthResolver: () => ({ async resolve() { return "token"; } }),
+    createBindingStore: () => ({
+      async read() { return appServerWakeFixture(3).binding; },
+      async write() {},
+    }),
+    createSession: () => ({ async start() {}, async stop() {} }),
+    createWakeBridge: () => ({
       async start() { return { status: "handler_ready" }; },
       async stop() {},
       async handleWake() { return { status: "accepted" }; },
@@ -906,569 +938,71 @@ test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
   assert.equal(supervisor.installWatchDispatcherEnabled, true);
 });
 
+
 test("App Server keeps own watch loop when installation differs from Bob dispatcher", () => {
-  let appOwnWatchLoop;
-  createClientSupervisor({
-    instances: [],
-    appServerWake: {
-      ...appServerWakeFixture(3),
-      installationId: "inst_OtherInstall01",
-      binding: {
-        ...appServerWakeFixture(3).binding,
-        installationId: "inst_OtherInstall01",
-      },
-    },
-    grokBotWake: grokBotWakeFixture(4),
-    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createAuthResolver: () => ({
-      async resolveAuth() {
-        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
-      },
-    }),
-    createAppServerTransport: () => ({
-      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
-      async call() { return {}; },
-      onEvent() { return () => {}; },
-      async close() {},
-    }),
-    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
-    createSession: () => ({
-      async connect() { return { status: "subscribed" }; },
-      async shutdown() { return { status: "disconnected" }; },
-      admit: async () => ({ status: "completed" }),
-      status: () => ({ status: "subscribed" }),
-    }),
-    createWakeBridge: (options) => {
-      appOwnWatchLoop = options.ownWatchLoop;
-      return {
-        async start() { return { status: "stopped", cycles: 1, ownWatchLoop: options.ownWatchLoop }; },
-        async stop() {},
-        async handleWake() { return { status: "accepted" }; },
-      };
-    },
-    createGrokBotBridge: () => ({
-      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
-      async stop() {},
-      async handleWake() { return { status: "accepted" }; },
-    }),
-    logger: { error() {} },
-  });
-  assert.equal(appOwnWatchLoop, true);
-});
-
-test("install dispatcher does not advance cursor when Bob wake throws; replay succeeds", async () => {
-  const cursorByPath = new Map();
-  let bobAttempts = 0;
-  const bobAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
-
-  const supervisor = createClientSupervisor({
+  assert.throws(() => createClientSupervisor({
     instances: [],
     grokBotWake: grokBotWakeFixture(4),
-    createWatchTransport: () => ({
-      async poll({ cursor }) {
-        if (cursor >= 15) return { cursor, events: [] };
-        return {
-          cursor: 15,
-          events: [{ agent_id: bobAgent, high_watermark: 15 }],
-        };
-      },
-    }),
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createCursorStore: ({ filePath } = {}) => {
-      const key = filePath ?? "default";
-      if (!cursorByPath.has(key)) cursorByPath.set(key, 0);
-      return {
-        async read() { return cursorByPath.get(key); },
-        async write(next) { cursorByPath.set(key, next); return next; },
-      };
-    },
-    createGrokBotBridge: () => ({
-      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
-      async stop() {},
-      async handleWake(wake) {
-        bobAttempts += 1;
-        if (bobAttempts === 1) {
-          const error = new Error("webhook failed");
-          error.code = "webhook_failed";
-          throw error;
-        }
-        return { status: "accepted", highWatermark: wake.highWatermark };
-      },
-    }),
-    logger: { error() {} },
-  });
-
-  const installPath = "/private/install-wake-cursor.json";
-  // First watch cycle: durable loop will retry after Bob failure.
-  const result = await supervisor.watch({
-    signal: AbortSignal.timeout(2_000),
-    sleep: async () => {},
-  });
-  assert.ok(bobAttempts >= 2);
-  assert.equal(cursorByPath.get(installPath), 15);
-  assert.ok(result.installWatch != null || result.grokBotWake != null);
+    appServerWake: appServerWakeFixture(3),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
 
-test("install dispatcher fans out Bob webhook and headless kick from one cursor", async () => {
-  const bobWakes = [];
-  const kicks = [];
-  const polls = [];
-  const bobAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
-  const headlessAgent = "agent_headless_codex_001";
-  const headless = headlessWakeFixture({
-    agentId: headlessAgent,
-    pollIntervalMs: 30_000,
-  });
 
-  const supervisor = createClientSupervisor({
+test("install dispatcher does not advance cursor when Bob wake throws; replay succeeds", () => {
+  assert.throws(() => createClientSupervisor({
     instances: [],
     grokBotWake: grokBotWakeFixture(4),
-    headlessWakes: [headless],
-    createWatchTransport: () => ({
-      async poll({ cursor }) {
-        polls.push(cursor);
-        if (polls.length === 1) {
-          return {
-            cursor: 11,
-            events: [
-              { agent_id: bobAgent, high_watermark: 11 },
-              { agent_id: headlessAgent, high_watermark: 10 },
-            ],
-          };
-        }
-        return { cursor: 11, events: [] };
-      },
-    }),
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createCursorStore: () => {
-      let cursor = 0;
-      return {
-        async read() { return cursor; },
-        async write(next) { cursor = next; return cursor; },
-      };
-    },
-    createGrokBotBridge: () => ({
-      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
-      async stop() {},
-      async handleWake(wake) {
-        bobWakes.push(wake);
-        return { status: "accepted" };
-      },
-    }),
-    createClaimerGuard: fakeClaimerGuard().create,
-    createHeadlessDrain: () => ({
-      async start() { return { status: "running" }; },
-      async stop() {},
-      kick(options) {
-        kicks.push(options);
-        return { status: "started", reason: options.reason };
-      },
-    }),
-    logger: { error() {} },
-  });
-
-  assert.equal(supervisor.installWatchDispatcherEnabled, true);
-  assert.equal(supervisor.installWatchProfileIds.length, 2);
-  assert.ok(supervisor.installWatchProfileIds.includes(id(4)));
-  assert.ok(supervisor.installWatchProfileIds.includes(headless.profileInstanceId));
-
-  const controller = new AbortController();
-  const watching = supervisor.watch({ signal: controller.signal, sleep: async () => {} });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  controller.abort();
-  await watching;
-
-  assert.ok(bobWakes.length >= 1);
-  assert.ok(bobWakes.some((wake) => wake.highWatermark === 11 && wake.instanceId === id(4)));
-  assert.ok(kicks.length >= 1);
-  assert.ok(kicks.some((kick) => kick.reason === "watch_hint"));
-  assert.equal(polls[0], 0);
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
+
+
+test("install dispatcher fans out Bob webhook and headless kick from one cursor", () => {
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    grokBotWake: grokBotWakeFixture(4),
+    headlessWakes: [headlessWakeFixture({ agentId: "agent_headless_codex_001", pollIntervalMs: 30_000 })],
+  }), /grokBotWake was removed|webhook wake path is retired/i);
+});
+
 
 test("supervisor rejects grokBotWake collision with worker and appServerWake", () => {
   assert.throws(() => createClientSupervisor({
-    instances: [{
-      instanceId: id(4),
-      mailbox: { meshToken: "secret" },
-      runner: { command: "/trusted/runner", args: [] },
-      runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(4) },
-    }],
+    instances: [],
     grokBotWake: grokBotWakeFixture(4),
-    createDeliveryClient: () => ({}),
-    createRunner: () => ({ async run() {} }),
-    createWorker: () => ({ async watch() {}, async runOnce() {} }),
-    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
-  }), /collides/i);
+  }), /grokBotWake was removed|webhook wake path is retired/i);
+});
 
+
+test("supervisor stops App Server and Grok Bot bridges before wake retry", () => {
   assert.throws(() => createClientSupervisor({
     instances: [],
+    grokBotWake: grokBotWakeFixture(4),
     appServerWake: appServerWakeFixture(3),
-    grokBotWake: {
-      ...grokBotWakeFixture(3),
-      binding: {
-        ...grokBotWakeFixture(3).binding,
-        instanceId: id(3),
-      },
-    },
-    createDeliveryClient: () => ({}),
-    createRunner: () => ({ async run() {} }),
-    createWorker: () => ({ async watch() {}, async runOnce() {} }),
-    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createAuthResolver: () => ({ async resolveAuth() { return { authorization: "Bearer x", serverIdentity: "s" }; } }),
-    createAppServerTransport: () => ({ async connect() {}, async call() {}, onEvent() { return () => {}; }, async close() {} }),
-    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
-    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createSession: () => ({ async connect() {}, async shutdown() {}, admit: async () => ({}), status: () => ({}) }),
     createWakeBridge: () => ({ async start() {}, async stop() {} }),
-    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
-  }), /collides/i);
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
 
-test("supervisor stops App Server and Grok Bot bridges before wake retry", async () => {
-  const logs = [];
-  const appServer = { starts: 0, stops: 0 };
-  const grokBot = { starts: 0, stops: 0 };
 
-  const supervisor = createClientSupervisor({
+test("supervisor shares one watch transport poll across App Server and Grok Bot wakes", () => {
+  assert.throws(() => createClientSupervisor({
     instances: [],
-    appServerWake: appServerWakeFixture(3),
     grokBotWake: grokBotWakeFixture(4),
-    useInstallWatchDispatcher: false,
-    createDeliveryClient: () => ({}),
-    createRunner: () => ({ async run() {} }),
-    createWorker: () => ({ async watch() {}, async runOnce() {} }),
-    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createAuthResolver: () => ({
-      async resolveAuth() {
-        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
-      },
-    }),
-    createAppServerTransport: () => ({
-      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
-      async call() { return {}; },
-      onEvent() { return () => {}; },
-      async close() {},
-    }),
-    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
-    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-    createSession: () => ({
-      async connect() { return { status: "subscribed" }; },
-      async shutdown() { return { status: "disconnected" }; },
-      admit: async () => ({ status: "completed" }),
-      status: () => ({ status: "subscribed" }),
-    }),
-    createWakeBridge: () => ({
-      async start() {
-        appServer.starts += 1;
-        if (appServer.starts === 1) {
-          const helper = new Error("watch helper poll failed");
-          helper.code = "helper_unavailable";
-          throw helper;
-        }
-        return { status: "stopped", cycles: 1 };
-      },
-      async stop() {
-        appServer.stops += 1;
-      },
-    }),
-    createGrokBotBridge: () => ({
-      async start() {
-        grokBot.starts += 1;
-        if (grokBot.starts === 1) {
-          const helper = new Error("watch helper poll failed");
-          helper.code = "helper_unavailable";
-          throw helper;
-        }
-        return { status: "stopped", cycles: 1 };
-      },
-      async stop() {
-        grokBot.stops += 1;
-      },
-    }),
-    logger: {
-      error(event, detail) {
-        logs.push({ event, code: detail?.code });
-      },
-    },
-  });
-
-  const result = await supervisor.watch({
-    signal: AbortSignal.timeout(1_000),
-    sleep: async () => {},
-  });
-
-  assert.equal(appServer.starts, 2);
-  assert.equal(appServer.stops, 1);
-  assert.equal(grokBot.starts, 2);
-  assert.equal(grokBot.stops, 1);
-  assert.equal(result.appServerWake?.cycles, 1);
-  assert.equal(result.grokBotWake?.cycles, 1);
-  assert.ok(logs.some((entry) => entry.event === "triangle_client_app_server_wake_failed" && entry.code === "helper_unavailable"));
-  assert.ok(logs.some((entry) => entry.event === "triangle_client_grok_bot_wake_failed" && entry.code === "helper_unavailable"));
-  assert.equal(logs.some((entry) => entry.code === "already_started"), false);
+    appServerWake: appServerWakeFixture(3),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
 
-test("supervisor shares one watch transport poll across App Server and Grok Bot wakes", async () => {
-  const { createWakeClient } = await import("../src/wake-client.mjs");
-  const transportCalls = [];
-  let underlyingPolls = 0;
-  let releasePoll;
-  const held = new Promise((resolve) => { releasePoll = resolve; });
-  const appAgent = "agent_codex_desktop_001";
-  const grokAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
-  const appWakes = [];
-  const grokWakes = [];
-  /** @type {{ poll: Function } | null} */
-  let sharedTransport = null;
 
-  const supervisor = createClientSupervisor({
+test("supervisor renews one expired shared watch grant and resumes both wake cursors exactly once", () => {
+  assert.throws(() => createClientSupervisor({
     instances: [],
-    appServerWake: appServerWakeFixture(3),
     grokBotWake: grokBotWakeFixture(4),
-    useInstallWatchDispatcher: false,
-    createDeliveryClient: () => ({}),
-    createRunner: () => ({ async run() {} }),
-    createWorker: () => ({ async watch() {}, async runOnce() {} }),
-    createWatchTransport({ helperPath, installationId }) {
-      transportCalls.push({ helperPath, installationId });
-      return {
-        async poll({ cursor }) {
-          underlyingPolls += 1;
-          await held;
-          return {
-            cursor: cursor + 1,
-            events: [
-              { agent_id: appAgent, high_watermark: cursor + 1 },
-              { agent_id: grokAgent, high_watermark: cursor + 1 },
-            ],
-          };
-        },
-      };
-    },
-    ensureWatchGrant: async () => ({ ensured: true }),
-    createAuthResolver: () => ({
-      async resolveAuth() {
-        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
-      },
-    }),
-    createAppServerTransport: () => ({
-      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
-      async call() { return {}; },
-      onEvent() { return () => {}; },
-      async close() {},
-    }),
-    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
-    createCursorStore: () => {
-      let cursor = 32;
-      return {
-        async read() { return cursor; },
-        async write(next) { cursor = next; return cursor; },
-      };
-    },
-    createSession: () => ({
-      async connect() { return { status: "subscribed" }; },
-      async shutdown() { return { status: "disconnected" }; },
-      admit: async () => ({ status: "completed" }),
-      status: () => ({ status: "subscribed" }),
-    }),
-    createWakeBridge({ binding, watchTransport, cursorStore }) {
-      sharedTransport = watchTransport;
-      const client = createWakeClient({
-        profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
-        transport: watchTransport,
-        cursorStore,
-        coalesceMs: 1,
-        onWake: async (wake) => {
-          appWakes.push(wake);
-          return { status: "empty" };
-        },
-      });
-      return {
-        async start({ signal }) {
-          return client.watch({ signal, maxCycles: 1 });
-        },
-        async stop() {
-          await client.stop();
-        },
-      };
-    },
-    createGrokBotBridge({ binding, watchTransport, cursorStore }) {
-      assert.equal(watchTransport, sharedTransport);
-      const client = createWakeClient({
-        profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
-        transport: watchTransport,
-        cursorStore,
-        coalesceMs: 1,
-        onWake: async (wake) => {
-          grokWakes.push(wake);
-          return { status: "accepted" };
-        },
-      });
-      return {
-        async start({ signal }) {
-          return client.watch({ signal, maxCycles: 1 });
-        },
-        async stop() {
-          await client.stop();
-        },
-      };
-    },
-    logger: { error() {} },
-  });
-
-  assert.equal(transportCalls.length, 1);
-  assert.deepEqual(transportCalls[0], {
-    helperPath: "/trusted/triangle-mailbox",
-    installationId: "inst_N7VhDq3mQ2",
-  });
-
-  const watching = supervisor.watch({
-    signal: AbortSignal.timeout(2_000),
-    sleep: async () => {},
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(underlyingPolls, 1);
-  releasePoll();
-  const result = await watching;
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  assert.equal(underlyingPolls, 1);
-  assert.equal(result.appServerWake?.cycles, 1);
-  assert.equal(result.grokBotWake?.cycles, 1);
-  assert.equal(appWakes.length, 1);
-  assert.equal(grokWakes.length, 1);
-  assert.equal(appWakes[0].highWatermark, 33);
-  assert.equal(grokWakes[0].highWatermark, 33);
-  assert.equal(appWakes[0].instanceId, id(3));
-  assert.equal(grokWakes[0].instanceId, id(4));
+    appServerWake: appServerWakeFixture(3),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
 
-test("supervisor renews one expired shared watch grant and resumes both wake cursors exactly once", async () => {
-  const { createWakeClient } = await import("../src/wake-client.mjs");
-  const appAgent = "agent_codex_desktop_001";
-  const grokAgent = "agent_582567705a9348c38f18c91d2bac9dd8";
-  const ensureCalls = [];
-  const observedCursors = [];
-  const appWakes = [];
-  const grokWakes = [];
-  let polls = 0;
-  let credentialValid = false;
-
-  const supervisor = createClientSupervisor({
-    instances: [],
-    appServerWake: appServerWakeFixture(3),
-    grokBotWake: grokBotWakeFixture(4),
-    useInstallWatchDispatcher: false,
-    createDeliveryClient: () => ({}),
-    createRunner: () => ({ async run() {} }),
-    createWorker: () => ({ async watch() {}, async runOnce() {} }),
-    createWatchTransport: () => ({
-      async poll({ cursor }) {
-        polls += 1;
-        observedCursors.push(cursor);
-        if (!credentialValid) {
-          const error = new Error("watch helper poll failed (watch_credential_invalid)");
-          error.code = "helper_unavailable";
-          error.rejectedCode = "watch_credential_invalid";
-          throw error;
-        }
-        return {
-          cursor: 42,
-          events: [
-            { agent_id: appAgent, high_watermark: 42 },
-            { agent_id: grokAgent, high_watermark: 42 },
-          ],
-        };
-      },
-    }),
-    ensureWatchGrant: async (options) => {
-      ensureCalls.push(options.actorProfile);
-      if (ensureCalls.length > 1) credentialValid = true;
-      return { ensured: true };
-    },
-    createAuthResolver: () => ({
-      async resolveAuth() {
-        return { authorization: "Bearer test", serverIdentity: "codex-app-server/test" };
-      },
-    }),
-    createAppServerTransport: () => ({
-      async connect() { return { connected: true, serverIdentity: "codex-app-server/test" }; },
-      async call() { return {}; },
-      onEvent() { return () => {}; },
-      async close() {},
-    }),
-    createBindingStore: () => ({ async read() { return null; }, async write(v) { return v; } }),
-    createCursorStore: ({ filePath }) => {
-      let cursor = filePath.includes("app-server") ? 40 : 41;
-      return {
-        async read() { return cursor; },
-        async write(next) { cursor = next; return cursor; },
-      };
-    },
-    createSession: () => ({
-      async connect() { return { status: "subscribed" }; },
-      async shutdown() { return { status: "disconnected" }; },
-      admit: async () => ({ status: "completed" }),
-      status: () => ({ status: "subscribed" }),
-    }),
-    createWakeBridge({ binding, watchTransport, cursorStore }) {
-      let client = null;
-      return {
-        async start({ signal }) {
-          client = createWakeClient({
-            profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
-            transport: watchTransport,
-            cursorStore,
-            coalesceMs: 1,
-            onWake: async (wake) => { appWakes.push(wake); return { status: "empty" }; },
-          });
-          return client.watch({ signal, maxCycles: 1 });
-        },
-        async stop() { await client?.stop(); client = null; },
-      };
-    },
-    createGrokBotBridge({ binding, watchTransport, cursorStore }) {
-      let client = null;
-      return {
-        async start({ signal }) {
-          client = createWakeClient({
-            profiles: [{ instanceId: binding.instanceId, agentId: binding.agentId }],
-            transport: watchTransport,
-            cursorStore,
-            coalesceMs: 1,
-            onWake: async (wake) => { grokWakes.push(wake); return { status: "accepted" }; },
-          });
-          return client.watch({ signal, maxCycles: 1 });
-        },
-        async stop() { await client?.stop(); client = null; },
-      };
-    },
-    logger: { error() {} },
-  });
-
-  const result = await supervisor.watch({
-    signal: AbortSignal.timeout(2_000),
-    sleep: async () => {},
-  });
-
-  assert.deepEqual(ensureCalls, ["bob", "bob"]);
-  assert.ok(observedCursors.includes(40));
-  assert.ok(observedCursors.includes(41));
-  assert.equal(observedCursors.every((cursor) => cursor === 40 || cursor === 41), true);
-  assert.equal(appWakes.length, 1);
-  assert.equal(grokWakes.length, 1);
-  assert.equal(appWakes[0].highWatermark, 42);
-  assert.equal(grokWakes[0].highWatermark, 42);
-  assert.equal(result.appServerWake?.cursor, 42);
-  assert.equal(result.grokBotWake?.cursor, 42);
-});
 
 function headlessWakeFixture(overrides = {}) {
   const profile = overrides.profile ?? "codex-bob-test";
@@ -1653,29 +1187,18 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
     },
     headlessWakes: [headlessWakeFixture()],
     ...factories,
-  }), /collides/i);
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
 
 test("supervisor does not put grok-bot on the Codex headless pool", () => {
-  const factories = {
-    createHeadlessDrain: () => ({ async start() {}, async stop() {} }),
-    createClaimerGuard: fakeClaimerGuard().create,
-    createGrokBotBridge: () => ({ async start() {}, async stop() {} }),
-    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
-    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
-  };
-  const grok = grokBotWakeFixture(4);
-  const headless = headlessWakeFixture();
-  const supervisor = createClientSupervisor({
+  assert.throws(() => createClientSupervisor({
     instances: [],
-    grokBotWake: grok,
-    headlessWakes: [headless],
-    ...factories,
-  });
-  assert.equal(supervisor.grokBotInstanceId, grok.binding.instanceId);
-  assert.deepEqual(supervisor.headlessInstanceIds, [headless.profileInstanceId]);
-  assert.notEqual(supervisor.grokBotInstanceId, supervisor.headlessInstanceIds[0]);
+    grokBotWake: grokBotWakeFixture(4),
+    appServerWake: appServerWakeFixture(3),
+    createWakeBridge: () => ({ async start() {}, async stop() {} }),
+  }), /grokBotWake was removed|webhook wake path is retired/i);
 });
+
 
 test("supervisor accepts Codex headless without Mini pin or classic room_77 pin", () => {
   const factories = {
