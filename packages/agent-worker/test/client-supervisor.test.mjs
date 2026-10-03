@@ -882,6 +882,67 @@ test("supervisor bootstraps opt-in grokBotWake beside workers", async () => {
   assert.ok(result.installWatch?.cycles >= 1 || result.grokBotWake != null);
 });
 
+test("install dispatcher accepts appServerWake without grokBotWake", async () => {
+  let dispatcherStarted = false;
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    useInstallWatchDispatcher: true,
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createAuthResolver: () => ({ async resolve() { return "token"; } }),
+    createBindingStore: () => ({
+      async read() { return appServerWakeFixture(3).binding; },
+      async write() {},
+    }),
+    createSession: () => ({ async start() {}, async stop() {} }),
+    createWakeBridge: (options) => {
+      assert.equal(options.ownWatchLoop, false);
+      return {
+        async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+        async stop() {},
+        async handleWake() { return { status: "accepted" }; },
+      };
+    },
+    createInstallDispatcher: (options) => {
+      assert.equal(options.profiles.length, 1);
+      assert.equal(options.profiles[0].instanceId, id(3));
+      return {
+        profiles: options.profiles,
+        async start() {
+          dispatcherStarted = true;
+          return { status: "ok", cycles: 1 };
+        },
+        async stop() {},
+      };
+    },
+    ensureWatchGrant: async () => ({ ensured: true }),
+    logger: { error() {} },
+  });
+
+  assert.equal(supervisor.installWatchDispatcherEnabled, true);
+  assert.equal(supervisor.grokBotInstanceId, null);
+  assert.deepEqual(supervisor.installWatchProfileIds, [id(3)]);
+  assert.throws(
+    () => createClientSupervisor({
+      instances: [{
+        instanceId: id(1),
+        mailbox: { meshToken: "secret" },
+        runner: { command: "/trusted/runner", args: [] },
+        runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
+      }],
+      useInstallWatchDispatcher: true,
+      createDeliveryClient: () => ({}),
+      createRunner: () => ({ async run() {} }),
+      createWorker: () => ({ async watch() {}, async runOnce() {} }),
+      logger: { error() {} },
+    }),
+    /grokBotWake or appServerWake/,
+  );
+  await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
+  assert.equal(dispatcherStarted, true);
+});
+
 test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
   const supervisor = createClientSupervisor({
     instances: [],

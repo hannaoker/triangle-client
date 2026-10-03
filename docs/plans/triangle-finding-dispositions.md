@@ -2,7 +2,7 @@
 
 Tracking sheet for [`codebase_review.md`](./codebase_review.md) under [`triangle_implementation_plan.md`](./triangle_implementation_plan.md).
 
-Updated: 2026-10-03 (Phase 0 start). Status values: `confirmed` | `rejected` | `deferred` | `fixed`.
+Updated: 2026-10-03 (PR10–PR11 remainder). Status values: `confirmed` | `rejected` | `deferred` | `fixed`.
 
 ## High priority
 
@@ -23,7 +23,7 @@ Updated: 2026-10-03 (Phase 0 start). Status values: `confirmed` | `rejected` | `
 | C2 | confirmed | No retry cap / head-of-line block | PR6 (pending) | poison → quarantine | — |
 | C3 | confirmed | Deadline rejection unhandled during token fetch | PR4 (pending) | timeout → request error | — |
 | C4 | confirmed | Child stdin EPIPE unhandled | PR4 (pending) | EPIPE handled; SIGKILL bound | — |
-| C5 | deferred | Grok webhook still wired at runtime | PR11 | — | Mini ops: webhook retired |
+| C5 | fixed (PR11) | Install dispatcher no longer hard-requires grokBotWake (appServerWake anchor OK); webhook opt-in only. Mini webhook re-arm deferred. | PR11 client (pending) | supervisor + host script | Do not re-arm Mini webhook |
 | C6 | fixed (PR3) | Plist `EnvironmentVariables` vs exact key set | PR3 (pending) | agent add/enable with shipped template | — |
 | C7 | fixed (PR3) | WorkloadTokenManager single-flight race | PR3 (pending) | concurrent refresh shares one task | — |
 
@@ -40,4 +40,13 @@ Updated: 2026-10-03 (Phase 0 start). Status values: `confirmed` | `rejected` | `
 
 ## Medium / low (condensed)
 
-All items from review §3 start as `deferred` pending Phase 5 PR10–11 triage. Promote individually when reproduced.
+| Item | Status | Notes |
+| --- | --- | --- |
+| openDirectRoom returns closed rooms | **fixed (PR11 MESH)** | Reject `state != active` before reuse; mailbox-d1 coverage |
+| Peer introspection ignores disabled senders | **fixed (PR11 MESH)** | D1 lookup requires sender status in online/busy/offline |
+| Registration challenge purpose binding | **deferred** | `registration_challenges` has no purpose column; needs migration + issuer/consumer CAS (evidence: schema.ts registrationChallenges) |
+| C5 Grok webhook hard dependency | **fixed (PR11 client)** | Install dispatcher accepts appServerWake anchor without grokBotWake; webhook remains opt-in |
+| Production default IDs in macos-shared-codex-app-server-host | **fixed (PR11 client)** | Require env or existing binding; no hardcoded agent/room/install/instance defaults |
+| Mini ops webhook re-arm | **deferred** | Explicitly not re-armed in PR11 |
+
+All other items from review §3 remain `deferred` pending later triage. Promote individually when reproduced.
