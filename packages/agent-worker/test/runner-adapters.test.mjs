@@ -15,6 +15,9 @@ import { createAgentPrompt as createCodexPrompt } from "../runners/codex-runner.
 import {
   createAgentPrompt as createAntigravityPrompt,
   createAntigravityInvocation,
+  extractAntigravityResponse,
+  loadConversationId,
+  saveConversationId,
 } from "../runners/antigravity-runner.mjs";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
 import { resolvePyvenvBasePrefix, runtimeRootCovers } from "../runners/runner-common.mjs";
@@ -310,7 +313,7 @@ process.stdin.on("end", () => {
   }
 });
 
-test("Antigravity adapter routes CLI logs into the instance temp root", () => {
+test("Antigravity adapter routes CLI logs into the instance temp root and defaults to json", () => {
   const invocation = createAntigravityInvocation("ping", {
     ANTIGRAVITY_CLI: "/usr/bin/agy",
     TRIANGLE_INSTANCE_TEMP_ROOT: "/tmp/triangle-instance",
@@ -318,8 +321,74 @@ test("Antigravity adapter routes CLI logs into the instance temp root", () => {
   assert.equal(invocation.command, "/usr/bin/agy");
   assert.deepEqual(
     invocation.args,
-    ["-p", "ping", "--output-format", "text", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
+    ["-p", "ping", "--output-format", "json", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
   );
+});
+
+test("Antigravity adapter passes --conversation when conversationId is provided", () => {
+  const invocation = createAntigravityInvocation("follow up", {
+    ANTIGRAVITY_CLI: "/usr/bin/agy",
+  }, {
+    conversationId: "27ce945c-ec2c-4c89-80fd-285f291cca0b",
+  });
+  assert.equal(invocation.command, "/usr/bin/agy");
+  assert.deepEqual(
+    invocation.args,
+    ["-p", "follow up", "--output-format", "json", "--sandbox", "--conversation", "27ce945c-ec2c-4c89-80fd-285f291cca0b"],
+  );
+});
+
+test("Antigravity adapter extracts response and conversation ID from JSON", () => {
+  const jsonOutput = JSON.stringify({
+    conversation_id: "27ce945c-ec2c-4c89-80fd-285f291cca0b",
+    status: "SUCCESS",
+    response: "Hello from peer agent!\n",
+  });
+  const extracted = extractAntigravityResponse(jsonOutput);
+  assert.equal(extracted.text, "Hello from peer agent!");
+  assert.equal(extracted.conversationId, "27ce945c-ec2c-4c89-80fd-285f291cca0b");
+
+});
+
+test("Antigravity adapter rejects output without a successful nonempty response", () => {
+  const invalidOutputs = [
+    JSON.stringify({ status: "ERROR", error: "resume failed", conversation_id: "old-session" }),
+    JSON.stringify({ status: "ERROR", response: "error details" }),
+    JSON.stringify({ status: "SUCCESS", conversation_id: "old-session" }),
+    JSON.stringify({ status: "SUCCESS", response: "  \n" }),
+    JSON.stringify({ status: "SUCCESS", response: 42 }),
+    JSON.stringify({ response: "missing status" }),
+    "Just raw text output",
+    '{"status":"SUCCESS",',
+    "null",
+    "[]",
+    '"text"',
+    "",
+    undefined,
+  ];
+  for (const output of invalidOutputs) {
+    assert.throws(() => extractAntigravityResponse(output), /Antigravity CLI returned an invalid response/);
+  }
+});
+
+test("Antigravity adapter persists and loads conversation ID per contextId", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tempDir = mkdtempSync(join(tmpdir(), "agy-test-sessions-"));
+  try {
+    const env = { TRIANGLE_MODEL_ROOTS: tempDir };
+    assert.equal(loadConversationId("room_abc", env), null);
+
+    saveConversationId("room_abc", "conv_123", env);
+    assert.equal(loadConversationId("room_abc", env), "conv_123");
+    assert.equal(loadConversationId("room_other", env), null);
+
+    saveConversationId("room_abc", "conv_456", env);
+    assert.equal(loadConversationId("room_abc", env), "conv_456");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("installed Hermes CLI documents the stdin query-file transport without contacting a provider", (t) => {

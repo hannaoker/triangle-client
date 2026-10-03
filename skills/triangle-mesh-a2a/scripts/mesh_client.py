@@ -172,13 +172,16 @@ def poll_mailbox(wait_seconds=0, interval=5, profile=DEFAULT_PROFILE):
     time.sleep(interval)
 
 
-def claim_delivery(delivery_id, claim_id=None, profile=DEFAULT_PROFILE):
+def claim_delivery(delivery_id, claim_id=None, room_id=None, profile=DEFAULT_PROFILE):
   if not claim_id:
     claim_id = f"claim_{secrets.token_hex(16)}"
-  res = call_mcp("mesh.mailbox.claim", {
+  args = {
     "delivery_id": delivery_id,
     "claim_id": claim_id,
-  }, profile=profile)
+  }
+  if room_id:
+    args["room_id"] = room_id
+  res = call_mcp("mesh.mailbox.claim", args, profile=profile)
   return res, claim_id
 
 
@@ -200,12 +203,17 @@ def send_message(
   if in_reply_to_event_id:
     body["inReplyToEventId"] = in_reply_to_event_id
 
-  res = call_mcp("mesh.messages.send", {
+  args = {
     "room_id": room_id,
     "type": "message.created",
+    "text": text,
     "body": body,
     "idempotency_key": idempotency_key,
-  }, profile=profile)
+  }
+  if in_reply_to_event_id:
+    args["in_reply_to_event_id"] = in_reply_to_event_id
+
+  res = call_mcp("mesh.messages.send", args, profile=profile)
   return res
 
 
@@ -260,7 +268,7 @@ def reply_atomic(delivery_id, text, reply_required=False, profile=DEFAULT_PROFIL
   base["roomId"] = room_id
   base["eventId"] = event_id
 
-  claim_res, claim_id = claim_delivery(delivery_id, profile=profile)
+  claim_res, claim_id = claim_delivery(delivery_id, room_id=room_id, profile=profile)
   base["claimId"] = claim_id
   failed, err = mcp_call_failed(claim_res)
   if failed:

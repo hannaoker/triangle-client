@@ -242,6 +242,10 @@ trap rollback EXIT
 trap 'exit 130' HUP INT TERM
 
 swift_build_args=(build -c release --package-path "$package_root" --scratch-path "$build_root")
+# Build the shipping binaries in Swift 5 language mode for older Command Line
+# Tools SDKs whose Foundation/CryptoKit types are not Sendable under Swift 6.
+# Preserve the package's bare slash regex syntax in that language mode.
+swift_build_args+=(-Xswiftc -swift-version -Xswiftc 5 -Xswiftc -enable-bare-slash-regex)
 if [[ $local_ad_hoc -eq 1 ]]; then
   swift_build_args+=(-Xswiftc -DTRIANGLE_LOCAL_AD_HOC)
 fi

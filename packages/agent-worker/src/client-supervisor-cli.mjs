@@ -15,8 +15,28 @@ import {
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
-import { hasHeadlessWakeKeys, normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
-import { hasCursorAcpWakeKeys, normalizeCursorAcpWakeConfig } from "./cursor-acp-runtime/headless-drain-service.mjs";
+let hasHeadlessWakeKeys = () => false;
+let normalizeHeadlessWakeConfig = () => {
+  throw new TypeError("codex-runtime is unavailable in this worker runtime bundle");
+};
+try {
+  const codexDrainModule = await import("./codex-runtime/headless-drain-service.mjs");
+  hasHeadlessWakeKeys = codexDrainModule.hasHeadlessWakeKeys;
+  normalizeHeadlessWakeConfig = codexDrainModule.normalizeHeadlessWakeConfig;
+} catch {
+  // codex-runtime is bundled only with Codex worker runtimes.
+}
+let hasCursorAcpWakeKeys = () => false;
+let normalizeCursorAcpWakeConfig = () => {
+  throw new TypeError("cursor-acp-runtime is unavailable in this worker runtime bundle");
+};
+try {
+  const cursorDrainModule = await import("./cursor-acp-runtime/headless-drain-service.mjs");
+  hasCursorAcpWakeKeys = cursorDrainModule.hasCursorAcpWakeKeys;
+  normalizeCursorAcpWakeConfig = cursorDrainModule.normalizeCursorAcpWakeConfig;
+} catch {
+  // cursor-acp-runtime requires codex-runtime, which is bundled only with Codex worker runtimes.
+}
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;

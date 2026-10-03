@@ -358,13 +358,26 @@ public struct LaunchdTriangleClientServiceControl: TriangleClientServiceControll
         let object = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil)
         let logs = home.appendingPathComponent("Library/Logs/the-triangle", isDirectory: true)
         let expectedKeys: Set<String> = ["Label", "ProgramArguments", "RunAtLoad", "KeepAlive", "ThrottleInterval", "StandardOutPath", "StandardErrorPath"]
-        guard let values = object as? [String: Any], Set(values.keys) == expectedKeys, values["Label"] as? String == Self.label,
+        guard let values = object as? [String: Any],
+              values["Label"] as? String == Self.label,
               values["ProgramArguments"] as? [String] == [helper.path, "run-supervisor"],
               values["RunAtLoad"] as? Bool == true, values["KeepAlive"] as? Bool == true,
               values["ThrottleInterval"] as? Int == 10,
               values["StandardOutPath"] as? String == logs.appendingPathComponent("client.log").path,
               values["StandardErrorPath"] as? String == logs.appendingPathComponent("client.error.log").path
         else { throw TriangleClientLifecycleError.reloadFailed }
+        let actualKeys = Set(values.keys)
+        if actualKeys != expectedKeys {
+            guard actualKeys == expectedKeys.union(["EnvironmentVariables"]),
+                  let env = values["EnvironmentVariables"] as? [String: String],
+                  Set(env.keys).isSubset(of: [
+                      "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE",
+                      "TRIANGLE_DESKTOP_HANDOFF_ENABLE", "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
+                      "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
+                  ]),
+                  env.values.allSatisfy({ $0.count == 1 && $0.allSatisfy({ $0 >= "0" && $0 <= "9" }) })
+            else { throw TriangleClientLifecycleError.reloadFailed }
+        }
     }
 
     private func validateFile(_ url: URL, mode: mode_t) throws {

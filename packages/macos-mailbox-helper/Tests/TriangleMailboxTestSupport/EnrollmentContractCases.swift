@@ -107,7 +107,7 @@ public enum EnrollmentContractCases {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [FixtureURLProtocol.self]
         for (status, expected) in [(503, ProfileVerificationStatus.registrationOutcomeUnknown), (408, .registrationOutcomeUnknown), (201, .verificationFailed)] {
-            for fixture in [FixtureURLProtocol.Fixture.declaredOversized(status: status), .streamedOversized(status: status)] {
+            for fixture in [FixtureURLProtocol.Fixture.declaredOversized(status: status), .streamedOversized(status: status), .chunkedOversized(status: status)] {
                 FixtureURLProtocol.reset([
                     .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!, body: challengeJSON()),
                     fixture
@@ -684,6 +684,45 @@ public enum EnrollmentContractCases {
             )
         }
 
+        FixtureURLProtocol.reset([.chunkedOversized(status: 200)])
+        try await expectMeshError(.responseTooLargeAfterResponse(statusCode: 200), "chunked oversized response was accepted") {
+            try await URLSessionMeshTransport(configuration: configuration).send(
+                MeshHTTPRequest(method: "GET", url: URL(string: "https://thetriangle.dev/api")!, headers: [:])
+            )
+        }
+        for _ in 0..<50 {
+            if FixtureURLProtocol.stopLoadingCallCount >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(FixtureURLProtocol.stopLoadingCallCount >= 1, "URLSession task was not cancelled when chunked response exceeded cap")
+
+        FixtureURLProtocol.reset([.hanging])
+        let cancelTransport = URLSessionMeshTransport(configuration: configuration)
+        let sendTask = Task {
+            try await cancelTransport.send(
+                MeshHTTPRequest(method: "GET", url: URL(string: "https://thetriangle.dev/api")!, headers: [:])
+            )
+        }
+        for _ in 0..<100 {
+            if !FixtureURLProtocol.requests.isEmpty { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(FixtureURLProtocol.requests.count == 1, "cancellation request was not initiated")
+        sendTask.cancel()
+        var didCatchCancellation = false
+        do {
+            _ = try await sendTask.value
+        } catch is CancellationError {
+            didCatchCancellation = true
+        } catch {
+        }
+        try expect(didCatchCancellation, "cancelled Swift task did not throw CancellationError")
+        for _ in 0..<50 {
+            if FixtureURLProtocol.stopLoadingCallCount >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(FixtureURLProtocol.stopLoadingCallCount >= 1, "URLSession task was not cancelled upon Swift task cancellation")
+
         FixtureURLProtocol.reset([
             .json(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/registration-challenges")!, body: challengeJSON()),
             .plaintextJSON(status: 201, body: registrationJSON())
@@ -1147,21 +1186,26 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         case redirect(location: String)
         case declaredOversized(status: Int = 200)
         case streamedOversized(status: Int = 200)
+        case chunkedOversized(status: Int = 200)
+        case hanging
     }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var fixtures: [Fixture] = []
     nonisolated(unsafe) private static var captured: [URLRequest] = []
     nonisolated(unsafe) private static var redirected: [URLRequest] = []
+    nonisolated(unsafe) private static var stopLoadingCalls: Int = 0
 
     static var requests: [URLRequest] { lock.withLock { captured } }
     static var redirectTargets: [URLRequest] { lock.withLock { redirected } }
+    static var stopLoadingCallCount: Int { lock.withLock { stopLoadingCalls } }
 
     static func reset(_ newFixtures: [Fixture]) {
         lock.withLock {
             fixtures = newFixtures
             captured = []
             redirected = []
+            stopLoadingCalls = 0
         }
     }
 
@@ -1240,10 +1284,25 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
                 headers: ["Content-Type": "application/json"],
                 chunks: [Data(repeating: 0x20, count: MeshClient.maximumResponseBytes), Data([0x20])]
             )
+        case let .chunkedOversized(status):
+            respond(
+                status: status,
+                url: request.url!,
+                headers: ["Content-Type": "application/json"],
+                chunks: [
+                    Data(repeating: 0x30, count: 24 * 1024),
+                    Data(repeating: 0x31, count: 24 * 1024),
+                    Data(repeating: 0x32, count: 24 * 1024)
+                ]
+            )
+        case .hanging:
+            break
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        Self.lock.withLock { Self.stopLoadingCalls += 1 }
+    }
 
     private func respond(status: Int, url: URL, headers: [String: String], chunks: [Data]) {
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!

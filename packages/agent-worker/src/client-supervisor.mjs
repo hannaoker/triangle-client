@@ -30,19 +30,56 @@ import {
   createGrokBotWakeBridge,
   validateGrokBotBinding,
 } from "./grok-bot-wake.mjs";
-import {
-  CLIENT_SUPERVISOR_CLAIMER_OWNER,
-  HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
-  createHeadlessClaimerGuard,
-  createInstalledHeadlessDrain,
-  normalizeHeadlessWakeConfig,
-} from "./codex-runtime/headless-drain-service.mjs";
-import {
-  CLIENT_SUPERVISOR_CLAIMER_OWNER as CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER,
-  createCursorAcpClaimerGuard,
-  createInstalledCursorAcpDrain,
-  normalizeCursorAcpWakeConfig,
-} from "./cursor-acp-runtime/headless-drain-service.mjs";
+let CLIENT_SUPERVISOR_CLAIMER_OWNER = "dev.thetriangle.client";
+let EXACT_HEADLESS_WAKE_KEYS = Object.freeze([
+  "profile",
+  "profileInstanceId",
+  "helperPath",
+  "workingDirectory",
+  "codexHome",
+  "stateRoot",
+  "command",
+  "pollIntervalMs",
+  "agentId",
+]);
+let createHeadlessClaimerGuard = () => {
+  throw new TypeError("codex-runtime is unavailable in this worker runtime bundle");
+};
+let createInstalledHeadlessDrain = () => {
+  throw new TypeError("codex-runtime is unavailable in this worker runtime bundle");
+};
+let normalizeHeadlessWakeConfig = () => {
+  throw new TypeError("codex-runtime is unavailable in this worker runtime bundle");
+};
+try {
+  const codexDrainModule = await import("./codex-runtime/headless-drain-service.mjs");
+  CLIENT_SUPERVISOR_CLAIMER_OWNER = codexDrainModule.CLIENT_SUPERVISOR_CLAIMER_OWNER;
+  EXACT_HEADLESS_WAKE_KEYS = codexDrainModule.HEADLESS_WAKE_KEYS;
+  createHeadlessClaimerGuard = codexDrainModule.createHeadlessClaimerGuard;
+  createInstalledHeadlessDrain = codexDrainModule.createInstalledHeadlessDrain;
+  normalizeHeadlessWakeConfig = codexDrainModule.normalizeHeadlessWakeConfig;
+} catch {
+  // codex-runtime is bundled only with Codex worker runtimes.
+}
+let CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER = "dev.thetriangle.client";
+let createCursorAcpClaimerGuard = () => {
+  throw new TypeError("cursor-acp-runtime is unavailable in this worker runtime bundle");
+};
+let createInstalledCursorAcpDrain = () => {
+  throw new TypeError("cursor-acp-runtime is unavailable in this worker runtime bundle");
+};
+let normalizeCursorAcpWakeConfig = () => {
+  throw new TypeError("cursor-acp-runtime is unavailable in this worker runtime bundle");
+};
+try {
+  const cursorDrainModule = await import("./cursor-acp-runtime/headless-drain-service.mjs");
+  CURSOR_ACP_CLIENT_SUPERVISOR_CLAIMER_OWNER = cursorDrainModule.CLIENT_SUPERVISOR_CLAIMER_OWNER;
+  createCursorAcpClaimerGuard = cursorDrainModule.createCursorAcpClaimerGuard;
+  createInstalledCursorAcpDrain = cursorDrainModule.createInstalledCursorAcpDrain;
+  normalizeCursorAcpWakeConfig = cursorDrainModule.normalizeCursorAcpWakeConfig;
+} catch {
+  // cursor-acp-runtime requires codex-runtime, which is bundled only with Codex worker runtimes.
+}
 
 import {
   APP_SERVER_BINDING_KEYS,
