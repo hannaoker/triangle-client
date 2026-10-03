@@ -258,10 +258,16 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             try provisionHermesEnvironment(home: home, modelRoot: modelRoot)
         }
         if worker == .antigravity {
-            let geminiCLI = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
-            if FileManager.default.fileExists(atPath: geminiCLI.path) {
-                let canonical = try checkedDirectory(geminiCLI, exactMode: nil)
-                trustedEnvironment["TRIANGLE_WRITABLE_RUNTIME_ROOTS"] = canonical.path
+            var writable: [String] = []
+            for relative in [".gemini/antigravity-cli", ".gemini/config"] {
+                let directory = home.appendingPathComponent(relative, isDirectory: true)
+                if FileManager.default.fileExists(atPath: directory.path) {
+                    let canonical = try checkedDirectory(directory, exactMode: nil)
+                    writable.append(canonical.path)
+                }
+            }
+            if !writable.isEmpty {
+                trustedEnvironment["TRIANGLE_WRITABLE_RUNTIME_ROOTS"] = writable.joined(separator: ":")
             }
         }
         return WorkerCommand(
@@ -273,6 +279,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     }
 
     public func resolveAdapter(for instance: ClientInstance) throws -> WorkerCommand {
+        if instance.runtimeAdapter == .cursorAcp { return try resolveCursorAcp(instance) }
         // grok-bot has no headless runner; wake is host-side (webhook), not worker polling.
         if instance.runtimeAdapter == .grokBot { throw WorkerLauncherError.invalidManifest }
         let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
@@ -285,6 +292,36 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             workingDirectory: base.workingDirectory,
             environment: base.environment
         )
+    }
+
+    private func resolveCursorAcp(_ instance: ClientInstance) throws -> WorkerCommand {
+        guard instance.instanceID == .derive(profile: instance.profile) else {
+            throw WorkerLauncherError.invalidManifest
+        }
+        let root = try checkedDirectory(applicationRoot, exactMode: 0o700)
+        return WorkerCommand(
+            executable: try Self.cursorAgentExecutable(),
+            arguments: ["acp"],
+            workingDirectory: root,
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"]
+        )
+    }
+
+    static func cursorAgentExecutable() throws -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent(".local/bin/agent"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/agent"),
+            URL(fileURLWithPath: "/usr/local/bin/agent"),
+        ]
+        for candidate in candidates {
+            let resolved = candidate.resolvingSymlinksInPath()
+            guard resolved.path.hasPrefix("/"),
+                  FileManager.default.isExecutableFile(atPath: resolved.path)
+            else { continue }
+            return resolved
+        }
+        throw WorkerLauncherError.invalidManifest
     }
 
     public func resolveCoordinator(for instances: [ClientInstance]) throws -> WorkerCommand {

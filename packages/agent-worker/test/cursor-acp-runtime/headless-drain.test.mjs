@@ -38,7 +38,10 @@ test("normalizeCursorAcpWakeConfig accepts closed shadow wake shape", () => {
   const normalized = normalizeCursorAcpWakeConfig(cursorAcpWake());
   assert.equal(normalized.profile, PROFILE);
   assert.equal(normalized.shadowTestProfile, true);
-  assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ shadowTestProfile: false })), /shadowTestProfile/);
+  assert.equal(
+    normalizeCursorAcpWakeConfig(cursorAcpWake({ shadowTestProfile: false })).shadowTestProfile,
+    false,
+  );
   assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ codexHome: "/x", cursorHome: undefined })), /schema|cursorHome/i);
 });
 

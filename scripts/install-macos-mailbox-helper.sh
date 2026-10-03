@@ -84,8 +84,10 @@ client_hash_target="${manifest_dir}/triangle-client.sha256"
 client_metadata_target="${manifest_dir}/triangle-client-install.json"
 
 swift_command=/usr/bin/swift
-if [[ -x /opt/homebrew/opt/swift/bin/swift ]]; then
-  swift_command=/opt/homebrew/opt/swift/bin/swift
+if ! /usr/bin/swift --version 2>/dev/null | /usr/bin/grep -q 'Swift version 6'; then
+  if [[ -x /opt/homebrew/opt/swift/bin/swift ]]; then
+    swift_command=/opt/homebrew/opt/swift/bin/swift
+  fi
 fi
 codesign_command=/usr/bin/codesign
 worker_service="${project_root}/scripts/triangle-worker-service.sh"

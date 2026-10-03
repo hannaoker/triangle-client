@@ -10,6 +10,7 @@ import {
   resolveTriangleCursorHome,
 } from "../../src/cursor-acp-runtime/runtime-home.mjs";
 import {
+  createCursorAcpProfile,
   createDefaultCursorAcpShadowProfile,
   isCursorAcpProfile,
   resolveCursorAcpRuntimeConfig,
@@ -118,6 +119,15 @@ test("config guards exclude Codex and grok-bot; require shadow enablement", () =
   assert.equal(
     resolveCursorAcpRuntimeConfig(profile, { enableShadow: true }).active,
     true,
+  );
+  const production = createCursorAcpProfile({
+    profileId: "cursor-mac",
+    shadowTestProfile: false,
+  });
+  assert.equal(resolveCursorAcpRuntimeConfig(production, { env: {} }).active, true);
+  assert.equal(
+    resolveCursorAcpRuntimeConfig(production, { env: {} }).activationMode,
+    "cursor_acp",
   );
 });
 

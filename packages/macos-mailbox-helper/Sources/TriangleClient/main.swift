@@ -16,7 +16,12 @@ enum TriangleClientCLI {
                     transport: transport,
                     reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
                 ),
-                runtimeReadiness: { instance in _ = try FileWorkerCommandResolver().resolveAdapter(for: instance) },
+                runtimeReadiness: { instance in
+                    _ = try FileWorkerCommandResolver().resolveAdapter(for: instance)
+                    if instance.runtimeAdapter == .cursorAcp {
+                        try CursorAcpRuntimeBinding.ensure(for: instance)
+                    }
+                },
                 serviceControl: LaunchdTriangleClientServiceControl(),
                 stateCleaner: FileTriangleClientMutableStateCleaner(),
                 lifecycleLock: FileTriangleClientLifecycleLock()

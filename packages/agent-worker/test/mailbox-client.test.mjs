@@ -1546,6 +1546,29 @@ test("mailbox errors do not leak mesh token", async () => {
   );
 });
 
+test("workload token mint shares the request deadline and stays observed", async () => {
+  const unhandled = [];
+  const onUnhandled = (error) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const client = createMailboxClient(
+      {
+        meshUrl: "https://mesh.example",
+        meshToken: "secret",
+        recipientId: "agent_11111111111111111111111111111111",
+        workloadId: "workload_test",
+        workloadPrivateKey: crypto.randomBytes(32).toString("base64"),
+      },
+      { fetchImpl: async () => new Promise(() => {}), requestTimeoutMs: 20 },
+    );
+    await assert.rejects(client.listUnread(), /timed out/);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(unhandled.length, 0);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
 test("one request deadline bounds a fetch that ignores abort", async () => {
   const client = createMailboxClient(
     {

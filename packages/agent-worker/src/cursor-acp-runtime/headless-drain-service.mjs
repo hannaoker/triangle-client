@@ -3,7 +3,8 @@
  *
  * Cursor ACP and Codex headless each keep a lock family, but both families are
  * acquired together (Codex lock first, then Cursor ACP) so the same profile
- * mailbox cannot be dual-claimed across runtimes. Shadow profiles only.
+ * mailbox cannot be dual-claimed across runtimes. Production profiles use
+ * shadowTestProfile false; shadow profiles stay opt-in.
  */
 
 import crypto from "node:crypto";
@@ -25,6 +26,7 @@ import {
   createHelperTrustedTransactionProxy,
 } from "../helper-transaction-proxy.mjs";
 import {
+  createCursorAcpProfile,
   createDefaultCursorAcpShadowProfile,
   CURSOR_ACP_DELIVERY_MODE,
   CURSOR_ACP_RUNTIME_ADAPTER,
@@ -104,10 +106,10 @@ export function assertCursorAcpDrainIdentity({
       { profile, runtimeAdapter },
     );
   }
-  if (shadowTestProfile !== true) {
+  if (typeof shadowTestProfile !== "boolean") {
     throw codedError(
       "cursor_acp_not_shadow_test_profile",
-      "Cursor ACP drain admits shadow test profiles only",
+      "Cursor ACP drain requires shadowTestProfile true or false",
       { profile },
     );
   }
@@ -385,8 +387,8 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
   if (deriveProfileInstanceId(profile) !== profileInstanceId) {
     throw new TypeError("profileInstanceId does not match profile");
   }
-  if (cursorAcpWake.shadowTestProfile !== true) {
-    throw new TypeError("shadowTestProfile must be true");
+  if (typeof cursorAcpWake.shadowTestProfile !== "boolean") {
+    throw new TypeError("shadowTestProfile must be true or false");
   }
   const pollIntervalMs = cursorAcpWake.pollIntervalMs;
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 60_000) {
@@ -401,7 +403,7 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
     stateRoot: path.resolve(requiredAbsolute(cursorAcpWake.stateRoot, "stateRoot")),
     command: requiredAbsolute(cursorAcpWake.command, "command"),
     pollIntervalMs,
-    shadowTestProfile: true,
+    shadowTestProfile: cursorAcpWake.shadowTestProfile,
   });
 }
 
@@ -432,10 +434,16 @@ export function createInstalledCursorAcpDrain(config, {
     protocol: "self-serve-drain",
     createProxy: () => transactionProxy,
   });
-  const profileConfig = createDefaultCursorAcpShadowProfile({
-    profileId: normalized.profile,
-    workingDirectory: normalized.workingDirectory,
-  });
+  const profileConfig = normalized.shadowTestProfile
+    ? createDefaultCursorAcpShadowProfile({
+      profileId: normalized.profile,
+      workingDirectory: normalized.workingDirectory,
+    })
+    : createCursorAcpProfile({
+      profileId: normalized.profile,
+      workingDirectory: normalized.workingDirectory,
+      shadowTestProfile: false,
+    });
   const runtime = createHeadlessCursorAcpRuntime({
     profileConfig,
     transactionProxy,
@@ -445,9 +453,9 @@ export function createInstalledCursorAcpDrain(config, {
     env: {
       ...env,
       TRIANGLE_CURSOR_HOME: cursorHome,
-      TRIANGLE_CURSOR_ACP_SHADOW_ENABLE: "1",
+      ...(normalized.shadowTestProfile ? { TRIANGLE_CURSOR_ACP_SHADOW_ENABLE: "1" } : {}),
     },
-    enableShadow: true,
+    enableShadow: normalized.shadowTestProfile,
     logger,
   });
   if (!runtime.active) {

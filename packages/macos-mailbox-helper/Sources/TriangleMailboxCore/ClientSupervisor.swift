@@ -1096,9 +1096,7 @@ public struct ClientSupervisor: Sendable {
 
         let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
         let memberProfiles = Set(sortedMembers.map { $0.profile.value })
-        guard entries.allSatisfy({ memberProfiles.contains($0.profile) }) else {
-            throw ClientSupervisorError.invalidBootstrap
-        }
+        let memberEntries = entries.filter { memberProfiles.contains($0.profile) }
         var prepared: [PreparedCursorAcpWakeBootstrap] = []
         var credentialTokens: Set<String> = []
         var credentialAgentIds: Set<String> = []
@@ -1107,14 +1105,10 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_adapter_mismatch"))
                 continue
             }
-            guard let entry = entries.first(where: { $0.profile == member.profile.value }),
+            guard let entry = memberEntries.first(where: { $0.profile == member.profile.value }),
                   entry.instanceId == member.instanceID.value
             else {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_runtime_binding_mismatch"))
-                continue
-            }
-            guard entry.shadowTestProfile else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_not_shadow_test_profile"))
                 continue
             }
             if isDedicatedCursorAcpDrainLoaded(member.profile.value) {
@@ -1148,7 +1142,7 @@ public struct ClientSupervisor: Sendable {
                 stateRoot: entry.stateRoot,
                 command: command,
                 pollIntervalMs: pollIntervalMs,
-                shadowTestProfile: true
+                shadowTestProfile: entry.shadowTestProfile
             ))
         }
         return prepared

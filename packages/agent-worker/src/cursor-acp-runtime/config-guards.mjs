@@ -2,8 +2,8 @@
  * Cursor ACP profile schema + shadow/opt-in guards.
  *
  * Dedicated runtimeAdapter: "cursor-acp". Never joins Codex App Server pool.
- * Never matches grok-bot. Production enrollment on Mini is out of scope for
- * this vertical — shadow/test profiles only unless operator-enabled.
+ * Never matches grok-bot. Shadow profiles stay opt-in. A cursor-acp profile
+ * with shadowTestProfile false is the production lane.
  */
 
 export const CURSOR_ACP_RUNTIME_ADAPTER = "cursor-acp";
@@ -111,12 +111,23 @@ export function resolveCursorAcpRuntimeConfig(
 
   const shadow = isShadowCursorAcpTestProfile(profileConfig);
   if (!shadow) {
+    const workload = profileConfig?.workload ?? "conversational";
+    const model = typeof profileConfig?.model === "string" ? profileConfig.model : null;
     return Object.freeze({
-      active: false,
-      inactiveReason: "not_shadow_test_profile",
+      active: true,
+      inactiveReason: null,
+      activationMode: "cursor_acp",
       runtimeAdapter: CURSOR_ACP_RUNTIME_ADAPTER,
-      pool: Object.freeze({ preferredSize: 1, maxSize: 1 }),
-      note: "production Cursor ACP enrollment is out of scope for this vertical",
+      deliveryMode: CURSOR_ACP_DELIVERY_MODE,
+      runtimeMode: CURSOR_ACP_RUNTIME_MODE,
+      workload,
+      model,
+      pool: Object.freeze({
+        preferredSize: 1,
+        maxSize: 1,
+        requestedPreferredSize: preferredPoolSize,
+      }),
+      profileId: profileConfig?.profileId ?? null,
     });
   }
 
@@ -154,6 +165,31 @@ export function resolveCursorAcpRuntimeConfig(
       requestedPreferredSize: preferredPoolSize,
     }),
     profileId,
+  });
+}
+
+export function createCursorAcpProfile(overrides = {}) {
+  if (overrides.runtimeAdapter === "grok-bot" || overrides.runtimeAdapter === "codex-app-server") {
+    throw createCodedError(
+      "cursor_acp_profile_conflict",
+      "Cursor ACP profile cannot reuse Codex or grok-bot adapters",
+    );
+  }
+  const shadowTestProfile = overrides.shadowTestProfile === true;
+  return Object.freeze({
+    profileId: overrides.profileId ?? "cursor-acp",
+    runtimeAdapter: CURSOR_ACP_RUNTIME_ADAPTER,
+    runtimeMode: CURSOR_ACP_RUNTIME_MODE,
+    deliveryMode: CURSOR_ACP_DELIVERY_MODE,
+    executionKind: CURSOR_ACP_EXECUTION_KIND.HEADLESS_ACP,
+    shadowTestProfile,
+    workload: overrides.workload ?? "conversational",
+    model: overrides.model ?? null,
+    workingDirectory: overrides.workingDirectory ?? null,
+    permissionDefault: overrides.permissionDefault ?? "allow-once",
+    ...overrides,
+    runtimeAdapter: CURSOR_ACP_RUNTIME_ADAPTER,
+    shadowTestProfile,
   });
 }
 

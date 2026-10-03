@@ -552,6 +552,10 @@ export function createMailboxClient(
     let callerAborted = false;
     let rejectDeadline;
     const deadline = new Promise((_, reject) => { rejectDeadline = reject; });
+    // Token mint runs before the response race. Observe the deadline immediately
+    // so a timeout during that mint cannot become an unhandled rejection and
+    // kill the supervisor.
+    deadline.catch(() => {});
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
@@ -572,7 +576,10 @@ export function createMailboxClient(
       let dpopHeader;
       const fullUrl = new URL(path, `${origin}/`).toString();
       if (workloadTokenManager) {
-        const accessToken = await workloadTokenManager.fetchToken(controller.signal);
+        const accessToken = await Promise.race([
+          workloadTokenManager.fetchToken(controller.signal),
+          deadline,
+        ]);
         authHeader = `Bearer ${accessToken}`;
         dpopHeader = workloadTokenManager.createDpopProof(method, fullUrl, accessToken);
       }

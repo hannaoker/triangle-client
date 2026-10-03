@@ -255,9 +255,11 @@ def discover_runtime_roots(agent, cli):
                         if os.path.exists(candidate):
                             roots.append(os.path.realpath(candidate))
     elif agent == "antigravity":
-        gemini_cli = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
-        if os.path.isdir(gemini_cli):
-            roots.append(os.path.realpath(gemini_cli))
+        gemini_home = os.path.expanduser("~")
+        for name in ("antigravity-cli", "config"):
+            candidate = os.path.join(gemini_home, ".gemini", name)
+            if os.path.isdir(candidate):
+                roots.append(os.path.realpath(candidate))
     return os.pathsep.join(dict.fromkeys(map(os.path.realpath, roots)))
 
 
@@ -361,6 +363,26 @@ def stage_runtime(args):
             fsync_dir(bundles)
             created_bundle = True
         bundle = final_bundle
+        # client-supervisor-cli imports the Codex headless graph from every
+        # bundle, including Hermes and Antigravity. The helper allowlist still
+        # records those files only on the Codex manifest, so copy them beside
+        # the hashed artifacts. A hashed addition would make the current helper
+        # reject the manifest.
+        for relative in CODEX_HEADLESS_ARTIFACTS:
+            if relative in artifacts:
+                continue
+            source = os.path.join(project, relative)
+            destination = os.path.join(bundle, relative)
+            parent = os.path.dirname(destination)
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            current = bundle
+            for component in os.path.relpath(parent, bundle).split(os.sep):
+                if component != ".":
+                    current = os.path.join(current, component)
+                    os.chmod(current, 0o700)
+            if os.path.lexists(destination):
+                os.unlink(destination)
+            copy_regular(source, destination)
         environment = {
             "PATH": os.pathsep.join(dict.fromkeys([os.path.join(bundle, "bin"), os.path.dirname(cli), "/usr/bin", "/bin"])),
             "LANG": "C",

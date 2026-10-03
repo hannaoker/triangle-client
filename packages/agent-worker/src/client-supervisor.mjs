@@ -468,7 +468,7 @@ export function createClientSupervisor({
     const lockPath = path.join(lockDirectory, `cursor-acp-claimer.${cursorAcpConfig.profile}.json`);
     const cursorAcpClaimer = createCursorAcpClaimer({
       profile: cursorAcpConfig.profile,
-      shadowTestProfile: true,
+      shadowTestProfile: cursorAcpConfig.shadowTestProfile === true,
       helperPath: cursorAcpConfig.helperPath,
       lockPath,
     });

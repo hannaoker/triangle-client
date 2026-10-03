@@ -113,7 +113,28 @@ function runtimeFamilies(env, activeWorker) {
       }
     }
   }
+  // agy keeps login state in ~/.gemini/antigravity-cli and project state in
+  // ~/.gemini/config. Neither is on the executable chain, so approve only those
+  // two directories. The rest of ~/.gemini stays outside the sandbox.
+  if (activeWorker === "antigravity") {
+    families.push(...antigravityCliStateRoots(env.HOME));
+  }
   return { families: [...new Set(families.map((entry) => realpathSync(entry)))], aliases: [...new Set(aliases)] };
+}
+
+function antigravityCliStateRoots(home) {
+  if (typeof home !== "string" || !path.isAbsolute(home) || /[\r\n\0]/.test(home)) return [];
+  const roots = [];
+  for (const relative of [[".gemini", "antigravity-cli"], [".gemini", "config"]]) {
+    const state = path.join(path.resolve(home), ...relative);
+    if (!existsSync(state)) continue;
+    try {
+      roots.push(requirePlainComponents(home, state, "Antigravity CLI state"));
+    } catch {
+      // A symlink or path that escapes HOME stays unapproved.
+    }
+  }
+  return roots;
 }
 
 function collapseToOuterRoots(roots) {
@@ -214,6 +235,12 @@ export function sandboxCommand(command, args, env = process.env) {
   const temporaryInput = path.join(homeInput, "Library", "Caches", "The Triangle", "instances", instanceId);
   if (env.TRIANGLE_INSTANCE_TEMP_ROOT !== temporaryInput) throw new Error("Instance temp root must select the exact Triangle instance");
   const temporary = requirePlainComponents(homeInput, temporaryInput, "worker temporary root", { create: true });
+  if (activeWorker === "antigravity") {
+    for (const stateRoot of antigravityCliStateRoots(env.HOME)) {
+      const listed = runtimeRoots.some((entry) => stateRoot === entry || stateRoot.startsWith(`${entry}${path.sep}`));
+      if (listed && !writableRuntimeRoots.includes(stateRoot)) writableRuntimeRoots.push(stateRoot);
+    }
+  }
   for (const writableRoot of writableRuntimeRoots) {
     if (!runtimeRoots.some((entry) => writableRoot === entry || writableRoot.startsWith(`${entry}${path.sep}`))) {
       throw new Error("Every writable runtime root must be within a runtime root");

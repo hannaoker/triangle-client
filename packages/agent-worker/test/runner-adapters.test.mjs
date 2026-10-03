@@ -17,7 +17,7 @@ import {
   createAntigravityInvocation,
 } from "../runners/antigravity-runner.mjs";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
-import { resolvePyvenvBasePrefix, runtimeRootCovers } from "../runners/runner-common.mjs";
+import { resolvePyvenvBasePrefix, runtimeRootCovers, sandboxCommand } from "../runners/runner-common.mjs";
 
 const request = {
   messageId: "message_1",
@@ -498,4 +498,54 @@ test("installed Hermes and Codex help run under Keychain-launched deny-default s
   const codexResult = spawnSync(codexCommand.command, codexCommand.args, { encoding: "utf8", env: codexEnv });
   assert.equal(codexResult.status, 0, codexResult.stderr || String(codexResult.signal));
   assert.match(codexResult.stdout, /Codex|Usage/i);
+});
+
+test("antigravity sandbox accepts only the Gemini CLI state directory", { skip: process.platform !== "darwin" }, () => {
+  const base = mkdtempSync(join(tmpdir(), "triangle-agy-sandbox-"));
+  try {
+    const instanceId = "ab".repeat(32);
+    const project = join(base, "project");
+    const credentials = join(base, "credentials");
+    const modelBase = join(base, "Library", "Application Support", "The Triangle", "model-state");
+    const model = join(modelBase, "instances", instanceId);
+    const temporary = join(base, "Library", "Caches", "The Triangle", "instances", instanceId);
+    const state = join(base, ".gemini", "antigravity-cli");
+    const config = join(base, ".gemini", "config");
+    const outside = join(base, ".gemini", "tasks");
+    for (const directory of [project, credentials, model, temporary, state, config, outside]) mkdirSync(directory, { recursive: true });
+    const cliDir = dirname(realpathSync(process.execPath));
+    const env = {
+      HOME: base,
+      PATH: "/usr/bin:/bin",
+      LANG: "C",
+      LC_ALL: "C",
+      ANTIGRAVITY_CLI: process.execPath,
+      ANTIGRAVITY_HOME: model,
+      TRIANGLE_PROJECT_ROOT: project,
+      TRIANGLE_CREDENTIAL_ROOT: credentials,
+      TRIANGLE_MODEL_STATE_BASE: modelBase,
+      TRIANGLE_MODEL_ROOTS: model,
+      TRIANGLE_RUNTIME_ROOTS: [cliDir, state, config].join(delimiter),
+      TRIANGLE_WRITABLE_RUNTIME_ROOTS: [state, config].join(delimiter),
+      TRIANGLE_INSTANCE_ID: instanceId,
+      TRIANGLE_INSTANCE_TEMP_ROOT: temporary,
+    };
+    const result = sandboxCommand(process.execPath, ["-e", ""], env);
+    const profile = result.args[1];
+    const writeRule = (directory) => new RegExp(`file-write\\* \\(subpath "${realpathSync(directory).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\)`);
+    assert.match(profile, writeRule(state));
+    assert.match(profile, writeRule(config));
+    const implicitWrite = sandboxCommand(process.execPath, ["-e", ""], {
+      ...env,
+      TRIANGLE_WRITABLE_RUNTIME_ROOTS: undefined,
+    });
+    assert.match(implicitWrite.args[1], writeRule(config));
+    assert.throws(() => sandboxCommand(process.execPath, ["-e", ""], {
+      ...env,
+      TRIANGLE_RUNTIME_ROOTS: [cliDir, outside].join(delimiter),
+      TRIANGLE_WRITABLE_RUNTIME_ROOTS: undefined,
+    }), /installation chain|runtime root/i);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
