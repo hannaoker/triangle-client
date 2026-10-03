@@ -78,6 +78,7 @@ test("package and CLI source contain no deprecated gateway transport", async () 
   );
   assert.deepEqual(Object.keys(manifest.exports).sort(), [
     ".",
+    "./app-server-host-support",
     "./client-supervisor",
     "./concurrency-gate",
     "./cursor-acp-runtime",

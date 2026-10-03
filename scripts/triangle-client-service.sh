@@ -59,14 +59,14 @@ if len(expected) != 64 or expected != actual:
 PY
 }
 
-manifest_is_v4() {
+manifest_is_supervisor_capable() {
   local agent=$1 manifest
   manifest="${application_root}/worker-runtime/${agent}.manifest.json"
   [[ -f "$manifest" ]] || return 1
   if ! /usr/bin/python3 "$installer" validate-runtime --manifest "$manifest" --agent "$agent" >/dev/null; then return 1; fi
   /usr/bin/python3 - "$manifest" <<'PY'
 import json, sys
-raise SystemExit(0 if json.load(open(sys.argv[1], encoding="utf-8")).get("version") in (4, 5) else 1)
+raise SystemExit(0 if json.load(open(sys.argv[1], encoding="utf-8")).get("version") in (4, 5, 6) else 1)
 PY
 }
 
@@ -103,12 +103,12 @@ prepare_runtime_records() {
       record=$(stage_one_runtime "$agent") || return
       runtime_records+=("$record")
       eligible=$((eligible + 1))
-    elif manifest_is_v4 "$agent"; then
+    elif manifest_is_supervisor_capable "$agent"; then
       eligible=$((eligible + 1))
     fi
   done
   if [[ $eligible -eq 0 ]]; then
-    echo "Triangle Client requires at least one trusted version 4 supervisor-capable runtime" >&2
+    echo "Triangle Client requires at least one trusted supervisor-capable runtime" >&2
     return 1
   fi
 }
@@ -165,9 +165,9 @@ prepare_runtime_transaction() {
   runtime_records=()
 }
 
-validate_v4_available() {
-  manifest_is_v4 codex || manifest_is_v4 hermes || manifest_is_v4 antigravity || {
-    echo "Triangle Client requires at least one trusted version 4 supervisor-capable runtime" >&2
+validate_supervisor_capable_available() {
+  manifest_is_supervisor_capable codex || manifest_is_supervisor_capable hermes || manifest_is_supervisor_capable antigravity || {
+    echo "Triangle Client requires at least one trusted supervisor-capable runtime" >&2
     return 1
   }
 }
@@ -320,7 +320,7 @@ PY
 
 render_service() {
   validate_helper
-  validate_v4_available
+  validate_supervisor_capable_available
   /usr/bin/python3 - "$template_path" "$helper_path" "$logs_dir" <<'PY'
 import sys
 from xml.sax.saxutils import escape
@@ -619,7 +619,7 @@ case "$action" in
   start)
     if [[ ! -e "$plist_path" && ! -L "$plist_path" ]]; then install_service
     else
-      validate_helper; validate_v4_available; validate_client_plist
+      validate_helper; validate_supervisor_capable_available; validate_client_plist
       registry=$(registry_state)
       if [[ "$registry" == "empty" ]]; then
         "$launchctl_command" bootout "${domain}/${label}" >/dev/null 2>&1 || true

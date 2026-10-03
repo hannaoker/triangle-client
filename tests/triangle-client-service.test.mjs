@@ -168,7 +168,7 @@ test("install prepares a runtime manifest and creates a private fixed plist", (t
   const result = run("install", f.env);
   assert.equal(result.status, 0, result.stderr);
   const runtime = JSON.parse(fs.readFileSync(path.join(f.app, "worker-runtime", "codex.manifest.json"), "utf8"));
-  assert.equal(runtime.version, 5);
+  assert.equal(runtime.version, 6);
   const plist = path.join(f.home, "Library", "LaunchAgents", "dev.thetriangle.client.plist");
   assert.equal(mode(plist), 0o600);
   assert.equal(mode(path.join(f.home, "Library", "Logs", "the-triangle")), 0o700);
