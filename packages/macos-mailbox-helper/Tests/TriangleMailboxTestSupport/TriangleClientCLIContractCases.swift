@@ -43,6 +43,9 @@ public enum TriangleClientCLIContractCases {
         let parsedHeadlessMode = try TriangleClientCommandParser.parse([
             "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "headless-app-server",
         ])
+        let parsedSetRuntime = try TriangleClientCommandParser.parse([
+            "agent", "set-runtime", "--profile", "alpha", "--runtime", "codex",
+        ])
         let parsedGrokBotRuntime = try TriangleClientCommandParser.parse([
             "agent", "add", "--profile", "bob", "--runtime", "grok-bot",
         ])
@@ -55,6 +58,7 @@ public enum TriangleClientCLIContractCases {
         try clientExpect(parsedDeliveryMode == .setDeliveryMode(profile: alpha, mode: .mcpInteractive), "set-delivery-mode did not parse")
         try clientExpect(parsedGrokBotMode == .setDeliveryMode(profile: alpha, mode: .grokBot), "grok-bot delivery mode did not parse")
         try clientExpect(parsedHeadlessMode == .setDeliveryMode(profile: alpha, mode: .headlessAppServer), "headless-app-server delivery mode did not parse")
+        try clientExpect(parsedSetRuntime == .setRuntime(profile: alpha, adapter: .codex), "set-runtime did not parse")
         let bob = try ProfileName("bob")
         try clientExpect(parsedGrokBotRuntime == .add(profile: bob, adapter: .grokBot), "grok-bot runtime did not parse")
 
@@ -69,6 +73,8 @@ public enum TriangleClientCLIContractCases {
             ["agent", "run", "--profile", "alpha", "--command", "/bin/sh"],
             ["agent", "set-delivery-mode", "--profile", "alpha"],
             ["agent", "set-delivery-mode", "--profile", "alpha", "--mode", "socket"],
+            ["agent", "set-runtime", "--profile", "alpha"],
+            ["agent", "set-runtime", "--profile", "alpha", "--runtime", "openrouter"],
             ["status", "--profile", "alpha"], ["agent", "enable", "--profile", "alpha", "--force"],
         ]
         for arguments in rejected {
@@ -499,6 +505,7 @@ private final class RecordingInstanceStore: ClientInstanceStore, @unchecked Send
     func list() throws -> [ClientInstance] { try backing.list() }
     func setEnabled(_ enabled: Bool, profile: ProfileName) throws { try backing.setEnabled(enabled, profile: profile) }
     func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws { try backing.setDeliveryMode(deliveryMode, profile: profile) }
+    func setRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter, profile: ProfileName) throws { try backing.setRuntimeAdapter(runtimeAdapter, profile: profile) }
     func remove(profile: ProfileName) throws { try backing.remove(profile: profile) }
 }
 private final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {

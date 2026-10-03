@@ -202,7 +202,11 @@ def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6} else [])
+    extras = ([
+        "packages/agent-worker/src/claimer-advisory-lock.mjs",
+        "packages/agent-worker/src/claimer-cross-runtime.mjs",
+        "packages/agent-worker/src/open-transaction-recovery.mjs",
+    ] if version in {5, 6} else [])
     extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6} and agent == "codex" else []
     extras += SUPERVISOR_SCHEMA_ARTIFACTS if version == 6 else []
     return common + extras + [

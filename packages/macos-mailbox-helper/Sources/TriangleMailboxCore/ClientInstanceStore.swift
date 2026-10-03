@@ -14,6 +14,7 @@ public protocol ClientInstanceStore: Sendable {
     func list() throws -> [ClientInstance]
     func setEnabled(_ enabled: Bool, profile: ProfileName) throws
     func setDeliveryMode(_ deliveryMode: DeliveryMode, profile: ProfileName) throws
+    func setRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter, profile: ProfileName) throws
     func remove(profile: ProfileName) throws
 }
 
@@ -63,6 +64,13 @@ public final class InMemoryClientInstanceStore: ClientInstanceStore, @unchecked 
         try lock.withLock {
             guard let record = records[profile] else { throw ClientInstanceStoreError.notFound }
             records[profile] = try record.settingDeliveryMode(deliveryMode)
+        }
+    }
+
+    public func setRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter, profile: ProfileName) throws {
+        try lock.withLock {
+            guard let record = records[profile] else { throw ClientInstanceStoreError.notFound }
+            records[profile] = try record.settingRuntimeAdapter(runtimeAdapter)
         }
     }
 
@@ -179,6 +187,16 @@ public final class FileClientInstanceStore: ClientInstanceStore, @unchecked Send
             let current = try read(directory: directory, name: name)
             guard current.profile == profile, current.instanceID == identifier else { throw ClientInstanceStoreError.invalidRecord }
             try write(encode(try current.settingDeliveryMode(deliveryMode)), directory: directory, name: name, replace: true)
+        }
+    }
+
+    public func setRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter, profile: ProfileName) throws {
+        let identifier = ClientInstanceID.derive(profile: profile)
+        try withDirectoryLock(exclusive: true) { directory in
+            let name = filename(identifier)
+            let current = try read(directory: directory, name: name)
+            guard current.profile == profile, current.instanceID == identifier else { throw ClientInstanceStoreError.invalidRecord }
+            try write(encode(try current.settingRuntimeAdapter(runtimeAdapter)), directory: directory, name: name, replace: true)
         }
     }
 
