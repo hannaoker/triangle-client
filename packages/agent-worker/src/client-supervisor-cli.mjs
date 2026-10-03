@@ -814,6 +814,13 @@ export async function runClientSupervisorCLI({
         headlessWakes: bootstrap.headlessWakes ?? [],
         cursorAcpWakes: bootstrap.cursorAcpWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
+        // C5: Bob webhook removed — install dispatcher opts in with appServerWake
+        // or headlessWakes that carry agentId + installationId for watch→kick.
+        useInstallWatchDispatcher: Boolean(
+          bootstrap.appServerWake
+          || (Array.isArray(bootstrap.headlessWakes)
+            && bootstrap.headlessWakes.some((wake) => wake?.agentId && wake?.installationId)),
+        ),
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake
           ? {

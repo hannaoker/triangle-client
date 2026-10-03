@@ -962,6 +962,7 @@ public struct ClientSupervisor: Sendable {
                 profile: member.profile.value,
                 profileInstanceId: member.instanceID.value,
                 helperPath: helperExecutableURL.path,
+                installationId: installationID.value,
                 allowedRoomId: nil,
                 workingDirectory: workingDirectory,
                 codexHome: codexHome,
@@ -1348,6 +1349,7 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
+    let installationId: String
     let allowedRoomId: String?
     let workingDirectory: String
     let codexHome: String
@@ -1358,7 +1360,7 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
     let agentId: String
 
     private enum CodingKeys: String, CodingKey {
-        case profile, profileInstanceId, helperPath, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs, agentId
+        case profile, profileInstanceId, helperPath, installationId, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs, agentId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1366,6 +1368,7 @@ private struct PreparedHeadlessWakeBootstrap: Encodable {
         try container.encode(profile, forKey: .profile)
         try container.encode(profileInstanceId, forKey: .profileInstanceId)
         try container.encode(helperPath, forKey: .helperPath)
+        try container.encode(installationId, forKey: .installationId)
         try container.encodeIfPresent(allowedRoomId, forKey: .allowedRoomId)
         try container.encode(workingDirectory, forKey: .workingDirectory)
         try container.encode(codexHome, forKey: .codexHome)

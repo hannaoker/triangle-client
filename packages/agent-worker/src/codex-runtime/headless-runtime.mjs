@@ -332,6 +332,7 @@ export function createHeadlessCodexRuntime({
    * }}
    */
   let activeDelivery = null;
+  let wakeInvoked = false;
 
   function writeProductionStatus(snapshot) {
     if (typeof statusFile !== "string" || statusFile.length === 0) return;
@@ -344,11 +345,20 @@ export function createHeadlessCodexRuntime({
       poolSize: snapshot.pool?.size ?? null,
       poolMaxSize: resolved.pool?.maxSize ?? null,
       handoffControllerConstructed: snapshot.handoffControllerConstructed === true,
-      wakeInvoked: false,
+      wakeInvoked,
       command,
       codexHome,
     };
     writeFileSync(statusFile, `${JSON.stringify(body)}\n`, { mode: 0o600 });
+  }
+
+  function noteWakeInvoked() {
+    wakeInvoked = true;
+    try {
+      writeProductionStatus(status());
+    } catch {
+      // Status file is best-effort; drain kick must not fail on write errors.
+    }
   }
 
   async function start() {
@@ -402,7 +412,7 @@ export function createHeadlessCodexRuntime({
       probeStatus: snapshot.productionProbe?.status ?? null,
       poolSize: snapshot.pool?.size ?? null,
       handoffControllerConstructed: snapshot.handoffControllerConstructed === true,
-      wakeInvoked: false,
+      wakeInvoked,
     });
     return snapshot;
   }
@@ -1227,7 +1237,7 @@ export function createHeadlessCodexRuntime({
             : null,
         }),
       handoffControllerConstructed: handoffController != null,
-      wakeInvoked: false,
+      wakeInvoked,
       conversations: resolvedRegistry.size(),
       registryKind: resolvedRegistry.kind,
       durableStoreEnabled: durableStore?.enabled === true,
@@ -1247,6 +1257,7 @@ export function createHeadlessCodexRuntime({
     },
     start,
     stop,
+    noteWakeInvoked,
     runDelivery,
     runReceiptOnly,
     recoverAfterRestart,

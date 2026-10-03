@@ -901,10 +901,66 @@ test("install dispatcher accepts appServerWake without grokBotWake", async () =>
       createWorker: () => ({ async watch() {}, async runOnce() {} }),
       logger: { error() {} },
     }),
-    /appServerWake as the install watch anchor/,
+    /install watch anchor/,
   );
   await supervisor.watch({ signal: AbortSignal.timeout(1_000) });
   assert.equal(dispatcherStarted, true);
+});
+
+test("install dispatcher accepts headlessWakes without appServerWake", async () => {
+  let dispatcherStarted = false;
+  let kicked = false;
+  const headless = headlessWakeFixture({
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const supervisor = createClientSupervisor({
+    instances: [],
+    headlessWakes: [headless],
+    useInstallWatchDispatcher: true,
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createHeadlessDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick() {
+        kicked = true;
+        return { status: "accepted" };
+      },
+    }),
+    createClaimerGuard: () => ({
+      assertSupervisorMayClaim() {},
+      acquire() {},
+      release() {},
+    }),
+    createInstallDispatcher: (options) => {
+      assert.equal(options.profiles.length, 1);
+      assert.equal(options.profiles[0].instanceId, headless.profileInstanceId);
+      assert.equal(options.profiles[0].agentId, headless.agentId);
+      return {
+        profiles: options.profiles,
+        async start() {
+          dispatcherStarted = true;
+          await options.handlers.get(headless.profileInstanceId)({
+            instanceId: headless.profileInstanceId,
+            reason: "watch_hint",
+          });
+          return { status: "ok", cycles: 1 };
+        },
+        async stop() {},
+      };
+    },
+    ensureWatchGrant: async () => ({ ensured: true }),
+    logger: { error() {} },
+  });
+  assert.equal(supervisor.installWatchDispatcherEnabled, true);
+  assert.deepEqual(supervisor.installWatchProfileIds, [headless.profileInstanceId]);
+  const ac = new AbortController();
+  const watchPromise = supervisor.watch({ signal: ac.signal });
+  setTimeout(() => ac.abort(), 50);
+  await watchPromise;
+  assert.equal(dispatcherStarted, true);
+  assert.equal(kicked, true);
 });
 
 test("install dispatcher uses held-poll short reconnect idle (2s)", () => {

@@ -41,6 +41,7 @@ public enum MailboxTransactionContractCases {
         .init(name: "mailbox list resolves omitted replyRequired from exact room event", run: mailboxListReplyRequiredFallback),
         .init(name: "authenticated reply body includes threading fields", run: authenticatedReplyBodyThreadingFields),
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
+        .init(name: "MCP rewriter resolves room_id from pending list", run: mcpRewriterResolvesRoomFromPendingList),
         .init(name: "MCP rewriter handles standalone ack when no transaction open", run: mcpRewriterStandaloneAck),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
         .init(name: "no message content in storage or status", run: noContentInStorage),
@@ -1075,6 +1076,47 @@ public enum MailboxTransactionContractCases {
         let claimID = result?["claimId"] as? String
         try expect(claimID != modelClaim, "model claim id was honored")
         try expect(claimID == MailboxTransactionIdentifier.claimId(instanceID: instanceID, deliveryID: 30), "deterministic claim missing")
+    }
+
+    public static func mcpRewriterResolvesRoomFromPendingList() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 31,
+                roomID: room,
+                eventID: MailboxEventID(rawValue: "event_" + String(repeating: "a", count: 32))!,
+                roomSequence: 1
+            ),
+        ]
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        let rewriter = MCPTransactionRewriter(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            store: store,
+            transport: transport
+        )
+        let claimID = "claim_" + String(repeating: "f", count: 32)
+        let raw = Data(#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mesh.mailbox.claim","arguments":{"delivery_id":31,"claim_id":"\#(claimID)"}}}"#.utf8)
+        let outcome = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.claim",
+                "arguments": [
+                    "delivery_id": 31,
+                    "claim_id": claimID,
+                ],
+            ],
+            raw: raw
+        )
+        guard case .respond(let body) = outcome else { throw ContractFailure("claim without room_id did not respond") }
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let result = object?["result"] as? [String: Any]
+        try expect(result?["claimed"] as? Bool == true, "claim without room_id failed")
+        try expect(result?["deliveryId"] as? Int == 31, "delivery id missing")
+        try expect(transport.listCalls == 1, "pending list was not consulted for room resolution")
+        let open = try store.readOpen(instanceID: instanceID)
+        try expect(open?.roomID == room, "resolved room was not stored")
     }
 
     public static func mcpRewriterStandaloneAck() async throws {

@@ -88,10 +88,28 @@ public struct MCPTransactionRewriter: Sendable {
     }
 
     private func rewriteClaim(arguments: [String: Any], raw: Data) async -> RewriteOutcome {
-        guard let deliveryID = intValue(arguments["delivery_id"] ?? arguments["deliveryId"]),
-              let roomRaw = arguments["room_id"] as? String ?? arguments["roomId"] as? String,
-              let roomID = MailboxRoomID(rawValue: roomRaw)
+        // MESH claim schema is delivery_id + claim_id only. room_id is optional helper
+        // metadata for the local transaction store; resolve it from pending list when omitted.
+        guard let deliveryID = intValue(arguments["delivery_id"] ?? arguments["deliveryId"])
         else { return .reject(code: -32602, message: "invalid params") }
+
+        let roomID: MailboxRoomID
+        if let roomRaw = arguments["room_id"] as? String ?? arguments["roomId"] as? String {
+            guard let parsed = MailboxRoomID(rawValue: roomRaw) else {
+                return .reject(code: -32602, message: "invalid params")
+            }
+            roomID = parsed
+        } else {
+            do {
+                let candidates = try await transport.listPendingCandidates()
+                guard let match = candidates.first(where: { $0.deliveryID == deliveryID }) else {
+                    return .reject(code: -32602, message: "invalid params")
+                }
+                roomID = match.roomID
+            } catch {
+                return .reject(code: -32603, message: "claim_failed")
+            }
+        }
 
         let modelClaim = arguments["claim_id"] as? String ?? arguments["claimId"] as? String
         do {
