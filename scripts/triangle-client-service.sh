@@ -4,13 +4,13 @@ set -euo pipefail
 IFS=$'\n\t'
 
 usage() {
-  echo "Usage: $0 <render|prepare-runtime|install|start|stop|status|uninstall>" >&2
+  echo "Usage: $0 <render|prepare-runtime|install|start|stop|status|doctor|uninstall>" >&2
   exit 64
 }
 
 [[ $# -eq 1 ]] || usage
 action=$1
-case "$action" in render|prepare-runtime|install|start|stop|status|uninstall) ;; *) usage ;; esac
+case "$action" in render|prepare-runtime|install|start|stop|status|doctor|uninstall) ;; *) usage ;; esac
 
 project_root=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd -P)
 installer="${project_root}/scripts/triangle-worker-install.py"
@@ -642,6 +642,9 @@ case "$action" in
     prepare_readiness
     ;;
   status) "$launchctl_command" print "${domain}/${label}" ;;
+  doctor)
+    node "${project_root}/scripts/triangle-headless-engagement-doctor.mjs"
+    ;;
   uninstall)
     "$launchctl_command" bootout "${domain}/${label}" >/dev/null 2>&1 || true
     if "$launchctl_command" print "${domain}/${label}" >/dev/null 2>&1; then echo "Triangle Client did not stop" >&2; exit 1; fi

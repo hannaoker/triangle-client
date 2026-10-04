@@ -114,8 +114,16 @@ test("cursor ACP claimer acquires Codex lock family and blocks Codex claimer", a
       || error.code === "supervisor_headless_claimer_active",
   );
   cursor.release({ owner: "dev.thetriangle.client" });
-  assert.equal(fs.existsSync(cursorLock), false);
-  assert.equal(fs.existsSync(codexLock), false);
+  // Diagnostic JSON may remain; ownership is the released advisory lock.
+  const codexAfter = createHeadlessClaimerGuard({
+    profile: PROFILE,
+    lockPath: codexLock,
+    probeDedicatedDrain: () => false,
+    probeCursorAcpDrain: () => false,
+    pid: process.pid + 8,
+  });
+  codexAfter.acquire({ owner: "dev.thetriangle.client" });
+  codexAfter.release({ owner: "dev.thetriangle.client" });
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -138,7 +146,7 @@ test("cursor ACP claimer fails closed when live Codex claimer lock exists", () =
     lockPath: cursorLock,
     probeDedicatedDrain: () => false,
     probeCodexDrain: () => false,
-    pidAlive: (candidate) => candidate === process.pid + 11,
+    advisoryHeld: (target) => target === codexLock,
   });
   assert.throws(
     () => guard.assertSupervisorMayClaim(),

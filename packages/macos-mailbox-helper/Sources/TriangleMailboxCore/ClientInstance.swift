@@ -123,6 +123,10 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         try Self(profile: profile, runtimeAdapter: runtimeAdapter, enabled: enabled, deliveryMode: deliveryMode)
     }
 
+    func settingRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter) throws -> Self {
+        try Self(profile: profile, runtimeAdapter: runtimeAdapter, enabled: enabled, deliveryMode: deliveryMode)
+    }
+
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case version, instanceID = "instanceId", profile, runtimeAdapter, enabled, deliveryMode
     }

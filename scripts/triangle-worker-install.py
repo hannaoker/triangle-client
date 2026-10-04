@@ -51,8 +51,14 @@ SUPERVISOR_ARTIFACTS = [
 SUPERVISOR_SCHEMA_ARTIFACTS = [
     "packages/agent-worker/src/client-supervisor-schema.mjs",
 ]
+# Headless claimer flock + open-txn recovery land in manifest v7 so existing v6
+# helpers (exact-set match) keep validating until the mailbox helper is rebuilt.
+HEADLESS_OWNERSHIP_ARTIFACTS = [
+    "packages/agent-worker/src/claimer-advisory-lock.mjs",
+    "packages/agent-worker/src/open-transaction-recovery.mjs",
+]
 COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
-CURRENT_MANIFEST_VERSION = 6
+CURRENT_MANIFEST_VERSION = 7
 CODEX_HEADLESS_ARTIFACTS = [
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
@@ -198,13 +204,14 @@ def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
         fail("invalid worker kind")
     if version == 3:
         common = LEGACY_COMMON_ARTIFACTS
-    elif version in {4, 5, 6}:
+    elif version in {4, 5, 6, 7}:
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6} else [])
-    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6} and agent == "codex" else []
-    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version == 6 else []
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7} else [])
+    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6, 7} and agent == "codex" else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7} else []
+    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version == 7 else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
@@ -273,7 +280,7 @@ def strict_manifest(path, agent):
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
         "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
-    if value["version"] not in {3, 4, 5, 6} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in {3, 4, 5, 6, 7} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")
