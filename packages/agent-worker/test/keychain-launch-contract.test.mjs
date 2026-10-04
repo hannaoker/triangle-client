@@ -113,7 +113,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 6);
+  assert.equal(manifest.version, 7);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
   assert.deepEqual(Object.keys(manifest).sort(), ["artifacts", "environment", "nodeSHA256", "projectRoot", "version"].sort());
@@ -297,7 +297,7 @@ test("LaunchAgent install rejects an existing symlink target without touching it
   assert.equal(fs.readFileSync(destination, "utf8"), "outside\n");
 });
 
-test("prepare-runtime upgrades to manifest v6 while v5 without schema stays valid", { skip: darwinOnly }, (t) => {
+test("prepare-runtime upgrades to manifest v7 while v6 without ownership modules stays valid", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const installer = path.join(root, "scripts/triangle-worker-install.py");
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
@@ -306,40 +306,47 @@ test("prepare-runtime upgrades to manifest v6 while v5 without schema stays vali
   });
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
-  const v6 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v6.version, 6);
-  assert.ok(v6.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
+  const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(v7.version, 7);
+  assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
+  assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
+  assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
 
-  const schemaRelative = "packages/agent-worker/src/client-supervisor-schema.mjs";
-  const projectRoot = v6.projectRoot;
-  const v5 = structuredClone(v6);
-  delete v5.artifacts[schemaRelative];
-  v5.version = 5;
-  fs.rmSync(path.join(projectRoot, schemaRelative));
+  const ownershipRelatives = [
+    "packages/agent-worker/src/claimer-advisory-lock.mjs",
+    "packages/agent-worker/src/open-transaction-recovery.mjs",
+  ];
+  const projectRoot = v7.projectRoot;
+  const v6 = structuredClone(v7);
+  for (const relative of ownershipRelatives) {
+    delete v6.artifacts[relative];
+    fs.rmSync(path.join(projectRoot, relative));
+  }
+  v6.version = 6;
   const addressInput = [
     "codex",
-    v5.nodeSHA256,
-    ...Object.keys(v5.artifacts).sort().map((name) => `${name}=${v5.artifacts[name]}`),
+    v6.nodeSHA256,
+    ...Object.keys(v6.artifacts).sort().map((name) => `${name}=${v6.artifacts[name]}`),
   ].join("\n") + "\n";
   const legacyRoot = path.join(
     path.dirname(projectRoot),
     crypto.createHash("sha256").update(addressInput).digest("hex"),
   );
   fs.renameSync(projectRoot, legacyRoot);
-  v5.projectRoot = legacyRoot;
-  for (const [name, value] of Object.entries(v5.environment)) {
-    v5.environment[name] = value.replaceAll(projectRoot, legacyRoot);
+  v6.projectRoot = legacyRoot;
+  for (const [name, value] of Object.entries(v6.environment)) {
+    v6.environment[name] = value.replaceAll(projectRoot, legacyRoot);
   }
-  fs.writeFileSync(manifestPath, JSON.stringify(v5), { mode: 0o600 });
+  fs.writeFileSync(manifestPath, JSON.stringify(v6), { mode: 0o600 });
   fs.chmodSync(manifestPath, 0o600);
 
-  const validatedV5 = spawnSync("/usr/bin/python3", [
+  const validatedV6 = spawnSync("/usr/bin/python3", [
     installer, "validate-runtime", "--manifest", manifestPath, "--agent", "codex",
   ], { encoding: "utf8", env: fixture.env });
-  assert.equal(validatedV5.status, 0, validatedV5.stderr);
+  assert.equal(validatedV6.status, 0, validatedV6.stderr);
 
-  const polluted = structuredClone(v5);
-  polluted.artifacts[schemaRelative] = crypto.createHash("sha256").update("// unexpected").digest("hex");
+  const polluted = structuredClone(v6);
+  polluted.artifacts[ownershipRelatives[0]] = crypto.createHash("sha256").update("// unexpected").digest("hex");
   fs.writeFileSync(manifestPath, JSON.stringify(polluted), { mode: 0o600 });
   fs.chmodSync(manifestPath, 0o600);
   const rejected = spawnSync("/usr/bin/python3", [
@@ -348,7 +355,7 @@ test("prepare-runtime upgrades to manifest v6 while v5 without schema stays vali
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /manifest contract mismatch/);
 
-  fs.writeFileSync(manifestPath, JSON.stringify(v5), { mode: 0o600 });
+  fs.writeFileSync(manifestPath, JSON.stringify(v6), { mode: 0o600 });
   fs.chmodSync(manifestPath, 0o600);
   const upgraded = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
     encoding: "utf8",
@@ -356,10 +363,12 @@ test("prepare-runtime upgrades to manifest v6 while v5 without schema stays vali
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 6);
-  assert.ok(after.artifacts[schemaRelative]);
-  const validatedV6 = spawnSync("/usr/bin/python3", [
+  assert.equal(after.version, 7);
+  for (const relative of ownershipRelatives) {
+    assert.ok(after.artifacts[relative]);
+  }
+  const validatedV7 = spawnSync("/usr/bin/python3", [
     installer, "validate-runtime", "--manifest", manifestPath, "--agent", "codex",
   ], { encoding: "utf8", env: fixture.env });
-  assert.equal(validatedV6.status, 0, validatedV6.stderr);
+  assert.equal(validatedV7.status, 0, validatedV7.stderr);
 });

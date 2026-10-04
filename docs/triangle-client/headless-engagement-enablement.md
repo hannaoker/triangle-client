@@ -6,14 +6,30 @@ without manual claimer cleanup and without dual claimers or silent redelivery.
 ## Prerequisites
 
 1. Client tip includes merged [PR #70](https://github.com/hannaoker/triangle-client/pull/70)
-   (admit-only kick, headless install-watch anchor, two-field claim resume).
-2. Helper + client installed with the same signing mode already on the machine:
+   (admit-only kick, headless install-watch anchor, two-field claim resume) **and**
+   this enablement change (manifest **v7** + rebuilt helper/client).
+2. Helper + client **rebuilt and installed together** with the same signing mode:
    `./scripts/install-macos-mailbox-helper.sh --install-client`
+   Staging Node tip alone without a rebuilt `triangle-mailbox` /
+   `triangle-client` will fail closed (`invalidManifest`) once
+   `prepare-runtime` writes a v7 bundle.
 3. Target MESH origin has **watch + lease reclaim** enabled (verify before
    enablement on a new Mac).
 4. Grok webhook stays retired — do not re-arm it.
 5. Login Keychain unlocked; Codex runtime auth present (`TRIANGLE_CODEX_HOME`,
    `CODEX_CLI`).
+
+### Compatibility notes
+
+- **Manifest v7** adds `claimer-advisory-lock.mjs` and
+  `open-transaction-recovery.mjs`. Existing **v6** manifests keep working on
+  older helpers (exact-set match unchanged).
+- **Do not** run `prepare-runtime` / enablement from this tip on a Mac that
+  cannot rebuild Swift yet — leave that machine on its current installed
+  helper + v6 runtime.
+- **Antigravity / pilot-mac**: this path is Codex/Cursor-ACP headless
+  engagement. Skip enablement there; leave the installed v6 antigravity
+  runtime untouched until a matching helper release is available.
 
 ## Fresh Mac (MacBook) runbook
 
