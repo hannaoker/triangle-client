@@ -982,7 +982,7 @@ test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
       async handleWake() { return { status: "accepted" }; },
     }),
     createInstallDispatcher: (options) => {
-      assert.equal(options.idlePollIntervalMs, 2_000);
+      assert.equal(options.idlePollIntervalMs, 30_000);
       return {
         profiles: options.profiles,
         async start() { return { cycles: 0 }; },

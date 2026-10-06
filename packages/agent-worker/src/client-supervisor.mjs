@@ -9,7 +9,7 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
-  INSTALL_WATCH_HELD_POLL_IDLE_MS,
+  INSTALL_WATCH_SAFE_IDLE_POLL_MS,
   createInstallWatchDispatcher,
   resolveInstallWatchCursorPath,
 } from "./install-watch-dispatcher.mjs";
@@ -663,9 +663,10 @@ export function createClientSupervisor({
       transport: watchTransport,
       cursorStore: createCursorStore({ filePath: installCursorPath }),
       laneCursorStores,
-      // Phase 0.5 hold proven on Mini prod (~26s empty tip). Short reconnect
-      // backoff only — rollback to INSTALL_WATCH_SAFE_IDLE_POLL_MS if hold dies.
-      idlePollIntervalMs: INSTALL_WATCH_HELD_POLL_IDLE_MS,
+      // Hobby Fluid memory: 2s reconnect after empty hold burns ~44 GB-hrs/day
+      // per always-on watcher. Prefer SAFE idle (30s) so one watcher stays near
+      // ~12–22 GB-hrs/day depending on server poll timeout.
+      idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
       logger,
     });
     if (!installDispatcher || typeof installDispatcher.start !== "function") {
