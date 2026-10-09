@@ -34,6 +34,7 @@ import {
   recordOrReplayCompletion,
   reconcileProfileAfterRestart,
 } from "./completion-reconciler.mjs";
+import { recoverOpenMailboxTransaction } from "../open-transaction-recovery.mjs";
 import {
   attachCorrelationToTurnStart,
   buildCorrelationTag,
@@ -1090,6 +1091,25 @@ export function createHeadlessCodexRuntime({
     if (typeof instanceId !== "string" || !/^[a-f0-9]{64}$/.test(instanceId)) {
       throw new TypeError("profileInstanceId is invalid");
     }
+    // Open mailbox txn recovery is separate from claimer lock ownership.
+    const openRecovery = await recoverOpenMailboxTransaction({
+      transactionProxy,
+      expectedProtocol:
+        typeof transactionProxy?.protocol === "string"
+          ? transactionProxy.protocol
+          : "coordinator-delivery-v1",
+      logger,
+    });
+    if (openRecovery.quarantined > 0) {
+      return Object.freeze({
+        quarantined: openRecovery.quarantined,
+        reconciledAck: openRecovery.reconciledAck,
+        resumePending: openRecovery.resumePending ?? 0,
+        receiptDrained: openRecovery.receiptDrained ?? 0,
+        openTransaction: openRecovery,
+        results: Object.freeze([]),
+      });
+    }
     if (resolvedRegistry.kind === "durable" && typeof resolvedRegistry.reload === "function") {
       resolvedRegistry.reload();
     }
@@ -1101,8 +1121,16 @@ export function createHeadlessCodexRuntime({
       now,
       logger,
     });
+    const merged = Object.freeze({
+      ...report,
+      quarantined: report.quarantined + openRecovery.quarantined,
+      reconciledAck: (report.reconciledAck ?? 0) + openRecovery.reconciledAck,
+      resumePending: openRecovery.resumePending ?? 0,
+      receiptDrained: openRecovery.receiptDrained ?? 0,
+      openTransaction: openRecovery,
+    });
     // After restart, prior owner is not presumed live. Acquire only when idle.
-    if (resolvedLeaseManager && report.quarantined === 0) {
+    if (resolvedLeaseManager && merged.quarantined === 0) {
       try {
         resolvedLeaseManager.acquire({
           profileInstanceId: instanceId,
@@ -1111,12 +1139,12 @@ export function createHeadlessCodexRuntime({
         });
       } catch (error) {
         if (error?.code === "lease_non_idle_no_steal") {
-          return Object.freeze({ ...report, lease: "deferred_non_idle" });
+          return Object.freeze({ ...merged, lease: "deferred_non_idle" });
         }
         throw error;
       }
     }
-    return report;
+    return merged;
   }
 
   /**
