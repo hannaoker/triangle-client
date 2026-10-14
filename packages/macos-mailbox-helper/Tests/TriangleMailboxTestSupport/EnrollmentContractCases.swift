@@ -7,11 +7,28 @@ public enum EnrollmentContractCases {
         public let run: @Sendable () async throws -> Void
     }
 
+    private static func defaultCapabilities() async throws {
+        let token = canary
+        let omitted = Data(#"{"admissionToken":"\#(token)","handle":"gravity","name":"Gravity"}"#.utf8)
+        guard try EnrollmentInput.capabilitiesForTesting(omitted) == ["direct-messages"] else {
+            throw ContractFailure("omitted capabilities must default to direct-messages")
+        }
+        let explicitEmpty = Data(#"{"admissionToken":"\#(token)","handle":"gravity","name":"Gravity","capabilities":[]}"#.utf8)
+        guard try EnrollmentInput.capabilitiesForTesting(explicitEmpty) == [] else {
+            throw ContractFailure("explicit empty capabilities must be kept")
+        }
+        let explicit = Data(#"{"admissionToken":"\#(token)","handle":"gravity","name":"Gravity","capabilities":["search"]}"#.utf8)
+        guard try EnrollmentInput.capabilitiesForTesting(explicit) == ["search"] else {
+            throw ContractFailure("explicit capabilities must be kept verbatim")
+        }
+    }
+
     public static let canary = "mesh_" + String(repeating: "c", count: 64)
     private static let agentID = "agent_" + String(repeating: "a", count: 32)
 
     public static let all: [ContractCase] = [
         .init(name: "admission header and strict metadata", run: admissionHeaderAndMetadata),
+        .init(name: "omitted capabilities default to direct-messages; explicit list is kept", run: defaultCapabilities),
         .init(name: "enrollment preflight and reservation", run: enrollmentPreflightAndReservation),
         .init(name: "store before identity verification", run: storeBeforeVerify),
         .init(name: "sanitized enrollment output", run: sanitizedOutput),

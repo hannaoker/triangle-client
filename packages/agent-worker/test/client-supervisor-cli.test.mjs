@@ -467,16 +467,28 @@ test("sanitized logger may include a short secret-free error code", async () => 
           logger.error("triangle_client_instance_failed", {
             code: `mesh_${"x".repeat(20)}`,
           });
+          logger.error("triangle_client_watch_grant_renewal_failed", {
+            code: "invalid_grant",
+          });
+          logger.error("agent_worker_cycle_failed", {
+            instanceId: "a".repeat(64),
+          });
+          logger.error(`mesh_${"y".repeat(20)}`, { code: "invalid_grant" });
           return { instances: [] };
         },
       };
     },
   }), 0);
-  assert.match(logged.value(), /triangle-client: instance cycle failed \(poll_limit_exceeded\)/);
-  assert.match(logged.value(), /triangle-client: instance cycle failed \(webhook_rejected\/503\)/);
-  assert.match(logged.value(), /triangle-client: instance cycle failed \(already_started\)/);
-  // Reject codes that look like credential material; fall back to bare message.
-  assert.match(logged.value(), /triangle-client: instance cycle failed\n/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(poll_limit_exceeded\) \[[a-z_]+\]/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(webhook_rejected\/503\) \[grok_bot_wake_failed\]\n/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(already_started\) \[grok_bot_wake_failed\]\n/);
+  // Reject codes that look like credential material; fall back to the bare
+  // message plus the emitting loop name.
+  assert.match(logged.value(), /triangle-client: instance cycle failed \[instance_failed\]\n/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(invalid_grant\) \[watch_grant_renewal_failed\]\n/);
+  assert.match(logged.value(), /triangle-client: instance cycle failed \[agent_worker_cycle_failed\] instance=aaaaaaaaaaaa\n/);
+  // Credential-shaped event names are never echoed.
+  assert.match(logged.value(), /triangle-client: instance cycle failed \(invalid_grant\)\n/);
   assert.doesNotMatch(logged.value(), new RegExp(secret));
   assert.doesNotMatch(logged.value(), /mesh_/);
 });
