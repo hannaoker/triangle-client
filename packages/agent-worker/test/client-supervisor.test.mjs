@@ -1200,6 +1200,51 @@ test("Cursor ACP without agentId stays off the install watch; a loaded claimer i
   assert.deepEqual(blocked.installWatchProfileIds, [id(3)]);
 });
 
+test("Cursor ACP with false or omitted shadowTestProfile still joins install watch and cannot anchor it", () => {
+  const headless = headlessWakeFixture({
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  function wake(profile, { omit = false, shadowTestProfile = true } = {}) {
+    const cursorAcp = cursorAcpWakeFixture({
+      profile,
+      agentId: "agent_cursor_acp_001",
+      installationId: "inst_N7VhDq3mQ2",
+      shadowTestProfile,
+    });
+    if (omit) delete cursorAcp.shadowTestProfile;
+    return cursorAcp;
+  }
+  for (const cursorAcp of [
+    wake("cursor-acp-false", { shadowTestProfile: false }),
+    wake("cursor-acp-omitted", { omit: true }),
+  ]) {
+    assert.throws(() => createClientSupervisor({
+      instances: [],
+      cursorAcpWakes: [cursorAcp],
+      useInstallWatchDispatcher: true,
+      ...installWatchStubs(),
+    }), /install watch anchor/);
+
+    const supervised = createClientSupervisor({
+      instances: [],
+      headlessWakes: [headless],
+      cursorAcpWakes: [cursorAcp],
+      useInstallWatchDispatcher: true,
+      ...installWatchStubs(),
+      createInstallDispatcher: (options) => ({
+        profiles: options.profiles,
+        async start() { return { cycles: 0 }; },
+        async stop() {},
+      }),
+    });
+    assert.deepEqual(supervised.installWatchProfileIds, [
+      headless.profileInstanceId,
+      cursorAcp.profileInstanceId,
+    ]);
+  }
+});
+
 test("Cursor ACP is a member of an existing install watch and cannot anchor it", async () => {
   const cursorAcp = cursorAcpWakeFixture({
     agentId: "agent_cursor_acp_001",

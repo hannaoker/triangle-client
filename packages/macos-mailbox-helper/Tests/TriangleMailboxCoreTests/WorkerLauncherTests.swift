@@ -17,4 +17,16 @@ struct WorkerLauncherTests {
 
     @Test("filesystem resolver rejects unsafe manifests and artifacts")
     func resolverSafety() throws { try WorkerLauncherContractCases.resolverSafety() }
+
+    @Test("cursor-acp readiness resolves the verified headless drain")
+    func cursorAcpReadiness() throws { try WorkerLauncherContractCases.cursorAcpReadinessResolvesDrain() }
+
+    @Test("cursor-acp readiness rejects bundles without the drain runtime")
+    func cursorAcpReadinessRejects() throws { try WorkerLauncherContractCases.cursorAcpReadinessRejectsBundlesWithoutDrain() }
+
+    @Test("cursor-acp never falls through to the antigravity worker check")
+    func cursorAcpNotAntigravity() throws { try WorkerLauncherContractCases.cursorAcpDoesNotUseAntigravityWorker() }
+
+    @Test("coordinator has no manifest version ceiling")
+    func noManifestCeiling() throws { try WorkerLauncherContractCases.coordinatorHasNoManifestCeiling() }
 }

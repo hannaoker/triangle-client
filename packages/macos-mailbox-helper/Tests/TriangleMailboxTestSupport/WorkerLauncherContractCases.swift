@@ -23,6 +23,11 @@ public enum WorkerLauncherContractCases {
         .init(name: "version-7 runtime can host the shared supervisor with ownership modules", run: { try versionSevenCanHostSupervisorWithOwnershipModules() }),
         .init(name: "version-5 runtime rejects unexpected schema module", run: { try versionFiveRejectsSchemaModule() }),
         .init(name: "version-6 runtime rejects unexpected ownership modules", run: { try versionSixRejectsOwnershipModules() }),
+        .init(name: "cursor-acp readiness resolves the verified headless drain from a v7 bundle", run: { try cursorAcpReadinessResolvesDrain() }),
+        .init(name: "cursor-acp readiness rejects bundles without the cursor-acp drain runtime", run: { try cursorAcpReadinessRejectsBundlesWithoutDrain() }),
+        .init(name: "cursor-acp never falls through to the antigravity worker check", run: { try cursorAcpDoesNotUseAntigravityWorker() }),
+        .init(name: "client CLI readiness routes cursor-acp to its own check", run: { try clientReadinessRoutesCursorAcp() }),
+        .init(name: "coordinator accepts manifest versions above 7 without a ceiling", run: { try coordinatorHasNoManifestCeiling() }),
         .init(name: "shared runtime release resolves isolated opaque instance state", run: { try instanceStateIsolation() }),
         .init(name: "concurrent fresh instance resolution is idempotent", run: concurrentFreshRootResolution),
         .init(name: "clean installed runtime resolves and passes Node syntax smoke", run: { try installedBundleResolvesAndSmokes() }),
@@ -243,6 +248,77 @@ public enum WorkerLauncherContractCases {
             _ = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolve(.codex, instance: instance)
             throw WorkerContractFailure("v6 accepted unexpected ownership module")
         } catch is WorkerLauncherError {}
+    }
+
+    public static func cursorAcpReadinessResolvesDrain() throws {
+        let fixture = try ResolverFixture(manifestVersion: 7); defer { fixture.cleanup() }
+        let instance = try ClientInstance(profile: ProfileName("cursor-acp-ready"), runtimeAdapter: .cursorAcp)
+        let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
+        let command = try resolver.resolveCursorAcpDrain(for: instance)
+        try expect(command.arguments == [command.workingDirectory.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs").path], "cursor-acp drain script mismatch")
+        try expect(command.executable.path.hasSuffix("/bin/node"), "cursor-acp drain must run the bundled node")
+        try expect(Set(command.environment.keys).isSubset(of: ["PATH", "LANG", "LC_ALL", "NO_COLOR"]), "cursor-acp drain readiness leaked worker environment")
+        try expect(!command.environment.keys.contains(where: { $0.hasPrefix("MESH_") || $0.hasSuffix("_AGENT_ID") || $0 == "CODEX_CLI" }), "cursor-acp drain carried credentials or worker selectors")
+        try resolver.checkRuntimeReadiness(for: instance)
+        for version in [5, 6] {
+            let older = try ResolverFixture(manifestVersion: version); defer { older.cleanup() }
+            _ = try FileWorkerCommandResolver(applicationRoot: older.applicationRoot).resolveCursorAcpDrain(for: instance)
+        }
+    }
+
+    public static func cursorAcpReadinessRejectsBundlesWithoutDrain() throws {
+        let instance = try ClientInstance(profile: ProfileName("cursor-acp-unready"), runtimeAdapter: .cursorAcp)
+        for version in [3, 4] {
+            let fixture = try ResolverFixture(manifestVersion: version); defer { fixture.cleanup() }
+            do {
+                try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).checkRuntimeReadiness(for: instance)
+                throw WorkerContractFailure("v\(version) bundle without cursor-acp drain was reported ready")
+            } catch is WorkerLauncherError {}
+        }
+        let empty = try ResolverFixture(manifestVersion: 7); defer { empty.cleanup() }
+        try FileManager.default.removeItem(at: empty.manifestURL)
+        do {
+            try FileWorkerCommandResolver(applicationRoot: empty.applicationRoot).checkRuntimeReadiness(for: instance)
+            throw WorkerContractFailure("cursor-acp reported ready without any installed runtime")
+        } catch is WorkerLauncherError {}
+        let tampered = try ResolverFixture(manifestVersion: 7); defer { tampered.cleanup() }
+        try tampered.withManifestMutation("nodeSHA256", value: String(repeating: "0", count: 64))
+        do {
+            try FileWorkerCommandResolver(applicationRoot: tampered.applicationRoot).checkRuntimeReadiness(for: instance)
+            throw WorkerContractFailure("cursor-acp readiness accepted a tampered runtime")
+        } catch is WorkerLauncherError {}
+    }
+
+    public static func cursorAcpDoesNotUseAntigravityWorker() throws {
+        let fixture = try ResolverFixture(manifestVersion: 7); defer { fixture.cleanup() }
+        let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
+        let cursor = try ClientInstance(profile: ProfileName("cursor-acp-adapter"), runtimeAdapter: .cursorAcp)
+        do { _ = try resolver.resolveAdapter(for: cursor); throw WorkerContractFailure("cursor-acp resolved a worker-polling adapter") }
+        catch is WorkerLauncherError {}
+        // Antigravity is unchanged: with only a Codex bundle it is still unavailable.
+        let antigravity = try ClientInstance(profile: ProfileName("antigravity-adapter"), runtimeAdapter: .antigravity)
+        do { try resolver.checkRuntimeReadiness(for: antigravity); throw WorkerContractFailure("antigravity readiness changed") }
+        catch is WorkerLauncherError {}
+        // Codex readiness still goes through resolveAdapter.
+        try resolver.checkRuntimeReadiness(for: try ClientInstance(profile: ProfileName("codex-adapter"), runtimeAdapter: .codex))
+        let cursorWrongAdapter = try ClientInstance(profile: ProfileName("codex-not-cursor"), runtimeAdapter: .codex)
+        do { _ = try resolver.resolveCursorAcpDrain(for: cursorWrongAdapter); throw WorkerContractFailure("cursor-acp drain accepted a non-cursor instance") }
+        catch is WorkerLauncherError {}
+    }
+
+    public static func clientReadinessRoutesCursorAcp() throws {
+        let source = try String(contentsOf: sourceRoot().appendingPathComponent("Sources/TriangleClient/main.swift"), encoding: .utf8)
+        try expect(source.contains("FileWorkerCommandResolver().checkRuntimeReadiness(for: instance)"), "triangle-client readiness bypasses the cursor-acp check")
+    }
+
+    public static func coordinatorHasNoManifestCeiling() throws {
+        let source = try String(contentsOf: sourceRoot().appendingPathComponent("Sources/TriangleMailboxCore/WorkerLauncher.swift"), encoding: .utf8)
+        try expect(!source.contains("manifest.version == 6 || manifest.version == 7"), "coordinator still hardcodes a manifest ceiling")
+        try expect(source.components(separatedBy: "manifest.version >= 4").count - 1 == 2, "coordinator minimum manifest version changed")
+    }
+
+    private static func sourceRoot() -> URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     }
 
     public static func instanceStateIsolation() throws {

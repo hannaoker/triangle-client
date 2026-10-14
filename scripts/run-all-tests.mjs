@@ -38,6 +38,11 @@ const suites = [
     args: ["--test", "tests/enable-headless-engagement.test.mjs"],
   },
   {
+    name: "hermes-exec-wrapper",
+    command: "node",
+    args: ["--test", "tests/hermes-exec-wrapper.test.mjs"],
+  },
+  {
     name: "worker-service-render",
     command: "node",
     args: ["--test", "tests/worker-service-render.test.mjs"],

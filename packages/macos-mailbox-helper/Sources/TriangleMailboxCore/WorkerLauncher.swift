@@ -281,7 +281,17 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     public func resolveAdapter(for instance: ClientInstance) throws -> WorkerCommand {
         // grok-bot has no headless runner; wake is host-side (webhook), not worker polling.
         if instance.runtimeAdapter == .grokBot { throw WorkerLauncherError.invalidManifest }
-        let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
+        // cursor-acp has no worker-polling runner; it is served by the
+        // supervisor's headless drain (see resolveCursorAcpDrain). It must
+        // never fall through to the antigravity worker check.
+        if instance.runtimeAdapter == .cursorAcp { throw WorkerLauncherError.invalidManifest }
+        let worker: WorkerKind
+        switch instance.runtimeAdapter {
+        case .codex: worker = .codex
+        case .hermes: worker = .hermes
+        case .antigravity: worker = .antigravity
+        case .grokBot, .cursorAcp: throw WorkerLauncherError.invalidManifest
+        }
         let base = try resolve(worker, instance: instance)
         let runner = base.workingDirectory.appendingPathComponent("packages/agent-worker/runners/\(worker.rawValue)-runner.mjs")
         try checkedFile(runner, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
@@ -291,6 +301,56 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             workingDirectory: base.workingDirectory,
             environment: base.environment
         )
+    }
+
+    /// Readiness used by `triangle-client agent add|enable`. cursor-acp
+    /// profiles are checked against the headless drain runtime the
+    /// supervisor launches; every other adapter keeps `resolveAdapter`.
+    public func checkRuntimeReadiness(for instance: ClientInstance) throws {
+        if instance.runtimeAdapter == .cursorAcp {
+            _ = try resolveCursorAcpDrain(for: instance)
+        } else {
+            _ = try resolveAdapter(for: instance)
+        }
+    }
+
+    /// Resolves the integrity-verified cursor-acp headless drain shipped in an
+    /// installed supervisor-capable worker bundle (manifest v5+, which carries
+    /// `packages/agent-worker/src/cursor-acp-runtime/*`). The Cursor `agent`
+    /// CLI itself is pinned per install in cursor-acp-runtime-binding.json and
+    /// validated by ClientSupervisor when the drain is bootstrapped.
+    public func resolveCursorAcpDrain(for instance: ClientInstance) throws -> WorkerCommand {
+        guard instance.runtimeAdapter == .cursorAcp,
+              instance.instanceID == .derive(profile: instance.profile)
+        else { throw WorkerLauncherError.invalidManifest }
+        let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
+        var lastError: Error = WorkerLauncherError.invalidManifest
+        for worker in [WorkerKind.codex, .antigravity, .hermes] {
+            guard FileManager.default.fileExists(atPath: runtime.appendingPathComponent("\(worker.rawValue).manifest.json").path) else { continue }
+            let adapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
+            do {
+                let host = try ClientInstance(profile: instance.profile, runtimeAdapter: adapter)
+                // Full manifest, hash, and content-address verification.
+                let base = try resolve(worker, instance: host)
+                let drain = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
+                try checkedFile(drain, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
+                let supervisor = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
+                try checkedFile(supervisor, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
+                var environment: [String: String] = [:]
+                for key in ["PATH", "LANG", "LC_ALL", "NO_COLOR"] {
+                    if let value = base.environment[key] { environment[key] = value }
+                }
+                return WorkerCommand(
+                    executable: base.executable,
+                    arguments: [drain.path],
+                    workingDirectory: base.workingDirectory,
+                    environment: environment
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
     }
 
     public func resolveCoordinator(for instances: [ClientInstance]) throws -> WorkerCommand {
@@ -308,7 +368,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let manifest: WorkerInstallManifest
             do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
             catch { throw WorkerLauncherError.invalidManifest }
-            guard manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7 else { continue }
+            guard manifest.version >= 4 else { continue }
             let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
             try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
             var environment: [String: String] = [:]
@@ -328,7 +388,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
                 guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
                 guard let manifest = try? JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)),
-                      manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7
+                      manifest.version >= 4
                 else { continue }
                 guard let canonicalProject = try? checkedDirectory(URL(fileURLWithPath: manifest.projectRoot, isDirectory: true), exactMode: 0o700) else { continue }
                 let node = canonicalProject.appendingPathComponent("bin/node")

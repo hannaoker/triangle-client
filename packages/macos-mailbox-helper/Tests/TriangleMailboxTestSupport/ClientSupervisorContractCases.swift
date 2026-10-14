@@ -36,6 +36,8 @@ public enum ClientSupervisorContractCases {
         .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
         .init(name: "headless-app-server emits sorted headlessWakes for every Codex profile", run: headlessWakeBootstrap),
         .init(name: "cursor-acp emits cursorAcpWakes for shadow test profile", run: cursorAcpWakeBootstrap),
+        .init(name: "cursor-acp binding treats shadowTestProfile as optional and still starts", run: cursorAcpShadowFlagOptionalIncludesProfiles),
+        .init(name: "cursor-acp binding rejects unknown profile keys", run: cursorAcpBindingRejectsUnknownProfileKeys),
         .init(name: "cursor-acp stays out of Codex headless pool beside grok-bot", run: cursorAcpWakeIsolatedFromCodexAndGrok),
         .init(name: "headless-app-server records every missing v2 binding entry", run: headlessWakeBindingEntryMissing),
         .init(name: "headless-app-server rejects duplicate v2 instance IDs", run: headlessWakeDuplicateInstanceRejected),
@@ -737,6 +739,86 @@ public enum ClientSupervisorContractCases {
         let raw = String(decoding: encoded, as: UTF8.self)
         try expect(!raw.contains(fixture.specifications[1].token), "cursor-acp mailbox token leaked")
         try expect(raw.contains("cursorAcpWakes"), "cursorAcpWakes key missing")
+    }
+
+    public static func cursorAcpShadowFlagOptionalIncludesProfiles() async throws {
+        let omitted = "cursor-acp-omitted"
+        let explicitFalse = "cursor-acp-false"
+        let explicitTrue = "cursor-acp-shadow-test"
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: omitted, adapter: .cursorAcp, digit: "a"),
+                .init(profile: explicitFalse, adapter: .cursorAcp, digit: "b"),
+                .init(profile: explicitTrue, adapter: .cursorAcp, digit: "c"),
+            ],
+            provisionCursorAcpRuntimeBinding: true,
+            cursorAcpBindingProfiles: [omitted, explicitFalse, explicitTrue]
+        )
+        for name in [omitted, explicitFalse, explicitTrue] {
+            try fixture.instanceStore.setDeliveryMode(.headlessCursorAcp, profile: try ProfileName(name))
+        }
+        try writeCursorAcpRuntimeBinding(
+            fixture: fixture,
+            profiles: [
+                (omitted, .absent),
+                (explicitFalse, .value(false)),
+                (explicitTrue, .value(true)),
+            ]
+        )
+        let launch = try await fixture.supervisor.prepareEnabledInstances()
+        try expect(
+            !launch.omitted.contains { $0.reasonCode == "cursor_acp_not_shadow_test_profile" },
+            "missing or false shadowTestProfile excluded a bound cursor-acp profile"
+        )
+        try await fixture.supervisor.run()
+        let bootstrap = try fixture.process.decodedBootstrap()
+        try expect(bootstrap.instances.count == 1, "worker profile was dropped when shadowTestProfile was omitted")
+        let wakes = Dictionary(uniqueKeysWithValues: bootstrap.cursorAcpWakes.map { ($0.profile, $0.shadowTestProfile) })
+        try expect(
+            bootstrap.cursorAcpWakes.map(\.profile).sorted() == [explicitFalse, omitted, explicitTrue].sorted(),
+            "cursor-acp wakes did not keep every bound profile"
+        )
+        try expect(wakes[omitted] == false, "missing shadowTestProfile did not default to false")
+        try expect(wakes[explicitFalse] == false, "explicit false was not preserved")
+        try expect(wakes[explicitTrue] == true, "explicit true was not preserved")
+        try expect(bootstrap.cursorAcpWakes.allSatisfy { !$0.agentId.isEmpty }, "enrolled agent id missing")
+    }
+
+    public static func cursorAcpBindingRejectsUnknownProfileKeys() async throws {
+        let fixture = try SupervisorFixture(
+            specifications: [
+                .init(profile: "worker-codex", adapter: .codex, digit: "1"),
+                .init(profile: "cursor-acp-shadow-test", adapter: .cursorAcp, digit: "a"),
+            ],
+            provisionCursorAcpRuntimeBinding: true,
+            cursorAcpBindingProfiles: ["cursor-acp-shadow-test"]
+        )
+        try fixture.instanceStore.setDeliveryMode(.headlessCursorAcp, profile: try ProfileName("cursor-acp-shadow-test"))
+        try writeCursorAcpRuntimeBinding(
+            fixture: fixture,
+            profiles: [("cursor-acp-shadow-test", .value(true))],
+            extraKeys: ["note": "extra"] as [String: Any]
+        )
+        do {
+            _ = try await fixture.supervisor.prepareEnabledInstances()
+            throw SupervisorContractFailure("unknown cursor-acp binding key was accepted")
+        } catch let error as ClientSupervisorError {
+            try expect(error == .invalidBootstrap, "unknown binding key did not fail closed")
+        }
+        try expect(fixture.process.request == nil, "coordinator launched after an invalid cursor-acp binding")
+
+        try writeCursorAcpRuntimeBinding(
+            fixture: fixture,
+            profiles: [("cursor-acp-shadow-test", .absent)],
+            extraKeys: ["shadowTestProfile": "yes"] as [String: Any]
+        )
+        do {
+            _ = try await fixture.supervisor.prepareEnabledInstances()
+            throw SupervisorContractFailure("non-boolean shadowTestProfile was accepted")
+        } catch let error as ClientSupervisorError {
+            try expect(error == .invalidBootstrap, "non-boolean shadowTestProfile did not fail closed")
+        }
     }
 
     public static func cursorAcpWakeIsolatedFromCodexAndGrok() async throws {
@@ -1466,6 +1548,49 @@ private struct TestCursorAcpWake: Decodable {
     let pollIntervalMs: Int
     let shadowTestProfile: Bool
     let agentId: String
+}
+
+private enum CursorAcpShadowFlag {
+    case absent
+    case value(Bool)
+}
+
+private func writeCursorAcpRuntimeBinding(
+    fixture: SupervisorFixture,
+    profiles: [(name: String, shadow: CursorAcpShadowFlag)],
+    extraKeys: [String: Any] = [:]
+) throws {
+    let common: [String: Any] = [
+        "adapterVersion": "1",
+        "installationId": "inst_N7VhDq3mQ2",
+        "workingDirectory": "/srv/triangle-cursor-work",
+        "cursorHome": "/private/cursor-acp-home",
+        "command": "/trusted/bin/agent",
+        "pollIntervalMs": 1_000,
+    ]
+    let profileObjects: [[String: Any]] = try profiles.map { item in
+        let profile = try ProfileName(item.name)
+        var object: [String: Any] = [
+            "profile": item.name,
+            "instanceId": ClientInstanceID.derive(profile: profile).value,
+            "stateRoot": "/private/cursor-acp-state/\(item.name)",
+        ]
+        switch item.shadow {
+        case .absent:
+            break
+        case .value(let flag):
+            object["shadowTestProfile"] = flag
+        }
+        for (key, value) in extraKeys {
+            object[key] = value
+        }
+        return object
+    }
+    let bindingObject: [String: Any] = ["version": 1, "common": common, "profiles": profileObjects]
+    let data = try JSONSerialization.data(withJSONObject: bindingObject, options: [.sortedKeys])
+    let url = fixture.helperRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
+    try data.write(to: url)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

@@ -85,8 +85,9 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     /// Installation watch grant notify members: event-driven drains, bound App Server /
     /// Grok Bot hosts, and bound headless Codex drains.
     /// Cursor ACP is not a member from this flag. Grant membership uses the same
-    /// shadow-binding gate as the supervisor wake (`cursor-acp-runtime-binding.json`
-    /// with `shadowTestProfile`) so an enabled ACP profile without a drain handler
+    /// binding gate as the supervisor wake (`cursor-acp-runtime-binding.json`):
+    /// enabled, enrolled, and listed. `shadowTestProfile` is optional and does not
+    /// exclude a listed profile. An enabled ACP profile that is not in the binding
     /// is not added to the grant.
     public var participatesInWatchGrantNotify: Bool {
         participatesInEventDrivenWake

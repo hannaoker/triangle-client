@@ -66,7 +66,10 @@ manifest_is_supervisor_capable() {
   if ! /usr/bin/python3 "$installer" validate-runtime --manifest "$manifest" --agent "$agent" >/dev/null; then return 1; fi
   /usr/bin/python3 - "$manifest" <<'PY'
 import json, sys
-raise SystemExit(0 if json.load(open(sys.argv[1], encoding="utf-8")).get("version") in (4, 5, 6) else 1)
+# Minimum 4 (first supervisor-capable schema); no ceiling. Exact per-version
+# artifact validation is enforced by validate-runtime above.
+version = json.load(open(sys.argv[1], encoding="utf-8")).get("version")
+raise SystemExit(0 if type(version) is int and version >= 4 else 1)
 PY
 }
 

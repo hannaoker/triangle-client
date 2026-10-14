@@ -24,6 +24,7 @@ public enum TriangleClientCLIContractCases {
         .init(name: "launchd cutover waits for PID stability and activates only after legacy retirement", run: launchdCutoverIsTwoPhase),
         .init(name: "launchd rollback never restores legacy while the client may still be loaded", run: launchdRollbackAvoidsDuplicates),
         .init(name: "set-delivery-mode reloads worker eligibility without touching credentials", run: setDeliveryModeReloadsWorkerEligibility),
+        .init(name: "cursor-acp add, headless-cursor-acp delivery mode, and enable use cursor-acp readiness", run: cursorAcpLifecycleUsesCursorAcpReadiness),
     ]
 
     public static func parserIsClosed() async throws {
@@ -316,6 +317,28 @@ public enum TriangleClientCLIContractCases {
         _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .worker))
         try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:worker"], "worker mode did not restore polling eligibility")
         try clientExpect(fixture.credentials.deleteCount == 0, "delivery mode change touched credentials")
+    }
+
+    public static func cursorAcpLifecycleUsesCursorAcpReadiness() async throws {
+        let parsed = try TriangleClientCommandParser.parse(["agent", "add", "--profile", "alpha-profile", "--runtime", "cursor-acp"])
+        let alphaProfile = try ProfileName("alpha-profile")
+        try clientExpect(parsed == .add(profile: alphaProfile, adapter: .cursorAcp), "cursor-acp add did not parse")
+        let parsedMode = try TriangleClientCommandParser.parse(["agent", "set-delivery-mode", "--profile", "alpha-profile", "--mode", "headless-cursor-acp"])
+        try clientExpect(parsedMode == .setDeliveryMode(profile: alphaProfile, mode: .headlessCursorAcp), "headless-cursor-acp mode did not parse")
+        let fixture = try Fixture()
+        let service = fixture.service(readiness: { instance in
+            fixture.events.append("runtime:\(instance.runtimeAdapter.rawValue)")
+        })
+        _ = try await service.execute(.add(profile: fixture.profile, adapter: .cursorAcp))
+        try clientExpect(fixture.events.values == ["credential", "runtime:cursor-acp", "create"], "cursor-acp add skipped readiness: \(fixture.events.values)")
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:headless-cursor-acp"], "cursor-acp add did not default to headless-cursor-acp")
+        _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .headlessCursorAcp))
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:headless-cursor-acp"], "set-delivery-mode headless-cursor-acp failed")
+        _ = try await service.execute(.disable(profile: fixture.profile))
+        _ = try await service.execute(.enable(profile: fixture.profile))
+        try clientExpect(fixture.events.values.filter { $0 == "runtime:cursor-acp" }.count == 2, "cursor-acp enable skipped readiness")
+        try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:headless-cursor-acp"], "cursor-acp enable did not restore the profile")
+        try clientExpect(fixture.credentials.deleteCount == 0, "cursor-acp lifecycle touched credentials")
     }
 
     public static func launchdCutoverIsTwoPhase() async throws {

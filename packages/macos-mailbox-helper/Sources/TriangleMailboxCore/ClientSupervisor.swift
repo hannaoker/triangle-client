@@ -1014,7 +1014,9 @@ public struct ClientSupervisor: Sendable {
 
         let topLevelKeys: Set<String> = ["version", "common", "profiles"]
         let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", "cursorHome", "command", "pollIntervalMs"]
-        let profileKeys: Set<String> = ["profile", "instanceId", "stateRoot", "shadowTestProfile"]
+        let requiredProfileKeys: Set<String> = ["profile", "instanceId", "stateRoot"]
+        let optionalProfileKeys: Set<String> = ["shadowTestProfile"]
+        let allowedProfileKeys = requiredProfileKeys.union(optionalProfileKeys)
         guard Set(object.keys) == topLevelKeys,
               object["version"] as? Int == 1,
               let common = object["common"] as? [String: Any],
@@ -1022,7 +1024,10 @@ public struct ClientSupervisor: Sendable {
               let profileObjects = object["profiles"] as? [[String: Any]],
               !profileObjects.isEmpty,
               profileObjects.count <= 100,
-              profileObjects.allSatisfy({ Set($0.keys) == profileKeys })
+              profileObjects.allSatisfy({ entry in
+                  let keys = Set(entry.keys)
+                  return requiredProfileKeys.isSubset(of: keys) && keys.isSubset(of: allowedProfileKeys)
+              })
         else { throw ClientSupervisorError.invalidBootstrap }
 
         let pollIntervalMs: Int
@@ -1072,10 +1077,18 @@ public struct ClientSupervisor: Sendable {
             return false
         }
         let entries: [BindingEntry] = try profileObjects.map { entry in
+            let shadowTestProfile: Bool
+            if entry.keys.contains("shadowTestProfile") {
+                guard let value = entry["shadowTestProfile"] as? Bool else {
+                    throw ClientSupervisorError.invalidBootstrap
+                }
+                shadowTestProfile = value
+            } else {
+                shadowTestProfile = false
+            }
             guard let profile = entry["profile"] as? String,
                   let instanceId = entry["instanceId"] as? String,
                   let stateRoot = entry["stateRoot"] as? String,
-                  let shadowTestProfile = entry["shadowTestProfile"] as? Bool,
                   stateRoot.hasPrefix("/"),
                   !stateRoot.contains("\0")
             else { throw ClientSupervisorError.invalidBootstrap }
@@ -1114,10 +1127,6 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_runtime_binding_mismatch"))
                 continue
             }
-            guard entry.shadowTestProfile else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_not_shadow_test_profile"))
-                continue
-            }
             if isDedicatedCursorAcpDrainLoaded(member.profile.value) {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "dedicated_cursor_acp_drain_loaded"))
                 continue
@@ -1141,8 +1150,9 @@ public struct ClientSupervisor: Sendable {
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
             // agentId + installationId are emitted only for this set: enabled,
-            // enrolled, and present in cursor-acp-runtime-binding.json with
-            // shadowTestProfile. That is the same gate as watch-grant membership.
+            // enrolled, and present in cursor-acp-runtime-binding.json.
+            // shadowTestProfile is optional (missing means false) and does not
+            // exclude the profile. That is the same gate as watch-grant membership.
             // Unbound profiles are omitted above and stay off the install watch.
             prepared.append(PreparedCursorAcpWakeBootstrap(
                 profile: member.profile.value,
@@ -1154,7 +1164,7 @@ public struct ClientSupervisor: Sendable {
                 stateRoot: entry.stateRoot,
                 command: command,
                 pollIntervalMs: pollIntervalMs,
-                shadowTestProfile: true,
+                shadowTestProfile: entry.shadowTestProfile,
                 agentId: credential.agentID.value
             ))
         }

@@ -223,14 +223,34 @@ def content_address(agent, node_hash, artifacts):
     return hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest()
 
 
+HERMES_EXEC_QUOTED = re.compile(r'^exec\s+"(/[^"\n$`\\]+)"\s+"\$@"\s*$', re.MULTILINE)
+HERMES_EXEC_UNQUOTED = re.compile(r'^exec\s+(/[A-Za-z0-9._+/@%:,=-]+)\s+"\$@"\s*$', re.MULTILINE)
+
+
+def hermes_exec_target(wrapper):
+    """Absolute exec target of a `~/.local/bin/hermes` wrapper, or None.
+
+    Accepts `exec "/abs/path/hermes" "$@"` and `exec /abs/path/hermes "$@"`.
+    Unquoted paths are limited to shell-inert characters (no expansion,
+    globbing, word splitting, or substitution). Exactly one exec line.
+    """
+    matches = HERMES_EXEC_QUOTED.findall(wrapper) + HERMES_EXEC_UNQUOTED.findall(wrapper)
+    if len(matches) != 1:
+        return None
+    target = matches[0]
+    if "//" in target or "/../" in target + "/" or "/./" in target + "/":
+        return None
+    return target
+
+
 def discover_runtime_roots(agent, cli):
     roots = [os.path.dirname(cli)]
     if agent == "hermes":
         wrapper = open(cli, encoding="utf-8").read()
-        match = re.search(r'^exec\s+"([^"\n]+)"\s+"\$@"\s*$', wrapper, re.MULTILINE)
-        if not match:
+        target = hermes_exec_target(wrapper)
+        if target is None:
             fail("unsupported Hermes execution chain")
-        entry = checked_file(os.path.realpath(match.group(1)), executable=True, owners={os.getuid(), 0})
+        entry = checked_file(os.path.realpath(target), executable=True, owners={os.getuid(), 0})
         first = open(entry, encoding="utf-8").readline().rstrip()
         if not first.startswith("#!/"):
             fail("Hermes entrypoint lacks an absolute interpreter")
