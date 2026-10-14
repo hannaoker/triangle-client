@@ -718,6 +718,11 @@ function sanitizedErrorCode(detail) {
   return null;
 }
 
+function sanitizedEventName(event) {
+  if (typeof event !== "string" || !SAFE_ERROR_CODE.test(event) || /mesh_/.test(event)) return null;
+  return event.replace(/^triangle_(?:client_)?/, "");
+}
+
 function sanitizedHttpStatus(detail) {
   const status = detail?.httpStatus ?? detail?.status;
   return Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null;
@@ -725,7 +730,7 @@ function sanitizedHttpStatus(detail) {
 
 function sanitizedLogger(stderr) {
   return Object.freeze({
-    error(_event, detail) {
+    error(event, detail) {
       const code = sanitizedErrorCode(detail);
       const httpStatus = sanitizedHttpStatus(detail);
       // Keep production stderr secret-free; optionally surface a short code so
@@ -733,6 +738,14 @@ function sanitizedLogger(stderr) {
       let line = "triangle-client: instance cycle failed";
       if (code && httpStatus != null) line += ` (${code}/${httpStatus})`;
       else if (code) line += ` (${code})`;
+      // Name the emitting loop (a fixed internal event id) and, for per-instance
+      // failures, a short opaque instance prefix so operators can attribute errors.
+      const source = sanitizedEventName(event);
+      if (source) line += ` [${source}]`;
+      const instance = typeof detail?.instanceId === "string" && /^[a-f0-9]{64}$/.test(detail.instanceId)
+        ? detail.instanceId.slice(0, 12)
+        : null;
+      if (instance) line += ` instance=${instance}`;
       stderr.write(`${line}\n`);
     },
   });

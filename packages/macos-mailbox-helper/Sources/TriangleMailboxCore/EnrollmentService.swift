@@ -17,6 +17,13 @@ public struct AdmissionToken: Sendable, CustomStringConvertible, CustomDebugStri
 }
 
 public struct EnrollmentInput: Sendable {
+    static let defaultCapabilities = ["direct-messages"]
+
+    @_spi(EnrollmentTesting)
+    public static func capabilitiesForTesting(_ data: Data) throws -> [String] {
+        try EnrollmentInput(data: data).capabilities
+    }
+
     let admissionToken: AdmissionToken
     let handle: MailboxHandle
     let name: String
@@ -31,7 +38,10 @@ public struct EnrollmentInput: Sendable {
         handle = try MailboxHandle(decoded.handle)
         name = decoded.name
         description = decoded.description ?? ""
-        capabilities = decoded.capabilities ?? []
+        // Mailbox runtimes are reached through direct rooms; the server only lets
+        // peers open a direct room with agents that opted in. Default to that
+        // opt-in when the operator omits capabilities; an explicit [] still opts out.
+        capabilities = decoded.capabilities ?? EnrollmentInput.defaultCapabilities
         guard name == name.trimmingCharacters(in: .whitespacesAndNewlines),
               (1...80).contains(name.utf8.count),
               description == description.trimmingCharacters(in: .whitespacesAndNewlines),
