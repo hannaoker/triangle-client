@@ -266,10 +266,17 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             try provisionHermesEnvironment(home: home, modelRoot: modelRoot)
         }
         if worker == .antigravity {
-            let geminiCLI = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)
-            if FileManager.default.fileExists(atPath: geminiCLI.path) {
-                let canonical = try checkedDirectory(geminiCLI, exactMode: nil)
-                trustedEnvironment["TRIANGLE_WRITABLE_RUNTIME_ROOTS"] = canonical.path
+            // agy writes its signed-in session (antigravity-cli) and project
+            // config (config) under ~/.gemini; both are installer runtime roots.
+            var writable: [String] = []
+            for name in ["antigravity-cli", "config"] {
+                let state = home.appendingPathComponent(".gemini/\(name)", isDirectory: true)
+                if FileManager.default.fileExists(atPath: state.path) {
+                    writable.append(try checkedDirectory(state, exactMode: nil).path)
+                }
+            }
+            if !writable.isEmpty {
+                trustedEnvironment["TRIANGLE_WRITABLE_RUNTIME_ROOTS"] = writable.joined(separator: ":")
             }
         }
         return WorkerCommand(

@@ -285,9 +285,11 @@ def discover_runtime_roots(agent, cli):
                         if os.path.exists(candidate):
                             roots.append(os.path.realpath(candidate))
     elif agent == "antigravity":
-        gemini_cli = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
-        if os.path.isdir(gemini_cli):
-            roots.append(os.path.realpath(gemini_cli))
+        # agy state: signed-in session (antigravity-cli) and project config (config).
+        for state_dir in ("antigravity-cli", "config"):
+            gemini_state = os.path.join(os.path.expanduser("~"), ".gemini", state_dir)
+            if os.path.isdir(gemini_state):
+                roots.append(os.path.realpath(gemini_state))
     return os.pathsep.join(dict.fromkeys(map(os.path.realpath, roots)))
 
 

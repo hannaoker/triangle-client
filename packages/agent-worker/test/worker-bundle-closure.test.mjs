@@ -4,7 +4,8 @@
 // of client-supervisor-cli.mjs plus the worker's own runner.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -59,4 +60,39 @@ test("Swift launcher requires codex-runtime in every v7 bundle (mirrors installe
     "utf8",
   );
   assert.match(swift, /if worker == \.codex \|\| manifestVersion == 7 \{\s*artifacts\.formUnion\(\[\s*"packages\/agent-worker\/src\/codex-runtime\//);
+});
+
+test("installer runtime roots for antigravity include both agy state directories", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "triangle-agy-roots-"));
+  try {
+    const bin = path.join(home, ".local", "bin");
+    for (const directory of [bin, path.join(home, ".gemini", "antigravity-cli"), path.join(home, ".gemini", "config")]) {
+      mkdirSync(directory, { recursive: true });
+    }
+    const cli = path.join(bin, "agy");
+    writeFileSync(cli, "#!/bin/sh\nexit 0\n");
+    chmodSync(cli, 0o755);
+    const code = [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('twi', sys.argv[1])",
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "print(m.discover_runtime_roots('antigravity', sys.argv[2]))",
+    ].join("\n");
+    const roots = execFileSync(python, ["-c", code, installer, cli], { encoding: "utf8", env: { ...process.env, HOME: home } })
+      .trim().split(":");
+    const real = realpathSync(home);
+    assert.ok(roots.includes(path.join(real, ".gemini", "antigravity-cli")), roots.join(":"));
+    assert.ok(roots.includes(path.join(real, ".gemini", "config")), roots.join(":"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Swift launcher marks both agy state directories writable (mirrors installer)", () => {
+  const swift = readFileSync(
+    path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),
+    "utf8",
+  );
+  assert.match(swift, /for name in \["antigravity-cli", "config"\]/);
+  assert.match(swift, /TRIANGLE_WRITABLE_RUNTIME_ROOTS"\] = writable\.joined\(separator: ":"\)/);
 });
