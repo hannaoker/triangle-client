@@ -1,0 +1,62 @@
+// Every worker bundle (codex, hermes, antigravity) can host the coordinator
+// (WorkerLauncher.resolveCoordinator picks the first resolvable instance's
+// bundle), so each v7 artifact set must contain the full static import closure
+// of client-supervisor-cli.mjs plus the worker's own runner.
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const installer = path.join(repoRoot, "scripts/triangle-worker-install.py");
+const python = existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+
+function expectedArtifacts(agent) {
+  const code = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('twi', sys.argv[1])",
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+    "print(json.dumps(m.expected_artifacts(sys.argv[2], 7)))",
+  ].join("\n");
+  return new Set(JSON.parse(execFileSync(python, ["-c", code, installer, agent], { encoding: "utf8" })));
+}
+
+function importClosure(entryRelative) {
+  const seen = new Set();
+  const queue = [entryRelative];
+  const pattern = /(?:^|[\s;])(?:import|export)\s[^"'`]*?from\s*["'](\.{1,2}\/[^"']+)["']|import\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)|^\s*import\s*["'](\.{1,2}\/[^"']+)["']/gm;
+  while (queue.length) {
+    const relative = queue.pop();
+    if (seen.has(relative)) continue;
+    seen.add(relative);
+    const source = readFileSync(path.join(repoRoot, relative), "utf8");
+    for (const match of source.matchAll(pattern)) {
+      const specifier = match[1] ?? match[2] ?? match[3];
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(relative), specifier));
+      queue.push(resolved);
+    }
+  }
+  return seen;
+}
+
+for (const agent of ["codex", "hermes", "antigravity"]) {
+  test(`v7 ${agent} bundle contains every module the coordinator and its runner import`, () => {
+    const artifacts = expectedArtifacts(agent);
+    const needed = new Set([
+      ...importClosure("packages/agent-worker/src/client-supervisor-cli.mjs"),
+      ...importClosure(`packages/agent-worker/runners/${agent}-runner.mjs`),
+    ]);
+    const missing = [...needed].filter((relative) => !artifacts.has(relative)).sort();
+    assert.deepEqual(missing, [], `${agent} bundle missing coordinator/runner imports`);
+  });
+}
+
+test("Swift launcher requires codex-runtime in every v7 bundle (mirrors installer)", () => {
+  const swift = readFileSync(
+    path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),
+    "utf8",
+  );
+  assert.match(swift, /if worker == \.codex \|\| manifestVersion == 7 \{\s*artifacts\.formUnion\(\[\s*"packages\/agent-worker\/src\/codex-runtime\//);
+});

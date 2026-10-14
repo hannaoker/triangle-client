@@ -150,7 +150,9 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 artifacts.insert("packages/agent-worker/src/claimer-advisory-lock.mjs")
                 artifacts.insert("packages/agent-worker/src/open-transaction-recovery.mjs")
             }
-            if worker == .codex {
+            // The coordinator can run from any worker bundle and imports
+            // codex-runtime, so v7 requires it everywhere (v5/v6: codex only).
+            if worker == .codex || manifestVersion == 7 {
                 artifacts.formUnion([
                     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
                     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",

@@ -209,7 +209,10 @@ def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     else:
         fail("unsupported manifest version")
     extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7} else [])
-    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6, 7} and agent == "codex" else []
+    # The coordinator (client-supervisor-cli.mjs) may launch from any worker's
+    # bundle and statically imports codex-runtime/headless-drain-service.mjs, so
+    # v7 ships codex-runtime in every bundle; v5/v6 keep their exact sets.
+    extras += CODEX_HEADLESS_ARTIFACTS if (version == 7 or (version in {5, 6} and agent == "codex")) else []
     extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7} else []
     extras += HEADLESS_OWNERSHIP_ARTIFACTS if version == 7 else []
     return common + extras + [
