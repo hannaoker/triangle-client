@@ -796,6 +796,55 @@ test("CLI forwards headlessWakes into supervisor creation", async () => {
   assert.equal(received.useInstallWatchDispatcher, false);
 });
 
+function cursorAcpWake(overrides = {}) {
+  const profile = overrides.profile ?? "cursor-acp-shadow-test";
+  return {
+    profile,
+    profileInstanceId: deriveProfileInstanceId(profile),
+    helperPath: "/trusted/triangle-mailbox",
+    workingDirectory: "/srv/triangle-cursor-work",
+    cursorHome: "/private/cursor-acp-home",
+    stateRoot: "/private/cursor-acp-state/cursor-acp-shadow-test",
+    command: "/trusted/bin/agent",
+    pollIntervalMs: 1_000,
+    shadowTestProfile: true,
+    ...overrides,
+  };
+}
+
+test("CLI opts into install dispatcher for cursorAcpWakes with agentId and installationId", async () => {
+  const wakes = [cursorAcpWake({
+    agentId: "agent_cursor_acp_001",
+    installationId: "inst_N7VhDq3mQ2",
+  })];
+  let received;
+  const result = await runClientSupervisorCLI({
+    input: Readable.from([JSON.stringify(bootstrap({ cursorAcpWakes: wakes }))]),
+    stderr: capture().stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [], cursorAcpWakes: [] }; } };
+    },
+  });
+  assert.equal(result, 0);
+  assert.equal(received.useInstallWatchDispatcher, true);
+  assert.equal(received.cursorAcpWakes[0].agentId, "agent_cursor_acp_001");
+  assert.equal(received.cursorAcpWakes[0].pollIntervalMs, 1_000);
+
+  const timerOnly = await runClientSupervisorCLI({
+    input: Readable.from([JSON.stringify(bootstrap({ cursorAcpWakes: [cursorAcpWake()] }))]),
+    stderr: capture().stream,
+    processEvents: new EventEmitter(),
+    createSupervisor(options) {
+      received = options;
+      return { async watch() { return { instances: [] }; } };
+    },
+  });
+  assert.equal(timerOnly, 0);
+  assert.equal(received.useInstallWatchDispatcher, false);
+});
+
 test("CLI opts into install dispatcher for headlessWakes with agentId and installationId", async () => {
   const wakes = [headlessWake({
     stateRoot: "/private/headless-state/bob",

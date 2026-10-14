@@ -730,6 +730,8 @@ public enum ClientSupervisorContractCases {
         try expect(bootstrap.instances.count == 1, "worker count wrong with cursorAcpWakes")
         try expect(bootstrap.cursorAcpWakes.map(\.profile) == ["cursor-acp-shadow-test"], "cursorAcpWakes wrong")
         try expect(bootstrap.cursorAcpWakes.first?.shadowTestProfile == true, "shadowTestProfile missing")
+        try expect(bootstrap.cursorAcpWakes.first?.agentId.isEmpty == false, "cursor-acp wake missing agentId for install dispatcher")
+        try expect(bootstrap.cursorAcpWakes.first?.installationId.hasPrefix("inst_") == true, "cursor-acp wake missing installationId for install dispatcher")
         try expect(bootstrap.headlessWakes.isEmpty, "cursor-acp leaked into Codex headlessWakes")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
@@ -1456,12 +1458,14 @@ private struct TestCursorAcpWake: Decodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
+    let installationId: String
     let workingDirectory: String
     let cursorHome: String
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
     let shadowTestProfile: Bool
+    let agentId: String
 }
 
 private struct SupervisorContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }

@@ -1144,12 +1144,14 @@ public struct ClientSupervisor: Sendable {
                 profile: member.profile.value,
                 profileInstanceId: member.instanceID.value,
                 helperPath: helperExecutableURL.path,
+                installationId: installationID.value,
                 workingDirectory: workingDirectory,
                 cursorHome: cursorHome,
                 stateRoot: entry.stateRoot,
                 command: command,
                 pollIntervalMs: pollIntervalMs,
-                shadowTestProfile: true
+                shadowTestProfile: true,
+                agentId: credential.agentID.value
             ))
         }
         return prepared
@@ -1383,12 +1385,35 @@ private struct PreparedCursorAcpWakeBootstrap: Encodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
+    let installationId: String
     let workingDirectory: String
     let cursorHome: String
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
     let shadowTestProfile: Bool
+    /// MESH agent id for the shared install-watch fan-out. The Node supervisor
+    /// routes hints for this id to the existing Cursor ACP drain kick.
+    let agentId: String
+
+    private enum CodingKeys: String, CodingKey {
+        case profile, profileInstanceId, helperPath, installationId, workingDirectory, cursorHome, stateRoot, command, pollIntervalMs, shadowTestProfile, agentId
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(profile, forKey: .profile)
+        try container.encode(profileInstanceId, forKey: .profileInstanceId)
+        try container.encode(helperPath, forKey: .helperPath)
+        try container.encode(installationId, forKey: .installationId)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(cursorHome, forKey: .cursorHome)
+        try container.encode(stateRoot, forKey: .stateRoot)
+        try container.encode(command, forKey: .command)
+        try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
+        try container.encode(shadowTestProfile, forKey: .shadowTestProfile)
+        try container.encode(agentId, forKey: .agentId)
+    }
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {

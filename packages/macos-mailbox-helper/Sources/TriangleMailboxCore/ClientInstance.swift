@@ -83,13 +83,15 @@ public struct ClientInstance: Codable, Equatable, Sendable {
             || participatesInCursorAcpWake
     }
     /// Installation watch grant notify members: event-driven drains, bound App Server /
-    /// Grok Bot hosts, and bound headless Codex App Server drains (supervisor kick path).
-    /// Cursor ACP stays out until it has a routable kick (#57).
+    /// Grok Bot hosts, bound headless Codex drains, and enrolled Cursor ACP drains.
+    /// ACP is included only because the supervisor routes its hints to the existing
+    /// Cursor ACP drain kick. A mis-set adapter still stays out.
     public var participatesInWatchGrantNotify: Bool {
         participatesInEventDrivenWake
             || participatesInAppServerWake
             || participatesInGrokBotWake
             || participatesInHeadlessWake
+            || participatesInCursorAcpWake
     }
 
     public init(

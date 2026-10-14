@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createClientSupervisor } from "../src/client-supervisor.mjs";
 import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
+import { createInstallWatchDispatcher } from "../src/install-watch-dispatcher.mjs";
 import { createAgentWorker } from "../src/runtime.mjs";
 import {
   deriveProfileInstanceId,
@@ -961,6 +962,307 @@ test("install dispatcher accepts headlessWakes without appServerWake", async () 
   await watchPromise;
   assert.equal(dispatcherStarted, true);
   assert.equal(kicked, true);
+});
+
+function cursorAcpWakeFixture(overrides = {}) {
+  const profile = overrides.profile ?? "cursor-acp-shadow-test";
+  return {
+    profile,
+    profileInstanceId: deriveProfileInstanceId(profile),
+    helperPath: "/trusted/triangle-mailbox",
+    workingDirectory: "/srv/triangle-cursor-work",
+    cursorHome: "/private/cursor-acp-home",
+    stateRoot: `/private/cursor-acp-state/${profile}`,
+    command: "/trusted/bin/agent",
+    pollIntervalMs: 1_000,
+    shadowTestProfile: true,
+    ...overrides,
+  };
+}
+
+function installWatchStubs() {
+  return {
+    createWatchTransport: () => ({ async poll() { return { cursor: 0, events: [] }; } }),
+    createCursorStore: () => ({ async read() { return 0; }, async write() {} }),
+    createAuthResolver: () => ({ async resolveAuth() { return { authorization: "Bearer test", serverIdentity: "s" }; } }),
+    createAppServerTransport: () => ({
+      async connect() {},
+      async call() {},
+      onEvent() { return () => {}; },
+      async close() {},
+    }),
+    createBindingStore: () => ({ async read() { return null; }, async write(value) { return value; } }),
+    createSession: () => ({ async connect() {}, async shutdown() {} }),
+    createWakeBridge: () => ({
+      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+      async stop() {},
+      async handleWake(wake) { return { status: "accepted", instanceId: wake?.instanceId }; },
+    }),
+    createHeadlessDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick() { return { status: "accepted" }; },
+    }),
+    createClaimerGuard: () => ({
+      assertSupervisorMayClaim() {},
+      acquire() {},
+      release() {},
+    }),
+    createCursorAcpDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick() { return { status: "accepted" }; },
+    }),
+    createCursorAcpClaimer: () => ({
+      assertSupervisorMayClaim() {},
+      acquire() {},
+      release() {},
+    }),
+    ensureWatchGrant: async () => ({ ensured: true }),
+    logger: { error() {} },
+  };
+}
+
+test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one claimer per profile", async () => {
+  const headless = headlessWakeFixture({
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const cursorAcp = cursorAcpWakeFixture({
+    agentId: "agent_cursor_acp_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const handled = [];
+  let transports = 0;
+  let codexClaimers = 0;
+  let acpClaimers = 0;
+  const codexAcquires = [];
+  const acpAcquires = [];
+  const controller = new AbortController();
+  const supervisor = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    headlessWakes: [headless],
+    cursorAcpWakes: [cursorAcp],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+    createWatchTransport: () => {
+      transports += 1;
+      return {
+        async poll() {
+          return {
+            cursor: 11,
+            events: [
+              { agent_id: "agent_codex_desktop_001", high_watermark: 11 },
+              { agent_id: "agent_headless_codex_001", high_watermark: 10 },
+              { agent_id: "agent_cursor_acp_001", high_watermark: 9 },
+            ],
+          };
+        },
+      };
+    },
+    createWakeBridge: () => ({
+      async start() { return { status: "handler_ready", ownWatchLoop: false }; },
+      async stop() {},
+      async handleWake(wake) {
+        handled.push({ who: "bob", instanceId: wake.instanceId, reason: wake.reason ?? null });
+        return { status: "accepted" };
+      },
+    }),
+    createHeadlessDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick({ reason }) {
+        handled.push({ who: "codex", reason });
+        return { status: "accepted" };
+      },
+    }),
+    createClaimerGuard: () => {
+      codexClaimers += 1;
+      return {
+        assertSupervisorMayClaim() {},
+        acquire() { codexAcquires.push("acquire"); },
+        release() { codexAcquires.push("release"); },
+      };
+    },
+    createCursorAcpDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick({ reason }) {
+        handled.push({ who: "acp", reason });
+        if (handled.filter((entry) => entry.who === "acp").length >= 2) controller.abort();
+        return { status: "accepted" };
+      },
+    }),
+    createCursorAcpClaimer: () => {
+      acpClaimers += 1;
+      return {
+        assertSupervisorMayClaim() {},
+        acquire() { acpAcquires.push("acquire"); },
+        release() { acpAcquires.push("release"); },
+      };
+    },
+    createInstallDispatcher: (options) => {
+      assert.equal(options.idlePollIntervalMs, 2_000);
+      assert.deepEqual(options.profiles.map((profile) => profile.agentId), [
+        "agent_codex_desktop_001",
+        "agent_headless_codex_001",
+        "agent_cursor_acp_001",
+      ]);
+      return createInstallWatchDispatcher(options);
+    },
+  });
+
+  assert.deepEqual(supervisor.installWatchProfileIds, [
+    id(3),
+    headless.profileInstanceId,
+    cursorAcp.profileInstanceId,
+  ]);
+  assert.equal(transports, 1);
+  assert.equal(codexClaimers, 1);
+  assert.equal(acpClaimers, 1);
+  await supervisor.watch({
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
+    sleep: async () => {},
+  });
+  assert.equal(handled.filter((entry) => entry.who === "bob").length >= 2, true);
+  assert.equal(handled.filter((entry) => entry.who === "codex" && entry.reason === "watch_hint").length >= 2, true);
+  assert.equal(handled.filter((entry) => entry.who === "acp" && entry.reason === "watch_hint").length >= 2, true);
+  assert.equal(codexAcquires.filter((event) => event === "acquire").length <= 1, true);
+  assert.equal(acpAcquires.filter((event) => event === "acquire").length <= 1, true);
+  assert.equal(codexClaimers, 1);
+  assert.equal(acpClaimers, 1);
+});
+
+test("Cursor ACP without agentId stays off the install watch; a loaded claimer is not a second member", () => {
+  const anchor = appServerWakeFixture(3);
+  const timerOnly = createClientSupervisor({
+    instances: [],
+    appServerWake: anchor,
+    cursorAcpWakes: [cursorAcpWakeFixture()],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+    createInstallDispatcher: (options) => ({
+      profiles: options.profiles,
+      async start() { return { cycles: 0 }; },
+      async stop() {},
+    }),
+  });
+  assert.deepEqual(timerOnly.installWatchProfileIds, [id(3)]);
+
+  let drains = 0;
+  const blocked = createClientSupervisor({
+    instances: [],
+    appServerWake: anchor,
+    cursorAcpWakes: [cursorAcpWakeFixture({
+      agentId: "agent_cursor_acp_001",
+      installationId: "inst_N7VhDq3mQ2",
+    })],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+    createCursorAcpDrain() {
+      drains += 1;
+      throw new Error("must not create a second claimer");
+    },
+    createCursorAcpClaimer: () => ({
+      assertSupervisorMayClaim() {
+        const error = new Error("dedicated");
+        error.code = "dedicated_cursor_acp_drain_loaded";
+        throw error;
+      },
+      acquire() { throw new Error("must not acquire"); },
+      release() {},
+    }),
+    createInstallDispatcher: (options) => ({
+      profiles: options.profiles,
+      async start() { return { cycles: 0 }; },
+      async stop() {},
+    }),
+  });
+  assert.equal(drains, 0);
+  assert.equal(blocked.cursorAcpWakeSkipReasons["cursor-acp-shadow-test"], "dedicated_cursor_acp_drain_loaded");
+  assert.deepEqual(blocked.installWatchProfileIds, [id(3)]);
+});
+
+test("enrolled Cursor ACP can anchor the install watch and recovers after a watch outage", async () => {
+  const cursorAcp = cursorAcpWakeFixture({
+    agentId: "agent_cursor_acp_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const kicks = [];
+  let starts = 0;
+  const controller = new AbortController();
+  const supervisor = createClientSupervisor({
+    instances: [],
+    cursorAcpWakes: [cursorAcp],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+    createCursorAcpDrain: () => ({
+      async start() {},
+      async stop() {},
+      kick({ reason }) {
+        kicks.push(reason);
+        return { status: "accepted" };
+      },
+    }),
+    createInstallDispatcher: (options) => {
+      assert.equal(options.idlePollIntervalMs, 2_000);
+      assert.deepEqual(options.profiles, [{
+        instanceId: cursorAcp.profileInstanceId,
+        agentId: cursorAcp.agentId,
+      }]);
+      return {
+        profiles: options.profiles,
+        async start() {
+          starts += 1;
+          if (starts === 1) {
+            throw Object.assign(new Error("watch down"), { code: "watch_unavailable" });
+          }
+          await options.handlers.get(cursorAcp.profileInstanceId)({
+            instanceId: cursorAcp.profileInstanceId,
+            reason: "watch_hint",
+            highWatermark: 6,
+          });
+          controller.abort();
+          return { status: "ok", cycles: starts };
+        },
+        async stop() {},
+      };
+    },
+  });
+  assert.deepEqual(supervisor.installWatchProfileIds, [cursorAcp.profileInstanceId]);
+  await supervisor.watch({
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
+    sleep: async () => {},
+  });
+  assert.equal(starts, 2);
+  assert.deepEqual(kicks, ["watch_hint"]);
+});
+
+test("Cursor ACP install-watch membership requires a kick handler on the same installation", () => {
+  const stubs = installWatchStubs();
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    cursorAcpWakes: [cursorAcpWakeFixture({
+      agentId: "agent_cursor_acp_001",
+      installationId: "inst_OtherInstall1",
+    })],
+    useInstallWatchDispatcher: true,
+    ...stubs,
+  }), /does not match the install watch anchor/);
+
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    cursorAcpWakes: [cursorAcpWakeFixture({
+      agentId: "agent_cursor_acp_001",
+      installationId: "inst_N7VhDq3mQ2",
+    })],
+    useInstallWatchDispatcher: true,
+    ...stubs,
+    createCursorAcpDrain: () => ({ async start() {}, async stop() {} }),
+  }), /cursorAcpWake drain must expose kick/);
 });
 
 test("install dispatcher uses held-poll short reconnect idle (2s)", () => {

@@ -26,6 +26,7 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant revoke clears local binding", run: revokeClearsBinding),
             .init(name: "watch grant excludes mcp-interactive actors", run: excludesInteractiveActor),
             .init(name: "watch grant allows mcp-interactive notify members", run: includesInteractiveMember),
+            .init(name: "watch grant includes enrolled cursor-acp notify members", run: includesCursorAcpMember),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
             .init(name: "watch grant recovers from stale replacement credential", run: recoversFromStaleReplacement),
@@ -317,6 +318,35 @@ public enum WatchGrantContractCases {
         }
     }
 
+    public static func includesCursorAcpMember() async throws {
+        let fixture = try await Fixture()
+        let status = try await fixture.service.ensureGrant(
+            installationID: fixture.installationID,
+            actorProfile: fixture.actorProfile,
+            memberProfiles: [fixture.actorProfile, fixture.cursorProfile]
+        )
+        try expect(status.state == "finalized", "cursor-acp member grant was not finalized")
+        try expect(
+            status.agentIDs.contains(fixture.cursorAgentID.value),
+            "enrolled cursor-acp notify member missing from grant"
+        )
+        try expect(
+            status.agentIDs.contains(fixture.actorAgentID.value),
+            "event-driven actor missing from cursor-acp grant"
+        )
+        try fixture.instances.setEnabled(false, profile: fixture.cursorProfile)
+        do {
+            _ = try await fixture.service.ensureGrant(
+                installationID: try InstallationID("inst_CursorDisabled1"),
+                actorProfile: fixture.actorProfile,
+                memberProfiles: [fixture.actorProfile, fixture.cursorProfile]
+            )
+            throw ContractFailure("disabled cursor-acp member was accepted")
+        } catch WatchGrantServiceError.noEventDrivenMembers {
+            return
+        }
+    }
+
     public static func includesInteractiveMember() async throws {
         let fixture = try await Fixture()
         try fixture.instances.setDeliveryMode(.mcpInteractive, profile: fixture.memberProfile)
@@ -471,8 +501,10 @@ public enum WatchGrantContractCases {
         let installationID: InstallationID
         let actorProfile: ProfileName
         let memberProfile: ProfileName
+        let cursorProfile: ProfileName
         let actorAgentID: AgentID
         let memberAgentID: AgentID
+        let cursorAgentID: AgentID
         let store: any WatchGrantStore
         let transport: ScriptedWatchTransport
         let instances: InMemoryClientInstanceStore
@@ -482,12 +514,15 @@ public enum WatchGrantContractCases {
             installationID = try InstallationID("inst_N7VhDq3mQ2")
             actorProfile = try ProfileName("codex-mailbox-live")
             memberProfile = try ProfileName("hermes-mailbox-live")
+            cursorProfile = try ProfileName("cursor-acp-shadow-test")
             actorAgentID = try AgentID("agent_" + String(repeating: "a", count: 32))
             memberAgentID = try AgentID("agent_" + String(repeating: "b", count: 32))
+            cursorAgentID = try AgentID("agent_" + String(repeating: "c", count: 32))
             store = failingStore ? FailingWatchGrantStore() : InMemoryWatchGrantStore()
             transport = ScriptedWatchTransport(
                 actorAgentID: actorAgentID,
                 memberAgentID: memberAgentID,
+                cursorAgentID: cursorAgentID,
                 installationID: installationID
             )
             let credentials = InMemoryCredentialStore()
@@ -509,9 +544,19 @@ public enum WatchGrantContractCases {
                 ),
                 for: memberProfile
             )
+            try credentials.create(
+                CredentialBinding(
+                    origin: MeshOrigin("https://thetriangle.dev"),
+                    agentID: cursorAgentID,
+                    handle: MailboxHandle("cursor-acp-shadow"),
+                    token: MeshToken("mesh_" + String(repeating: "c", count: 64))
+                ),
+                for: cursorProfile
+            )
             instances = InMemoryClientInstanceStore()
             try instances.create(ClientInstance(profile: actorProfile, runtimeAdapter: .codex, deliveryMode: .eventDriven))
             try instances.create(ClientInstance(profile: memberProfile, runtimeAdapter: .hermes, deliveryMode: .eventDriven))
+            try instances.create(ClientInstance(profile: cursorProfile, runtimeAdapter: .cursorAcp))
             let journal = InMemoryEnrollmentJournal()
             try journal.write(.testing(
                 profile: actorProfile,
@@ -527,6 +572,14 @@ public enum WatchGrantContractCases {
                 state: .verified,
                 agentID: memberAgentID,
                 handle: MailboxHandle("hermes-mailbox-live"),
+                reasonCode: "identity_verified"
+            ))
+            try journal.write(.testing(
+                profile: cursorProfile,
+                origin: MeshOrigin("https://thetriangle.dev"),
+                state: .verified,
+                agentID: cursorAgentID,
+                handle: MailboxHandle("cursor-acp-shadow"),
                 reasonCode: "identity_verified"
             ))
             let gate = VerifiedCredentialGate(
@@ -624,6 +677,7 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     private let lock = NSLock()
     private let actorAgentID: AgentID
     private let memberAgentID: AgentID
+    private let cursorAgentID: AgentID
     private let installationID: InstallationID
     private(set) var paths: [String] = []
     private(set) var loggedBodies: [String] = []
@@ -639,9 +693,10 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
     private var watchCredential = "mesh_watch_" + String(repeating: "2", count: 64)
     private var grantID = "watchgrant_" + String(repeating: "3", count: 64)
 
-    init(actorAgentID: AgentID, memberAgentID: AgentID, installationID: InstallationID) {
+    init(actorAgentID: AgentID, memberAgentID: AgentID, cursorAgentID: AgentID, installationID: InstallationID) {
         self.actorAgentID = actorAgentID
         self.memberAgentID = memberAgentID
+        self.cursorAgentID = cursorAgentID
         self.installationID = installationID
     }
 
@@ -721,10 +776,11 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
             }
             if path == "/api/v1/agents/me" {
                 let auth = request.headers["Authorization"] ?? ""
+                let isCursor = auth.contains(String(repeating: "c", count: 64))
                 let isMember = auth.contains(String(repeating: "b", count: 64))
-                let agentID = isMember ? memberAgentID.value : actorAgentID.value
-                let handle = isMember ? "hermes-mailbox-live" : "codex-mailbox-live"
-                let name = isMember ? "Hermes" : "Codex"
+                let agentID = isCursor ? cursorAgentID.value : (isMember ? memberAgentID.value : actorAgentID.value)
+                let handle = isCursor ? "cursor-acp-shadow" : (isMember ? "hermes-mailbox-live" : "codex-mailbox-live")
+                let name = isCursor ? "Cursor" : (isMember ? "Hermes" : "Codex")
                 let body = Data("""
                 {"agent":{"id":"\(agentID)","name":"\(name)","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
                 """.utf8)
@@ -732,7 +788,9 @@ private final class ScriptedWatchTransport: MeshTransport, @unchecked Sendable {
             }
             if path.hasPrefix("/api/v1/agents/") {
                 let agentID = path.split(separator: "/").last.map(String.init) ?? actorAgentID.value
-                let handle = agentID == memberAgentID.value ? "hermes-mailbox-live" : "codex-mailbox-live"
+                let handle = agentID == cursorAgentID.value
+                    ? "cursor-acp-shadow"
+                    : (agentID == memberAgentID.value ? "hermes-mailbox-live" : "codex-mailbox-live")
                 let body = Data("""
                 {"agent":{"id":"\(agentID)","name":"Agent","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
                 """.utf8)

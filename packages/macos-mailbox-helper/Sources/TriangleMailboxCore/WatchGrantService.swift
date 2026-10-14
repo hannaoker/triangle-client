@@ -250,14 +250,16 @@ public struct WatchGrantService: Sendable {
             }
             // Auto membership: event-driven drains + App Server-bound
             // mcp-interactive + Grok Bot-bound + headless-runtime-bound Codex
-            // (when bindings are present). Do not pull every mcp-interactive /
-            // grok-bot / headless profile into the grant — binding gates apply.
-            // Cursor ACP is never auto-included (no kick path yet).
+            // + cursor-acp-runtime-bound shadow profiles (when bindings are
+            // present). Do not pull every profile into the grant — binding
+            // gates apply. Cursor ACP joins only with that binding gate; the
+            // supervisor wake-to-drain handler is what makes the membership live.
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
             let boundGrokBot = Self.grokBotBoundMembers(from: instances)
             let boundHeadless = Self.headlessBoundCodexMembers(from: instances)
-            profiles = (eventDriven + boundInteractive + boundGrokBot + boundHeadless).map(\.profile)
+            let boundCursorAcp = Self.cursorAcpBoundMembers(from: instances)
+            profiles = (eventDriven + boundInteractive + boundGrokBot + boundHeadless + boundCursorAcp).map(\.profile)
         } else {
             profiles = [actorProfile]
         }
@@ -439,6 +441,43 @@ public struct WatchGrantService: Sendable {
         })
         guard !boundInstanceIds.isEmpty else { return [] }
         let bound = headless.filter { boundInstanceIds.contains($0.instanceID.value) }
+        let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
+        let fileCustodyEnabled = FileManager.default.isReadableFile(
+            atPath: credentialsRoot.appendingPathComponent("ENABLED").path
+        )
+        guard fileCustodyEnabled else { return bound }
+        return bound.filter { instance in
+            let workloadURL = credentialsRoot
+                .appendingPathComponent("workload")
+                .appendingPathComponent("\(instance.profile.value).json")
+            return FileManager.default.isReadableFile(atPath: workloadURL.path)
+        }
+    }
+
+    /// Cursor ACP shadow profiles whose instanceId appears in
+    /// cursor-acp-runtime-binding.json with shadowTestProfile true.
+    /// File-credential custody, when enabled, also requires a local workload key
+    /// so auto-ensure does not fail closed on a bound profile that cannot join yet.
+    private static func cursorAcpBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
+        let cursorAcp = instances.filter(\.participatesInCursorAcpWake)
+        guard !cursorAcp.isEmpty else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let clientRoot = home.appendingPathComponent("Library/Application Support/The Triangle/client")
+        let bindingURL = clientRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
+        guard FileManager.default.isReadableFile(atPath: bindingURL.path),
+              let data = try? Data(contentsOf: bindingURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let profileObjects = object["profiles"] as? [[String: Any]]
+        else { return [] }
+        let boundInstanceIds = Set(profileObjects.compactMap { entry -> String? in
+            guard entry["shadowTestProfile"] as? Bool == true,
+                  let instanceId = entry["instanceId"] as? String,
+                  !instanceId.isEmpty
+            else { return nil }
+            return instanceId
+        })
+        guard !boundInstanceIds.isEmpty else { return [] }
+        let bound = cursorAcp.filter { boundInstanceIds.contains($0.instanceID.value) }
         let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
         let fileCustodyEnabled = FileManager.default.isReadableFile(
             atPath: credentialsRoot.appendingPathComponent("ENABLED").path
