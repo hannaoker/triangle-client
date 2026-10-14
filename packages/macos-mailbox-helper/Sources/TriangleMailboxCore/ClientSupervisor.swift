@@ -1,5 +1,13 @@
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 public enum ClientSupervisorError: Error, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -98,8 +106,12 @@ public struct ClientSupervisor: Sendable {
     public static func productionOptInEnvironment(from environment: [String: String]) -> [String: String] {
         var forwarded: [String: String] = [:]
         for key in productionOptInEnvironmentKeys.sorted() {
+            // A single ASCII digit. `$` in NSRegularExpression also matches
+            // before a trailing newline, which would accept "1\n".
             guard let value = environment[key],
-                  value.range(of: "^[0-9]$", options: .regularExpression) != nil
+                  value.utf8.count == 1,
+                  let digit = value.utf8.first,
+                  (48...57).contains(digit)
             else { continue }
             forwarded[key] = value
         }
@@ -1644,7 +1656,13 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
     }
 
     private func writeBounded(_ data: Data, to descriptor: Int32, process: SupervisorFoundationProcessBox) throws {
+        #if canImport(Darwin)
         guard fcntl(descriptor, F_SETNOSIGPIPE, 1) == 0 else { throw ClientSupervisorError.processFailed }
+        #else
+        // Linux has no per-descriptor NOSIGPIPE. Ignore SIGPIPE so a closed
+        // child pipe cannot kill the host, which is what the Darwin fcntl does.
+        _ = signal(SIGPIPE, SIG_IGN)
+        #endif
         let flags = fcntl(descriptor, F_GETFL)
         guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
             throw ClientSupervisorError.processFailed
@@ -1695,7 +1713,13 @@ private final class SupervisorFoundationProcessBox: @unchecked Sendable {
     var isRunning: Bool { process.isRunning }
     func forward(_ signal: Int32) {
         guard process.isRunning else { return }
+        #if canImport(Darwin)
         _ = Darwin.kill(process.processIdentifier, signal)
+        #else
+        // Foundation on Linux waits for the child's process group. Signaling
+        // only the leader leaves grandchildren such as sleep running.
+        _ = kill(-process.processIdentifier, signal)
+        #endif
     }
     func waitUntilExit() { process.waitUntilExit() }
 }
@@ -1712,9 +1736,16 @@ private struct SupervisorSavedSignalActions {
     let function: SupervisorSigactionFunction
 
     static func installIgnoring() throws -> Self {
+        #if canImport(Darwin)
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "sigaction") else {
             throw ClientSupervisorError.processFailed
         }
+        #else
+        // glibc RTLD_DEFAULT is a null handle. Darwin's -2 handle is not valid here.
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: 0), "sigaction") else {
+            throw ClientSupervisorError.processFailed
+        }
+        #endif
         let function = unsafeBitCast(symbol, to: SupervisorSigactionFunction.self)
         var interrupt = sigaction()
         var terminate = sigaction()
@@ -1722,7 +1753,11 @@ private struct SupervisorSavedSignalActions {
               function(SIGTERM, nil, &terminate) == 0
         else { throw ClientSupervisorError.processFailed }
         var ignored = sigaction()
+        #if canImport(Darwin)
         ignored.__sigaction_u.__sa_handler = SIG_IGN
+        #else
+        ignored.__sigaction_handler.sa_handler = SIG_IGN
+        #endif
         sigemptyset(&ignored.sa_mask)
         ignored.sa_flags = 0
         guard function(SIGINT, &ignored, nil) == 0 else { throw ClientSupervisorError.processFailed }

@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 public struct AdmissionToken: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -312,14 +316,16 @@ public struct ProfileStatus: Codable, Equatable, Sendable,
     }
     public var debugDescription: String { description }
     public var customMirror: Mirror {
-        Mirror(self, children: [
+        let identityCreatedText = identityCreated.map { $0 ? "true" : "false" } ?? "unknown"
+        let credentialInstalledText = credentialInstalled.map { $0 ? "true" : "false" } ?? "unknown"
+        return Mirror(self, children: [
             "profile": profile,
             "origin": origin ?? "none",
             "agentID": agentID ?? "none",
             "handle": handle ?? "none",
             "status": status.rawValue,
-            "identityCreated": identityCreated.map(String.init) ?? "unknown",
-            "credentialInstalled": credentialInstalled.map(String.init) ?? "unknown",
+            "identityCreated": identityCreatedText,
+            "credentialInstalled": credentialInstalledText,
             "mustNotReregister": mustNotReregister,
             "safeToRetry": safeToRetry,
             "operatorAction": operatorAction.rawValue,
@@ -650,7 +656,7 @@ public struct EnrollmentService: Sendable {
             // workload key is persisted (must not be InMemory across process exit).
             do {
                 var randomBytes = [UInt8](repeating: 0, count: 32)
-                _ = SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes)
+                SecureRandomBytes.fill(&randomBytes, count: 32)
                 let hexToken = "mesh_" + randomBytes.map { String(format: "%02x", $0) }.joined()
                 token = try MeshToken(hexToken)
             } catch {

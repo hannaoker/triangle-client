@@ -1,5 +1,27 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+#if !canImport(Security)
+import Glibc
+#endif
 import Foundation
+
+#if !canImport(CryptoKit)
+extension Curve25519.Signing.PrivateKey: @retroactive @unchecked Sendable {}
+extension Curve25519.Signing.PublicKey: @retroactive @unchecked Sendable {}
+#endif
+
+enum SecureRandomBytes {
+    static func fill(_ pointer: UnsafeMutableRawPointer, count: Int) {
+        #if canImport(Security)
+        _ = SecRandomCopyBytes(kSecRandomDefault, count, pointer)
+        #else
+        _ = getentropy(pointer, count)
+        #endif
+    }
+}
 
 public enum Base64URL {
     public static func encode(_ data: Data) -> String {
@@ -61,7 +83,7 @@ public struct WorkloadID: Codable, Equatable, Hashable, Sendable {
 
     public static func generate() -> Self {
         var bytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 16, &bytes)
+        SecureRandomBytes.fill(&bytes, count: 16)
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
         return try! Self("workload_\(hex)")
     }

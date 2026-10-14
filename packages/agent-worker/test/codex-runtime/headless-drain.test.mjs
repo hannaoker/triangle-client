@@ -296,7 +296,7 @@ test("claimer guard refuses Cursor ACP ownership of the same profile", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("claimer guard refuses dual consumers on the same profile", () => {
+test("claimer guard refuses dual consumers on the same profile", { skip: process.platform !== "darwin" ? "advisory claimer locks require macOS (Darwin O_EXLOCK)" : false }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "codex-dual-claimer-"));
   const profile = PINNED_HEADLESS_DRAIN_PROFILE;
   const lockPath = path.join(root, `headless-claimer.${profile}.json`);
@@ -347,7 +347,7 @@ test("claimer guard refuses dual consumers on the same profile", () => {
   }
 });
 
-test("claimer guard advisory lock allows only one concurrent owner", () => {
+test("claimer guard advisory lock allows only one concurrent owner", { skip: process.platform !== "darwin" ? "advisory claimer locks require macOS (Darwin O_EXLOCK)" : false }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "codex-claimer-race-"));
   const lockPath = path.join(root, "headless-claimer.codex-headless.json");
   const first = createHeadlessClaimerGuard({
@@ -379,7 +379,7 @@ test("claimer guard advisory lock allows only one concurrent owner", () => {
   }
 });
 
-test("claimer guard acquires over leftover diagnostic JSON without operator cleanup", () => {
+test("claimer guard acquires over leftover diagnostic JSON without operator cleanup", { skip: process.platform !== "darwin" ? "advisory claimer locks require macOS (Darwin O_EXLOCK)" : false }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "codex-claimer-stale-"));
   const lockPath = path.join(root, "headless-claimer.codex-headless.json");
   const stale = `${JSON.stringify({ version: 1, profile: "codex-headless", owner: "dev.thetriangle.client", pid: 4_444 })}\n`;

@@ -17,7 +17,7 @@ import {
   createAntigravityInvocation,
 } from "../runners/antigravity-runner.mjs";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
-import { resolvePyvenvBasePrefix, runtimeRootCovers } from "../runners/runner-common.mjs";
+import { hermesWrapperExecTarget, resolvePyvenvBasePrefix, runtimeRootCovers } from "../runners/runner-common.mjs";
 
 const request = {
   messageId: "message_1",
@@ -42,6 +42,18 @@ for (const [name, createPrompt] of [
     assert.equal(prompt.includes("private-token"), false);
   });
 }
+
+test("Hermes wrapper accepts quoted and unquoted absolute exec targets", () => {
+  assert.equal(hermesWrapperExecTarget('#!/bin/sh\nexec "/opt/hermes/bin/hermes" "$@"\n'), "/opt/hermes/bin/hermes");
+  assert.equal(hermesWrapperExecTarget('#!/bin/sh\nexec /opt/hermes/bin/hermes "$@"\n'), "/opt/hermes/bin/hermes");
+  assert.equal(hermesWrapperExecTarget('exec "/opt/my hermes/bin/hermes" "$@"'), "/opt/my hermes/bin/hermes");
+  assert.equal(hermesWrapperExecTarget('exec ./hermes "$@"'), null);
+  assert.equal(hermesWrapperExecTarget('exec hermes "$@"'), null);
+  assert.equal(hermesWrapperExecTarget('exec /opt/hermes/bin/hermes;echo "$@"'), null);
+  assert.equal(hermesWrapperExecTarget('exec /opt/$HOME/hermes "$@"'), null);
+  assert.equal(hermesWrapperExecTarget('exec /opt/`id`/hermes "$@"'), null);
+  assert.equal(hermesWrapperExecTarget("exec /opt/hermes/bin/hermes $@"), null);
+});
 
 test("runner common strips controller credentials before invoking a reasoning CLI", async (t) => {
   const { invoke, sandboxCommand } = await import("../runners/runner-common.mjs");
@@ -428,7 +440,7 @@ test("installed Hermes and Codex help run under Keychain-launched deny-default s
   const projectRoot = realpathSync(fileURLToPath(new URL("../../..", import.meta.url)));
   const hermesRuntimeRoots = new Set([dirname(realpathSync(process.execPath)), dirname(hermesCLI)]);
   const wrapper = readFileSync(hermesCLI, "utf8");
-  const entryPath = wrapper.match(/^exec\s+"([^"\n]+)"\s+"\$@"\s*$/m)?.[1];
+  const entryPath = hermesWrapperExecTarget(wrapper);
   assert.equal(typeof entryPath, "string", "installed Hermes wrapper has an unsupported execution chain");
   const entry = realpathSync(entryPath);
   const venv = dirname(dirname(entry));

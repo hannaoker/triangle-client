@@ -17,57 +17,69 @@ enum TriangleMailboxHostTests {
                 }
                 return
             }
+            var tally = HostTestTally()
             for contractCase in ModelContractCases.all {
-                try contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try contractCase.run() }
             }
             for contractCase in CredentialStoreContractCases.all {
-                try contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try contractCase.run() }
             }
             for contractCase in ClientInstanceContractCases.all {
-                try contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try contractCase.run() }
             }
             for contractCase in EnrollmentContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in MCPProxyContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in WorkerLauncherContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in ClientSupervisorContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in TriangleClientCLIContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in WatchGrantContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in MailboxTransactionContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
             for contractCase in CodexConversationStoreContractCases.all {
-                try await contractCase.run()
-                print("PASS \(contractCase.name)")
+                await run(contractCase.name, tally: &tally) { try await contractCase.run() }
             }
-            try StatusOutputContractCases.boundedStatus()
-            print("PASS sanitized operator status")
-            try await EndToEndContractCases.crossSessionMailboxLifecycle()
-            print("PASS cross-session mailbox credential custody")
+            await run("sanitized operator status", tally: &tally) { try StatusOutputContractCases.boundedStatus() }
+            await run("cross-session mailbox credential custody", tally: &tally) {
+                try await EndToEndContractCases.crossSessionMailboxLifecycle()
+            }
+            print("HOST_TEST_SUMMARY pass=\(tally.pass) skip=\(tally.skip) fail=\(tally.fail)")
+            if tally.fail != 0 { exit(1) }
         } catch {
             FileHandle.standardError.write(Data("FAIL \(error)\n".utf8))
             exit(1)
         }
     }
+
+    private static func run(_ name: String, tally: inout HostTestTally, _ body: @Sendable () async throws -> Void) async {
+        do {
+            try await body()
+            print("PASS \(name)")
+            tally.pass += 1
+        } catch let skip as HostPlatformSkip {
+            print("SKIP \(name) (\(skip.reason))")
+            tally.skip += 1
+        } catch {
+            FileHandle.standardError.write(Data("FAIL \(name): \(error)\n".utf8))
+            tally.fail += 1
+        }
+    }
+}
+
+private struct HostTestTally {
+    var pass = 0
+    var skip = 0
+    var fail = 0
 }

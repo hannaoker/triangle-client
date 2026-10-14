@@ -305,7 +305,7 @@ public struct MCPTransactionRewriter: Sendable {
 
     private func intValue(_ value: Any?) -> Int? {
         if let int = value as? Int { return int }
-        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, !jsonNumberIsBoolean(number) {
             return number.intValue
         }
         if let string = value as? String, let int = Int(string), int > 0 { return int }
@@ -597,7 +597,7 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
 
     private static func boolValue(_ value: Any?) -> Bool? {
         if let bool = value as? Bool { return bool }
-        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, jsonNumberIsBoolean(number) {
             return number.boolValue
         }
         return nil
@@ -605,7 +605,7 @@ public struct AuthenticatedMailboxTransactionTransport: MailboxTransactionTransp
 
     private static func intValue(_ value: Any?) -> Int? {
         if let int = value as? Int { return int }
-        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, !jsonNumberIsBoolean(number) {
             return number.intValue
         }
         return nil

@@ -5,6 +5,33 @@ import { pathToFileURL } from "node:url";
 import { createRunnerEnvironment } from "../src/command-runner.mjs";
 
 const MAX_BYTES = 1024 * 1024;
+const HERMES_UNQUOTED_UNSAFE = /[\s\u0000\r\n;|&<>`$(){}*?!\\'"]/;
+
+/**
+ * Absolute exec target from a Hermes launcher script.
+ * Accepts `exec "/abs/path" "$@"` and `exec /abs/path "$@"`.
+ * Unquoted targets must be one absolute path with no shell metacharacters.
+ * @returns {string | null}
+ */
+export function hermesWrapperExecTarget(wrapper) {
+  if (typeof wrapper !== "string") return null;
+  for (const rawLine of wrapper.split("\n")) {
+    const line = rawLine.trim();
+    const quoted = line.match(/^exec\s+"([^"\n]*)"\s+"\$@"$/);
+    if (quoted) {
+      const target = quoted[1];
+      if (!target.startsWith("/") || target.includes("\0")) return null;
+      return target;
+    }
+    const unquoted = line.match(/^exec\s+(\S+)\s+"\$@"$/);
+    if (unquoted) {
+      const target = unquoted[1];
+      if (!target.startsWith("/") || HERMES_UNQUOTED_UNSAFE.test(target)) return null;
+      return target;
+    }
+  }
+  return null;
+}
 
 function sandboxLiteral(value) {
   if (/[\r\n\0]/.test(value)) throw new Error("Sandbox paths must not contain control characters");
@@ -85,7 +112,7 @@ function runtimeFamilies(env, activeWorker) {
     families.push(path.dirname(executable));
     if (name !== "HERMES_CLI") continue;
     const wrapper = readFileSync(executable, "utf8");
-    const target = wrapper.match(/^exec\s+"([^"\n]+)"\s+"\$@"\s*$/m)?.[1];
+    const target = hermesWrapperExecTarget(wrapper);
     if (!target || !path.isAbsolute(target) || !existsSync(target)) throw new Error("Installed Hermes wrapper has an unsupported execution chain");
     const entry = realpathSync(target);
     const interpreterPath = readFileSync(entry, "utf8").split(/\r?\n/, 1)[0]?.replace(/^#!/, "").split(/\s+/, 1)[0];

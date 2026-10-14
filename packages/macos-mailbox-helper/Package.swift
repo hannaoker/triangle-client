@@ -2,6 +2,20 @@
 
 import PackageDescription
 
+// Linux hosts do not ship Apple's CryptoKit. swift-crypto's Crypto module is
+// API-compatible and is linked only when this package is built off macOS.
+#if os(Linux)
+let packageDependencies: [Package.Dependency] = [
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.12.0"),
+]
+let cryptoDependencies: [Target.Dependency] = [
+    .product(name: "Crypto", package: "swift-crypto"),
+]
+#else
+let packageDependencies: [Package.Dependency] = []
+let cryptoDependencies: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "TriangleMailbox",
     platforms: [.macOS(.v13)],
@@ -15,8 +29,9 @@ let package = Package(
             targets: ["TriangleMailboxDisposableKeychainTest"]
         ),
     ],
+    dependencies: packageDependencies,
     targets: [
-        .target(name: "TriangleMailboxCore"),
+        .target(name: "TriangleMailboxCore", dependencies: cryptoDependencies),
         .executableTarget(
             name: "TriangleMailbox",
             dependencies: ["TriangleMailboxCore"]
@@ -27,7 +42,7 @@ let package = Package(
         ),
         .target(
             name: "TriangleMailboxTestSupport",
-            dependencies: ["TriangleMailboxCore"],
+            dependencies: ["TriangleMailboxCore"] + cryptoDependencies,
             path: "Tests/TriangleMailboxTestSupport"
         ),
         .executableTarget(

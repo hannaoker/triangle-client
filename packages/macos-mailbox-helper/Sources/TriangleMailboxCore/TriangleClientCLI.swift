@@ -1,5 +1,13 @@
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 public enum TriangleClientCommandParseError: Error, Equatable, Sendable { case invalidArguments }

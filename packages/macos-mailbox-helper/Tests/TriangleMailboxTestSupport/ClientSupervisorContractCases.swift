@@ -1,5 +1,13 @@
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 @_spi(EnrollmentTesting) @_spi(ClientInstanceTesting) import TriangleMailboxCore
 
@@ -936,6 +944,9 @@ public enum ClientSupervisorContractCases {
     }
 
     public static func signalPreservationAndSerialization() async throws {
+        #if !canImport(Darwin)
+        throw HostPlatformSkip("Darwin sigaction bytes do not round-trip through glibc sigaction")
+        #endif
         let beforeInterrupt = signalDisposition(SIGINT)
         let beforeTerminate = signalDisposition(SIGTERM)
         let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
@@ -1476,7 +1487,7 @@ private func subprocessRequest(arguments: [String]) -> ClientSupervisorProcessRe
     ClientSupervisorProcessRequest(
         executable: URL(fileURLWithPath: "/bin/sh"),
         arguments: arguments,
-        workingDirectory: URL(fileURLWithPath: "/private/tmp"),
+        workingDirectory: URL(fileURLWithPath: "/tmp"),
         environment: ["PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
     )
 }
@@ -1492,13 +1503,21 @@ private func expectProcessReaped(_ pidFile: URL) throws {
     let text = try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
     guard let pid = Int32(text) else { throw SupervisorContractFailure("subprocess PID was not recorded") }
     errno = 0
+    #if canImport(Darwin)
     let result = Darwin.kill(pid, 0)
+    #else
+    let result = kill(pid, 0)
+    #endif
     try expect(result == -1 && errno == ESRCH, "subprocess was not reaped")
 }
 
 private func signalDisposition(_ signalNumber: Int32) -> Data {
     typealias SigactionFunction = @convention(c) (Int32, UnsafePointer<sigaction>?, UnsafeMutablePointer<sigaction>?) -> Int32
+    #if canImport(Darwin)
     guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "sigaction") else { return Data() }
+    #else
+    guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: 0), "sigaction") else { return Data() }
+    #endif
     let function = unsafeBitCast(symbol, to: SigactionFunction.self)
     var action = sigaction()
     _ = function(signalNumber, nil, &action)

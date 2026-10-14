@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 @_spi(EnrollmentTesting) @_spi(TriangleClientTesting) import TriangleMailboxCore
 
@@ -24,6 +28,7 @@ public enum TriangleClientCLIContractCases {
         .init(name: "launchd cutover waits for PID stability and activates only after legacy retirement", run: launchdCutoverIsTwoPhase),
         .init(name: "launchd rollback never restores legacy while the client may still be loaded", run: launchdRollbackAvoidsDuplicates),
         .init(name: "set-delivery-mode reloads worker eligibility without touching credentials", run: setDeliveryModeReloadsWorkerEligibility),
+        .init(name: "cursor-acp add and enable check runtime; set-delivery-mode does not", run: cursorAcpEnableChecksRuntime),
     ]
 
     public static func parserIsClosed() async throws {
@@ -43,6 +48,12 @@ public enum TriangleClientCLIContractCases {
         let parsedHeadlessMode = try TriangleClientCommandParser.parse([
             "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "headless-app-server",
         ])
+        let parsedCursorAcpMode = try TriangleClientCommandParser.parse([
+            "agent", "set-delivery-mode", "--profile", "alpha", "--mode", "headless-cursor-acp",
+        ])
+        let parsedCursorAcpAdd = try TriangleClientCommandParser.parse([
+            "agent", "add", "--profile", "cursor", "--runtime", "cursor-acp",
+        ])
         let parsedSetRuntime = try TriangleClientCommandParser.parse([
             "agent", "set-runtime", "--profile", "alpha", "--runtime", "codex",
         ])
@@ -58,6 +69,9 @@ public enum TriangleClientCLIContractCases {
         try clientExpect(parsedDeliveryMode == .setDeliveryMode(profile: alpha, mode: .mcpInteractive), "set-delivery-mode did not parse")
         try clientExpect(parsedGrokBotMode == .setDeliveryMode(profile: alpha, mode: .grokBot), "grok-bot delivery mode did not parse")
         try clientExpect(parsedHeadlessMode == .setDeliveryMode(profile: alpha, mode: .headlessAppServer), "headless-app-server delivery mode did not parse")
+        try clientExpect(parsedCursorAcpMode == .setDeliveryMode(profile: alpha, mode: .headlessCursorAcp), "headless-cursor-acp delivery mode did not parse")
+        let cursor = try ProfileName("cursor")
+        try clientExpect(parsedCursorAcpAdd == .add(profile: cursor, adapter: .cursorAcp), "cursor-acp add did not parse")
         try clientExpect(parsedSetRuntime == .setRuntime(profile: alpha, adapter: .codex), "set-runtime did not parse")
         let bob = try ProfileName("bob")
         try clientExpect(parsedGrokBotRuntime == .add(profile: bob, adapter: .grokBot), "grok-bot runtime did not parse")
@@ -316,6 +330,21 @@ public enum TriangleClientCLIContractCases {
         _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .worker))
         try clientExpect(fixture.serviceControl.snapshots.last == ["alpha-profile:true:worker"], "worker mode did not restore polling eligibility")
         try clientExpect(fixture.credentials.deleteCount == 0, "delivery mode change touched credentials")
+    }
+
+    public static func cursorAcpEnableChecksRuntime() async throws {
+        let fixture = try Fixture()
+        let seen = EventRecorder()
+        let service = fixture.service { instance in seen.append(instance.runtimeAdapter.rawValue) }
+        _ = try await service.execute(.add(profile: fixture.profile, adapter: .cursorAcp))
+        try clientExpect(seen.values == ["cursor-acp"], "add did not readiness-check cursor-acp")
+        let deliveryMode = try fixture.instances.read(profile: fixture.profile).deliveryMode
+        try clientExpect(deliveryMode == .headlessCursorAcp, "cursor-acp add did not default to headless-cursor-acp")
+        _ = try await service.execute(.setDeliveryMode(profile: fixture.profile, mode: .headlessCursorAcp))
+        try clientExpect(seen.values == ["cursor-acp"], "set-delivery-mode repeated the runtime check")
+        _ = try await service.execute(.disable(profile: fixture.profile))
+        _ = try await service.execute(.enable(profile: fixture.profile))
+        try clientExpect(seen.values == ["cursor-acp", "cursor-acp"], "enable did not recheck the cursor-acp runtime")
     }
 
     public static func launchdCutoverIsTwoPhase() async throws {

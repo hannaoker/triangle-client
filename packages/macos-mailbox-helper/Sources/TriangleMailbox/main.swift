@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TriangleMailboxCore
 
 @main
@@ -415,9 +418,17 @@ enum TriangleMailboxCLI {
         }
     }
 
+    private static func numberIsJSONBoolean(_ number: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+        #else
+        NSStringFromClass(type(of: number)) == "__NSCFBoolean"
+        #endif
+    }
+
     private static func parseReplyRequired(_ value: Any?) -> Bool {
         if let bool = value as? Bool { return bool }
-        if let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, Self.numberIsJSONBoolean(number) {
             return number.boolValue
         }
         return true

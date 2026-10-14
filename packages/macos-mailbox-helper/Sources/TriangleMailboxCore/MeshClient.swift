@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public struct MeshHTTPRequest: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let method: String
@@ -82,10 +85,55 @@ public enum MeshClientError: Error, Equatable, Sendable, CustomStringConvertible
     public var debugDescription: String { description }
 }
 
+#if !canImport(Darwin)
+private final class LinuxResponseBodies: @unchecked Sendable {
+    private struct Entry {
+        var body = Data()
+        var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+        let limit: Int
+    }
+
+    private let lock = NSLock()
+    private var entries: [Int: Entry] = [:]
+
+    func begin(_ identifier: Int, continuation: CheckedContinuation<(Data, URLResponse), Error>, limit: Int) {
+        lock.withLock {
+            entries[identifier] = Entry(continuation: continuation, limit: limit)
+        }
+    }
+
+    func append(_ identifier: Int, data: Data) {
+        lock.withLock {
+            guard var entry = entries[identifier] else { return }
+            let room = entry.limit + 1 - entry.body.count
+            if room > 0 {
+                entry.body.append(data.prefix(room))
+            }
+            entries[identifier] = entry
+        }
+    }
+
+    func finish(_ identifier: Int, response: URLResponse?, error: Error?) {
+        let entry = lock.withLock { entries.removeValue(forKey: identifier) }
+        guard let continuation = entry?.continuation else { return }
+        if let error {
+            continuation.resume(throwing: error)
+        } else if let response, let body = entry?.body {
+            continuation.resume(returning: (body, response))
+        } else {
+            continuation.resume(throwing: URLError(.badServerResponse))
+        }
+    }
+}
+#endif
+
 public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionTaskDelegate, @unchecked Sendable {
     private let configuration: URLSessionConfiguration
     private let redirectLock = NSLock()
     private var redirectEpoch = 0
+    #if !canImport(Darwin)
+    private let linuxBodies = LinuxResponseBodies()
+    #endif
     private lazy var session: URLSession = {
         let configuration = configuration.copy() as! URLSessionConfiguration
         configuration.httpCookieStorage = nil
@@ -132,7 +180,14 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
 
         let startingRedirectEpoch = redirectLock.withLock { redirectEpoch }
         do {
+            #if canImport(Darwin)
             let (bytes, response) = try await session.bytes(for: urlRequest)
+            #else
+            // Linux Foundation has no URLSession.bytes(for:), and data(for:)
+            // drops all but the last URLProtocol chunk. Accumulate on the
+            // data delegate so the byte ceiling still sees the whole body.
+            let (bufferedBody, response) = try await receiveLinuxBody(for: urlRequest)
+            #endif
             guard let http = response as? HTTPURLResponse, let finalURL = http.url else {
                 throw MeshClientError.invalidResponse
             }
@@ -142,6 +197,7 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
             if http.expectedContentLength > MeshClient.maximumResponseBytes {
                 throw MeshClientError.responseTooLargeAfterResponse(statusCode: http.statusCode)
             }
+            #if canImport(Darwin)
             var data = Data()
             data.reserveCapacity(min(http.expectedContentLength > 0 ? Int(http.expectedContentLength) : 0, MeshClient.maximumResponseBytes))
             for try await byte in bytes {
@@ -150,6 +206,12 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
                 }
                 data.append(byte)
             }
+            #else
+            guard bufferedBody.count <= MeshClient.maximumResponseBytes else {
+                throw MeshClientError.responseTooLargeAfterResponse(statusCode: http.statusCode)
+            }
+            let data = bufferedBody
+            #endif
             let headers = responseHeaders(http)
             return MeshHTTPResponse(statusCode: http.statusCode, headers: headers, body: data, finalURL: finalURL)
         } catch let error as MeshClientError {
@@ -162,6 +224,24 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
         }
     }
 
+    #if !canImport(Darwin)
+    private func receiveLinuxBody(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            let task = session.dataTask(with: request)
+            linuxBodies.begin(task.taskIdentifier, continuation: continuation, limit: MeshClient.maximumResponseBytes)
+            task.resume()
+        }
+    }
+
+    public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        linuxBodies.append(dataTask.taskIdentifier, data: data)
+    }
+
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        linuxBodies.finish(task.taskIdentifier, response: task.response, error: error)
+    }
+    #endif
+
     private func responseHeaders(_ response: HTTPURLResponse) -> [String: String] {
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
@@ -170,6 +250,10 @@ public final class URLSessionMeshTransport: NSObject, MeshTransport, URLSessionT
         return headers
     }
 }
+
+#if !canImport(Darwin)
+extension URLSessionMeshTransport: URLSessionDataDelegate {}
+#endif
 
 public struct MeshClient: Sendable {
     public static let maximumRequestBytes = 16 * 1024

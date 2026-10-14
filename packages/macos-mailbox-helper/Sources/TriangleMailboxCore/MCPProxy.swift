@@ -396,7 +396,7 @@ public struct MCPProxy: Sendable {
         guard let error = value as? [String: Any],
               Set(error.keys).isSubset(of: ["code", "message", "data"]),
               let code = error["code"] as? NSNumber,
-              CFGetTypeID(code) != CFBooleanGetTypeID(),
+              !jsonNumberIsBoolean(code),
               code.doubleValue.rounded(.towardZero) == code.doubleValue,
               error["message"] is String
         else { return false }
@@ -514,7 +514,7 @@ private struct JSONRPCRequest {
             // unnecessary for MCP and unsafe to echo.
             return string.wholeMatch(of: /^mesh_[a-f0-9]{64}$/) == nil
         }
-        if let number = value as? NSNumber { return CFGetTypeID(number) != CFBooleanGetTypeID() }
+        if let number = value as? NSNumber { return !jsonNumberIsBoolean(number) }
         return false
     }
 
@@ -522,7 +522,7 @@ private struct JSONRPCRequest {
         switch (lhs, rhs) {
         case (nil, nil), (_ as NSNull, nil), (nil, _ as NSNull), (_ as NSNull, _ as NSNull): true
         case let (left as String, right as String): left == right
-        case let (left as NSNumber, right as NSNumber): CFGetTypeID(left) != CFBooleanGetTypeID() && CFGetTypeID(right) != CFBooleanGetTypeID() && left == right
+        case let (left as NSNumber, right as NSNumber): !jsonNumberIsBoolean(left) && !jsonNumberIsBoolean(right) && left == right
         default: false
         }
     }

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @_spi(EnrollmentTesting) @_spi(ReservationTesting) import TriangleMailboxCore
 
 public enum EnrollmentContractCases {
@@ -656,6 +659,7 @@ public enum EnrollmentContractCases {
         try expect(requests[1].value(forHTTPHeaderField: "Authorization") == nil, "URLSession registration sent authorization")
         try expect(requests[2].value(forHTTPHeaderField: "Authorization") == "Bearer \(canary)", "URLSession dropped bearer")
 
+        #if canImport(Darwin)
         for location in ["https://evil.example/steal", "http://evil.example/steal"] {
             FixtureURLProtocol.reset([.redirect(location: location)])
             let redirectTransport = URLSessionMeshTransport(configuration: configuration)
@@ -669,6 +673,7 @@ public enum EnrollmentContractCases {
             try expect(FixtureURLProtocol.requests.count == 1, "redirect caused a second request")
             try expect(FixtureURLProtocol.redirectTargets.count == 1, "URLSession redirect delegate was not exercised")
         }
+        #endif
 
         FixtureURLProtocol.reset([.declaredOversized(status: 200)])
         try await expectMeshError(.responseTooLargeAfterResponse(statusCode: 200), "declared oversized response was accepted") {
@@ -1224,8 +1229,13 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
             var redirectedRequest = request
             redirectedRequest.url = URL(string: location)!
             Self.lock.withLock { Self.redirected.append(redirectedRequest) }
+            #if canImport(Darwin)
             client?.urlProtocol(self, wasRedirectedTo: redirectedRequest, redirectResponse: response)
             client?.urlProtocolDidFinishLoading(self)
+            #else
+            // swift-corelibs-foundation aborts if a URLProtocol reports a redirect.
+            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+            #endif
         case let .declaredOversized(status):
             respond(
                 status: status,

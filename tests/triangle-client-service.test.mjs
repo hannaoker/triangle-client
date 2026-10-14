@@ -168,7 +168,7 @@ test("install prepares a runtime manifest and creates a private fixed plist", (t
   const result = run("install", f.env);
   assert.equal(result.status, 0, result.stderr);
   const runtime = JSON.parse(fs.readFileSync(path.join(f.app, "worker-runtime", "codex.manifest.json"), "utf8"));
-  assert.equal(runtime.version, 6);
+  assert.equal(runtime.version, 7);
   const plist = path.join(f.home, "Library", "LaunchAgents", "dev.thetriangle.client.plist");
   assert.equal(mode(plist), 0o600);
   assert.equal(mode(path.join(f.home, "Library", "Logs", "the-triangle")), 0o700);
@@ -303,6 +303,31 @@ test("duplicate registry keys fail closed before install or start mutates servic
   assert.deepEqual(fs.readFileSync(plist), beforePlist);
   assert.equal(fs.readFileSync(startFixture.launchctlLog, "utf8"), beforeCalls);
   assert.equal(fs.existsSync(path.join(startFixture.state, "dev.thetriangle.client")), false);
+});
+
+test("installed manifest v7 and later stay supervisor-capable without a CLI", (t) => {
+  const f = fixture(t);
+  let result = run("prepare-runtime", f.env);
+  assert.equal(result.status, 0, result.stderr);
+  const manifestPath = path.join(f.app, "worker-runtime", "codex.manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.version, 7);
+  const hidden = { ...f.env, CODEX_CLI: "", PATH: path.dirname(f.env.TRIANGLE_LAUNCHCTL) };
+  result = run("render", hidden);
+  assert.equal(result.status, 0, result.stderr);
+
+  manifest.version = 8;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+  fs.chmodSync(manifestPath, 0o600);
+  result = run("render", hidden);
+  assert.equal(result.status, 0, result.stderr);
+
+  manifest.version = 3;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+  fs.chmodSync(manifestPath, 0o600);
+  result = run("render", hidden);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /supervisor-capable/i);
 });
 
 test("install fails closed without a supervisor-capable runtime", (t) => {

@@ -1,4 +1,8 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 @_spi(EnrollmentTesting) import TriangleMailboxCore
 
@@ -21,6 +25,8 @@ public enum WorkerLauncherContractCases {
         .init(name: "version-5 runtime can host the shared supervisor", run: { try versionFiveCanHostSupervisor() }),
         .init(name: "version-6 runtime can host the shared supervisor with schema", run: { try versionSixCanHostSupervisorWithSchema() }),
         .init(name: "version-7 runtime can host the shared supervisor with ownership modules", run: { try versionSevenCanHostSupervisorWithOwnershipModules() }),
+        .init(name: "version-8 runtime can host the shared supervisor", run: { try versionEightCanHostSupervisor() }),
+        .init(name: "cursor-acp readiness uses the agent CLI and drain runtime", run: { try cursorAcpResolvesAgentCliNotAntigravity() }),
         .init(name: "version-5 runtime rejects unexpected schema module", run: { try versionFiveRejectsSchemaModule() }),
         .init(name: "version-6 runtime rejects unexpected ownership modules", run: { try versionSixRejectsOwnershipModules() }),
         .init(name: "shared runtime release resolves isolated opaque instance state", run: { try instanceStateIsolation() }),
@@ -203,6 +209,64 @@ public enum WorkerLauncherContractCases {
             let url = command.workingDirectory.appendingPathComponent(relative)
             try expect(FileManager.default.isReadableFile(atPath: url.path), "v7 ownership module missing: \(relative)")
         }
+    }
+
+    public static func versionEightCanHostSupervisor() throws {
+        let fixture = try ResolverFixture(manifestVersion: 8); defer { fixture.cleanup() }
+        let instance = try ClientInstance(profile: ProfileName("future-supervisor-host"), runtimeAdapter: .codex)
+        let command = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolveCoordinator(for: [instance])
+        try expect(command.arguments[0].hasSuffix("/packages/agent-worker/src/client-supervisor-cli.mjs"), "future coordinator script missing")
+    }
+
+    public static func cursorAcpResolvesAgentCliNotAntigravity() throws {
+        let fixture = try ResolverFixture(manifestVersion: 7); defer { fixture.cleanup() }
+        let agent = fixture.applicationRoot.appendingPathComponent("agent")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: agent)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+        let client = fixture.applicationRoot.appendingPathComponent("client", isDirectory: true)
+        try FileManager.default.createDirectory(at: client, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let profile = try ProfileName("cursor-acp-shadow-test")
+        let instance = try ClientInstance(profile: profile, runtimeAdapter: .cursorAcp)
+        let binding: [String: Any] = [
+            "version": 1,
+            "common": [
+                "command": agent.path,
+                "workingDirectory": "/srv/triangle-cursor-work",
+            ],
+            "profiles": [[
+                "profile": profile.value,
+                "instanceId": instance.instanceID.value,
+            ]],
+        ]
+        let bindingURL = client.appendingPathComponent("cursor-acp-runtime-binding.json")
+        try JSONSerialization.data(withJSONObject: binding, options: [.sortedKeys]).write(to: bindingURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: bindingURL.path)
+        let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
+        let command = try resolver.resolveAdapter(for: instance)
+        try expect(command.executable.standardizedFileURL.path == agent.standardizedFileURL.path, "cursor-acp did not use the binding agent CLI")
+        try expect(command.arguments == ["acp"], "cursor-acp drain did not use agent acp")
+        try expect(command.arguments.allSatisfy { !$0.contains("antigravity-runner") }, "cursor-acp resolved the antigravity runner")
+        try expect(command.environment["ANTIGRAVITY_HOME"] == nil && command.environment["ANTIGRAVITY_CLI"] == nil, "cursor-acp inherited the antigravity runtime")
+        try expect(FileManager.default.isReadableFile(atPath: command.workingDirectory.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs").path), "cursor-acp drain runtime missing")
+
+        try FileManager.default.removeItem(at: bindingURL)
+        let savedPath = getenv("PATH").map { String(cString: $0) }
+        setenv("PATH", fixture.applicationRoot.path, 1)
+        defer {
+            if let savedPath { setenv("PATH", savedPath, 1) } else { unsetenv("PATH") }
+        }
+        let fromPath = try resolver.resolveAdapter(for: instance)
+        try expect(fromPath.executable.lastPathComponent == "agent" && fromPath.arguments == ["acp"], "PATH agent CLI was not accepted")
+
+        try FileManager.default.removeItem(at: agent)
+        do {
+            _ = try resolver.resolveAdapter(for: instance)
+            throw WorkerContractFailure("cursor-acp resolved without an agent CLI")
+        } catch is WorkerLauncherError {}
+        do {
+            _ = try resolver.resolveAdapter(for: try ClientInstance(profile: ProfileName("agy-profile"), runtimeAdapter: .antigravity))
+            throw WorkerContractFailure("antigravity resolved without its own manifest")
+        } catch is WorkerLauncherError {}
     }
 
     public static func versionFiveRejectsSchemaModule() throws {
@@ -428,7 +492,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion >= 4 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -444,7 +508,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion >= 5 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -479,12 +543,12 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion >= 6 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 {
+        if manifestVersion >= 7 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",

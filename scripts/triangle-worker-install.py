@@ -199,19 +199,23 @@ def copy_regular(source, destination, destination_mode=0o600):
         os.close(destination_fd)
 
 
+def manifest_version_is_known(version):
+    return type(version) is int and (version == 3 or version >= 4)
+
+
 def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     if agent not in AGENTS:
         fail("invalid worker kind")
     if version == 3:
         common = LEGACY_COMMON_ARTIFACTS
-    elif version in {4, 5, 6, 7}:
+    elif type(version) is int and version >= 4:
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7} else [])
-    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6, 7} and agent == "codex" else []
-    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7} else []
-    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version == 7 else []
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version >= 5 else [])
+    extras += CODEX_HEADLESS_ARTIFACTS if version >= 5 and agent == "codex" else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version >= 6 else []
+    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version >= 7 else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
@@ -223,14 +227,39 @@ def content_address(agent, node_hash, artifacts):
     return hashlib.sha256(("\n".join(lines) + "\n").encode()).hexdigest()
 
 
+_HERMES_UNQUOTED_UNSAFE = re.compile(r"""[\s\x00\r\n;|&<>`$(){}*?!\\'"]""")
+
+
+def hermes_wrapper_exec_target(wrapper):
+    """Absolute exec target from a Hermes launcher script.
+
+    Accepts both `exec "/abs/path" "$@"` and `exec /abs/path "$@"`.
+    Unquoted targets must be a single absolute path with no shell metacharacters.
+    """
+    if not isinstance(wrapper, str):
+        fail("unsupported Hermes execution chain")
+    for raw_line in wrapper.splitlines():
+        line = raw_line.strip()
+        quoted = re.fullmatch(r'exec\s+"([^"\n]*)"\s+"\$@"', line)
+        if quoted:
+            target = quoted.group(1)
+            if not target.startswith("/") or "\x00" in target:
+                fail("unsupported Hermes execution chain")
+            return target
+        unquoted = re.fullmatch(r'exec\s+(\S+)\s+"\$@"', line)
+        if unquoted:
+            target = unquoted.group(1)
+            if not target.startswith("/") or _HERMES_UNQUOTED_UNSAFE.search(target):
+                fail("unsupported Hermes execution chain")
+            return target
+    fail("unsupported Hermes execution chain")
+
+
 def discover_runtime_roots(agent, cli):
     roots = [os.path.dirname(cli)]
     if agent == "hermes":
         wrapper = open(cli, encoding="utf-8").read()
-        match = re.search(r'^exec\s+"([^"\n]+)"\s+"\$@"\s*$', wrapper, re.MULTILINE)
-        if not match:
-            fail("unsupported Hermes execution chain")
-        entry = checked_file(os.path.realpath(match.group(1)), executable=True, owners={os.getuid(), 0})
+        entry = checked_file(os.path.realpath(hermes_wrapper_exec_target(wrapper)), executable=True, owners={os.getuid(), 0})
         first = open(entry, encoding="utf-8").readline().rstrip()
         if not first.startswith("#!/"):
             fail("Hermes entrypoint lacks an absolute interpreter")
@@ -280,7 +309,7 @@ def strict_manifest(path, agent):
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
         "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
-    if value["version"] not in {3, 4, 5, 6, 7} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if not manifest_version_is_known(value["version"]) or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")

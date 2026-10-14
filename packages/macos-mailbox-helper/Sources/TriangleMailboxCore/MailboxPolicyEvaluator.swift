@@ -87,7 +87,7 @@ public enum MailboxPolicyEvaluator {
 
     private static func intValue(_ value: Any?) -> Int? {
         if let int = value as? Int { return int }
-        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, !jsonNumberIsBoolean(number) {
             return number.intValue
         }
         return nil

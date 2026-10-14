@@ -189,6 +189,34 @@ test("runtime preparation ignores hostile model overrides and rejects a symlinke
   assert.match(result.stderr, /canonical|symlink|directory/i);
 });
 
+test("Hermes runtime preparation accepts an unquoted absolute wrapper exec path", (t) => {
+  const fixture = makeFixture(t);
+  const entry = fs.realpathSync(path.join(fixture.home, "hermes-agent", "venv", "bin", "hermes"));
+  fs.writeFileSync(fixture.hermesCLI, `#!/bin/bash\nexec ${entry} "$@"\n`, { mode: 0o700 });
+  fs.chmodSync(fixture.hermesCLI, 0o700);
+  const manifest = prepare(fixture, "hermes");
+  assert.equal(manifest.environment.HERMES_CLI, fs.realpathSync(fixture.hermesCLI));
+  assert.match(manifest.environment.TRIANGLE_RUNTIME_ROOTS, /hermes-agent/);
+});
+
+test("Hermes runtime preparation rejects unsafe wrapper exec paths", (t) => {
+  const unsafe = [
+    '#!/bin/bash\nexec ./hermes "$@"\n',
+    '#!/bin/bash\nexec hermes "$@"\n',
+    '#!/bin/bash\nexec /tmp/hermes;echo "$@"\n',
+    '#!/bin/bash\nexec /tmp/$HOME/hermes "$@"\n',
+    "#!/bin/bash\nexec /tmp/hermes $@\n",
+  ];
+  for (const wrapper of unsafe) {
+    const fixture = makeFixture(t);
+    fs.writeFileSync(fixture.hermesCLI, wrapper, { mode: 0o700 });
+    fs.chmodSync(fixture.hermesCLI, 0o700);
+    const result = run("prepare-runtime", "hermes", fixture.env);
+    assert.notEqual(result.status, 0, wrapper);
+    assert.match(result.stderr, /unsupported Hermes execution chain/);
+  }
+});
+
 test("Hermes runtime preparation records its verified wrapper chain without ambient PYTHONPATH", (t) => {
   const fixture = makeFixture(t);
   const ambientPython = path.join(fixture.home, "ambient-python"); fs.mkdirSync(ambientPython);

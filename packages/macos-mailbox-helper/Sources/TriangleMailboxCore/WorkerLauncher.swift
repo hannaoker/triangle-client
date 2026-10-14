@@ -1,5 +1,13 @@
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 import Foundation
 
 public enum WorkerLauncherError: Error, Equatable, Sendable {
@@ -114,7 +122,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion >= 5 {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -142,11 +150,12 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
             ])
             // v6 schema extraction; v5 bundles omit it.
-            if manifestVersion == 6 || manifestVersion == 7 {
+            if manifestVersion >= 6 {
                 artifacts.insert("packages/agent-worker/src/client-supervisor-schema.mjs")
             }
             // v7 headless ownership recovery; v5/v6 helpers keep exact-set match.
-            if manifestVersion == 7 {
+            // Later versions keep this set until a new artifact contract is added.
+            if manifestVersion >= 7 {
                 artifacts.insert("packages/agent-worker/src/claimer-advisory-lock.mjs")
                 artifacts.insert("packages/agent-worker/src/open-transaction-recovery.mjs")
             }
@@ -278,10 +287,123 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         )
     }
 
+    /// Cursor ACP is not a worker-runner adapter. Readiness matches the supervisor
+    /// drain: an absolute `agent` CLI (`acp`) plus the bundled cursor-acp-runtime.
+    private func resolveCursorAcpAdapter(for instance: ClientInstance) throws -> WorkerCommand {
+        guard instance.runtimeAdapter == .cursorAcp,
+              instance.instanceID == .derive(profile: instance.profile)
+        else { throw WorkerLauncherError.invalidManifest }
+        let project = try cursorAcpDrainProjectRoot()
+        let agent = try cursorAcpAgentExecutable(for: instance)
+        let drain = project.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
+        try checkedFile(drain, beneath: project, exactMode: 0o600, executable: false)
+        return WorkerCommand(
+            executable: agent,
+            arguments: ["acp"],
+            workingDirectory: project,
+            environment: [
+                "PATH": project.appendingPathComponent("bin").path,
+                "TRIANGLE_PROJECT_ROOT": project.path,
+            ]
+        )
+    }
+
+    /// Binding `common.command` when present; otherwise the `agent` CLI on PATH.
+    /// Never consults the antigravity worker runtime.
+    private func cursorAcpAgentExecutable(for instance: ClientInstance) throws -> URL {
+        let bindingURL = applicationRoot
+            .appendingPathComponent("client", isDirectory: true)
+            .appendingPathComponent("cursor-acp-runtime-binding.json")
+        if FileManager.default.fileExists(atPath: bindingURL.path) {
+            let binding = try parseCursorAcpBinding(bindingURL, instance: instance)
+            return try verifiedAgentExecutable(URL(fileURLWithPath: binding))
+        }
+        let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for component in pathValue.split(separator: ":", omittingEmptySubsequences: false) {
+            let candidate = URL(fileURLWithPath: String(component), isDirectory: true).appendingPathComponent("agent")
+            if FileManager.default.fileExists(atPath: candidate.path), let verified = try? verifiedAgentExecutable(candidate) {
+                return verified
+            }
+        }
+        throw WorkerLauncherError.invalidManifest
+    }
+
+    private func parseCursorAcpBinding(_ url: URL, instance: ClientInstance) throws -> String {
+        let data = try boundedRead(url, maximum: 64 * 1024)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["version"] as? Int == 1,
+              let common = object["common"] as? [String: Any],
+              let command = common["command"] as? String,
+              command.hasPrefix("/"),
+              !command.contains("\0"),
+              !command.contains("\n"),
+              !command.contains("\r")
+        else { throw WorkerLauncherError.invalidManifest }
+        if let profiles = object["profiles"] as? [[String: Any]] {
+            for entry in profiles {
+                guard entry["profile"] as? String == instance.profile.value else { continue }
+                guard entry["instanceId"] as? String == instance.instanceID.value else {
+                    throw WorkerLauncherError.invalidManifest
+                }
+            }
+        }
+        return command
+    }
+
+    /// Shared supervisor bundle that contains the Cursor ACP drain modules.
+    /// Codex, then Hermes, then Antigravity — the files are bundle contents, not the antigravity runner.
+    private func cursorAcpDrainProjectRoot() throws -> URL {
+        let runtime = applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true)
+        for worker in [WorkerKind.codex, .hermes, .antigravity] {
+            let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
+            guard FileManager.default.isReadableFile(atPath: manifestURL.path) else { continue }
+            let manifest: WorkerInstallManifest
+            do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
+            catch { continue }
+            guard manifest.version >= 4, manifest.projectRoot.hasPrefix("/") else { continue }
+            let project = URL(fileURLWithPath: manifest.projectRoot, isDirectory: true)
+            let drain = project.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
+            do {
+                try checkedFile(drain, beneath: project, exactMode: 0o600, executable: false)
+                return project
+            } catch {
+                continue
+            }
+        }
+        throw WorkerLauncherError.invalidManifest
+    }
+
+    private func verifiedAgentExecutable(_ url: URL) throws -> URL {
+        let path = url.path
+        guard path.hasPrefix("/"), !path.contains("\0"), !path.contains("\n"), !path.contains("\r") else {
+            throw WorkerLauncherError.invalidManifest
+        }
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0 else { throw WorkerLauncherError.invalidManifest }
+        let kind = metadata.st_mode & S_IFMT
+        guard kind == S_IFREG || kind == S_IFLNK else { throw WorkerLauncherError.invalidManifest }
+        let resolved = url.resolvingSymlinksInPath()
+        var resolvedMetadata = stat()
+        guard lstat(resolved.path, &resolvedMetadata) == 0,
+              (resolvedMetadata.st_mode & S_IFMT) == S_IFREG,
+              resolvedMetadata.st_mode & 0o022 == 0,
+              resolvedMetadata.st_uid == getuid() || resolvedMetadata.st_uid == 0,
+              access(resolved.path, X_OK) == 0
+        else { throw WorkerLauncherError.invalidManifest }
+        return url.standardizedFileURL
+    }
+
     public func resolveAdapter(for instance: ClientInstance) throws -> WorkerCommand {
         // grok-bot has no headless runner; wake is host-side (webhook), not worker polling.
         if instance.runtimeAdapter == .grokBot { throw WorkerLauncherError.invalidManifest }
-        let worker: WorkerKind = instance.runtimeAdapter == .codex ? .codex : (instance.runtimeAdapter == .hermes ? .hermes : .antigravity)
+        if instance.runtimeAdapter == .cursorAcp { return try resolveCursorAcpAdapter(for: instance) }
+        let worker: WorkerKind
+        switch instance.runtimeAdapter {
+        case .codex: worker = .codex
+        case .hermes: worker = .hermes
+        case .antigravity: worker = .antigravity
+        case .cursorAcp, .grokBot: throw WorkerLauncherError.invalidManifest
+        }
         let base = try resolve(worker, instance: instance)
         let runner = base.workingDirectory.appendingPathComponent("packages/agent-worker/runners/\(worker.rawValue)-runner.mjs")
         try checkedFile(runner, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
@@ -308,7 +430,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let manifest: WorkerInstallManifest
             do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
             catch { throw WorkerLauncherError.invalidManifest }
-            guard manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7 else { continue }
+            guard manifest.version >= 4 else { continue }
             let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
             try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
             var environment: [String: String] = [:]
@@ -328,7 +450,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
                 guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
                 guard let manifest = try? JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)),
-                      manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7
+                      manifest.version >= 4
                 else { continue }
                 guard let canonicalProject = try? checkedDirectory(URL(fileURLWithPath: manifest.projectRoot, isDirectory: true), exactMode: 0o700) else { continue }
                 let node = canonicalProject.appendingPathComponent("bin/node")
