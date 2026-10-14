@@ -515,7 +515,7 @@ export function createClientSupervisor({
     const lockPath = path.join(lockDirectory, `cursor-acp-claimer.${cursorAcpConfig.profile}.json`);
     const cursorAcpClaimer = createCursorAcpClaimer({
       profile: cursorAcpConfig.profile,
-      shadowTestProfile: true,
+      shadowTestProfile: cursorAcpConfig.shadowTestProfile === true,
       helperPath: cursorAcpConfig.helperPath,
       lockPath,
     });
@@ -622,12 +622,11 @@ export function createClientSupervisor({
 
     // Register kick handlers when agentId is present. Events arrive only after
     // the install grant includes those agent ids. Cursor ACP joins this same
-    // profile list — no second watch listener or cursor — and only when
-    // shadowTestProfile is set (the binding gate Swift already applied).
+    // profile list — no second watch listener or cursor. shadowTestProfile is
+    // accepted for compatibility and does not exclude an enrolled profile.
     function registerDrainKick(entry, { lane, logEvent }) {
       const agentId = entry.config.agentId;
       if (typeof agentId !== "string" || agentId.length === 0) return;
-      if (lane === "cursorAcpWake" && entry.config.shadowTestProfile !== true) return;
       const installationId = resolveConfigInstallationId(entry.config);
       if (typeof installationId === "string" && installationId !== installAnchor.installationId) {
         throw new TypeError(`${lane} installationId does not match the install watch anchor`);

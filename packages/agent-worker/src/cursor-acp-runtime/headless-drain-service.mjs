@@ -3,7 +3,7 @@
  *
  * Cursor ACP and Codex headless each keep a lock family, but both families are
  * acquired together (Codex lock first, then Cursor ACP) so the same profile
- * mailbox cannot be dual-claimed across runtimes. Shadow profiles only.
+ * mailbox cannot be dual-claimed across runtimes.
  */
 
 import crypto from "node:crypto";
@@ -53,12 +53,14 @@ export const CURSOR_ACP_WAKE_REQUIRED_KEYS = Object.freeze([
   "stateRoot",
   "command",
   "pollIntervalMs",
-  "shadowTestProfile",
 ]);
-/** Optional: MESH agent id + installation for the shared install-watch fan-out. Absent → timer-only. */
+/** Optional: MESH agent id + installation for the shared install-watch fan-out. Absent → timer-only.
+ * `shadowTestProfile` is accepted for compatibility and defaults to false. It does not gate admission.
+ */
 export const CURSOR_ACP_WAKE_OPTIONAL_KEYS = Object.freeze([
   "agentId",
   "installationId",
+  "shadowTestProfile",
 ]);
 export const CURSOR_ACP_WAKE_KEYS = Object.freeze([
   ...CURSOR_ACP_WAKE_REQUIRED_KEYS,
@@ -94,7 +96,7 @@ function requiredAbsolute(value, name) {
 export function assertCursorAcpDrainIdentity({
   profile,
   runtimeAdapter = CURSOR_ACP_RUNTIME_ADAPTER,
-  shadowTestProfile = true,
+  shadowTestProfile = false,
 } = {}) {
   if (typeof profile !== "string" || !PROFILE.test(profile)) {
     throw new TypeError("profile is invalid");
@@ -113,12 +115,8 @@ export function assertCursorAcpDrainIdentity({
       { profile, runtimeAdapter },
     );
   }
-  if (shadowTestProfile !== true) {
-    throw codedError(
-      "cursor_acp_not_shadow_test_profile",
-      "Cursor ACP drain admits shadow test profiles only",
-      { profile },
-    );
+  if (typeof shadowTestProfile !== "boolean") {
+    throw new TypeError("shadowTestProfile must be a boolean");
   }
 }
 
@@ -400,8 +398,12 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
   if (deriveProfileInstanceId(profile) !== profileInstanceId) {
     throw new TypeError("profileInstanceId does not match profile");
   }
-  if (cursorAcpWake.shadowTestProfile !== true) {
-    throw new TypeError("shadowTestProfile must be true");
+  let shadowTestProfile = false;
+  if (Object.hasOwn(cursorAcpWake, "shadowTestProfile")) {
+    if (typeof cursorAcpWake.shadowTestProfile !== "boolean") {
+      throw new TypeError("shadowTestProfile must be a boolean");
+    }
+    shadowTestProfile = cursorAcpWake.shadowTestProfile;
   }
   const pollIntervalMs = cursorAcpWake.pollIntervalMs;
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 60_000) {
@@ -430,7 +432,7 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
     stateRoot: path.resolve(requiredAbsolute(cursorAcpWake.stateRoot, "stateRoot")),
     command: requiredAbsolute(cursorAcpWake.command, "command"),
     pollIntervalMs,
-    shadowTestProfile: true,
+    shadowTestProfile,
     ...(agentId != null ? { agentId } : {}),
     ...(installationId != null ? { installationId } : {}),
   });

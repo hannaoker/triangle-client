@@ -27,7 +27,7 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant revoke clears local binding", run: revokeClearsBinding),
             .init(name: "watch grant excludes mcp-interactive actors", run: excludesInteractiveActor),
             .init(name: "watch grant allows mcp-interactive notify members", run: includesInteractiveMember),
-            .init(name: "watch grant includes shadow-bound cursor-acp notify members", run: includesCursorAcpMember),
+            .init(name: "watch grant includes bound cursor-acp notify members without requiring shadowTestProfile", run: includesCursorAcpMember),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
             .init(name: "watch grant recovers from stale replacement credential", run: recoversFromStaleReplacement),
@@ -377,15 +377,30 @@ public enum WatchGrantContractCases {
         {"profiles":[{"instanceId":"\(cursorInstanceId)","shadowTestProfile":false}]}
         """.utf8).write(to: nonShadowURL)
         let nonShadow = try await Fixture(cursorAcpBindingURL: nonShadowURL)
-        do {
-            _ = try await nonShadow.service.ensureGrant(
-                installationID: try InstallationID("inst_CursorNonShadow1"),
-                actorProfile: nonShadow.actorProfile,
-                memberProfiles: [nonShadow.actorProfile, nonShadow.cursorProfile]
-            )
-            throw ContractFailure("non-shadow cursor-acp member was accepted")
-        } catch WatchGrantServiceError.noEventDrivenMembers {
-        }
+        let includedFalse = try await nonShadow.service.ensureGrant(
+            installationID: try InstallationID("inst_CursorNonShadow1"),
+            actorProfile: nonShadow.actorProfile,
+            memberProfiles: [nonShadow.actorProfile, nonShadow.cursorProfile]
+        )
+        try expect(
+            includedFalse.agentIDs.contains(nonShadow.cursorAgentID.value),
+            "explicit false shadowTestProfile excluded a bound cursor-acp member"
+        )
+
+        let omittedFlagURL = boundRoot.appendingPathComponent("cursor-acp-omitted-flag.json")
+        try Data("""
+        {"profiles":[{"instanceId":"\(cursorInstanceId)"}]}
+        """.utf8).write(to: omittedFlagURL)
+        let omittedFlag = try await Fixture(cursorAcpBindingURL: omittedFlagURL)
+        let includedOmitted = try await omittedFlag.service.ensureGrant(
+            installationID: try InstallationID("inst_CursorOmittedFlag1"),
+            actorProfile: omittedFlag.actorProfile,
+            memberProfiles: [omittedFlag.actorProfile, omittedFlag.cursorProfile]
+        )
+        try expect(
+            includedOmitted.agentIDs.contains(omittedFlag.cursorAgentID.value),
+            "binding entry without shadowTestProfile excluded a bound cursor-acp member"
+        )
 
         do {
             _ = try await fixture.service.ensureGrant(

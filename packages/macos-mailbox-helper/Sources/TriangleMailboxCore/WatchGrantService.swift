@@ -274,8 +274,9 @@ public struct WatchGrantService: Sendable {
             }
             // Auto membership: event-driven drains + App Server-bound
             // mcp-interactive + Grok Bot-bound + headless-runtime-bound Codex
-            // + cursor-acp-runtime-bound shadow profiles. Cursor ACP uses that
-            // binding gate on the explicit path too — enabled alone is not membership.
+            // + cursor-acp-runtime-bound profiles. Cursor ACP uses that binding
+            // gate on the explicit path too — enabled alone is not membership.
+            // shadowTestProfile does not exclude a listed profile.
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
             let boundGrokBot = Self.grokBotBoundMembers(from: instances)
@@ -333,7 +334,7 @@ public struct WatchGrantService: Sendable {
                     throw ClientInstanceStoreError.unsafeStorage
                 }
                 if instance.runtimeAdapter == .cursorAcp || instance.deliveryMode == .headlessCursorAcp {
-                    // Same gate as auto membership: enabled shadow binding, not every ACP profile.
+                    // Same gate as auto membership: enabled and listed in the binding, not every ACP profile.
                     guard instance.participatesInCursorAcpWake,
                           cursorAcpMemberIds.contains(instance.instanceID.value)
                     else { throw WatchGrantServiceError.noEventDrivenMembers }
@@ -500,8 +501,9 @@ public struct WatchGrantService: Sendable {
         }
     }
 
-    /// Cursor ACP shadow profiles whose instanceId appears in
-    /// cursor-acp-runtime-binding.json with shadowTestProfile true.
+    /// Cursor ACP profiles whose instanceId appears in
+    /// cursor-acp-runtime-binding.json. `shadowTestProfile` is accepted and ignored
+    /// for membership (missing or false still joins).
     /// File-credential custody, when enabled, also requires a local workload key
     /// so auto-ensure does not fail closed on a bound profile that cannot join yet.
     private func cursorAcpBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
@@ -517,8 +519,7 @@ public struct WatchGrantService: Sendable {
               let profileObjects = object["profiles"] as? [[String: Any]]
         else { return [] }
         let boundInstanceIds = Set(profileObjects.compactMap { entry -> String? in
-            guard entry["shadowTestProfile"] as? Bool == true,
-                  let instanceId = entry["instanceId"] as? String,
+            guard let instanceId = entry["instanceId"] as? String,
                   !instanceId.isEmpty
             else { return nil }
             return instanceId

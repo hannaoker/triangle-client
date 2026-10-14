@@ -7,6 +7,7 @@ import test from "node:test";
 import { createClientSupervisor } from "../../src/client-supervisor.mjs";
 import { parseClientSupervisorBootstrap } from "../../src/client-supervisor-cli.mjs";
 import {
+  assertCursorAcpDrainIdentity,
   createCursorAcpClaimerGuard,
   createHeadlessCursorAcpDrain,
   deriveProfileInstanceId,
@@ -51,7 +52,16 @@ test("normalizeCursorAcpWakeConfig accepts closed shadow wake shape", () => {
   assert.equal(enrolled.agentId, "agent_cursor_acp_001");
   assert.equal(enrolled.installationId, "inst_N7VhDq3mQ2");
   assert.equal(enrolled.pollIntervalMs, 1_000);
-  assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ shadowTestProfile: false })), /shadowTestProfile/);
+  assert.equal(normalizeCursorAcpWakeConfig(cursorAcpWake({ shadowTestProfile: false })).shadowTestProfile, false);
+  const omitted = cursorAcpWake();
+  delete omitted.shadowTestProfile;
+  assert.equal(normalizeCursorAcpWakeConfig(omitted).shadowTestProfile, false);
+  assert.doesNotThrow(() => assertCursorAcpDrainIdentity({
+    profile: PROFILE,
+    shadowTestProfile: false,
+  }));
+  assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ shadowTestProfile: "yes" })), /shadowTestProfile/);
+  assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ note: "extra" })), /schema/);
   assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ codexHome: "/x", cursorHome: undefined })), /schema|cursorHome/i);
   assert.throws(() => normalizeCursorAcpWakeConfig(cursorAcpWake({ agentId: "bad id" })), /agentId/);
 });
