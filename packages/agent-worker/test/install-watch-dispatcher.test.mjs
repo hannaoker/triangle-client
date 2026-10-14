@@ -267,6 +267,90 @@ test("install dispatcher migrates lane cursors from disk before first poll", asy
   assert.equal(raw.cursor, 42);
 });
 
+test("mixed Bob, Codex, and ACP hints share one cursor across resync and watch outage", async () => {
+  const INSTANCE_C = "c".repeat(64);
+  const seen = [];
+  const cursorStore = createMemoryCursorStore(0);
+  let phase = "outage";
+  const transport = {
+    async poll({ cursor }) {
+      if (phase === "outage") {
+        phase = "resync";
+        throw Object.assign(new Error("watch down"), { code: "watch_unavailable" });
+      }
+      if (phase === "resync") {
+        phase = "hints";
+        throw Object.assign(new Error("resync"), { code: "resync_required", restartCursor: 4 });
+      }
+      if (cursor >= 11) return { cursor, events: [] };
+      return {
+        cursor: 11,
+        events: [
+          { agent_id: "agent_bob", high_watermark: 11 },
+          { agent_id: "agent_codex", high_watermark: 10 },
+          { agent_id: "agent_acp", high_watermark: 9 },
+          { agent_id: "agent_foreign", high_watermark: 99 },
+        ],
+      };
+    },
+  };
+  const profiles = [
+    { instanceId: INSTANCE_A, agentId: "agent_bob" },
+    { instanceId: INSTANCE_B, agentId: "agent_codex" },
+    { instanceId: INSTANCE_C, agentId: "agent_acp" },
+  ];
+  const handlers = {
+    [INSTANCE_A]: async (wake) => {
+      seen.push({ who: "bob", reason: wake.reason, highWatermark: wake.highWatermark });
+      return { status: "accepted" };
+    },
+    [INSTANCE_B]: async (wake) => {
+      seen.push({ who: "codex", reason: wake.reason, highWatermark: wake.highWatermark });
+      return { status: "accepted" };
+    },
+    [INSTANCE_C]: async (wake) => {
+      seen.push({ who: "acp", reason: wake.reason, highWatermark: wake.highWatermark });
+      return { status: "accepted" };
+    },
+  };
+
+  const outage = createInstallWatchDispatcher({
+    profiles,
+    handlers,
+    transport,
+    cursorStore,
+    coalesceMs: 1,
+    idlePollIntervalMs: 0,
+    migrateLaneCursors: false,
+  });
+  await assert.rejects(
+    () => outage.start({ maxCycles: 1, reconcile: false }),
+    (error) => error?.code === "watch_unavailable",
+  );
+  assert.equal(await cursorStore.read(), 0);
+  assert.equal(seen.length, 0);
+
+  const recovered = createInstallWatchDispatcher({
+    profiles,
+    handlers,
+    transport,
+    cursorStore,
+    coalesceMs: 1,
+    idlePollIntervalMs: 0,
+    migrateLaneCursors: false,
+  });
+  await recovered.start({ maxCycles: 2, reconcile: true });
+
+  const startup = seen.filter((wake) => wake.reason === "startup_reconcile").map((wake) => wake.who);
+  const resync = seen.filter((wake) => wake.reason === "resync_reconcile").map((wake) => wake.who);
+  const hints = seen.filter((wake) => wake.reason == null);
+  assert.deepEqual(startup, ["bob", "codex", "acp"]);
+  assert.deepEqual(resync, ["bob", "codex", "acp"]);
+  assert.deepEqual(hints.map((wake) => wake.who), ["bob", "codex", "acp"]);
+  assert.deepEqual(hints.map((wake) => wake.highWatermark), [11, 10, 9]);
+  assert.equal(await cursorStore.read(), 11);
+});
+
 test("install dispatcher rejects profiles without handlers", () => {
   assert.throws(() => createInstallWatchDispatcher({
     profiles: [{ instanceId: INSTANCE_A, agentId: "agent_bob" }],

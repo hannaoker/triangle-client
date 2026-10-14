@@ -153,6 +153,18 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 safeToRetry: false,
                 detail: "Actor profile is not declared in the watch grant membership."
             )
+        case .cursorAcpActorExcluded:
+            return WatchGrantFailureDiagnosis(
+                code: .actorNotDeclared,
+                gate: .membership,
+                operatorAction: .reviewWatchMembership,
+                safeToRetry: false,
+                detail: "cursor-acp profiles are watch members and cannot act as watch grant actors.",
+                operatorNotes: [
+                    "Keep an event-driven or headless Codex profile as the watch grant actor.",
+                    "Cursor ACP joins the grant only through the shadow runtime binding.",
+                ]
+            )
         case .interactiveDeliveryExcluded:
             return WatchGrantFailureDiagnosis(
                 code: .interactiveDeliveryExcluded,

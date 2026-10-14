@@ -56,15 +56,15 @@ export function createHeadlessCursorAcpDrain({
   let timer = null;
   let inFlight = null;
   let lastResult = null;
+  /** @type {string | null} Coalesced trailing kick reason while a drain is in flight. */
+  let pendingKickReason = null;
 
-  async function drainOnce() {
-    if (!started || stopping) return Object.freeze({ status: "stopped" });
-    if (inFlight != null) return Object.freeze({ status: "already_draining" });
-
+  async function runDrainAttempt(reason = "timer") {
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
     const operation = (async () => {
       const delivery = await resolveDelivery();
       if (delivery == null) {
-        lastResult = Object.freeze({ status: "idle" });
+        lastResult = Object.freeze({ status: "idle", reason });
         return lastResult;
       }
       try {
@@ -72,8 +72,8 @@ export function createHeadlessCursorAcpDrain({
           profileInstanceId,
           ...delivery,
         });
-        lastResult = result;
-        return result;
+        lastResult = Object.freeze({ ...result, reason });
+        return lastResult;
       } catch (error) {
         if (onDeliveryFailure != null) {
           try {
@@ -92,7 +92,80 @@ export function createHeadlessCursorAcpDrain({
       return await operation;
     } finally {
       if (inFlight === operation) inFlight = null;
+      if (pendingKickReason && started && !stopping) {
+        const trailingReason = pendingKickReason;
+        pendingKickReason = null;
+        // One trailing drainOnce claims at most one delivery. Further backlog
+        // waits for the pollIntervalMs timer. Do not await inside finally — a
+        // nested drainOnce would re-enter this finally, and do not loop here.
+        queueMicrotask(() => {
+          if (!started || stopping || inFlight != null) return;
+          drainOnce(trailingReason).catch((error) => {
+            logger.error?.("triangle_cursor_acp_drain_trailing_failed", {
+              code: error?.code ?? null,
+              reason: trailingReason,
+            });
+          });
+        });
+      }
     }
+  }
+
+  async function drainOnce(reason = "timer") {
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
+    if (inFlight != null) {
+      // Timer ticks already re-arm via schedule(). Coalescing them would
+      // busy-loop. Only watch hints arm a trailing drain, and the poll
+      // interval itself stays pollIntervalMs.
+      if (reason === "watch_hint" || reason === "watch_hint_trailing") {
+        pendingKickReason = "watch_hint_trailing";
+        return Object.freeze({
+          status: "already_draining",
+          pendingKick: true,
+          reason: pendingKickReason,
+        });
+      }
+      return Object.freeze({
+        status: "already_draining",
+        pendingKick: pendingKickReason != null,
+        reason: pendingKickReason,
+      });
+    }
+    return runDrainAttempt(reason);
+  }
+
+  /**
+   * Install-watch hint for this profile. Uses the supervisor-owned drain;
+   * does not open a second claimer or watch listener.
+   * Idle → start drainOnce; already draining → one coalesced trailing kick.
+   * That trailing kick drains one delivery. Any further backlog falls to the
+   * existing pollIntervalMs timer rather than another kick loop.
+   */
+  function kick({ reason = "watch_hint" } = {}) {
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > 64) {
+      throw new TypeError("kick reason is invalid");
+    }
+    if (!started || stopping) return Object.freeze({ status: "stopped", reason });
+    try {
+      runtime.noteWakeInvoked?.();
+    } catch {
+      // Diagnostic handoff only; never block watch fan-out.
+    }
+    if (inFlight != null) {
+      pendingKickReason = reason === "watch_hint" ? "watch_hint_trailing" : reason;
+      return Object.freeze({ status: "pending", reason: pendingKickReason });
+    }
+    // Admit-only: the install cursor must advance without waiting on claim.
+    const startedDrain = drainOnce(reason);
+    if (startedDrain && typeof startedDrain.then === "function") {
+      startedDrain.catch((error) => {
+        logger.error?.("triangle_cursor_acp_drain_kick_failed", {
+          code: error?.code ?? null,
+          reason,
+        });
+      });
+    }
+    return Object.freeze({ status: "accepted", reason });
   }
 
   function schedule() {
@@ -100,7 +173,7 @@ export function createHeadlessCursorAcpDrain({
     timer = setTimer(async () => {
       timer = null;
       try {
-        await drainOnce();
+        await drainOnce("timer");
       } catch (error) {
         logger.error?.("triangle_cursor_acp_drain_failed", {
           code: error?.code ?? null,
@@ -115,6 +188,7 @@ export function createHeadlessCursorAcpDrain({
   async function start({ runLoop = true } = {}) {
     if (started) return status();
     stopping = false;
+    pendingKickReason = null;
     await runtime.start();
     try {
       if (typeof runtime.recoverAfterRestart === "function") {
@@ -138,6 +212,7 @@ export function createHeadlessCursorAcpDrain({
 
   async function stop(options = {}) {
     stopping = true;
+    pendingKickReason = null;
     if (timer != null) {
       clearTimer(timer);
       timer = null;
@@ -158,8 +233,12 @@ export function createHeadlessCursorAcpDrain({
     return Object.freeze({
       started,
       stopping,
-      lastResult,
+      draining: inFlight != null,
+      pendingKick: pendingKickReason != null,
+      pendingKickReason,
+      pollIntervalMs,
       profileInstanceId,
+      lastResult,
     });
   }
 
@@ -167,6 +246,7 @@ export function createHeadlessCursorAcpDrain({
     start,
     stop,
     drainOnce,
+    kick,
     status,
   });
 }

@@ -38,6 +38,8 @@ import { resolveTriangleCursorHome } from "./runtime-home.mjs";
 
 const PROFILE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const INSTANCE = /^[a-f0-9]{64}$/;
+const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
+const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 
 export const CLIENT_SUPERVISOR_CLAIMER_OWNER = "dev.thetriangle.client";
 export const DEDICATED_CURSOR_ACP_DRAIN_CLAIMER_OWNER = "dev.thetriangle.cursor-acp-drain";
@@ -53,7 +55,11 @@ export const CURSOR_ACP_WAKE_REQUIRED_KEYS = Object.freeze([
   "pollIntervalMs",
   "shadowTestProfile",
 ]);
-export const CURSOR_ACP_WAKE_OPTIONAL_KEYS = Object.freeze([]);
+/** Optional: MESH agent id + installation for the shared install-watch fan-out. Absent → timer-only. */
+export const CURSOR_ACP_WAKE_OPTIONAL_KEYS = Object.freeze([
+  "agentId",
+  "installationId",
+]);
 export const CURSOR_ACP_WAKE_KEYS = Object.freeze([
   ...CURSOR_ACP_WAKE_REQUIRED_KEYS,
   ...CURSOR_ACP_WAKE_OPTIONAL_KEYS,
@@ -401,6 +407,20 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
   if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 60_000) {
     throw new TypeError("pollIntervalMs must be between 100 and 60000");
   }
+  let agentId = null;
+  if (Object.hasOwn(cursorAcpWake, "agentId")) {
+    if (typeof cursorAcpWake.agentId !== "string" || !AGENT_ID.test(cursorAcpWake.agentId)) {
+      throw new TypeError("cursorAcpWake.agentId is invalid");
+    }
+    agentId = cursorAcpWake.agentId;
+  }
+  let installationId = null;
+  if (Object.hasOwn(cursorAcpWake, "installationId")) {
+    if (typeof cursorAcpWake.installationId !== "string" || !INSTALLATION_ID.test(cursorAcpWake.installationId)) {
+      throw new TypeError("cursorAcpWake.installationId is invalid");
+    }
+    installationId = cursorAcpWake.installationId;
+  }
   return Object.freeze({
     profile,
     profileInstanceId,
@@ -411,6 +431,8 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
     command: requiredAbsolute(cursorAcpWake.command, "command"),
     pollIntervalMs,
     shadowTestProfile: true,
+    ...(agentId != null ? { agentId } : {}),
+    ...(installationId != null ? { installationId } : {}),
   });
 }
 
