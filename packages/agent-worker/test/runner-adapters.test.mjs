@@ -318,7 +318,7 @@ test("Antigravity adapter routes CLI logs into the instance temp root", () => {
   assert.equal(invocation.command, "/usr/bin/agy");
   assert.deepEqual(
     invocation.args,
-    ["-p", "ping", "--output-format", "text", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
+    ["-p", "ping", "--output-format", "json", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
   );
 });
 
