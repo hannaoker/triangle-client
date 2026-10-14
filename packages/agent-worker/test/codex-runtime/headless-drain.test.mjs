@@ -278,6 +278,7 @@ test("claimer guard refuses Cursor ACP ownership of the same profile", () => {
       profile,
       owner: "dev.thetriangle.client",
       pid: 9_001,
+      family: "cursor-acp",
     })}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
@@ -286,7 +287,7 @@ test("claimer guard refuses Cursor ACP ownership of the same profile", () => {
     lockPath,
     probeDedicatedDrain: () => false,
     probeCursorAcpDrain: () => false,
-    pidAlive: (candidate) => candidate === 9_001,
+    advisoryHeld: (target) => target === cursorLock,
   });
   assert.throws(
     () => guard.assertSupervisorMayClaim(),
@@ -346,58 +347,63 @@ test("claimer guard refuses dual consumers on the same profile", () => {
   }
 });
 
-test("claimer guard uses exclusive creation so a check-then-create race has one winner", () => {
-  const lockPath = `/tmp/triangle-headless-race-${process.pid}-${Date.now()}.json`;
+test("claimer guard advisory lock allows only one concurrent owner", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "codex-claimer-race-"));
+  const lockPath = path.join(root, "headless-claimer.codex-headless.json");
   const first = createHeadlessClaimerGuard({
-    profile: "codex-headless", pid: 5_001, lockPath,
+    profile: "codex-headless",
+    pid: 5_001,
+    lockPath,
     probeDedicatedDrain: () => false,
     probeCursorAcpDrain: () => false,
-    pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
   });
-  let raced = false;
   const second = createHeadlessClaimerGuard({
-    profile: "codex-headless", pid: 5_002, lockPath,
+    profile: "codex-headless",
+    pid: 5_002,
+    lockPath,
     probeDedicatedDrain: () => false,
     probeCursorAcpDrain: () => false,
-    pidAlive: (candidate) => candidate === 5_001 || candidate === 5_002,
-    createLockExclusive(args) {
-      raced = true;
-      first.acquire({ owner: "dev.thetriangle.client" });
-      return args.create(args.lockPath, args.document);
-    },
   });
+  first.acquire({ owner: "dev.thetriangle.client" });
   try {
     assert.throws(
       () => second.acquire({ owner: "dev.thetriangle.client" }),
-      (error) => error.code === "supervisor_headless_claimer_active",
+      (error) =>
+        error.code === "supervisor_headless_claimer_active"
+        || error.code === "claimer_lock_held",
     );
-    assert.equal(raced, true);
     assert.equal(first.inspect().lock?.pid, 5_001);
   } finally {
     first.release({ owner: "dev.thetriangle.client" });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("claimer guard never unlinks or replaces an existing stale lock during acquire", () => {
-  const lockPath = `/tmp/triangle-headless-stale-${process.pid}-${Date.now()}.json`;
+test("claimer guard acquires over leftover diagnostic JSON without operator cleanup", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "codex-claimer-stale-"));
+  const lockPath = path.join(root, "headless-claimer.codex-headless.json");
   const stale = `${JSON.stringify({ version: 1, profile: "codex-headless", owner: "dev.thetriangle.client", pid: 4_444 })}\n`;
   writeFileSync(lockPath, stale, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  // Peer path leftover from a prior dual-lock acquire.
+  writeFileSync(
+    path.join(root, "cursor-acp-claimer.codex-headless.json"),
+    `${JSON.stringify({ version: 1, profile: "codex-headless", owner: "dev.thetriangle.client", pid: 4_444 })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   const guard = createHeadlessClaimerGuard({
-    profile: "codex-headless", pid: 5_555, lockPath,
+    profile: "codex-headless",
+    pid: 5_555,
+    lockPath,
     probeDedicatedDrain: () => false,
     probeCursorAcpDrain: () => false,
-    pidAlive: () => false,
   });
   try {
-    assert.throws(
-      () => guard.acquire({ owner: "dev.thetriangle.client" }),
-      (error) => error.code === "headless_claimer_lock_stale",
-    );
-    assert.equal(readFileSync(lockPath, "utf8"), stale);
-    assert.equal(guard.release({ owner: "dev.thetriangle.client" }), false);
-    assert.equal(readFileSync(lockPath, "utf8"), stale);
+    guard.acquire({ owner: "dev.thetriangle.client" });
+    assert.equal(guard.inspect().lock?.pid, 5_555);
+    assert.match(readFileSync(lockPath, "utf8"), /"pid":5555/);
   } finally {
-    unlinkSync(lockPath);
+    guard.release({ owner: "dev.thetriangle.client" });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

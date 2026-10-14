@@ -114,7 +114,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if manifestVersion == 5 || manifestVersion == 6 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -141,8 +141,14 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
             ])
-            if manifestVersion == 6 {
+            // v6 schema extraction; v5 bundles omit it.
+            if manifestVersion == 6 || manifestVersion == 7 {
                 artifacts.insert("packages/agent-worker/src/client-supervisor-schema.mjs")
+            }
+            // v7 headless ownership recovery; v5/v6 helpers keep exact-set match.
+            if manifestVersion == 7 {
+                artifacts.insert("packages/agent-worker/src/claimer-advisory-lock.mjs")
+                artifacts.insert("packages/agent-worker/src/open-transaction-recovery.mjs")
             }
             if worker == .codex {
                 artifacts.formUnion([
@@ -302,7 +308,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let manifest: WorkerInstallManifest
             do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
             catch { throw WorkerLauncherError.invalidManifest }
-            guard manifest.version == 4 || manifest.version == 5 || manifest.version == 6 else { continue }
+            guard manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7 else { continue }
             let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
             try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
             var environment: [String: String] = [:]
@@ -322,7 +328,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 let manifestURL = runtime.appendingPathComponent("\(worker.rawValue).manifest.json")
                 guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
                 guard let manifest = try? JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)),
-                      manifest.version == 4 || manifest.version == 5 || manifest.version == 6
+                      manifest.version == 4 || manifest.version == 5 || manifest.version == 6 || manifest.version == 7
                 else { continue }
                 guard let canonicalProject = try? checkedDirectory(URL(fileURLWithPath: manifest.projectRoot, isDirectory: true), exactMode: 0o700) else { continue }
                 let node = canonicalProject.appendingPathComponent("bin/node")

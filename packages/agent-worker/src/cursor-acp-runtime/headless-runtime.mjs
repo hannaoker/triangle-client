@@ -11,6 +11,7 @@
  */
 
 import { replyBeforeAckStages } from "../codex-runtime/execution-state.mjs";
+import { recoverOpenMailboxTransaction } from "../open-transaction-recovery.mjs";
 import { createCursorAcpProcess } from "./acp-process.mjs";
 import {
   createDefaultCursorAcpShadowProfile,
@@ -373,41 +374,35 @@ export function createHeadlessCursorAcpRuntime({
   }
 
   async function recoverAfterRestart({ profileInstanceId: instanceId = null } = {}) {
-    // Prefer the durable helper path: a reply-persisted / ack-missing transaction
-    // is reconciled by createHelperDurableDeliveryResolver on the next claim-next.
-    // When a proxy is present, also settle a verified replied open via status→ack
-    // before the drain admits more work after restart.
-    let reconciledAck = 0;
-    if (
-      transactionProxy != null
-      && typeof transactionProxy.status === "function"
-      && typeof transactionProxy.ack === "function"
-    ) {
-      try {
-        const status = await transactionProxy.status();
-        const open = status?.open;
-        if (
-          open
-          && typeof open === "object"
-          && open.state === "replied"
-          && Number.isSafeInteger(open.deliveryId)
-          && open.deliveryId > 0
-        ) {
-          await transactionProxy.ack({ resumeOnly: true });
-          reconciledAck = 1;
-          logger.info?.({
-            msg: "cursor_acp_replied_reconciled",
-            deliveryId: open.deliveryId,
-            path: "ack_only",
-          });
-        }
-      } catch (error) {
-        logger.error?.({
-          msg: "cursor_acp_recover_after_restart_failed",
-          code: error?.code ?? null,
-        });
-        throw error;
-      }
+    let openRecovery;
+    try {
+      openRecovery = await recoverOpenMailboxTransaction({
+        transactionProxy,
+        expectedProtocol:
+          typeof transactionProxy?.protocol === "string"
+            ? transactionProxy.protocol
+            : "coordinator-delivery-v1",
+        logger: {
+          info: (event, fields) => logger.info?.({ msg: event, ...(fields ?? {}) }),
+          error: (event, fields) => logger.error?.({ msg: event, ...(fields ?? {}) }),
+        },
+      });
+    } catch (error) {
+      logger.error?.({
+        msg: "cursor_acp_recover_after_restart_failed",
+        code: error?.code ?? null,
+      });
+      throw error;
+    }
+
+    if (openRecovery.quarantined > 0) {
+      return Object.freeze({
+        quarantined: openRecovery.quarantined,
+        reconciledAck: openRecovery.reconciledAck,
+        resumePending: openRecovery.resumePending ?? 0,
+        receiptDrained: openRecovery.receiptDrained ?? 0,
+        openTransaction: openRecovery,
+      });
     }
 
     // Ack already committed in helper but local clear never ran: return memory
@@ -425,7 +420,13 @@ export function createHeadlessCursorAcpRuntime({
       }
     }
 
-    return Object.freeze({ quarantined: 0, reconciledAck });
+    return Object.freeze({
+      quarantined: 0,
+      reconciledAck: openRecovery.reconciledAck,
+      resumePending: openRecovery.resumePending ?? 0,
+      receiptDrained: openRecovery.receiptDrained ?? 0,
+      openTransaction: openRecovery,
+    });
   }
 
   function status() {

@@ -1,10 +1,8 @@
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -17,6 +15,12 @@ import {
   createHelperDurableDeliveryResolver,
   createHelperTrustedTransactionProxy,
 } from "../helper-transaction-proxy.mjs";
+import {
+  acquireAdvisoryLock,
+  isAdvisoryLockHeld,
+  isPidAlive,
+  readClaimerDiagnostics,
+} from "../claimer-advisory-lock.mjs";
 import { orderedClaimerLockPaths, peerClaimerLockPath } from "../claimer-cross-runtime.mjs";
 import { createDurableConversationStore } from "./durable-conversation-store.mjs";
 import { createHeadlessCodexDrain } from "./headless-drain.mjs";
@@ -190,54 +194,6 @@ export function probeDedicatedCursorAcpDrainLoaded(
   }
 }
 
-function isPidAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function readClaimerLock(lockPath) {
-  if (typeof lockPath !== "string" || !path.isAbsolute(lockPath) || lockPath.includes("\0")) {
-    return null;
-  }
-  if (!existsSync(lockPath)) return null;
-  try {
-    const raw = readFileSync(lockPath, { encoding: "utf8" });
-    const value = JSON.parse(raw);
-    if (
-      value?.version !== 1
-      || typeof value.profile !== "string"
-      || typeof value.owner !== "string"
-      || !Number.isSafeInteger(value.pid)
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      version: 1,
-      profile: value.profile,
-      owner: value.owner,
-      pid: value.pid,
-    });
-  } catch {
-    return null;
-  }
-}
-
-function writeClaimerLockExclusive(lockPath, document) {
-  const directory = path.dirname(lockPath);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const descriptor = openSync(lockPath, "wx", 0o600);
-  try {
-    writeFileSync(descriptor, `${JSON.stringify(document)}\n`, { encoding: "utf8" });
-  } finally {
-    closeSync(descriptor);
-  }
-}
-
 export function createHeadlessClaimerGuard({
   profile,
   allowedRoomId = null,
@@ -249,7 +205,8 @@ export function createHeadlessClaimerGuard({
   probeDedicatedDrain = probeDedicatedHeadlessDrainLoaded,
   probeCursorAcpDrain = probeDedicatedCursorAcpDrainLoaded,
   pidAlive = isPidAlive,
-  createLockExclusive = ({ lockPath: target, document, create }) => create(target, document),
+  advisoryHeld = isAdvisoryLockHeld,
+  acquireLock = acquireAdvisoryLock,
 } = {}) {
   assertHeadlessDrainIdentity({ profile, allowedRoomId, runtimeAdapter });
   const cursorAcpLockPath = peerClaimerLockPath(lockPath, profile, "cursor-acp");
@@ -258,15 +215,43 @@ export function createHeadlessClaimerGuard({
     profile,
     primaryFamily: "codex",
   });
+  /** @type {Map<string, { release(): boolean }>} */
+  const held = new Map();
 
-  function liveLockAt(targetPath) {
-    const primary = readClaimerLock(targetPath);
-    if (primary?.profile === profile && pidAlive(primary.pid)) return primary;
+  function diagnosticsAt(targetPath) {
+    const primary = readClaimerDiagnostics(targetPath);
+    if (primary?.profile === profile) return primary;
     if (targetPath !== lockPath) return null;
     const legacyPath = legacyHeadlessClaimerLockPath(lockPath);
-    const legacy = legacyPath === lockPath ? null : readClaimerLock(legacyPath);
-    if (legacy?.profile === profile && pidAlive(legacy.pid)) return legacy;
-    return null;
+    if (legacyPath === lockPath) return null;
+    const legacy = readClaimerDiagnostics(legacyPath);
+    return legacy?.profile === profile ? legacy : null;
+  }
+
+  function foreignHeldAt(targetPath) {
+    if (held.has(targetPath)) return false;
+    try {
+      return advisoryHeld(targetPath) === true;
+    } catch (error) {
+      if (error?.code === "claimer_lock_unsupported_platform") throw error;
+      return false;
+    }
+  }
+
+  function liveLockAt(targetPath) {
+    const diagnostics = diagnosticsAt(targetPath);
+    if (held.has(targetPath)) {
+      return diagnostics ?? Object.freeze({ version: 1, profile, owner: CLIENT_SUPERVISOR_CLAIMER_OWNER, pid });
+    }
+    if (!foreignHeldAt(targetPath)) return null;
+    if (diagnostics?.profile === profile) return diagnostics;
+    // Held but diagnostics missing/malformed — still treat as foreign ownership.
+    return Object.freeze({
+      version: 1,
+      profile,
+      owner: "unknown",
+      pid: -1,
+    });
   }
 
   function liveLock() {
@@ -279,6 +264,9 @@ export function createHeadlessClaimerGuard({
     }
     if (existing?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER) {
       return "dedicated_headless_drain_loaded";
+    }
+    if (existing?.owner === "unknown") {
+      return "claimer_lock_held";
     }
     return "cursor_acp_claimer_blocks_codex";
   }
@@ -297,8 +285,12 @@ export function createHeadlessClaimerGuard({
         dedicatedDrainLoaded,
         cursorAcpDrainLoaded,
         cursorAcpClaimerLockActive: cursorAcpLock != null && cursorAcpLock.pid !== pid,
-        supervisorLockActive: lock?.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER,
-        dedicatedDrainLockActive: lock?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER,
+        supervisorLockActive: lock?.owner === CLIENT_SUPERVISOR_CLAIMER_OWNER && (
+          held.has(lockPath) || (lock.pid !== pid && (foreignHeldAt(lockPath) || pidAlive(lock.pid)))
+        ),
+        dedicatedDrainLockActive: lock?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER && (
+          held.has(lockPath) || foreignHeldAt(lockPath) || pidAlive(lock.pid)
+        ),
         lock,
         cursorAcpLock,
       });
@@ -312,13 +304,6 @@ export function createHeadlessClaimerGuard({
           { profile },
         );
       }
-      if (state.cursorAcpClaimerLockActive) {
-        throw codedError(
-          "cursor_acp_claimer_blocks_codex",
-          "Cursor ACP claimer lock is active for this profile; refusing Codex claim",
-          { profile, cursorAcpLockPath },
-        );
-      }
       if (state.dedicatedDrainLoaded) {
         throw codedError(
           "dedicated_headless_drain_loaded",
@@ -326,7 +311,7 @@ export function createHeadlessClaimerGuard({
           { label: dedicatedHeadlessDrainLaunchAgentLabel(profile) },
         );
       }
-      if (state.supervisorLockActive && state.lock.pid !== pid) {
+      if (state.supervisorLockActive && state.lock?.pid !== pid) {
         throw codedError(
           "supervisor_headless_claimer_active",
           "another client supervisor already owns the headless claimer lock",
@@ -338,6 +323,26 @@ export function createHeadlessClaimerGuard({
           "dedicated headless drain still holds the claimer lock; refusing dual claimers",
         );
       }
+      if (state.cursorAcpClaimerLockActive) {
+        const peer = state.cursorAcpLock;
+        // Our dual-lock writes family=codex on both paths; Cursor ACP writes family=cursor-acp.
+        if (peer?.family === "codex" || peer?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER) {
+          throw codedError(
+            peer?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER
+              ? "dedicated_headless_drain_loaded"
+              : "supervisor_headless_claimer_active",
+            peer?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER
+              ? "dedicated headless drain still holds the claimer lock; refusing dual claimers"
+              : "another client supervisor already owns the headless claimer lock",
+            { profile, cursorAcpLockPath },
+          );
+        }
+        throw codedError(
+          "cursor_acp_claimer_blocks_codex",
+          "Cursor ACP claimer lock is active for this profile; refusing Codex claim",
+          { profile, cursorAcpLockPath },
+        );
+      }
     },
     assertDedicatedDrainMayClaim() {
       const state = this.inspect();
@@ -347,7 +352,22 @@ export function createHeadlessClaimerGuard({
           "client supervisor already owns headless mailbox admission; refusing dual claimers",
         );
       }
-      if (state.cursorAcpDrainLoaded || state.cursorAcpClaimerLockActive) {
+      if (state.cursorAcpDrainLoaded) {
+        throw codedError(
+          "cursor_acp_claimer_blocks_codex",
+          "Cursor ACP already owns mailbox admission for this profile; refusing dual claimers",
+          { profile },
+        );
+      }
+      if (state.cursorAcpClaimerLockActive) {
+        const peer = state.cursorAcpLock;
+        if (peer?.family === "codex" || peer?.owner === DEDICATED_HEADLESS_DRAIN_CLAIMER_OWNER) {
+          throw codedError(
+            "supervisor_headless_claimer_active",
+            "client supervisor already owns headless mailbox admission; refusing dual claimers",
+            { profile },
+          );
+        }
         throw codedError(
           "cursor_acp_claimer_blocks_codex",
           "Cursor ACP already owns mailbox admission for this profile; refusing dual claimers",
@@ -361,41 +381,41 @@ export function createHeadlessClaimerGuard({
       }
       if (owner === CLIENT_SUPERVISOR_CLAIMER_OWNER) this.assertSupervisorMayClaim();
       else this.assertDedicatedDrainMayClaim();
+      if (held.size > 0) {
+        throw codedError("claimer_lock_held", "claimer guard already holds advisory locks", { profile });
+      }
       const document = {
         version: 1,
         profile,
         owner,
         pid,
+        family: "codex",
       };
-      const created = [];
+      const acquired = [];
       try {
         for (const target of orderedLockPaths) {
           try {
-            createLockExclusive({ lockPath: target, document, create: writeClaimerLockExclusive });
-            created.push(target);
+            const handle = acquireLock({ lockPath: target, document });
+            acquired.push([target, handle]);
           } catch (error) {
-            if (error?.code !== "EEXIST") throw error;
-            const existing = readClaimerLock(target);
-            if (existing && pidAlive(existing.pid)) {
+            if (error?.code === "claimer_lock_held") {
+              const existing = error.existing ?? readClaimerDiagnostics(target);
               throw codedError(
                 classifyForeignLock(existing),
                 "another process already owns a cross-runtime claimer lock for this profile",
-                { lockPath: target, profile },
+                { lockPath: target, profile, existing },
               );
             }
-            // Fail closed for stale or malformed files. Acquisition never removes
-            // an existing path; operator cleanup is explicit and auditable.
-            throw codedError(
-              "headless_claimer_lock_stale",
-              "an existing stale headless claimer lock requires operator cleanup",
-              { lockPath: target },
-            );
+            throw error;
           }
         }
+        for (const [target, handle] of acquired) {
+          held.set(target, handle);
+        }
       } catch (error) {
-        for (const target of [...created].reverse()) {
+        for (const [, handle] of [...acquired].reverse()) {
           try {
-            unlinkSync(target);
+            handle.release();
           } catch {
             // Best-effort rollback of partial dual-lock acquire.
           }
@@ -406,15 +426,17 @@ export function createHeadlessClaimerGuard({
     release({ owner } = {}) {
       let released = false;
       for (const target of [...orderedLockPaths].reverse()) {
-        const lock = readClaimerLock(target);
-        if (lock == null) continue;
-        if (lock.profile !== profile || lock.owner !== owner || lock.pid !== pid) continue;
-        try {
-          unlinkSync(target);
-          released = true;
-        } catch {
-          // Keep trying remaining locks.
+        const handle = held.get(target);
+        if (handle == null) continue;
+        const diagnostics = readClaimerDiagnostics(target);
+        if (
+          diagnostics != null
+          && (diagnostics.profile !== profile || diagnostics.owner !== owner || diagnostics.pid !== pid)
+        ) {
+          continue;
         }
+        held.delete(target);
+        if (handle.release()) released = true;
       }
       return released;
     },

@@ -33,6 +33,11 @@ const suites = [
     args: ["--test", "tests/cutover-headless-supervisor.test.mjs"],
   },
   {
+    name: "enable-headless-engagement",
+    command: "node",
+    args: ["--test", "tests/enable-headless-engagement.test.mjs"],
+  },
+  {
     name: "worker-service-render",
     command: "node",
     args: ["--test", "tests/worker-service-render.test.mjs"],

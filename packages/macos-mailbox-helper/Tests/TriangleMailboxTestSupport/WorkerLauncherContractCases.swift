@@ -20,7 +20,9 @@ public enum WorkerLauncherContractCases {
         .init(name: "legacy version-3 runtime cannot host the shared supervisor", run: { try legacyVersionThreeCannotHostSupervisor() }),
         .init(name: "version-5 runtime can host the shared supervisor", run: { try versionFiveCanHostSupervisor() }),
         .init(name: "version-6 runtime can host the shared supervisor with schema", run: { try versionSixCanHostSupervisorWithSchema() }),
+        .init(name: "version-7 runtime can host the shared supervisor with ownership modules", run: { try versionSevenCanHostSupervisorWithOwnershipModules() }),
         .init(name: "version-5 runtime rejects unexpected schema module", run: { try versionFiveRejectsSchemaModule() }),
+        .init(name: "version-6 runtime rejects unexpected ownership modules", run: { try versionSixRejectsOwnershipModules() }),
         .init(name: "shared runtime release resolves isolated opaque instance state", run: { try instanceStateIsolation() }),
         .init(name: "concurrent fresh instance resolution is idempotent", run: concurrentFreshRootResolution),
         .init(name: "clean installed runtime resolves and passes Node syntax smoke", run: { try installedBundleResolvesAndSmokes() }),
@@ -188,6 +190,21 @@ public enum WorkerLauncherContractCases {
         try expect(FileManager.default.isReadableFile(atPath: schema.path), "v6 schema module missing from bundle")
     }
 
+    public static func versionSevenCanHostSupervisorWithOwnershipModules() throws {
+        let fixture = try ResolverFixture(manifestVersion: 7); defer { fixture.cleanup() }
+        let instance = try ClientInstance(profile: ProfileName("ownership-supervisor-host"), runtimeAdapter: .codex)
+        let command = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolveCoordinator(for: [instance])
+        try expect(command.arguments[0].hasSuffix("/packages/agent-worker/src/client-supervisor-cli.mjs"), "v7 coordinator script missing")
+        for relative in [
+            "packages/agent-worker/src/client-supervisor-schema.mjs",
+            "packages/agent-worker/src/claimer-advisory-lock.mjs",
+            "packages/agent-worker/src/open-transaction-recovery.mjs",
+        ] {
+            let url = command.workingDirectory.appendingPathComponent(relative)
+            try expect(FileManager.default.isReadableFile(atPath: url.path), "v7 ownership module missing: \(relative)")
+        }
+    }
+
     public static func versionFiveRejectsSchemaModule() throws {
         let fixture = try ResolverFixture(manifestVersion: 5); defer { fixture.cleanup() }
         var object = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.manifestURL)) as! [String: Any]
@@ -205,6 +222,26 @@ public enum WorkerLauncherContractCases {
         do {
             _ = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolve(.codex, instance: instance)
             throw WorkerContractFailure("v5 accepted unexpected schema module")
+        } catch is WorkerLauncherError {}
+    }
+
+    public static func versionSixRejectsOwnershipModules() throws {
+        let fixture = try ResolverFixture(manifestVersion: 6); defer { fixture.cleanup() }
+        var object = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.manifestURL)) as! [String: Any]
+        var artifacts = object["artifacts"] as! [String: String]
+        let relative = "packages/agent-worker/src/claimer-advisory-lock.mjs"
+        let url = URL(fileURLWithPath: object["projectRoot"] as! String).appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try Data("// injected".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        artifacts[relative] = try sha256(url)
+        object["artifacts"] = artifacts
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: fixture.manifestURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fixture.manifestURL.path)
+        let instance = try ClientInstance(profile: ProfileName("v6-ownership-reject"), runtimeAdapter: .codex)
+        do {
+            _ = try FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot).resolve(.codex, instance: instance)
+            throw WorkerContractFailure("v6 accepted unexpected ownership module")
         } catch is WorkerLauncherError {}
     }
 
@@ -364,7 +401,7 @@ private final class ResolverFixture {
     private let node: URL
     private let manifest: URL
     var manifestURL: URL { manifest }
-    init(manifestVersion: Int = 6) throws {
+    init(manifestVersion: Int = 7) throws {
         fixtureHome = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("triangle-worker-\(UUID().uuidString)")
         applicationRoot = fixtureHome.appendingPathComponent("Library/Application Support/The Triangle")
         try manager.createDirectory(at: applicationRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -391,7 +428,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -407,7 +444,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -442,9 +479,15 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 {
+        if manifestVersion == 6 || manifestVersion == 7 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
+            ]
+        }
+        if manifestVersion == 7 {
+            artifactNames += [
+                "packages/agent-worker/src/claimer-advisory-lock.mjs",
+                "packages/agent-worker/src/open-transaction-recovery.mjs",
             ]
         }
         var artifacts: [String: String] = [:]

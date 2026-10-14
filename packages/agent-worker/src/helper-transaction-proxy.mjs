@@ -177,6 +177,13 @@ function parseJsonStdout(result, fallbackCode = "helper_unavailable") {
     if (gate?.code === "journal_ineligible") {
       throw createCodedError("journal_ineligible", "enrollment journal is ineligible");
     }
+    if (
+      gate?.code === "protocol_mismatch"
+      || /protocol_mismatch/i.test(String(result.stderr ?? ""))
+      || /protocol_mismatch/i.test(String(result.stdout ?? ""))
+    ) {
+      throw createCodedError("protocol_mismatch", "open transaction protocol ownership mismatch");
+    }
     throw createCodedError(fallbackCode, "transaction helper failed");
   }
   try {
@@ -359,7 +366,8 @@ export function createHelperTrustedTransactionProxy({
       );
     },
 
-    async ack({ signal } = {}) {
+    async ack({ signal, resumeOnly: _resumeOnly = false } = {}) {
+      // resumeOnly is advisory for callers (crash recovery); helper ack is idempotent.
       return invoke(
         ["transaction-ack", "--profile", profile, "--protocol", protocol],
         { signal },

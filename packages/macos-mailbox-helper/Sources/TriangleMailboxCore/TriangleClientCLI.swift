@@ -3,7 +3,10 @@ import CryptoKit
 import Foundation
 
 public enum TriangleClientCommandParseError: Error, Equatable, Sendable { case invalidArguments }
-public enum TriangleClientOperationError: Error, Equatable, Sendable { case runtimeUnavailable }
+public enum TriangleClientOperationError: Error, Equatable, Sendable {
+    case runtimeUnavailable
+    case invalidRuntimeTransition
+}
 public enum TriangleClientLifecycleError: Error, Equatable, Sendable { case reloadFailed, rollbackFailed, cleanupFailed }
 
 public protocol TriangleClientServiceControlling: Sendable { func applyAndVerify(shouldRun: Bool) throws }
@@ -19,6 +22,7 @@ public enum TriangleClientAgentCommand: Equatable, Sendable {
     case disable(profile: ProfileName)
     case remove(profile: ProfileName)
     case setDeliveryMode(profile: ProfileName, mode: DeliveryMode)
+    case setRuntime(profile: ProfileName, adapter: RuntimeAdapter)
 }
 
 public enum TriangleClientCommandParser {
@@ -45,6 +49,13 @@ public enum TriangleClientCommandParser {
                 throw TriangleClientCommandParseError.invalidArguments
             }
             do { return .setDeliveryMode(profile: try ProfileName(rawProfile), mode: mode) }
+            catch { throw TriangleClientCommandParseError.invalidArguments }
+        case "set-runtime":
+            let values = try exactFlags(flags, allowed: ["--profile", "--runtime"])
+            guard let rawProfile = values["--profile"], let rawRuntime = values["--runtime"], let adapter = RuntimeAdapter(rawValue: rawRuntime) else {
+                throw TriangleClientCommandParseError.invalidArguments
+            }
+            do { return .setRuntime(profile: try ProfileName(rawProfile), adapter: adapter) }
             catch { throw TriangleClientCommandParseError.invalidArguments }
         default: throw TriangleClientCommandParseError.invalidArguments
         }
@@ -117,7 +128,21 @@ public struct TriangleClientAgentService: Sendable {
             try instanceStore.setDeliveryMode(mode, profile: profile)
             try reloadOrRollback { try instanceStore.setDeliveryMode(previous.deliveryMode, profile: profile) }
             return try render(operation: "delivery_mode_set", agents: [instanceStore.read(profile: profile)])
+        case let .setRuntime(profile, adapter):
+            let lease = try lifecycleLock.acquire(); defer { lease.release() }
+            let previous = try instanceStore.read(profile: profile)
+            try Self.assertAllowedRuntimeTransition(from: previous.runtimeAdapter, to: adapter)
+            try instanceStore.setRuntimeAdapter(adapter, profile: profile)
+            try reloadOrRollback { try instanceStore.setRuntimeAdapter(previous.runtimeAdapter, profile: profile) }
+            return try render(operation: "runtime_set", agents: [instanceStore.read(profile: profile)])
         }
+    }
+
+    /// Guarded runtime swaps only. Idempotent same-adapter; grok-bot→codex for headless migrate.
+    private static func assertAllowedRuntimeTransition(from: RuntimeAdapter, to: RuntimeAdapter) throws {
+        if from == to { return }
+        if from == .grokBot, to == .codex { return }
+        throw TriangleClientOperationError.invalidRuntimeTransition
     }
 
     private func reloadOrRollback(_ rollback: () throws -> Void) throws {

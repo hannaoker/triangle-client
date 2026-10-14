@@ -331,6 +331,8 @@ function cursorAcpWakeOutsideValues(cursorAcpWake) {
     cursorAcpWake.cursorHome,
     cursorAcpWake.stateRoot,
     cursorAcpWake.command,
+    cursorAcpWake.agentId,
+    cursorAcpWake.installationId,
   ].filter((value) => typeof value === "string");
 }
 
@@ -815,7 +817,8 @@ export async function runClientSupervisorCLI({
         cursorAcpWakes: bootstrap.cursorAcpWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
         // C5: Bob webhook removed — install dispatcher opts in with appServerWake
-        // or headlessWakes that carry agentId + installationId for watch→kick.
+        // or headless Codex wakes that carry agentId + installationId.
+        // Cursor ACP is a member of that watch, never the reason it starts.
         useInstallWatchDispatcher: Boolean(
           bootstrap.appServerWake
           || (Array.isArray(bootstrap.headlessWakes)
