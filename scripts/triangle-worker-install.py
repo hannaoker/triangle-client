@@ -209,7 +209,10 @@ def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     else:
         fail("unsupported manifest version")
     extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7} else [])
-    extras += CODEX_HEADLESS_ARTIFACTS if version in {5, 6, 7} and agent == "codex" else []
+    # The coordinator (client-supervisor-cli.mjs) may launch from any worker's
+    # bundle and statically imports codex-runtime/headless-drain-service.mjs, so
+    # v7 ships codex-runtime in every bundle; v5/v6 keep their exact sets.
+    extras += CODEX_HEADLESS_ARTIFACTS if (version == 7 or (version in {5, 6} and agent == "codex")) else []
     extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7} else []
     extras += HEADLESS_OWNERSHIP_ARTIFACTS if version == 7 else []
     return common + extras + [
@@ -282,9 +285,11 @@ def discover_runtime_roots(agent, cli):
                         if os.path.exists(candidate):
                             roots.append(os.path.realpath(candidate))
     elif agent == "antigravity":
-        gemini_cli = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
-        if os.path.isdir(gemini_cli):
-            roots.append(os.path.realpath(gemini_cli))
+        # agy state: signed-in session (antigravity-cli) and project config (config).
+        for state_dir in ("antigravity-cli", "config"):
+            gemini_state = os.path.join(os.path.expanduser("~"), ".gemini", state_dir)
+            if os.path.isdir(gemini_state):
+                roots.append(os.path.realpath(gemini_state))
     return os.pathsep.join(dict.fromkeys(map(os.path.realpath, roots)))
 
 

@@ -56,6 +56,8 @@ function requirePlainComponents(homeInput, target, name, { create = false } = {}
   return canonical;
 }
 
+export const ANTIGRAVITY_STATE_DIRECTORIES = Object.freeze(["antigravity-cli", "config"]);
+
 function runtimeFamilies(env, activeWorker) {
   const families = [path.dirname(realpathSync(process.execPath))];
   const aliases = [];
@@ -83,6 +85,16 @@ function runtimeFamilies(env, activeWorker) {
     if (!cli || !path.isAbsolute(cli) || !existsSync(cli)) continue;
     const executable = realpathSync(cli);
     families.push(path.dirname(executable));
+    if (name === "ANTIGRAVITY_CLI") {
+      // agy keeps signed-in state under ~/.gemini/antigravity-cli and project config under
+      // ~/.gemini/config; the
+      // installer lists it in TRIANGLE_RUNTIME_ROOTS and the launcher marks it
+      // writable, so it is part of the approved Antigravity installation chain.
+      const home = typeof env.HOME === "string" && path.isAbsolute(env.HOME) ? env.HOME : null;
+      for (const stateRoot of home ? ANTIGRAVITY_STATE_DIRECTORIES.map((entry) => path.join(home, ".gemini", entry)) : []) {
+        if (existsSync(stateRoot)) families.push(realpathSync(stateRoot));
+      }
+    }
     if (name !== "HERMES_CLI") continue;
     const wrapper = readFileSync(executable, "utf8");
     const target = wrapper.match(/^exec\s+"([^"\n]+)"\s+"\$@"\s*$/m)?.[1];

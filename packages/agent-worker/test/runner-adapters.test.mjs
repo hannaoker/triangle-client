@@ -318,7 +318,7 @@ test("Antigravity adapter routes CLI logs into the instance temp root", () => {
   assert.equal(invocation.command, "/usr/bin/agy");
   assert.deepEqual(
     invocation.args,
-    ["-p", "ping", "--output-format", "text", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
+    ["-p", "ping", "--output-format", "json", "--sandbox", "--log-file", "/tmp/triangle-instance/antigravity-cli.log"],
   );
 });
 
@@ -522,4 +522,48 @@ test("installed Hermes and Codex help run under Keychain-launched deny-default s
   const codexResult = spawnSync(codexCommand.command, codexCommand.args, { encoding: "utf8", env: codexEnv });
   assert.equal(codexResult.status, 0, codexResult.stderr || String(codexResult.signal));
   assert.match(codexResult.stdout, /Codex|Usage/i);
+});
+
+test("Antigravity sandbox approves agy state roots (~/.gemini/antigravity-cli, ~/.gemini/config) but not arbitrary roots", async (t) => {
+  if (process.platform !== "darwin") return t.skip("Darwin sandbox profile");
+  const { sandboxCommand } = await import("../runners/runner-common.mjs");
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "triangle-agy-sandbox-")));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const instanceId = "d".repeat(64);
+  const project = join(base, "project");
+  const credentials = join(base, "credentials");
+  const modelBase = join(base, "Library", "Application Support", "The Triangle", "model-state");
+  const model = join(modelBase, "instances", instanceId);
+  const temporary = join(base, "Library", "Caches", "The Triangle", "instances", instanceId);
+  const cliBin = join(base, ".local", "bin");
+  const agyState = join(base, ".gemini", "antigravity-cli");
+  const agyConfig = join(base, ".gemini", "config");
+  const arbitrary = join(base, "arbitrary-runtime");
+  for (const directory of [project, credentials, model, temporary, cliBin, agyState, agyConfig, arbitrary]) mkdirSync(directory, { recursive: true });
+  const agy = join(cliBin, "agy"); writeFileSync(agy, "#!/bin/sh\nexit 0\n"); chmodSync(agy, 0o755);
+  const env = {
+    ...process.env,
+    HOME: base,
+    TRIANGLE_PROJECT_ROOT: project,
+    TRIANGLE_CREDENTIAL_ROOT: credentials,
+    TRIANGLE_MODEL_STATE_BASE: modelBase,
+    TRIANGLE_MODEL_ROOTS: model,
+    TRIANGLE_RUNTIME_ROOTS: [cliBin, agyState, agyConfig].join(":"),
+    TRIANGLE_WRITABLE_RUNTIME_ROOTS: [agyState, agyConfig].join(":"),
+    TRIANGLE_INSTANCE_ID: instanceId,
+    TRIANGLE_INSTANCE_TEMP_ROOT: temporary,
+    ANTIGRAVITY_CLI: agy,
+    ANTIGRAVITY_HOME: model,
+    CODEX_HOME: undefined,
+    HERMES_HOME: undefined,
+    CODEX_CLI: undefined,
+    HERMES_CLI: undefined,
+  };
+  const result = sandboxCommand(agy, ["--version"], env);
+  assert.equal(result.command, "/usr/bin/sandbox-exec");
+  for (const root of [agyState, agyConfig]) assert.match(result.args[1], new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.throws(
+    () => sandboxCommand(agy, ["--version"], { ...env, TRIANGLE_RUNTIME_ROOTS: [cliBin, agyState, agyConfig, arbitrary].join(":") }),
+    /approved executable installation chain/,
+  );
 });
