@@ -16,6 +16,10 @@ import { createFakeAcpStdioProgram } from "../../src/cursor-acp-runtime/acp-proc
 import { createHeadlessCursorAcpRuntime } from "../../src/cursor-acp-runtime/headless-runtime.mjs";
 import { createDefaultCursorAcpShadowProfile } from "../../src/cursor-acp-runtime/config-guards.mjs";
 
+const darwinAdvisoryLocks = process.platform !== "darwin"
+  ? "advisory claimer locks require macOS (Darwin O_EXLOCK); covered on macOS hosts"
+  : false;
+
 const PROFILE = "cursor-acp-shadow-test";
 const PROFILE_INSTANCE_ID = deriveProfileInstanceId(PROFILE);
 
@@ -219,7 +223,7 @@ test("restart recovery still blocks new Cursor ACP claims", async () => {
   assert.equal(drain.kick({ reason: "watch_hint" }).status, "stopped");
 });
 
-test("cursor ACP claimer fail-closed on dual claim", () => {
+test("cursor ACP claimer fail-closed on dual claim", { skip: darwinAdvisoryLocks }, () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-claimer-"));
   const lockPath = path.join(root, `cursor-acp-claimer.${PROFILE}.json`);
   const first = createCursorAcpClaimerGuard({
@@ -262,7 +266,7 @@ test("cursor ACP claimer fails closed when Codex drain is loaded", () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("cursor ACP claimer acquires Codex lock family and blocks Codex claimer", async () => {
+test("cursor ACP claimer acquires Codex lock family and blocks Codex claimer", { skip: darwinAdvisoryLocks }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-cross-runtime-"));
   const cursorLock = path.join(root, `cursor-acp-claimer.${PROFILE}.json`);
   const codexLock = path.join(root, `headless-claimer.${PROFILE}.json`);

@@ -11,6 +11,10 @@ import {
   readClaimerDiagnostics,
 } from "../src/claimer-advisory-lock.mjs";
 
+const darwinAdvisoryLocks = process.platform !== "darwin"
+  ? "advisory claimer locks require macOS (Darwin O_EXLOCK); covered on macOS hosts"
+  : false;
+
 test("isPidAlive treats only ESRCH as absent", () => {
   assert.equal(isPidAlive(process.pid), true);
   assert.equal(isPidAlive(1), false);
@@ -19,8 +23,7 @@ test("isPidAlive treats only ESRCH as absent", () => {
   assert.equal(isPidAlive(2_147_483_646), false);
 });
 
-test("advisory lock: leftover JSON does not block acquire; concurrent exclusive fails", () => {
-  if (process.platform !== "darwin") return;
+test("advisory lock: leftover JSON does not block acquire; concurrent exclusive fails", { skip: darwinAdvisoryLocks }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "claimer-advisory-"));
   const lockPath = path.join(root, "headless-claimer.demo.json");
   writeFileSync(
@@ -51,8 +54,7 @@ test("advisory lock: leftover JSON does not block acquire; concurrent exclusive 
   }
 });
 
-test("advisory lock rejects symlink leaf", () => {
-  if (process.platform !== "darwin") return;
+test("advisory lock rejects symlink leaf", { skip: darwinAdvisoryLocks }, () => {
   const root = mkdtempSync(path.join(tmpdir(), "claimer-symlink-"));
   const target = path.join(root, "target.json");
   const lockPath = path.join(root, "claimer.json");
