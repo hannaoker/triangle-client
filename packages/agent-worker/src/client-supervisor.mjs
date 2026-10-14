@@ -150,23 +150,30 @@ export function createClientSupervisor({
   // A grant is installation-scoped too. Track its generation so listeners that
   // fail together on one expired credential join (or observe) one renewal.
   const watchGrantRenewals = new Map();
-  // One install dispatcher. Anchor is appServerWake, or a headless Codex /
-  // Cursor ACP wake that carries agentId + installationId. Bob webhook removed.
+  // One install dispatcher. Anchor is appServerWake or a headless Codex wake
+  // that carries agentId + installationId. Cursor ACP is a member of that
+  // watch, never the anchor or grant actor. Bob webhook removed.
+  function readFallbackInstallationId(helperPath) {
+    try {
+      const raw = readFileSync(
+        path.join(path.dirname(helperPath), "..", "client", "installation.json"),
+        "utf8",
+      );
+      const installationId = JSON.parse(raw)?.installationId;
+      return typeof installationId === "string" ? installationId : null;
+    } catch {
+      return null;
+    }
+  }
+  function resolveConfigInstallationId(config) {
+    if (typeof config?.installationId === "string") return config.installationId;
+    if (typeof config?.helperPath !== "string") return null;
+    return readFallbackInstallationId(config.helperPath);
+  }
   function resolveRuntimeInstallAnchor(configs) {
     for (const config of configs) {
       if (typeof config.agentId !== "string" || config.agentId.length === 0) continue;
-      let installationId = config.installationId;
-      if (typeof installationId !== "string") {
-        try {
-          const raw = readFileSync(
-            path.join(path.dirname(config.helperPath), "..", "client", "installation.json"),
-            "utf8",
-          );
-          installationId = JSON.parse(raw)?.installationId;
-        } catch {
-          continue;
-        }
-      }
+      const installationId = resolveConfigInstallationId(config);
       if (typeof installationId !== "string" || !INSTALLATION_ID.test(installationId)) continue;
       const clientDir = path.resolve(path.dirname(config.helperPath), "..", "client");
       return Object.freeze({
@@ -180,16 +187,14 @@ export function createClientSupervisor({
     return null;
   }
   const headlessInstallAnchor = resolveRuntimeInstallAnchor(headlessConfigs);
-  const cursorAcpInstallAnchor = resolveRuntimeInstallAnchor(cursorAcpConfigs);
   const hasInstallDispatcherAnchor = Boolean(appServerConfig)
-    || Boolean(headlessInstallAnchor)
-    || Boolean(cursorAcpInstallAnchor);
+    || Boolean(headlessInstallAnchor);
   const installDispatcherEnabled = useInstallWatchDispatcher == null
     ? false
     : Boolean(useInstallWatchDispatcher);
   if (installDispatcherEnabled && !hasInstallDispatcherAnchor) {
     throw new TypeError(
-      "useInstallWatchDispatcher requires appServerWake, headlessWakes, or cursorAcpWakes with installationId as the install watch anchor",
+      "useInstallWatchDispatcher requires appServerWake or headlessWakes with installationId as the install watch anchor",
     );
   }
 
@@ -608,23 +613,23 @@ export function createClientSupervisor({
       laneCursorStores.push(createCursorStore({ filePath: appServerConfig.cursorPath }));
     }
 
-    const installAnchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor ?? cursorAcpInstallAnchor;
+    const installAnchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor;
     if (!installAnchor) {
       throw new TypeError(
-        "useInstallWatchDispatcher requires appServerWake, headlessWakes, or cursorAcpWakes with installationId as the install watch anchor",
+        "useInstallWatchDispatcher requires appServerWake or headlessWakes with installationId as the install watch anchor",
       );
     }
 
     // Register kick handlers when agentId is present. Events arrive only after
     // the install grant includes those agent ids. Cursor ACP joins this same
-    // profile list — no second watch listener or cursor.
+    // profile list — no second watch listener or cursor — and only when
+    // shadowTestProfile is set (the binding gate Swift already applied).
     function registerDrainKick(entry, { lane, logEvent }) {
       const agentId = entry.config.agentId;
       if (typeof agentId !== "string" || agentId.length === 0) return;
-      if (
-        typeof entry.config.installationId === "string"
-        && entry.config.installationId !== installAnchor.installationId
-      ) {
+      if (lane === "cursorAcpWake" && entry.config.shadowTestProfile !== true) return;
+      const installationId = resolveConfigInstallationId(entry.config);
+      if (typeof installationId === "string" && installationId !== installAnchor.installationId) {
         throw new TypeError(`${lane} installationId does not match the install watch anchor`);
       }
       if (dispatcherProfiles.some((profile) => profile.agentId === agentId)) {
@@ -774,18 +779,6 @@ export function createClientSupervisor({
           helperPath: headlessInstallAnchor.helperPath,
           installationId: headlessInstallAnchor.installationId,
           actorProfile: headlessInstallAnchor.actorProfile,
-        }
-        : null;
-      const cursorAcpEnsure = !wakeEnsure
-        && !appServerEnsure
-        && !grokBotEnsure
-        && !headlessEnsure
-        && installDispatcher
-        && cursorAcpInstallAnchor?.ensureBeforeWatch
-        ? {
-          helperPath: cursorAcpInstallAnchor.helperPath,
-          installationId: cursorAcpInstallAnchor.installationId,
-          actorProfile: cursorAcpInstallAnchor.actorProfile,
         }
         : null;
 
@@ -964,14 +957,14 @@ export function createClientSupervisor({
             }
           },
           // Grant renewal: prefer event-driven / App Server actor; headless Codex
-          // or Cursor ACP may renew when it is the sole install-watch anchor.
+          // may renew when it is the install-watch anchor. Cursor ACP is never
+          // the actor.
           renewal: (() => {
-            const anchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor ?? cursorAcpInstallAnchor;
+            const anchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor;
             if (!anchor?.ensureBeforeWatch) return null;
             const actorProfile = wakeConfig?.actorProfile
               ?? grokBotConfig?.actorProfile
-              ?? headlessInstallAnchor?.actorProfile
-              ?? cursorAcpInstallAnchor?.actorProfile;
+              ?? headlessInstallAnchor?.actorProfile;
             if (!actorProfile) return null;
             return {
               helperPath: anchor.helperPath,
@@ -979,7 +972,7 @@ export function createClientSupervisor({
               actorProfile,
             };
           })(),
-          ensure: grokBotEnsure ?? appServerEnsure ?? headlessEnsure ?? cursorAcpEnsure,
+          ensure: grokBotEnsure ?? appServerEnsure ?? headlessEnsure,
           logEvent: "triangle_client_install_watch_failed",
           logMessage: "Install watch dispatcher failed",
         })

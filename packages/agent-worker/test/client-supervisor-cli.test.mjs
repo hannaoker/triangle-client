@@ -812,7 +812,7 @@ function cursorAcpWake(overrides = {}) {
   };
 }
 
-test("CLI opts into install dispatcher for cursorAcpWakes with agentId and installationId", async () => {
+test("CLI keeps Cursor ACP off the install dispatcher even with agentId and installationId", async () => {
   const wakes = [cursorAcpWake({
     agentId: "agent_cursor_acp_001",
     installationId: "inst_N7VhDq3mQ2",
@@ -828,7 +828,7 @@ test("CLI opts into install dispatcher for cursorAcpWakes with agentId and insta
     },
   });
   assert.equal(result, 0);
-  assert.equal(received.useInstallWatchDispatcher, true);
+  assert.equal(received.useInstallWatchDispatcher, false);
   assert.equal(received.cursorAcpWakes[0].agentId, "agent_cursor_acp_001");
   assert.equal(received.cursorAcpWakes[0].pollIntervalMs, 1_000);
 

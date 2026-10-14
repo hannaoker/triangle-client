@@ -6,6 +6,7 @@ public enum WatchGrantServiceError: Error, Equatable, Sendable, CustomStringConv
     case noEventDrivenMembers
     case actorNotDeclared
     case interactiveDeliveryExcluded
+    case cursorAcpActorExcluded
     case workloadAuthUnavailable
     case workloadKeyMissing
     case credentialMissing
@@ -21,6 +22,7 @@ public enum WatchGrantServiceError: Error, Equatable, Sendable, CustomStringConv
         case .noEventDrivenMembers: "no notify-eligible profiles are available for a watch grant"
         case .actorNotDeclared: "actor profile is not declared in the watch grant membership"
         case .interactiveDeliveryExcluded: "mcp-interactive profiles cannot act as watch grant actors"
+        case .cursorAcpActorExcluded: "cursor-acp profiles are watch members and cannot act as watch grant actors"
         case .workloadAuthUnavailable: "workload authentication is unavailable for watch grant operations"
         case .workloadKeyMissing: "workload key material is missing for watch grant operations"
         case .credentialMissing: "watch grant credential is not installed"
@@ -44,6 +46,8 @@ public struct WatchGrantService: Sendable {
     private let auth: any WatchGrantAuthProviding
     private let credentialGate: VerifiedCredentialGate
     private let instanceStore: (any ClientInstanceStore)?
+    /// Test-only binding file. Production reads `cursor-acp-runtime-binding.json` under the home client root.
+    private let cursorAcpBindingURL: URL?
 
     public init(
         store: any WatchGrantStore,
@@ -52,11 +56,31 @@ public struct WatchGrantService: Sendable {
         credentialGate: VerifiedCredentialGate,
         instanceStore: (any ClientInstanceStore)? = nil
     ) {
+        self.init(
+            store: store,
+            transport: transport,
+            auth: auth,
+            credentialGate: credentialGate,
+            instanceStore: instanceStore,
+            cursorAcpBindingURL: nil
+        )
+    }
+
+    @_spi(WatchGrantTesting)
+    public init(
+        store: any WatchGrantStore,
+        transport: any MeshTransport,
+        auth: any WatchGrantAuthProviding,
+        credentialGate: VerifiedCredentialGate,
+        instanceStore: (any ClientInstanceStore)? = nil,
+        cursorAcpBindingURL: URL?
+    ) {
         self.store = store
         self.client = MeshWatchClient(transport: transport)
         self.auth = auth
         self.credentialGate = credentialGate
         self.instanceStore = instanceStore
+        self.cursorAcpBindingURL = cursorAcpBindingURL
     }
 
     /// Creates, joins, and finalizes a staged watch grant for event-driven members, then stores the opaque credential.
@@ -250,15 +274,13 @@ public struct WatchGrantService: Sendable {
             }
             // Auto membership: event-driven drains + App Server-bound
             // mcp-interactive + Grok Bot-bound + headless-runtime-bound Codex
-            // + cursor-acp-runtime-bound shadow profiles (when bindings are
-            // present). Do not pull every profile into the grant — binding
-            // gates apply. Cursor ACP joins only with that binding gate; the
-            // supervisor wake-to-drain handler is what makes the membership live.
+            // + cursor-acp-runtime-bound shadow profiles. Cursor ACP uses that
+            // binding gate on the explicit path too — enabled alone is not membership.
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
             let boundGrokBot = Self.grokBotBoundMembers(from: instances)
             let boundHeadless = Self.headlessBoundCodexMembers(from: instances)
-            let boundCursorAcp = Self.cursorAcpBoundMembers(from: instances)
+            let boundCursorAcp = cursorAcpBoundMembers(from: instances)
             profiles = (eventDriven + boundInteractive + boundGrokBot + boundHeadless + boundCursorAcp).map(\.profile)
         } else {
             profiles = [actorProfile]
@@ -277,11 +299,28 @@ public struct WatchGrantService: Sendable {
             }
             // mcp-interactive App Server hosts are notify-only; they cannot act.
             // grok-bot may act (Bob owns post-wake claim/reply/ack outside this adapter).
+            // cursor-acp may be a notify member and must never be the grant actor.
             if actorInstance.deliveryMode == .mcpInteractive {
                 throw WatchGrantServiceError.interactiveDeliveryExcluded
             }
+            if actorInstance.runtimeAdapter == .cursorAcp || actorInstance.deliveryMode == .headlessCursorAcp {
+                throw WatchGrantServiceError.cursorAcpActorExcluded
+            }
         }
 
+        let listedInstances: [ClientInstance]
+        if let instanceStore {
+            do {
+                listedInstances = try instanceStore.list()
+            } catch let error as ClientInstanceStoreError {
+                throw error
+            } catch {
+                throw ClientInstanceStoreError.unsafeStorage
+            }
+        } else {
+            listedInstances = []
+        }
+        let cursorAcpMemberIds = Set(cursorAcpBoundMembers(from: listedInstances).map(\.instanceID.value))
         var members: [MemberBinding] = []
         for profile in profiles.sorted(by: { $0.value < $1.value }) {
             if let instanceStore {
@@ -293,8 +332,15 @@ public struct WatchGrantService: Sendable {
                 } catch {
                     throw ClientInstanceStoreError.unsafeStorage
                 }
-                guard instance.participatesInWatchGrantNotify else {
-                    throw WatchGrantServiceError.noEventDrivenMembers
+                if instance.runtimeAdapter == .cursorAcp || instance.deliveryMode == .headlessCursorAcp {
+                    // Same gate as auto membership: enabled shadow binding, not every ACP profile.
+                    guard instance.participatesInCursorAcpWake,
+                          cursorAcpMemberIds.contains(instance.instanceID.value)
+                    else { throw WatchGrantServiceError.noEventDrivenMembers }
+                } else {
+                    guard instance.participatesInWatchGrantNotify else {
+                        throw WatchGrantServiceError.noEventDrivenMembers
+                    }
                 }
             }
             let credential = try await credentialGate.credential(for: profile)
@@ -458,12 +504,13 @@ public struct WatchGrantService: Sendable {
     /// cursor-acp-runtime-binding.json with shadowTestProfile true.
     /// File-credential custody, when enabled, also requires a local workload key
     /// so auto-ensure does not fail closed on a bound profile that cannot join yet.
-    private static func cursorAcpBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
+    private func cursorAcpBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
         let cursorAcp = instances.filter(\.participatesInCursorAcpWake)
         guard !cursorAcp.isEmpty else { return [] }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let clientRoot = home.appendingPathComponent("Library/Application Support/The Triangle/client")
-        let bindingURL = clientRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
+        let bindingURL = cursorAcpBindingURL ?? home
+            .appendingPathComponent("Library/Application Support/The Triangle/client")
+            .appendingPathComponent("cursor-acp-runtime-binding.json")
         guard FileManager.default.isReadableFile(atPath: bindingURL.path),
               let data = try? Data(contentsOf: bindingURL),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -478,6 +525,9 @@ public struct WatchGrantService: Sendable {
         })
         guard !boundInstanceIds.isEmpty else { return [] }
         let bound = cursorAcp.filter { boundInstanceIds.contains($0.instanceID.value) }
+        // An injected binding URL is the test fixture. Do not consult the
+        // operator home for file custody, or host tests depend on $HOME.
+        guard cursorAcpBindingURL == nil else { return bound }
         let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
         let fileCustodyEnabled = FileManager.default.isReadableFile(
             atPath: credentialsRoot.appendingPathComponent("ENABLED").path

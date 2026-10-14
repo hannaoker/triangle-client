@@ -816,15 +816,13 @@ export async function runClientSupervisorCLI({
         headlessWakes: bootstrap.headlessWakes ?? [],
         cursorAcpWakes: bootstrap.cursorAcpWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
-        // C5: Bob webhook removed — install dispatcher opts in with appServerWake,
-        // headless Codex, or Cursor ACP wakes that carry agentId + installationId.
-        // ACP membership without this opt-in would not route hints to the drain.
+        // C5: Bob webhook removed — install dispatcher opts in with appServerWake
+        // or headless Codex wakes that carry agentId + installationId.
+        // Cursor ACP is a member of that watch, never the reason it starts.
         useInstallWatchDispatcher: Boolean(
           bootstrap.appServerWake
           || (Array.isArray(bootstrap.headlessWakes)
-            && bootstrap.headlessWakes.some((wake) => wake?.agentId && wake?.installationId))
-          || (Array.isArray(bootstrap.cursorAcpWakes)
-            && bootstrap.cursorAcpWakes.some((wake) => wake?.agentId && wake?.installationId)),
+            && bootstrap.headlessWakes.some((wake) => wake?.agentId && wake?.installationId)),
         ),
         logger: sanitizedLogger(stderr),
         ...(bootstrap.appServerWake

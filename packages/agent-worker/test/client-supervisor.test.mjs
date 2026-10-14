@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { createClientSupervisor } from "../src/client-supervisor.mjs";
@@ -1039,6 +1042,12 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
   const codexAcquires = [];
   const acpAcquires = [];
   const controller = new AbortController();
+  function finishIfReady() {
+    const acpKicks = handled.filter((entry) => entry.who === "acp").length;
+    const acpHeld = acpAcquires.filter((event) => event === "acquire").length;
+    const codexHeld = codexAcquires.filter((event) => event === "acquire").length;
+    if (acpKicks >= 2 && acpHeld >= 1 && codexHeld >= 1) controller.abort();
+  }
   const supervisor = createClientSupervisor({
     instances: [],
     appServerWake: appServerWakeFixture(3),
@@ -1074,6 +1083,7 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
       async stop() {},
       kick({ reason }) {
         handled.push({ who: "codex", reason });
+        finishIfReady();
         return { status: "accepted" };
       },
     }),
@@ -1081,7 +1091,10 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
       codexClaimers += 1;
       return {
         assertSupervisorMayClaim() {},
-        acquire() { codexAcquires.push("acquire"); },
+        acquire() {
+          codexAcquires.push("acquire");
+          finishIfReady();
+        },
         release() { codexAcquires.push("release"); },
       };
     },
@@ -1090,7 +1103,7 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
       async stop() {},
       kick({ reason }) {
         handled.push({ who: "acp", reason });
-        if (handled.filter((entry) => entry.who === "acp").length >= 2) controller.abort();
+        finishIfReady();
         return { status: "accepted" };
       },
     }),
@@ -1098,7 +1111,10 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
       acpClaimers += 1;
       return {
         assertSupervisorMayClaim() {},
-        acquire() { acpAcquires.push("acquire"); },
+        acquire() {
+          acpAcquires.push("acquire");
+          finishIfReady();
+        },
         release() { acpAcquires.push("release"); },
       };
     },
@@ -1128,8 +1144,8 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
   assert.equal(handled.filter((entry) => entry.who === "bob").length >= 2, true);
   assert.equal(handled.filter((entry) => entry.who === "codex" && entry.reason === "watch_hint").length >= 2, true);
   assert.equal(handled.filter((entry) => entry.who === "acp" && entry.reason === "watch_hint").length >= 2, true);
-  assert.equal(codexAcquires.filter((event) => event === "acquire").length <= 1, true);
-  assert.equal(acpAcquires.filter((event) => event === "acquire").length <= 1, true);
+  assert.equal(codexAcquires.filter((event) => event === "acquire").length, 1);
+  assert.equal(acpAcquires.filter((event) => event === "acquire").length, 1);
   assert.equal(codexClaimers, 1);
   assert.equal(acpClaimers, 1);
 });
@@ -1184,59 +1200,118 @@ test("Cursor ACP without agentId stays off the install watch; a loaded claimer i
   assert.deepEqual(blocked.installWatchProfileIds, [id(3)]);
 });
 
-test("enrolled Cursor ACP can anchor the install watch and recovers after a watch outage", async () => {
+test("Cursor ACP is a member of an existing install watch and cannot anchor it", async () => {
+  const cursorAcp = cursorAcpWakeFixture({
+    agentId: "agent_cursor_acp_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    cursorAcpWakes: [cursorAcp],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+  }), /install watch anchor/);
+
+  const timerOnly = createClientSupervisor({
+    instances: [],
+    cursorAcpWakes: [cursorAcp],
+    ...installWatchStubs(),
+  });
+  assert.equal(timerOnly.installWatchDispatcherEnabled, false);
+  assert.deepEqual(timerOnly.installWatchProfileIds, []);
+  assert.deepEqual(timerOnly.cursorAcpInstanceIds, [cursorAcp.profileInstanceId]);
+
+  const actors = [];
+  const controller = new AbortController();
+  const headless = headlessWakeFixture({
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const supervised = createClientSupervisor({
+    instances: [],
+    headlessWakes: [headless],
+    cursorAcpWakes: [cursorAcp],
+    useInstallWatchDispatcher: true,
+    ...installWatchStubs(),
+    ensureWatchGrant: async (request) => {
+      actors.push(request.actorProfile);
+      controller.abort();
+      return { ensured: true };
+    },
+    createInstallDispatcher: (options) => ({
+      profiles: options.profiles,
+      async start() { return { cycles: 0 }; },
+      async stop() {},
+    }),
+  });
+  assert.deepEqual(supervised.installWatchProfileIds, [
+    headless.profileInstanceId,
+    cursorAcp.profileInstanceId,
+  ]);
+  await supervised.watch({
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
+    sleep: async () => {},
+  });
+  assert.deepEqual(actors, [headless.profile]);
+});
+
+test("enrolled Cursor ACP recovers through the real install dispatcher after a watch outage", async () => {
   const cursorAcp = cursorAcpWakeFixture({
     agentId: "agent_cursor_acp_001",
     installationId: "inst_N7VhDq3mQ2",
   });
   const kicks = [];
-  let starts = 0;
+  let polls = 0;
+  let cursor = 0;
   const controller = new AbortController();
   const supervisor = createClientSupervisor({
     instances: [],
+    appServerWake: appServerWakeFixture(3),
     cursorAcpWakes: [cursorAcp],
     useInstallWatchDispatcher: true,
     ...installWatchStubs(),
+    createCursorStore: () => ({
+      async read() { return cursor; },
+      async write(value) { cursor = value; },
+    }),
+    createWatchTransport: () => ({
+      async poll() {
+        polls += 1;
+        if (polls === 1) {
+          throw Object.assign(new Error("watch down"), { code: "watch_unavailable" });
+        }
+        if (cursor >= 6) return { cursor, events: [] };
+        return {
+          cursor: 6,
+          events: [{ agent_id: cursorAcp.agentId, high_watermark: 6 }],
+        };
+      },
+    }),
     createCursorAcpDrain: () => ({
       async start() {},
       async stop() {},
       kick({ reason }) {
         kicks.push(reason);
+        if (polls >= 2) controller.abort();
         return { status: "accepted" };
       },
     }),
-    createInstallDispatcher: (options) => {
-      assert.equal(options.idlePollIntervalMs, 2_000);
-      assert.deepEqual(options.profiles, [{
-        instanceId: cursorAcp.profileInstanceId,
-        agentId: cursorAcp.agentId,
-      }]);
-      return {
-        profiles: options.profiles,
-        async start() {
-          starts += 1;
-          if (starts === 1) {
-            throw Object.assign(new Error("watch down"), { code: "watch_unavailable" });
-          }
-          await options.handlers.get(cursorAcp.profileInstanceId)({
-            instanceId: cursorAcp.profileInstanceId,
-            reason: "watch_hint",
-            highWatermark: 6,
-          });
-          controller.abort();
-          return { status: "ok", cycles: starts };
-        },
-        async stop() {},
-      };
-    },
+    createInstallDispatcher: (options) => createInstallWatchDispatcher({
+      ...options,
+      coalesceMs: 1,
+    }),
   });
-  assert.deepEqual(supervisor.installWatchProfileIds, [cursorAcp.profileInstanceId]);
+  assert.deepEqual(supervisor.installWatchProfileIds, [
+    id(3),
+    cursorAcp.profileInstanceId,
+  ]);
   await supervisor.watch({
     signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
     sleep: async () => {},
   });
-  assert.equal(starts, 2);
-  assert.deepEqual(kicks, ["watch_hint"]);
+  assert.equal(polls >= 2, true);
+  assert.equal(cursor, 6);
+  assert.equal(kicks.includes("watch_hint"), true);
 });
 
 test("Cursor ACP install-watch membership requires a kick handler on the same installation", () => {
@@ -1263,6 +1338,51 @@ test("Cursor ACP install-watch membership requires a kick handler on the same in
     ...stubs,
     createCursorAcpDrain: () => ({ async start() {}, async stop() {} }),
   }), /cursorAcpWake drain must expose kick/);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-install-fallback-"));
+  const helperPath = path.join(root, "bin", "triangle-mailbox");
+  fs.mkdirSync(path.dirname(helperPath), { recursive: true });
+  fs.writeFileSync(helperPath, "");
+  fs.mkdirSync(path.join(root, "client"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "client", "installation.json"),
+    JSON.stringify({ installationId: "inst_OtherInstall1" }),
+  );
+  assert.throws(() => createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    cursorAcpWakes: [cursorAcpWakeFixture({
+      agentId: "agent_cursor_acp_001",
+      helperPath,
+    })],
+    useInstallWatchDispatcher: true,
+    ...stubs,
+  }), /does not match the install watch anchor/);
+
+  fs.writeFileSync(
+    path.join(root, "client", "installation.json"),
+    JSON.stringify({ installationId: "inst_N7VhDq3mQ2" }),
+  );
+  const matched = createClientSupervisor({
+    instances: [],
+    appServerWake: appServerWakeFixture(3),
+    cursorAcpWakes: [cursorAcpWakeFixture({
+      agentId: "agent_cursor_acp_001",
+      helperPath,
+    })],
+    useInstallWatchDispatcher: true,
+    ...stubs,
+    createInstallDispatcher: (options) => ({
+      profiles: options.profiles,
+      async start() { return { cycles: 0 }; },
+      async stop() {},
+    }),
+  });
+  assert.equal(
+    matched.installWatchProfileIds.includes(deriveProfileInstanceId("cursor-acp-shadow-test")),
+    true,
+  );
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("install dispatcher uses held-poll short reconnect idle (2s)", () => {

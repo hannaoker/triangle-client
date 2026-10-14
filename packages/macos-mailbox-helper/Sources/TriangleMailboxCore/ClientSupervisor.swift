@@ -1140,6 +1140,10 @@ public struct ClientSupervisor: Sendable {
             guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
+            // agentId + installationId are emitted only for this set: enabled,
+            // enrolled, and present in cursor-acp-runtime-binding.json with
+            // shadowTestProfile. That is the same gate as watch-grant membership.
+            // Unbound profiles are omitted above and stay off the install watch.
             prepared.append(PreparedCursorAcpWakeBootstrap(
                 profile: member.profile.value,
                 profileInstanceId: member.instanceID.value,

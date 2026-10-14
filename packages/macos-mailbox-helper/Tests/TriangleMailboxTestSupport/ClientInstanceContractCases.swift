@@ -309,7 +309,7 @@ public enum ClientInstanceContractCases {
             try expect(try store.read(profile: cursor).participatesInCursorAcpWake, "new cursor-acp instance is not on cursorAcpWakes")
             try expect(try store.read(profile: cursor).participatesInHeadlessWake == false, "cursor-acp entered the Codex headless pool")
             try expect(try store.read(profile: cursor).participatesInGrokBotWake == false, "cursor-acp entered grokBotWake")
-            try expect(try store.read(profile: cursor).participatesInWatchGrantNotify, "enrolled cursor-acp excluded from watch grant notify")
+            try expect(try store.read(profile: cursor).participatesInWatchGrantNotify == false, "enabled cursor-acp joined watch grant notify without a shadow binding")
             try store.setEnabled(false, profile: cursor)
             try expect(try store.read(profile: cursor).participatesInWatchGrantNotify == false, "disabled cursor-acp stayed on watch grant notify")
             try store.setEnabled(true, profile: cursor)

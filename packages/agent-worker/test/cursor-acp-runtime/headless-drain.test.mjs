@@ -106,6 +106,99 @@ test("watch kick while draining arms one trailing drain and keeps the poll timer
   await drain.stop();
 });
 
+test("stop while a trailing kick is pending does not run that drain", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let resolves = 0;
+  const drain = createHeadlessCursorAcpDrain({
+    runtime: {
+      async start() {},
+      async runDelivery() {
+        await blocked;
+        return { status: "completed", settlementTrace: ["reply_persisted", "acked"] };
+      },
+      async stop() {},
+    },
+    resolveDelivery: async () => {
+      resolves += 1;
+      return {
+        roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        deliveryId: `delivery_${resolves}`,
+        numericDeliveryId: resolves,
+        text: "hint",
+        inboundEventId: "event_inbound_test",
+      };
+    },
+    profileInstanceId: PROFILE_INSTANCE_ID,
+    pollIntervalMs: 1_000,
+    setTimer() { return {}; },
+    clearTimer() {},
+  });
+  await drain.start({ runLoop: false });
+  const first = drain.drainOnce("timer");
+  const kicked = drain.kick({ reason: "watch_hint" });
+  assert.equal(kicked.status, "pending");
+  assert.equal(drain.status().pendingKick, true);
+  const stopped = drain.stop();
+  release();
+  await stopped;
+  await first;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(resolves, 1);
+  assert.equal(drain.status().pendingKick, false);
+  assert.equal(drain.status().draining, false);
+});
+
+test("a trailing drain whose runDelivery throws is logged and does not escape kick", async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let deliveries = 0;
+  const logged = [];
+  const drain = createHeadlessCursorAcpDrain({
+    runtime: {
+      async start() {},
+      async runDelivery() {
+        deliveries += 1;
+        if (deliveries === 1) {
+          await blocked;
+          return { status: "completed", settlementTrace: ["reply_persisted", "acked"] };
+        }
+        throw Object.assign(new Error("delivery failed"), { code: "cursor_acp_delivery_failed" });
+      },
+      async stop() {},
+    },
+    resolveDelivery: async () => ({
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      deliveryId: `delivery_${deliveries + 1}`,
+      numericDeliveryId: deliveries + 1,
+      text: "hint",
+      inboundEventId: "event_inbound_test",
+    }),
+    profileInstanceId: PROFILE_INSTANCE_ID,
+    pollIntervalMs: 1_000,
+    logger: {
+      error(event, fields) {
+        logged.push({ event, code: fields?.code ?? null });
+      },
+    },
+    setTimer() { return {}; },
+    clearTimer() {},
+  });
+  await drain.start({ runLoop: false });
+  const first = drain.drainOnce("timer");
+  const kicked = drain.kick({ reason: "watch_hint" });
+  assert.equal(kicked.status, "pending");
+  release();
+  await first;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(deliveries, 2);
+  assert.deepEqual(logged, [{
+    event: "triangle_cursor_acp_drain_trailing_failed",
+    code: "cursor_acp_delivery_failed",
+  }]);
+  await drain.stop();
+});
+
 test("restart recovery still blocks new Cursor ACP claims", async () => {
   let resolved = false;
   const drain = createHeadlessCursorAcpDrain({

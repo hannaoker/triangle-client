@@ -95,8 +95,9 @@ export function createHeadlessCursorAcpDrain({
       if (pendingKickReason && started && !stopping) {
         const trailingReason = pendingKickReason;
         pendingKickReason = null;
-        // One follow-up drain after the in-flight attempt settles. Do not await
-        // inside finally — a nested drainOnce would re-enter this finally.
+        // One trailing drainOnce claims at most one delivery. Further backlog
+        // waits for the pollIntervalMs timer. Do not await inside finally — a
+        // nested drainOnce would re-enter this finally, and do not loop here.
         queueMicrotask(() => {
           if (!started || stopping || inFlight != null) return;
           drainOnce(trailingReason).catch((error) => {
@@ -137,6 +138,8 @@ export function createHeadlessCursorAcpDrain({
    * Install-watch hint for this profile. Uses the supervisor-owned drain;
    * does not open a second claimer or watch listener.
    * Idle → start drainOnce; already draining → one coalesced trailing kick.
+   * That trailing kick drains one delivery. Any further backlog falls to the
+   * existing pollIntervalMs timer rather than another kick loop.
    */
   function kick({ reason = "watch_hint" } = {}) {
     if (typeof reason !== "string" || reason.length === 0 || reason.length > 64) {
