@@ -28,10 +28,6 @@ import {
   validateBinding,
 } from "./shared-codex-app-server.mjs";
 import {
-  createGrokBotWakeBridge,
-  validateGrokBotBinding,
-} from "./grok-bot-wake.mjs";
-import {
   CLIENT_SUPERVISOR_CLAIMER_OWNER,
   HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
   createHeadlessClaimerGuard,
@@ -61,7 +57,6 @@ import {
   validateCursorAcpWakes,
   validateDrain,
   validateEventWake,
-  validateGrokBotWake,
   validateHeadlessWakes,
   validateRunner,
 } from "./client-supervisor-schema.mjs";
@@ -95,7 +90,6 @@ export function createClientSupervisor({
   createCursorStore = createAtomicFileCursorStore,
   createSession = createSharedCodexSession,
   createWakeBridge = createAppServerWakeBridge,
-  createGrokBotBridge = createGrokBotWakeBridge,
   createHeadlessDrain = createInstalledHeadlessDrain,
   createClaimerGuard = createHeadlessClaimerGuard,
   createCursorAcpDrain = createInstalledCursorAcpDrain,
@@ -128,14 +122,12 @@ export function createClientSupervisor({
   }
   const wakeConfig = validateEventWake(eventWake);
   const appServerConfig = validateAppServerWake(appServerWake);
-  const grokBotConfig = null;
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
   const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
   if (
     instances.length < 1
     && !wakeConfig
     && !appServerConfig
-    && !grokBotConfig
     && headlessConfigs.length === 0
     && cursorAcpConfigs.length === 0
   ) {
@@ -144,8 +136,8 @@ export function createClientSupervisor({
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
   const gate = createConcurrencyGate({ limit: maxConcurrentReasoners });
   const seen = new Set();
-  // One MESH held poll per installation: App Server + Grok Bot (+ eventWake)
-  // that share an installationId must coalesce onto a single watch-poll.
+  // One MESH held poll per installation: lanes that share an installationId
+  // coalesce onto a single watch-poll.
   const sharedWatchTransport = createInstallationWatchTransportFactory(createWatchTransport);
   // A grant is installation-scoped too. Track its generation so listeners that
   // fail together on one expired credential join (or observe) one renewal.
@@ -293,18 +285,6 @@ export function createClientSupervisor({
     }
   }
 
-  if (grokBotConfig) {
-    if (seen.has(grokBotConfig.binding.instanceId)) {
-      throw new TypeError("grokBotWake instanceId collides with a worker instance");
-    }
-    if (wakeConfig?.profiles.some((profile) => profile.instanceId === grokBotConfig.binding.instanceId)) {
-      throw new TypeError("grokBotWake instanceId collides with an eventWake profile");
-    }
-    if (appServerConfig?.binding.instanceId === grokBotConfig.binding.instanceId) {
-      throw new TypeError("grokBotWake instanceId collides with an appServerWake profile");
-    }
-  }
-
   for (const headlessConfig of headlessConfigs) {
     if (seen.has(headlessConfig.profileInstanceId)) {
       throw new TypeError("headlessWake instanceId collides with a worker instance");
@@ -314,9 +294,6 @@ export function createClientSupervisor({
     }
     if (appServerConfig?.binding.instanceId === headlessConfig.profileInstanceId) {
       throw new TypeError("headlessWake instanceId collides with an appServerWake profile");
-    }
-    if (grokBotConfig?.binding.instanceId === headlessConfig.profileInstanceId) {
-      throw new TypeError("headlessWake instanceId collides with a grokBotWake profile");
     }
   }
 
@@ -329,9 +306,6 @@ export function createClientSupervisor({
     }
     if (appServerConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
       throw new TypeError("cursorAcpWake instanceId collides with an appServerWake profile");
-    }
-    if (grokBotConfig?.binding.instanceId === cursorAcpConfig.profileInstanceId) {
-      throw new TypeError("cursorAcpWake instanceId collides with a grokBotWake profile");
     }
     if (headlessConfigs.some((config) => config.profileInstanceId === cursorAcpConfig.profileInstanceId)) {
       throw new TypeError("cursorAcpWake instanceId collides with a headlessWake profile");
@@ -399,13 +373,8 @@ export function createClientSupervisor({
       installationId: appServerConfig.installationId,
     });
     const cursorStore = createCursorStore({ filePath: appServerConfig.cursorPath });
-    // App Server joins the install dispatcher when it shares Bob's installationId,
-    // or when it is the sole install-watch anchor after Grok webhook retirement.
-    const appServerCoveredByInstallDispatcher = installDispatcherEnabled
-      && (
-        grokBotConfig == null
-        || appServerConfig.installationId === grokBotConfig.installationId
-      );
+    // App Server joins the install dispatcher when install watch is enabled.
+    const appServerCoveredByInstallDispatcher = installDispatcherEnabled;
     appServerBridge = createWakeBridge({
       binding: appServerConfig.binding,
       session,
@@ -423,38 +392,6 @@ export function createClientSupervisor({
     });
     if (!appServerBridge || typeof appServerBridge.start !== "function") {
       throw new TypeError("createWakeBridge must return an App Server wake bridge");
-    }
-  }
-
-  let grokBotBridge = null;
-  if (grokBotConfig) {
-    const watchTransport = sharedWatchTransport({
-      helperPath: grokBotConfig.helperPath,
-      installationId: grokBotConfig.installationId,
-    });
-    const cursorStore = createCursorStore({ filePath: grokBotConfig.cursorPath });
-    const quotaResetStorePath = path.join(
-      path.dirname(grokBotConfig.cursorPath),
-      `grok-bot-quota-reset.${grokBotConfig.binding.instanceId}.json`,
-    );
-    grokBotBridge = createGrokBotBridge({
-      binding: grokBotConfig.binding,
-      watchTransport,
-      cursorStore,
-      helperPath: grokBotConfig.helperPath,
-      installationId: grokBotConfig.installationId,
-      actorProfile: grokBotConfig.actorProfile,
-      // When eventWake is also present, supervisor ensures with that actor first.
-      // Under install dispatcher, ensure stays on the dispatcher wake loop (#55).
-      ensureBeforeWatch: false,
-      webhookUrlPath: grokBotConfig.webhookUrlPath,
-      webhookKeyPath: grokBotConfig.webhookKeyPath,
-      ownWatchLoop: !installDispatcherEnabled,
-      logger,
-      quotaResetStorePath,
-    });
-    if (!grokBotBridge || typeof grokBotBridge.start !== "function") {
-      throw new TypeError("createGrokBotBridge must return a Grok Bot wake bridge");
     }
   }
 
@@ -562,38 +499,7 @@ export function createClientSupervisor({
     const dispatcherHandlers = new Map();
     const laneCursorStores = [];
 
-    if (grokBotBridge && grokBotConfig) {
-      dispatcherProfiles.push({
-        instanceId: grokBotConfig.binding.instanceId,
-        agentId: grokBotConfig.binding.agentId,
-      });
-      dispatcherHandlers.set(grokBotConfig.binding.instanceId, async (wake) => {
-        try {
-          return await grokBotBridge.handleWake(wake);
-        } catch (error) {
-          // D3: must reject the fan-out barrier so the install cursor does not
-          // advance past a failed Bob wake (at-least-once replay on next poll).
-          logger.error?.("triangle_grok_bot_wake_failed", {
-            code: error?.code,
-            message: error?.message,
-            instanceId: wake?.instanceId,
-            httpStatus: error?.status ?? null,
-            reason: typeof wake?.reason === "string" ? wake.reason.slice(0, 64) : undefined,
-          });
-          throw error;
-        }
-      });
-      laneCursorStores.push(createCursorStore({ filePath: grokBotConfig.cursorPath }));
-    }
-
-    if (
-      appServerBridge
-      && appServerConfig
-      && (
-        !grokBotConfig
-        || appServerConfig.installationId === grokBotConfig.installationId
-      )
-    ) {
+    if (appServerBridge && appServerConfig) {
       dispatcherProfiles.push({
         instanceId: appServerConfig.binding.instanceId,
         agentId: appServerConfig.binding.agentId,
@@ -613,7 +519,7 @@ export function createClientSupervisor({
       laneCursorStores.push(createCursorStore({ filePath: appServerConfig.cursorPath }));
     }
 
-    const installAnchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor;
+    const installAnchor = appServerConfig ?? headlessInstallAnchor;
     if (!installAnchor) {
       throw new TypeError(
         "useInstallWatchDispatcher requires appServerWake or headlessWakes with installationId as the install watch anchor",
@@ -703,12 +609,12 @@ export function createClientSupervisor({
     instanceIds: Object.freeze(entries.map(({ instanceId }) => instanceId)),
     eventWakeProfileIds: Object.freeze(wakeConfig ? wakeConfig.profiles.map(({ instanceId }) => instanceId) : []),
     appServerInstanceId: appServerConfig?.binding.instanceId ?? null,
-    grokBotInstanceId: grokBotConfig?.binding.instanceId ?? null,
+    grokBotInstanceId: null,
     headlessInstanceIds: Object.freeze(headlessConfigs.map((config) => config.profileInstanceId)),
     cursorAcpInstanceIds: Object.freeze(cursorAcpConfigs.map((config) => config.profileInstanceId)),
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
-    grokBotWake: grokBotConfig,
+    grokBotWake: null,
     headlessWakes: headlessConfigs,
     cursorAcpWakes: cursorAcpConfigs,
     headlessWakeSkipReasons: Object.freeze({ ...headlessWakeSkipReasons }),
@@ -739,7 +645,7 @@ export function createClientSupervisor({
       // worker / headless / Cursor ACP drains start independently. Persistent
       // 402/429 backoff must not serialize ahead of unrelated mailbox lanes.
       // Preference matches prior supervisor ensure: eventWake > appServer (with
-      // event-driven actor) > grokBot. Shared grant renewal stays installation-scoped.
+      // event-driven actor). Shared grant renewal stays installation-scoped.
       const wakeEnsure = wakeRuntime && wakeConfig.ensureBeforeWatch
         ? {
           helperPath: wakeConfig.helperPath,
@@ -759,20 +665,8 @@ export function createClientSupervisor({
           actorProfile: wakeConfig.actorProfile,
         }
         : null;
-      const grokBotEnsure = !wakeEnsure
-        && !appServerEnsure
-        && grokBotBridge
-        && grokBotConfig.ensureBeforeWatch
-        ? {
-          // Grok Bot Bob may act as grant actor (unlike mcp-interactive).
-          helperPath: grokBotConfig.helperPath,
-          installationId: grokBotConfig.installationId,
-          actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
-        }
-        : null;
       const headlessEnsure = !wakeEnsure
         && !appServerEnsure
-        && !grokBotEnsure
         && installDispatcher
         && headlessInstallAnchor?.ensureBeforeWatch
         ? {
@@ -930,9 +824,6 @@ export function createClientSupervisor({
             if (appServerBridge) {
               await appServerBridge.start({ signal });
             }
-            if (grokBotBridge) {
-              await grokBotBridge.start({ signal });
-            }
             return installDispatcher.start({ signal });
           },
           stop: async () => {
@@ -940,13 +831,6 @@ export function createClientSupervisor({
               await installDispatcher.stop();
             } catch {
               /* ignore */
-            }
-            if (grokBotBridge) {
-              try {
-                await grokBotBridge.stop();
-              } catch {
-                /* ignore */
-              }
             }
             if (appServerBridge) {
               try {
@@ -960,10 +844,9 @@ export function createClientSupervisor({
           // may renew when it is the install-watch anchor. Cursor ACP is never
           // the actor.
           renewal: (() => {
-            const anchor = grokBotConfig ?? appServerConfig ?? headlessInstallAnchor;
+            const anchor = appServerConfig ?? headlessInstallAnchor;
             if (!anchor?.ensureBeforeWatch) return null;
             const actorProfile = wakeConfig?.actorProfile
-              ?? grokBotConfig?.actorProfile
               ?? headlessInstallAnchor?.actorProfile;
             if (!actorProfile) return null;
             return {
@@ -972,7 +855,7 @@ export function createClientSupervisor({
               actorProfile,
             };
           })(),
-          ensure: grokBotEnsure ?? appServerEnsure ?? headlessEnsure,
+          ensure: appServerEnsure ?? headlessEnsure,
           logEvent: "triangle_client_install_watch_failed",
           logMessage: "Install watch dispatcher failed",
         })
@@ -992,23 +875,6 @@ export function createClientSupervisor({
             ensure: appServerEnsure,
             logEvent: "triangle_client_app_server_wake_failed",
             logMessage: "App Server bound wake listener failed",
-          })
-          : Promise.resolve(null);
-
-      const grokBotLoop = installDispatcher
-        ? Promise.resolve(null)
-        : grokBotBridge
-          ? runDurableWakeLoop({
-            start: () => grokBotBridge.start({ signal }),
-            stop: () => grokBotBridge.stop(),
-            renewal: grokBotConfig.ensureBeforeWatch ? {
-              helperPath: grokBotConfig.helperPath,
-              installationId: grokBotConfig.installationId,
-              actorProfile: wakeConfig?.actorProfile ?? grokBotConfig.actorProfile,
-            } : null,
-            ensure: grokBotEnsure,
-            logEvent: "triangle_client_grok_bot_wake_failed",
-            logMessage: "Grok Bot wake listener failed",
           })
           : Promise.resolve(null);
 
@@ -1123,12 +989,11 @@ export function createClientSupervisor({
             : [],
         );
 
-      const [instances, wakeResult, installResult, appServerResult, grokBotResult, headlessResult, cursorAcpResult] = await Promise.all([
+      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult] = await Promise.all([
         workerLoop,
         wakeLoop,
         installDispatcherLoop,
         appServerLoop,
-        grokBotLoop,
         headlessLoop,
         cursorAcpLoop,
       ]);
@@ -1137,8 +1002,7 @@ export function createClientSupervisor({
         eventWake: wakeResult,
         installWatch: installResult,
         appServerWake: appServerResult,
-        // Under the install dispatcher, Bob/handler prep is folded into installWatch.
-        grokBotWake: installDispatcher ? (installResult ?? { status: "install_dispatcher" }) : grokBotResult,
+        grokBotWake: null,
         headlessWakes: Array.isArray(headlessResult) ? headlessResult : [headlessResult].filter(Boolean),
         cursorAcpWakes: Array.isArray(cursorAcpResult) ? cursorAcpResult : [cursorAcpResult].filter(Boolean),
       };
