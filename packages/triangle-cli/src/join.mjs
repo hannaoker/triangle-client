@@ -8,14 +8,14 @@ import os from "node:os";
 import { openCustody } from "./custody.mjs";
 import { LocalStateError, MeshApiError, OutcomeUnknownError } from "./errors.mjs";
 import { generateEd25519, jwkThumbprint, publicJwk, fingerprint } from "./keys.mjs";
-import { agentDraft, buildRedemption, parseInviteLink } from "./protocol.mjs";
+import { agentDraft, buildRedemption, parseInviteLink, truncateText } from "./protocol.mjs";
 import { createTransport } from "./transport.mjs";
 import { transportOptions } from "./session.mjs";
 
 const JOURNAL = "join";
 
 export function defaultDeviceLabel() {
-  const host = os.hostname().replace(/\.local$/, "").slice(0, 100) || "this computer";
+  const host = truncateText(os.hostname().replace(/\.local$/, ""), 100) || "this computer";
   return host;
 }
 
@@ -57,6 +57,12 @@ function persistResult(custody, journal, result) {
   }
 }
 
+function committed(error) {
+  error.committed = true;
+  error.resumeHint = "triangle join --resume";
+  return error;
+}
+
 async function send(custody, transport, journal) {
   let response;
   try {
@@ -69,8 +75,14 @@ async function send(custody, transport, journal) {
     throw error;
   }
   const result = response.body?.result;
-  if (!result?.controller?.controller_id) throw new OutcomeUnknownError("The MESH server answered without a join result. Run `triangle join --resume`.");
-  persistResult(custody, journal, result);
+  if (!result?.controller?.controller_id) throw committed(new OutcomeUnknownError("The MESH server answered without a join result. Run `triangle join --resume`."));
+  try {
+    persistResult(custody, journal, result);
+  } catch (error) {
+    // The server committed; keep the journal (it holds the keys) so
+    // `triangle join --resume` can replay and finish installing.
+    throw committed(new LocalStateError(`Joined, but saving this device's state failed (${error.message}). Fix the problem, then run \`triangle join --resume\`.`));
+  }
   custody.removeJournal(JOURNAL);
   return { outcome: response.body.outcome, result };
 }
@@ -107,7 +119,7 @@ export async function join({ home, link, via = null, deviceLabel = defaultDevice
 
     const ownerKey = custody.readOwnerKey() ?? (() => { const key = generateEd25519(); custody.writeOwnerKey(key); return key; })();
     const workloadKey = device ? null : generateEd25519();
-    const agent = device ? null : agentDraft({ handle: handle ?? defaultHandle(), name: agentName ?? `${displayName ?? os.userInfo().username}'s agent on ${deviceLabel}`.slice(0, 80).trim(), workloadKey });
+    const agent = device ? null : agentDraft({ handle: handle ?? defaultHandle(), name: agentName ?? truncateText(`${displayName ?? os.userInfo().username}'s agent on ${deviceLabel}`, 80).trim(), workloadKey });
     const journal = {
       kind: "join",
       authority: parsed.authority,
@@ -121,15 +133,22 @@ export async function join({ home, link, via = null, deviceLabel = defaultDevice
       agent,
       created_at: new Date().toISOString(),
     };
-    try {
-      return await signAndSend(custody, transport, journal);
-    } catch (error) {
-      if (!device && isDeviceOnlyRefusal(error)) {
+    const attempt = async () => {
+      try {
+        return await signAndSend(custody, transport, journal);
+      } catch (error) {
+        if (device || !isDeviceOnlyRefusal(error)) throw error;
         // A device link adds this computer to an existing owner; it creates no agent.
         Object.assign(journal, { workload_key: null, agent: null, display_name: null });
         return signAndSend(custody, transport, journal);
       }
-      if (!(error instanceof OutcomeUnknownError)) custody.removeJournal(JOURNAL);
+    };
+    try {
+      return await attempt();
+    } catch (error) {
+      // Only a definitive refusal of a request that cannot have committed frees the journal.
+      if (error instanceof MeshApiError && !error.committed && error.status >= 400 && error.status < 500) custody.removeJournal(JOURNAL);
+      else if (!(error instanceof OutcomeUnknownError) && !error.committed && !(error instanceof MeshApiError)) custody.removeJournal(JOURNAL);
       throw error;
     }
   });

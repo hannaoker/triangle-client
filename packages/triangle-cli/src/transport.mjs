@@ -8,6 +8,7 @@ import { MeshApiError, OutcomeUnknownError } from "./errors.mjs";
 import { canonicalOrigin } from "./protocol.mjs";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const AUTHORITY_PATH = "/api/v1/authority";
 const HEADER_NAME = /^[a-z0-9-]{1,64}$/;
 const FORBIDDEN_EXTRA = new Set(["authorization", "dpop", "mesh-owner-proof", "content-type", "host", "cookie"]);
 
@@ -44,7 +45,7 @@ async function readBoundedJson(response) {
     total += value.byteLength;
     if (total > MAX_BODY_BYTES) {
       await reader.cancel().catch(() => {});
-      throw new MeshApiError({ status: response.status, code: "response_too_large" });
+      throw Object.assign(new Error("response too large"), { tooLarge: true });
     }
     chunks.push(value);
   }
@@ -57,6 +58,7 @@ export function createTransport({ authority, via = null, headers = {}, fetchImpl
   const canonicalAuthority = canonicalOrigin(authority, { allowLoopbackHttp });
   const base = via ? canonicalOrigin(via, { allowLoopbackHttp }) : canonicalAuthority;
   const extra = via ? { ...headers } : {};
+  let verified = via ? null : Promise.resolve();
 
   function url(path) {
     if (!path.startsWith("/")) throw new TypeError("path must be absolute");
@@ -69,6 +71,16 @@ export function createTransport({ authority, via = null, headers = {}, fetchImpl
    * mutating request throw OutcomeUnknownError (the caller replays its stored request).
    */
   async function request(method, path, { body, headers: requestHeaders = {}, mutating = method !== "GET" } = {}) {
+    // A --via transport must prove it serves this authority before anything
+    // signed or secret is sent to it (every session, including resumes).
+    if (path !== AUTHORITY_PATH) {
+      verified ??= verifyAuthority().catch((error) => { verified = null; throw error; });
+      await verified;
+    }
+    return send(method, path, { body, requestHeaders, mutating });
+  }
+
+  async function send(method, path, { body, requestHeaders, mutating }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response;
@@ -92,7 +104,16 @@ export function createTransport({ authority, via = null, headers = {}, fetchImpl
       throw new MeshApiError({ status: 0, code: "network_error", serverMessage: `Cannot reach ${base}.`, path });
     }
     try {
-      const payload = response.status === 304 ? null : await readBoundedJson(response);
+      let payload;
+      try {
+        payload = response.status === 304 ? null : await readBoundedJson(response);
+      } catch (error) {
+        // The status line arrived but the body did not. For a mutation that may
+        // have committed (2xx/5xx), the outcome is unknown: keep the journal.
+        const refused = response.status >= 300 && response.status < 500;
+        if (mutating && !refused) throw new OutcomeUnknownError(`The response from ${base} was cut off${error?.tooLarge ? " (too large)" : ""}; the change may or may not have been applied.`, { cause: error });
+        throw new MeshApiError({ status: response.status, code: error?.tooLarge ? "response_too_large" : "network_error", serverMessage: `Unreadable response from ${base}.`, path });
+      }
       const etag = response.headers.get("etag");
       if ((response.status >= 200 && response.status < 300) || response.status === 304) {
         return { status: response.status, etag, body: payload };
@@ -114,12 +135,17 @@ export function createTransport({ authority, via = null, headers = {}, fetchImpl
 
   /** Refuse a transport whose /api/v1/authority does not name this authority. */
   async function verifyAuthority() {
-    const { body } = await request("GET", "/api/v1/authority");
+    const { body } = await send("GET", AUTHORITY_PATH, { requestHeaders: {}, mutating: false });
     if (!body || body.authority !== canonicalAuthority) {
       throw new MeshApiError({ status: 200, code: "authority_mismatch", serverMessage: `${base} does not serve the MESH authority ${canonicalAuthority}.` });
     }
     return body;
   }
 
-  return Object.freeze({ authority: canonicalAuthority, base, url, request, verifyAuthority });
+  async function verifyOnce() {
+    verified ??= verifyAuthority().catch((error) => { verified = null; throw error; });
+    return verified;
+  }
+
+  return Object.freeze({ authority: canonicalAuthority, base, url, request, verifyAuthority: verifyOnce });
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // triangle — join a MESH, manage this device's agents and their permissions.
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { addAgent, listAgents } from "./agents.mjs";
@@ -20,7 +21,7 @@ export const USAGE = `Usage: triangle <command> [options]
   agent add --handle HANDLE [--name NAME] [--description TEXT] [--read-only]
   agent list
   status | doctor             What this device controls and what needs attention.
-  resume                      Replay owner operations whose outcome was unknown.
+  resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
 Global: --home DIR (default ${defaultHome()}), --json`;
 
@@ -70,6 +71,10 @@ function renderJoin({ outcome, result }) {
 }
 
 export async function main(argv, { env = process.env, io = { stdout: (s) => process.stdout.write(`${s}\n`), stderr: (s) => process.stderr.write(`${s}\n`) }, fetchImpl = globalThis.fetch } = {}) {
+  if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
+    io.stdout(USAGE);
+    return 0;
+  }
   let parsed;
   try {
     parsed = parseArgs(argv);
@@ -84,8 +89,11 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
     switch (command) {
       case "join": {
         allowOnly(flags, ["resume", "abandon", "name", "handle", "agent-name", "device-label", "device", "via"]);
+        if (flags.abandon && flags.resume) throw new UsageError("use --resume or --abandon, not both");
+        if ((flags.abandon || flags.resume) && (sub !== undefined || Object.keys(flags).some((f) => !["abandon", "resume", "home", "json"].includes(f)))) throw new UsageError("join --resume/--abandon take no link or other options");
         if (flags.abandon) {
-          openCustody(home).removeJournal("join");
+          const custody = openCustody(home);
+          custody.withLock(() => custody.removeJournal("join"));
           io.stdout("Forgot the unfinished join.");
           return 0;
         }
@@ -130,8 +138,18 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         return report.warnings.length && command === "doctor" ? 1 : 0;
       }
       case "resume": {
-        allowOnly(flags, []);
+        allowOnly(flags, ["abandon"]);
         const session = openSession({ home, env, fetchImpl });
+        if (flags.abandon) {
+          const dropped = session.custody.withLock(() => {
+            const pending = session.custody.listJournal().filter((name) => name !== "join");
+            for (const name of pending) session.custody.removeJournal(name);
+            return pending;
+          });
+          print(io, flags, dropped, (items) => (items.length ? `Discarded ${items.length} unfinished request(s). If one had been applied, its effect stays on the server (an agent created that way has no key here).` : "Nothing to discard."));
+          return 0;
+        }
+        return await session.custody.withLock(async () => {
         const names = session.custody.listJournal().filter((name) => name.startsWith("op-"));
         const done = [];
         for (const name of names) {
@@ -140,16 +158,19 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         }
         print(io, flags, done, (items) => items.map((d) => `${d.operation} ${d.target ?? ""} → ${d.outcome}`).join("\n") || "Nothing to resume.");
         return 0;
+        });
       }
       case undefined:
-      case "help":
-      case "--help":
         io.stdout(USAGE);
-        return command ? 0 : 2;
+        return 2;
       default:
         throw new UsageError(`unknown command ${command}`);
     }
   } catch (error) {
+    if (error?.code === "challenge_mismatch") {
+      io.stderr(error.message);
+      return 1;
+    }
     if (error instanceof UsageError || error instanceof TypeError && !(error instanceof MeshApiError)) {
       io.stderr(error instanceof UsageError ? `${error.message}\n\n${USAGE}` : error.message);
       return 2;
@@ -166,6 +187,11 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
+function invokedDirectly() {
+  // npm installs `triangle` as a symlink; compare real paths.
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1] || "")).href; } catch { return false; }
+}
+
+if (invokedDirectly()) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }

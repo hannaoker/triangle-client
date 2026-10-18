@@ -1,5 +1,5 @@
 // A loaded device: custody + transport + (once joined) the owner controller.
-import { LocalStateError, OutcomeUnknownError } from "./errors.mjs";
+import { LocalStateError, MeshApiError, OutcomeUnknownError } from "./errors.mjs";
 import { buildOwnerOperation, OWNER_PROOF_HEADER, ownerRequestProof } from "./protocol.mjs";
 import { createTransport, loadTransportHeaders } from "./transport.mjs";
 import { openCustody, defaultHome } from "./custody.mjs";
@@ -65,6 +65,14 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
     }
   }
 
+  /**
+   * Send a journaled request. The journal is removed only after the result is
+   * installed locally, or when the very first send is definitively refused
+   * (a 4xx before anything could have committed). Once a send's outcome was
+   * unknown, the entry is marked and kept through any later failure, so the
+   * only copy of a new workload key is never lost; `triangle resume --abandon`
+   * discards it explicitly.
+   */
   async function sendJournaled(name, entry) {
     let response;
     try {
@@ -72,8 +80,11 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
     } catch (error) {
       if (error instanceof OutcomeUnknownError) {
         error.resumeHint = "triangle resume";
-      } else {
+        if (!entry.outcome_unknown) custody.writeJournal(name, { ...entry, outcome_unknown: true });
+      } else if (!entry.outcome_unknown && error instanceof MeshApiError && error.status >= 400 && error.status < 500) {
         custody.removeJournal(name);
+      } else if (entry.outcome_unknown && error instanceof MeshApiError) {
+        error.message += ` The earlier attempt may have been applied; its request is kept. Retry \`triangle resume\`, or discard it with \`triangle resume --abandon\`.`;
       }
       throw error;
     }
@@ -90,7 +101,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
    */
   async function ownerOperation(operation, target, params, { workloadKey = null } = {}) {
     const { body: challenge } = await ownerRequest("POST", "/api/v1/owners/me/challenges", { body: { operation, target }, mutating: false });
-    const body = buildOwnerOperation({ authority: transport.authority, controllerId: controller.controller_id, ownerKey, challenge, params, workloadKey });
+    const body = buildOwnerOperation({ authority: transport.authority, controllerId: controller.controller_id, ownerKey, challenge, operation, target, params, workloadKey });
     const name = `op-${body.idempotency_key}`;
     const entry = {
       kind: "owner-operation",
@@ -114,11 +125,16 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
     return { entry, result: response.body };
   }
 
+  /** Workload session for a local agent; scopes default to (and must stay within) its registered bounds. */
   function workloadSession(agentId, { scopes } = {}) {
     const agent = custody.readAgent(agentId);
     const workloadKey = custody.readWorkloadKey(agentId);
     if (!agent || !workloadKey) throw new LocalStateError(`No workload key for ${agentId} on this device.`);
-    return createWorkloadSession({ transport, workloadId: agent.workload_id, workloadKey, scopes });
+    const bounds = Array.isArray(agent.bounds) && agent.bounds.length ? agent.bounds : ["agent.read"];
+    const requested = scopes ?? bounds;
+    const outside = requested.filter((scope) => !bounds.includes(scope));
+    if (outside.length) throw new TypeError(`${agent.handle ?? agentId} is limited to ${bounds.join(", ")}; cannot request ${outside.join(", ")}.`);
+    return createWorkloadSession({ transport, workloadId: agent.workload_id, workloadKey, scopes: requested });
   }
 
   return {

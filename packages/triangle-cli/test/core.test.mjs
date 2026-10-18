@@ -43,8 +43,9 @@ test("invite links: strict parse; secret only in the fragment; https only", () =
 test("redemption: owner and workload sign the same canonical message bound to the nonce", () => {
   const ownerKey = generateEd25519();
   const workloadKey = generateEd25519();
-  const challenge = { challenge_id: `invite_challenge_${"0".repeat(32)}`, nonce_sha256: "ab".repeat(32) };
+  const challenge = { challenge_id: `invite_challenge_${"0".repeat(32)}`, invite_id: `invite_${"1".repeat(32)}`, authority: "https://m.test", nonce_sha256: "ab".repeat(32) };
   const agent = agentDraft({ handle: "jerry-mini", name: "Jerry", workloadKey });
+  assert.throws(() => buildRedemption({ authority: "https://m.test", inviteId: `invite_${"2".repeat(32)}`, secret: "s".repeat(43), challenge, ownerKey, deviceLabel: "Mini", agent, workloadKey }), /different request \(invite_id\)/);
   const body = buildRedemption({ authority: "https://m.test", inviteId: `invite_${"1".repeat(32)}`, secret: "s".repeat(43), challenge, ownerKey, deviceLabel: "Mini", displayName: "Jerry", agent, workloadKey });
   const message = redemptionMessage(body, challenge.nonce_sha256);
   assert.ok(verifyBytes(publicJwk(ownerKey), message, body.owner_proof));
@@ -94,7 +95,11 @@ test("transport headers file: must be 0600 and cannot inject auth headers; only 
   chmodSync(file, 0o600);
   assert.throws(() => loadTransportHeaders(file), /not allowed/);
   const seen = [];
-  const fetchImpl = async (url, init) => { seen.push(init.headers); return new Response("{}", { status: 200 }); };
+  const fetchImpl = async (url, init) => {
+    if (url.endsWith("/api/v1/authority")) return new Response(JSON.stringify({ authority: "https://mesh.test" }), { status: 200 });
+    seen.push(init.headers);
+    return new Response("{}", { status: 200 });
+  };
   await createTransport({ authority: "https://mesh.test", headers: { "x-test": "1" }, fetchImpl }).request("GET", "/x");
   assert.equal(seen[0]["x-test"], undefined, "no extra headers to the canonical authority");
   await createTransport({ authority: "https://mesh.test", via: "https://preview.test", headers: { "x-test": "1" }, fetchImpl }).request("GET", "/x");

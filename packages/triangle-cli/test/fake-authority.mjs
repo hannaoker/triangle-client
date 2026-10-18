@@ -119,7 +119,7 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
       return response;
     };
     let m;
-    if (method === "GET" && path === "/api/v1/authority") return json(200, { authority, permissions_version: 1 });
+    if (method === "GET" && path === "/api/v1/authority") return json(200, { authority: state.servedAuthority ?? authority, permissions_version: 1 });
     if (method === "POST" && (m = /^\/api\/v1\/invites\/(invite_[0-9a-f]{32})\/challenges$/.exec(path))) {
       const id = `invite_challenge_${hex()}`;
       const nonce = crypto.randomBytes(32).toString("base64url");

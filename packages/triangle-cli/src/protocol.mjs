@@ -68,6 +68,38 @@ export function inviteLink(authority, inviteId, secret) {
   return `${authority}/join#${inviteId}.${secret}`;
 }
 
+/** Cut to at most `max` UTF-16 units without splitting a surrogate pair. */
+export function truncateText(text, max) {
+  let out = String(text).slice(0, max);
+  if (/[\uD800-\uDBFF]$/.test(out)) out = out.slice(0, -1);
+  return out;
+}
+
+const CHALLENGE_IDS = Object.freeze({
+  invite: /^invite_challenge_[0-9a-f]{32}$/,
+  owner: /^owner_challenge_[0-9a-f]{32}$/,
+});
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * A challenge is server input: before signing, check that it is for exactly the
+ * request we meant (operation, target, authority, controller), so a tampered
+ * challenge cannot redirect our signature to a different operation (§5.1).
+ */
+export function assertChallenge(challenge, expected) {
+  const fail = (field) => { throw Object.assign(new TypeError(`The MESH server returned a challenge for a different request (${field}); refusing to sign.`), { code: "challenge_mismatch" }); };
+  if (!challenge || typeof challenge !== "object") fail("missing");
+  if (typeof challenge.nonce_sha256 !== "string" || !HEX64.test(challenge.nonce_sha256)) fail("nonce_sha256");
+  const idPattern = CHALLENGE_IDS[expected.kind];
+  if (idPattern && !idPattern.test(challenge.challenge_id ?? "")) fail("challenge_id");
+  if (!idPattern && (typeof challenge.challenge_id !== "string" || !/^[a-z_]{3,40}_[0-9a-f]{32}$/.test(challenge.challenge_id))) fail("challenge_id");
+  for (const [field, value] of Object.entries(expected)) {
+    if (field === "kind") continue;
+    if ((challenge[field] ?? null) !== value) fail(field);
+  }
+  return challenge;
+}
+
 export function isCanonicalHandle(value) {
   return typeof value === "string" && value === value.trim().toLowerCase() && HANDLE.test(value);
 }
@@ -119,6 +151,7 @@ export function redemptionMessage(envelope, nonceSha256) {
 
 /** Signed invite redemption body (§3.4). */
 export function buildRedemption({ authority, inviteId, secret, challenge, ownerKey, deviceLabel, displayName = null, agent = null, workloadKey = null }) {
+  assertChallenge(challenge, { kind: "invite", invite_id: inviteId, authority });
   if ((agent === null) !== (workloadKey === null)) throw new TypeError("agent and workloadKey go together");
   const envelope = {
     profile: INVITE_REDEMPTION_PROFILE,
@@ -154,14 +187,16 @@ export function ownerOperationMessage(envelope, nonceSha256) {
 }
 
 /** Signed owner operation (agent.create, invite.create, owner.device.approve, …). */
-export function buildOwnerOperation({ authority, controllerId, ownerKey, challenge, params = {}, idempotencyKey = `idem_${randomHex(12)}`, workloadKey = null }) {
+export function buildOwnerOperation({ authority, controllerId, ownerKey, challenge, operation, target = null, params = {}, idempotencyKey = `idem_${randomHex(12)}`, workloadKey = null }) {
+  if (typeof operation !== "string") throw new TypeError("buildOwnerOperation needs the intended operation");
+  assertChallenge(challenge, { kind: "owner", operation, target, authority, controller_id: controllerId });
   const envelope = {
     profile: OWNER_OPERATION_PROFILE,
     authority,
     controller_id: controllerId,
     challenge_id: challenge.challenge_id,
-    operation: challenge.operation,
-    target: challenge.target ?? null,
+    operation,
+    target,
     params,
     idempotency_key: idempotencyKey,
   };
