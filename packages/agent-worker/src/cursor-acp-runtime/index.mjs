@@ -33,10 +33,14 @@ export {
 export { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
 
 export {
+  applyLegacyCursorAcpSessionCopy,
   buildSanitizedCursorChildEnv,
+  CURSOR_ACP_LEGACY_COPY_MANIFEST,
   defaultTriangleCursorHome,
+  planLegacyCursorAcpSessionCopy,
   resolveCursorAcpPoolGuards,
   resolveTriangleCursorHome,
+  revertLegacyCursorAcpSessionCopy,
 } from "./runtime-home.mjs";
 
 export {
