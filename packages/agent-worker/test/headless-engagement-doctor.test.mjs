@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { deriveClientInstanceId } from "../src/installation-inventory.mjs";
+import {
+  FIXTURE_INSTALLATION_ID,
+  openTransactionRecord,
+  secureRegistry,
+  writeEnrollment,
+  writeInstallationIdentity,
+} from "./inventory-fixture-helpers.mjs";
 import {
   formatDoctorReport,
   runHeadlessEngagementDoctor,
 } from "../src/headless-engagement-doctor.mjs";
 
 function fixture() {
-  const root = mkdtempSync(path.join(tmpdir(), "headless-doctor-"));
+  const root = mkdtempSync(path.join(realpathSync(tmpdir()), "headless-doctor-"));
   const client = path.join(root, "client");
   mkdirSync(client, { recursive: true, mode: 0o700 });
   const workdir = path.join(root, "work");
@@ -35,7 +43,7 @@ function fixture() {
       version: 2,
       common: {
         adapterVersion: "1",
-        installationId: "inst_x",
+        installationId: FIXTURE_INSTALLATION_ID,
         workingDirectory: workdir,
         codexHome,
         command,
@@ -44,13 +52,27 @@ function fixture() {
       profiles: [
         {
           profile: "bob",
-          instanceId: "a".repeat(64),
+          instanceId: deriveClientInstanceId("bob"),
           stateRoot: path.join(root, "state", "bob"),
         },
       ],
     })}\n`,
   );
-  return { root, client };
+  // Complete inventory: the registry row and enrollment journal for bob.
+  const bobId = deriveClientInstanceId("bob");
+  mkdirSync(path.join(client, "instances"), { recursive: true });
+  writeFileSync(
+    path.join(client, "instances", `${bobId}.json`),
+    `${JSON.stringify({ version: 1, instanceId: bobId, profile: "bob", runtimeAdapter: "codex", enabled: true, deliveryMode: "headless-app-server" })}\n`,
+  );
+  writeEnrollment(root, "bob");
+  writeInstallationIdentity(client);
+  secureRegistry(root);
+  writeFileSync(
+    path.join(client, "headless-claimer.bob.json"),
+    `${JSON.stringify({ version: 1, profile: "bob", owner: "dev.thetriangle.client", pid: 4242, family: "codex" })}\n`,
+  );
+  return { root, client, bobId };
 }
 
 test("doctor reports progress separately and exits 0 when healthy", () => {
@@ -73,10 +95,12 @@ test("doctor reports progress separately and exits 0 when healthy", () => {
     );
     const result = runHeadlessEngagementDoctor({
       clientRoot: client,
-      advisoryHeldAt: () => false,
-      pidAlive: () => false,
+      advisoryHeldAt: () => true,
+      pidAlive: () => true,
     });
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, 0, JSON.stringify([result.report.blockers, result.report.warnings]));
+    assert.equal(result.ok, true);
+    assert.equal(result.report.inventory.profiles[0].status, "ok");
     assert.equal(result.report.supervisor.readyGeneration, "11111111-1111-4111-8111-111111111111");
     assert.equal(result.report.watch.connection, "connected");
     assert.equal(result.report.profiles[0].progress.lastAckAt, "2026-10-03T20:00:11.000Z");
@@ -102,13 +126,13 @@ test("doctor exits non-zero on missing ready generation", () => {
 });
 
 test("doctor marks kick-ok drain-stale as degraded without deleting open txns", () => {
-  const { root, client } = fixture();
+  const { root, client, bobId } = fixture();
   try {
-    const openDir = path.join(root, "model-state", "instances", "a".repeat(64), "mailbox-transactions");
+    const openDir = path.join(root, "model-state", "instances", bobId, "mailbox-transactions");
     mkdirSync(openDir, { recursive: true, mode: 0o700 });
     writeFileSync(
       path.join(openDir, "open.json"),
-      `${JSON.stringify({ state: "claimed", deliveryId: 9, protocol: "coordinator-delivery-v1" })}\n`,
+      `${JSON.stringify(openTransactionRecord(bobId, { deliveryId: 9, createdAt: "2026-10-03T21:00:00.000Z" }))}\n`,
       { mode: 0o600 },
     );
     writeFileSync(
@@ -133,6 +157,18 @@ test("doctor marks kick-ok drain-stale as degraded without deleting open txns", 
     assert.ok(result.report.warnings.some((row) => row.code === "kick_ok_drain_stale"));
     assert.equal(result.report.profiles[0].openTransaction.state, "claimed");
     assert.ok(existsSync(path.join(openDir, "open.json")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor is not healthy when the registry is missing even if the Codex binding is fine", () => {
+  const { root, client } = fixture();
+  try {
+    rmSync(path.join(client, "instances"), { recursive: true, force: true });
+    const result = runHeadlessEngagementDoctor({ clientRoot: client, advisoryHeldAt: () => true, pidAlive: () => true });
+    assert.equal(result.ok, false);
+    assert.equal(result.exitCode, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
