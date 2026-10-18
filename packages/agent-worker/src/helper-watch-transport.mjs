@@ -95,6 +95,23 @@ function parseWatchFailureDiagnosis(stderr) {
   }
 }
 
+const GRANT_EXPIRY = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+
+/**
+ * Pull the secret-free `expiresAt` from `watch-ensure` / `watch-status` stdout.
+ * Helpers built before L1e omit it; callers then fall back to reactive renewal.
+ */
+export function parseWatchGrantStatusExpiry(stdout) {
+  if (typeof stdout !== "string" || stdout.trim().length === 0 || stdout.length > 65_536) return null;
+  try {
+    const payload = JSON.parse(stdout.trim().split("\n").at(-1));
+    const value = payload?.expiresAt;
+    return typeof value === "string" && value.length <= 40 && GRANT_EXPIRY.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function assertInstallationId(installationId) {
   if (typeof installationId !== "string" || !/^inst_[A-Za-z0-9_-]{10,75}$/.test(installationId)) {
     throw new TypeError("installationId is invalid");
@@ -207,7 +224,8 @@ export async function ensureHelperWatchGrant({
       { timeoutMs, signal },
     );
     if (result.code === 0) {
-      return { ensured: true };
+      const expiresAt = parseWatchGrantStatusExpiry(result.stdout);
+      return expiresAt ? { ensured: true, expiresAt } : { ensured: true };
     }
 
     diagnosis = parseWatchFailureDiagnosis(result.stderr);
