@@ -28,6 +28,7 @@ function verifyJws(compact, jwk) {
 export function createFakeAuthority({ authority = "https://mesh.test", transportBase = authority } = {}) {
   const state = {
     owners: new Map(),
+    extraCatalogKeys: [], // simulate a newer server catalog
     controllers: new Map(), // id -> {owner_id, jwk, jkt, state, device_label}
     invites: new Map(), // id -> {kind, secret_hash, role, target_owner_id, redeemed_hash, result}
     challenges: new Map(),
@@ -54,18 +55,24 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
     return { id, secret, link: `${authority}/join#${id}.${secret}` };
   }
 
+  // Returns the controller, null (401), or FORBIDDEN (valid proof from a pending/revoked device → 403).
+  const FORBIDDEN = Symbol("forbidden");
+  const ownerGate = (c) => (c === FORBIDDEN ? err(403, "owner_forbidden") : c ? null : err(401, "owner_auth_required"));
+
   function ownerFromProof(request, method, path) {
     const proof = request.headers.get("mesh-owner-proof");
     if (!proof) return null;
     const header = b64urlJson(proof.split(".")[0]);
     const controller = state.controllers.get(header.kid);
-    if (!controller || controller.state !== "active") return null;
+    if (!controller) return null;
     const verified = verifyJws(proof, controller.jwk);
     if (!verified || verified.header.typ !== "mesh-owner-request+jwt") return null;
     const { payload } = verified;
-    if (payload.authority !== authority || payload.htm !== method || payload.htp !== path || state.jtis.has(payload.jti)) return null;
+    const htp = path + new URL(request.url).search;
+    if (payload.authority !== authority || payload.htm !== method || payload.htp !== htp || state.jtis.has(payload.jti)) return null;
     if (Math.abs(payload.iat - Date.now() / 1000) > 120) return null;
     state.jtis.add(payload.jti);
+    if (controller.state !== "active") return FORBIDDEN;
     return { id: header.kid, ...controller };
   }
 
@@ -94,7 +101,7 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
     if ([...state.agents.values()].some((a) => a.handle === draft.handle)) return { error: err(409, "handle_unavailable") };
     const agentId = `agent_${hex()}`;
     const workloadId = `workload_${hex()}`;
-    state.agents.set(agentId, { owner_id: ownerId, handle: draft.handle, name: draft.name, state: "active", permissions: draft.permissions, revision: 1, history: [] });
+    state.agents.set(agentId, { owner_id: ownerId, handle: draft.handle, name: draft.name, state: "active", permissions: draft.permissions, revision: 1, history: [{ revision: 1, previous: null, next: draft.permissions, controller_id: null, device_label: null, created_at: new Date().toISOString() }] });
     state.workloads.set(workloadId, { agent_id: agentId, jwk: draft.workload_public_jwk, bounds: draft.bounds });
     return { agent: { agent_id: agentId, handle: draft.handle, name: draft.name, description: draft.description, state: "active", permissions: draft.permissions, revision: 1, workload: { workload_id: workloadId, jkt: thumb(draft.workload_public_jwk), bounds: draft.bounds } } };
   }
@@ -159,7 +166,7 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
     }
     if (method === "GET" && path === "/api/v1/owners/me") {
       const c = ownerFromProof(request, method, path);
-      if (!c) return err(401, "owner_auth_required");
+      if (ownerGate(c)) return ownerGate(c);
       return json(200, {
         authority,
         owner: state.owners.get(c.owner_id),
@@ -170,7 +177,7 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
     }
     if (method === "POST" && path === "/api/v1/owners/me/challenges") {
       const c = ownerFromProof(request, method, path);
-      if (!c) return err(401, "owner_auth_required");
+      if (ownerGate(c)) return ownerGate(c);
       const id = `owner_challenge_${hex()}`;
       const nonce = crypto.randomBytes(32).toString("base64url");
       state.challenges.set(id, { controller_id: c.id, operation: body.operation, target: body.target, nonce_sha256: sha256hex(nonce), used: false });
@@ -220,29 +227,38 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
         result = { invite_id: body.target, state: "revoked" };
       } else if (operation === "owner.device.approve" || operation === "owner.device.revoke") {
         const entry = [...state.controllers].find(([, v]) => v.jkt === body.target && v.owner_id === controller.owner_id);
-        if (!entry) return err(404, "device_not_found");
+        if (!entry) return err(404, "not_found");
+        if (operation === "owner.device.approve" && entry[1].state !== "pending_approval") return err(409, "state_conflict");
+        if (operation === "owner.device.revoke") {
+          const active = [...state.controllers.values()].filter((v) => v.owner_id === controller.owner_id && v.state === "active").length;
+          if (entry[1].state === "revoked") return err(409, "state_conflict");
+          if (entry[1].state === "active" && active <= 1) return err(409, "last_controller");
+        }
         entry[1].state = operation === "owner.device.approve" ? "active" : "revoked";
         result = { controller_id: entry[0], jkt: body.target, state: entry[1].state };
       }
       state.receipts.set(key, { hash: requestHash, result });
       return finish(json(operation === "agent.create" || operation === "invite.create" ? 201 : 200, { outcome: "applied", result }));
     }
-    if ((m = /^\/api\/v1\/agents\/(agent_[0-9a-f]{32})\/permissions(\/challenges|\/history)?$/.exec(path))) {
+    if ((m = /^\/api\/v1\/agents\/(agent_[0-9a-f]{32})\/permissions(\/challenges|\/history)?$/.exec(path)) && !(method === "POST" && !m[2])) {
       const c = ownerFromProof(request, method, path);
       const agent = state.agents.get(m[1]);
-      if (!c) return err(401, "owner_auth_required");
-      if (!agent || agent.owner_id !== c.owner_id) return err(404, "agent_not_found");
+      if (ownerGate(c)) return ownerGate(c);
+      if (!agent || agent.owner_id !== c.owner_id || agent.state === "deleted") return err(404, "agent_not_found");
       const etag = `W/"${agent.revision}"`;
       if (method === "GET" && !m[2]) {
-        if ((request.headers.get("if-none-match") ?? "").split(",").map((s) => s.trim()).includes(etag)) return new Response(null, { status: 304, headers: { etag } });
+        if ((request.headers.get("if-none-match") ?? "").split(",").map((s) => s.trim()).includes(etag)) return new Response(null, { status: 304, headers: { etag: etag.replace(/^W\//, "") } }); // like Vercel: W/ dropped on 304
         return json(200, permissionsView(m[1]), { etag });
       }
-      if (method === "GET" && m[2] === "/history") return json(200, { agent_id: m[1], entries: agent.history });
+      if (method === "GET" && m[2] === "/history") {
+        const limit = Number(new URL(request.url).searchParams.get("limit") ?? 50);
+        return json(200, { agent_id: m[1], entries: [...agent.history].reverse().slice(0, limit) });
+      }
       if (method === "POST" && m[2] === "/challenges") {
-        const id = `perm_challenge_${hex()}`;
+        const id = `owner_challenge_${hex()}`;
         const nonce = crypto.randomBytes(32).toString("base64url");
         state.challenges.set(id, { controller_id: c.id, agent_id: m[1], nonce_sha256: sha256hex(nonce), used: false });
-        return json(201, { challenge_id: id, agent_id: m[1], authority, current_revision: agent.revision, nonce, nonce_sha256: sha256hex(nonce) });
+        return json(201, { challenge_id: id, operation: "agent.permissions.update", agent_id: m[1], authority, controller_id: c.id, current_revision: agent.revision, nonce, nonce_sha256: sha256hex(nonce) });
       }
     }
     if (method === "POST" && (m = /^\/api\/v1\/agents\/(agent_[0-9a-f]{32})\/permissions$/.exec(path))) {
@@ -256,8 +272,11 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
       const message = enc({ agent_id: body.agent_id, authority: body.authority, challenge_id: body.challenge_id, controller_id: body.controller_id, expected_revision: body.expected_revision, idempotency_key: body.idempotency_key, nonce_sha256: challenge.nonce_sha256, permissions: body.permissions, profile: body.profile });
       if (!verify(controller.jwk, message, body.proof)) return err(401, "owner_auth_required");
       challenge.used = true;
+      const expectedKeys = ["permissions_version", "dm.receive", "dm.send", "posts.publish", "tasks.claim", "directory.listed", ...state.extraCatalogKeys].sort();
+      const sentKeys = Object.keys(body.permissions ?? {}).sort();
+      if (sentKeys.join() !== expectedKeys.join() || sentKeys.some((k) => k !== "permissions_version" && typeof body.permissions[k] !== "boolean")) return err(400, "invalid_permissions");
       if (body.expected_revision !== agent.revision) return err(409, "revision_conflict", { current_revision: agent.revision });
-      agent.history.push({ revision: agent.revision + 1, previous: agent.permissions, next: body.permissions, device_label: controller.device_label, changed_at: new Date().toISOString() });
+      agent.history.push({ revision: agent.revision + 1, previous: agent.permissions, next: body.permissions, controller_id: body.controller_id, device_label: controller.device_label, created_at: new Date().toISOString() });
       agent.permissions = body.permissions;
       agent.revision += 1;
       const response = { ...permissionsView(m[1]), outcome: "applied", updated_by: { controller_id: body.controller_id, device_label: controller.device_label }, receipt: { id: `receipt_${hex()}`, controller_id: body.controller_id } };

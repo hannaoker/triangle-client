@@ -114,3 +114,38 @@ test("collectDashboard fails closed when helper leaks a token", async () => {
   assert.equal(dashboard.profiles.length, 0);
   assert.equal(findSecretLeak(dashboard).ok, true);
 });
+
+test("collectDashboard includes the permissions v1 read model through an allow-list", async () => {
+  const { pickPermissionsModel } = await import("../src/status.mjs");
+  const { formatDashboardHuman } = await import("../src/format.mjs");
+  const model = {
+    joined: true,
+    authority: "https://mesh.test",
+    device: { device_label: "Desk", fingerprint: "ABCD-EFGH-IJKL-MNOP", state: "active", controller_id: "ctl_x" },
+    devices: [{ device_label: "Desk", fingerprint: "ABCD-EFGH-IJKL-MNOP", state: "active", this_device: true, jkt: "x".repeat(43) }],
+    agents: [{ agent_id: `agent_${"a".repeat(32)}`, handle: "alpha", state: "active", on_this_device: true, revision: 2, permissions: [{ key: "dm.send", label: "Start conversations", value: true, extra: "dropped" }, { key: "posts.publish", label: "Post to the team feed", value: false }], unknown_permissions: [{ key: "calendar.read", value: true, read_only: true }] }],
+    errors: [],
+    stray: "dropped",
+  };
+  const dashboard = await collectDashboard({
+    home: "/tmp/triangle-console-test-home",
+    installationId: "inst_N7VhDq3mQ2",
+    probe: async () => ({ present: false, executable: false, reason: "absent" }),
+    run: async () => { throw new Error("not called"); },
+    readPermissions: async () => model,
+  });
+  assert.equal(dashboard.permissions.agents[0].permissions[0].extra, undefined);
+  assert.equal(dashboard.permissions.stray, undefined);
+  assert.equal(dashboard.permissions.devices[0].jkt, undefined);
+  const human = formatDashboardHuman(dashboard);
+  assert.match(human, /alpha \(active, rev 2\): allowed: Start conversations · \+1 newer/);
+  assert.equal(pickPermissionsModel(null), null);
+  const failing = await collectDashboard({
+    home: "/tmp/triangle-console-test-home",
+    installationId: "inst_N7VhDq3mQ2",
+    probe: async () => ({ present: false, executable: false, reason: "absent" }),
+    run: async () => { throw new Error("not called"); },
+    readPermissions: async () => ({ ...model, agents: [{ ...model.agents[0], handle: '{"d":"' + "k".repeat(43) + '"}' }] }),
+  });
+  assert.ok(failing.errors.some((e) => e.scope === "permissions" && e.code === "secret_leak"));
+});

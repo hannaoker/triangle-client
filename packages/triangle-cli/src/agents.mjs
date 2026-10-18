@@ -37,3 +37,13 @@ export function resolveAgent(session, ref, serverAgents = null) {
   if (/^agent_[0-9a-f]{32}$/.test(ref)) return ref;
   throw new TypeError(`Unknown agent ${ref}.`);
 }
+
+/** Owner-signed lifecycle changes (§3.6). Delete is permanent on the server; the local key is removed after it commits. */
+export async function setAgentState(session, agentId, action) {
+  const operation = { pause: "agent.pause", resume: "agent.resume", delete: "agent.delete" }[action];
+  if (!operation) throw new TypeError(`unknown agent action ${action}`);
+  return session.custody.withLock(async () => {
+    const response = await session.ownerOperation(operation, agentId, {});
+    return { ...response.result, outcome: response.outcome };
+  });
+}

@@ -25,6 +25,9 @@ const INSTALLATION_ID_RE = /^inst_[A-Za-z0-9_-]{10,75}$/;
  * @param {(path: string, encoding: string) => Promise<string>} [options.readText]
  * @param {string} [options.serviceScriptPath] Optional path to triangle-client-service.sh
  * @param {AbortSignal} [options.signal]
+ * @param {(o: {home?: string}) => Promise<object>} [options.readPermissions] Permissions v1 read model
+ *   (owner devices, agents, toggles). The CLI passes `readTrianglePermissions`; omitted → section skipped.
+ * @param {string} [options.triangleHome] Permissions v1 state home (default: triangle-cli default / TRIANGLE_HOME)
  */
 export async function collectDashboard(options = {}) {
   const paths = resolveTrianglePaths(options.home);
@@ -68,6 +71,7 @@ export async function collectDashboard(options = {}) {
       watchEnsure: "explicit triangle-mailbox watch-ensure (see actions watch-ensure)",
       serviceControl: "explicit scripts/triangle-client-service.sh start|stop",
     },
+    permissions: null,
     errors: [],
   };
 
@@ -159,8 +163,49 @@ export async function collectDashboard(options = {}) {
     };
   }
 
+  if (typeof options.readPermissions === "function") {
+    try {
+      dashboard.permissions = assertSecretFree(
+        pickPermissionsModel(await options.readPermissions({ home: options.triangleHome })),
+        "permissions",
+      );
+    } catch (error) {
+      dashboard.errors.push(summarizeError("permissions", error));
+    }
+  }
+
   assertSecretFree(dashboard, "dashboard");
   return dashboard;
+}
+
+/** Default permissions v1 reader: the triangle CLI's secret-free read model. */
+export async function readTrianglePermissions({ home } = {}) {
+  const { collectPermissionsModel } = await import("@the-triangle/triangle-cli/read-model");
+  return collectPermissionsModel({ home });
+}
+
+const TOGGLE_KEYS = ["key", "label", "value"];
+/** Allow-list the read model before display (defense in depth on top of assertSecretFree). */
+export function pickPermissionsModel(model) {
+  if (!model || typeof model !== "object") return null;
+  const text = (v) => (typeof v === "string" ? v.slice(0, 200) : null);
+  const toggles = (list) => (Array.isArray(list) ? list.map((t) => Object.fromEntries(TOGGLE_KEYS.map((k) => [k, k === "value" ? t?.[k] ?? null : text(t?.[k])]))) : []);
+  return {
+    joined: Boolean(model.joined),
+    authority: text(model.authority),
+    device: model.device ? { device_label: text(model.device.device_label), fingerprint: text(model.device.fingerprint), state: text(model.device.state) } : null,
+    devices: (model.devices ?? []).map((d) => ({ device_label: text(d.device_label), fingerprint: text(d.fingerprint), state: text(d.state), this_device: Boolean(d.this_device) })),
+    agents: (model.agents ?? []).map((a) => ({
+      agent_id: text(a.agent_id),
+      handle: text(a.handle),
+      state: text(a.state),
+      on_this_device: Boolean(a.on_this_device),
+      revision: Number.isSafeInteger(a.revision) ? a.revision : null,
+      permissions: toggles(a.permissions),
+      unknown_permissions: toggles(a.unknown_permissions),
+    })),
+    errors: (model.errors ?? []).map((e) => ({ code: text(e.code), message: text(e.message) })),
+  };
 }
 
 async function readInstallationId(filePath, readText) {

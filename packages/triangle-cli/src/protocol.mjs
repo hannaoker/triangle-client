@@ -223,7 +223,10 @@ export function permissionsUpdateMessage(envelope, nonceSha256) {
 }
 
 /** Signed permission update; expected_revision is the conditional-write guard (the If-Match of this API). */
+export const PERMISSIONS_UPDATE_OPERATION = "agent.permissions.update";
+
 export function buildPermissionsUpdate({ authority, controllerId, ownerKey, agentId, challenge, expectedRevision, permissions, idempotencyKey = `idem_${randomHex(12)}` }) {
+  assertChallenge(challenge, { kind: "owner", operation: PERMISSIONS_UPDATE_OPERATION, agent_id: agentId, authority, controller_id: controllerId });
   const envelope = {
     profile: PERMISSIONS_UPDATE_PROFILE,
     authority,

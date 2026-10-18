@@ -41,14 +41,42 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
   const ownerKey = custody.readOwnerKey();
   if (requireJoined && (!controller || !ownerKey)) throw new LocalStateError("This device's owner state is incomplete. Run `triangle doctor`.");
 
-  async function ownerRequest(method, path, { body, headers = {}, mutating } = {}) {
-    if (controller.state !== "active") throw new LocalStateError("This device is waiting for approval from another of your devices (`triangle device approve` there).");
+  async function ownerRequest(method, path, { body, headers = {}, mutating, allowPending = false } = {}) {
+    if (controller.state === "pending_approval" && !allowPending) await refreshController();
+    if (controller.state !== "active" && !allowPending) throw new LocalStateError(`This device is waiting for approval. On one of your other devices run \`triangle device approve ${controller.fingerprint}\`.`);
     const proof = ownerRequestProof({ controllerId: controller.controller_id, ownerKey, authority: transport.authority, method, url: `${transport.authority}${path}` });
     return transport.request(method, path, { body, mutating, headers: { ...headers, [OWNER_PROOF_HEADER]: proof } });
   }
 
+  /**
+   * A device added by a device invite starts pending; once another device
+   * approves it, owner reads succeed. Returns the (possibly updated) state.
+   */
+  async function refreshController() {
+    if (!controller || controller.state !== "pending_approval") return controller?.state ?? null;
+    try {
+      await ownerRequest("GET", "/api/v1/owners/me", { allowPending: true });
+    } catch (error) {
+      if (error instanceof MeshApiError && (error.status === 403 || error.status === 401)) return controller.state;
+      throw error;
+    }
+    controller.state = "active";
+    // Atomic replace; no lock so this also works inside a locked command.
+    custody.writeController({ ...custody.readController(), state: "active" });
+    return controller.state;
+  }
+
   /** Local effects of a committed operation; run before the journal entry is removed. */
   function applyEffect(entry, result) {
+    if (entry.kind === "permissions-update") {
+      const { outcome, receipt, ...view } = result ?? {};
+      if (Number.isSafeInteger(view.revision)) custody.writeCache("permissions", entry.agent_id, { etag: `W/"${view.revision}"`, view });
+      return;
+    }
+    if (entry.operation === "agent.delete") {
+      if (custody.readAgent(entry.target)) custody.removeAgent(entry.target);
+      return;
+    }
     if (entry.operation === "agent.create") {
       const agent = result?.result;
       if (!agent?.agent_id || !agent.workload?.workload_id) throw new LocalStateError("agent.create returned no agent; keeping the journal for `triangle resume`.");
@@ -76,7 +104,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
   async function sendJournaled(name, entry) {
     let response;
     try {
-      response = await transport.request("POST", entry.path, { body: entry.body });
+      response = await transport.request(entry.method ?? "POST", entry.path, { body: entry.body });
     } catch (error) {
       if (error instanceof OutcomeUnknownError) {
         error.resumeHint = "triangle resume";
@@ -99,7 +127,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
    * replaying the identical request (`triangle resume`), which the server
    * answers from its receipt. Keys are never regenerated on retry.
    */
-  async function ownerOperation(operation, target, params, { workloadKey = null } = {}) {
+  async function ownerOperation(operation, target, params, { workloadKey = null, extra = {} } = {}) {
     const { body: challenge } = await ownerRequest("POST", "/api/v1/owners/me/challenges", { body: { operation, target }, mutating: false });
     const body = buildOwnerOperation({ authority: transport.authority, controllerId: controller.controller_id, ownerKey, challenge, operation, target, params, workloadKey });
     const name = `op-${body.idempotency_key}`;
@@ -111,16 +139,17 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       body,
       created_at: new Date().toISOString(),
       ...(workloadKey ? { workload_key: workloadKey } : {}),
+      ...extra,
     };
     custody.writeJournal(name, entry);
     const response = await sendJournaled(name, entry);
     return response.body;
   }
 
-  /** Replay one stored owner operation exactly as signed. */
+  /** Replay one stored owner operation or permission update exactly as signed. */
   async function replayOperation(name) {
     const entry = custody.readJournal(name);
-    if (!entry || entry.kind !== "owner-operation") throw new LocalStateError(`No pending operation ${name}.`);
+    if (!entry || !["owner-operation", "permissions-update"].includes(entry.kind)) throw new LocalStateError(`No pending operation ${name}.`);
     const response = await sendJournaled(name, entry);
     return { entry, result: response.body };
   }
@@ -143,6 +172,8 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
     owner: controller ? { ...controller, key: ownerKey } : null,
     ownerRequest,
     ownerOperation,
+    sendJournaled,
+    refreshController,
     replayOperation,
     workloadSession,
     newIdempotencyKey: () => `idem_${randomHex(12)}`,

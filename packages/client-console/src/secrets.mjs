@@ -7,6 +7,8 @@ const SECRET_PATTERNS = [
   // Check watch secrets before mailbox tokens (`mesh_watch_` also matches a naive `mesh_`).
   { name: "mesh_watch_secret", re: /\bmesh_watch_[A-Za-z0-9_-]{8,}\b/ },
   { name: "mesh_token", re: /\bmesh_(?!watch_)[A-Za-z0-9_-]{16,}\b/ },
+  // Permissions v1 private keys are Ed25519 JWKs; their private scalar is "d".
+  { name: "private_jwk", re: /\\?"d\\?"\s*:\s*\\?"[A-Za-z0-9_-]{43}\\?"/ },
 ];
 
 /**

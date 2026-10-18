@@ -17,6 +17,9 @@
     "./secrets": "./src/secrets.mjs",
     "./actions": "./src/actions.mjs"
   },
+  "dependencies": {
+    "@the-triangle/triangle-cli": "0.1.0"
+  },
   "scripts": {
     "start": "node ./src/cli.mjs status --human",
     "test": "node --test test/*.test.mjs"

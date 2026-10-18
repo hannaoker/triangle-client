@@ -57,6 +57,23 @@ export function formatDashboardHuman(dashboard) {
   }
   lines.push("");
 
+  lines.push("## Permissions (permissions v1)");
+  const p = dashboard.permissions;
+  if (!p) {
+    lines.push("(not collected)");
+  } else if (!p.joined) {
+    lines.push("This computer has not joined a MESH. Run `triangle join <link>`.");
+  } else {
+    lines.push(`MESH: ${p.authority} · this device: ${p.device?.device_label ?? "?"} ${p.device?.fingerprint ?? ""} (${p.device?.state ?? "?"})`);
+    if (p.devices.length) lines.push(`devices: ${p.devices.map((d) => `${d.device_label ?? "?"} ${d.state}`).join(", ")}`);
+    for (const agent of p.agents) {
+      const on = agent.permissions.filter((t) => t.value === true).map((t) => t.label).join(", ") || "nothing";
+      lines.push(`- ${agent.handle} (${agent.state}, rev ${agent.revision ?? "?"}): allowed: ${on}${agent.unknown_permissions.length ? ` · +${agent.unknown_permissions.length} newer` : ""}`);
+    }
+    for (const err of p.errors) lines.push(`  ! ${err.message}`);
+  }
+  lines.push("");
+
   lines.push("## Service");
   if (dashboard.service?.summary) {
     lines.push(dashboard.service.summary);

@@ -3,7 +3,10 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import { addAgent, listAgents } from "./agents.mjs";
+import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
+import { approveDevice, listDevices, renderDevices, revokeDevice } from "./devices.mjs";
+import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
+import { parseChanges, permissionHistory, readPermissions, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
 import { defaultHome } from "./custody.mjs";
 import { doctor, renderDoctor, TRUST_COPY } from "./doctor.mjs";
 import { LocalStateError, MeshApiError, OutcomeUnknownError } from "./errors.mjs";
@@ -20,6 +23,18 @@ export const USAGE = `Usage: triangle <command> [options]
   join --abandon              Forget an unfinished join (keeps this device's owner key).
   agent add --handle HANDLE [--name NAME] [--description TEXT] [--read-only]
   agent list
+  agent pause|resume <agent>
+  agent delete <agent> --yes  Permanently delete an agent (its key on this device is removed too).
+  permissions show [agent]    Current toggles (conditional read; cached ETag).
+  permissions set <agent> key=on|off ...
+                              Owner-signed change against the revision you saw (conflicts are re-read, never overwritten).
+  permissions history [agent] [--limit N]
+  invite teammate [--role member|admin] [--name-hint NAME] [--email-hint EMAIL] [--expires SECONDS]
+  invite device               A 15-minute link that adds another computer of yours as an owner device.
+  invite revoke <invite_id>
+  device list
+  device approve <fingerprint>
+  device revoke <fingerprint> [--yes]
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
@@ -127,7 +142,100 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           print(io, flags, view.agents, (agents) => agents.map((a) => `${a.handle}\t${a.agent_id}\t${a.state}\trev ${a.revision ?? "?"}${a.on_this_device ? "\t(this device)" : ""}`).join("\n") || "No agents.");
           return 0;
         }
+        if (sub === "pause" || sub === "resume" || sub === "delete") {
+          allowOnly(flags, sub === "delete" ? ["yes"] : []);
+          if (rest.length > 1) throw new UsageError(`agent ${sub} takes one agent`);
+          const agents = (await listAgents(session)).agents;
+          const agentId = resolveAgent(session, rest[0], agents);
+          const handle = agents.find((a) => a.agent_id === agentId)?.handle ?? agentId;
+          if (sub === "delete" && !flags.yes) throw new UsageError(`Deleting ${handle} is permanent. Re-run with --yes.`);
+          const result = await setAgentState(session, agentId, sub);
+          print(io, flags, result, (r) => `${handle} is ${r.state}${r.outcome === "replayed" ? " (already applied)" : ""}.`);
+          return 0;
+        }
         throw new UsageError(`unknown agent command ${sub ?? ""}`);
+      }
+      case "permissions": {
+        const session = openSession({ home, env, fetchImpl });
+        const agents = (await listAgents(session)).agents;
+        const handleOf = (id) => agents.find((a) => a.agent_id === id)?.handle ?? id;
+        if (sub === "show" || sub === undefined) {
+          allowOnly(flags, []);
+          if (rest.length > 1) throw new UsageError("permissions show takes one agent");
+          const agentId = resolveAgent(session, rest[0], agents);
+          const view = await readPermissions(session, agentId);
+          print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
+          return 0;
+        }
+        if (sub === "set") {
+          allowOnly(flags, []);
+          const [ref, ...changeArgs] = rest;
+          if (!ref || !changeArgs.length) throw new UsageError("permissions set <agent> key=on|off ...");
+          const agentId = resolveAgent(session, ref, agents);
+          const changes = parseChanges(changeArgs);
+          try {
+            const view = await setPermissions(session, agentId, changes);
+            print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
+            return 0;
+          } catch (error) {
+            if (!(error instanceof RevisionConflictError)) throw error;
+            if (flags.json) io.stderr(JSON.stringify(error.toJSON()));
+            else io.stderr(`${error.message}\n\nLatest:\n${renderPermissions(handleOf(agentId), error.latest)}`);
+            return 4;
+          }
+        }
+        if (sub === "history") {
+          allowOnly(flags, ["limit"]);
+          if (rest.length > 1) throw new UsageError("permissions history takes one agent");
+          const agentId = resolveAgent(session, rest[0], agents);
+          if (flags.limit !== undefined && !/^\d{1,3}$/.test(flags.limit)) throw new UsageError("--limit must be 1-200");
+          const history = await permissionHistory(session, agentId, { limit: flags.limit === undefined ? undefined : Number(flags.limit) });
+          print(io, flags, history, (h) => renderHistory(handleOf(agentId), h));
+          return 0;
+        }
+        throw new UsageError(`unknown permissions command ${sub}`);
+      }
+      case "invite": {
+        const session = openSession({ home, env, fetchImpl });
+        if (sub === "teammate" || sub === "device") {
+          allowOnly(flags, sub === "teammate" ? ["role", "name-hint", "email-hint", "expires"] : []);
+          if (rest.length) throw new UsageError(`invite ${sub} takes no arguments`);
+          if (flags.expires !== undefined && !/^\d{1,7}$/.test(flags.expires)) throw new UsageError("--expires is a number of seconds");
+          const outcome = await createInvite(session, {
+            kind: sub,
+            role: sub === "teammate" ? flags.role ?? "member" : null,
+            displayNameHint: flags["name-hint"] ?? null,
+            emailHint: flags["email-hint"] ?? null,
+            expiresInSeconds: flags.expires === undefined ? null : Number(flags.expires),
+          });
+          print(io, flags, outcome, renderInvite);
+          return 0;
+        }
+        if (sub === "revoke") {
+          allowOnly(flags, []);
+          if (rest.length !== 1) throw new UsageError("invite revoke <invite_id>");
+          const result = await revokeInvite(session, rest[0]);
+          print(io, flags, result, (r) => `Revoked ${r.invite_id ?? rest[0]}.`);
+          return 0;
+        }
+        throw new UsageError(`unknown invite command ${sub ?? ""}`);
+      }
+      case "device": {
+        const session = openSession({ home, env, fetchImpl });
+        if (sub === "list") {
+          allowOnly(flags, []);
+          const devices = await listDevices(session);
+          print(io, flags, devices, renderDevices);
+          return 0;
+        }
+        if (sub === "approve" || sub === "revoke") {
+          allowOnly(flags, sub === "revoke" ? ["yes"] : []);
+          if (rest.length !== 1) throw new UsageError(`device ${sub} <fingerprint>`);
+          const result = sub === "approve" ? await approveDevice(session, rest[0]) : await revokeDevice(session, rest[0], { allowSelf: Boolean(flags.yes) });
+          print(io, flags, result, (r) => `${r.device_label ?? "Device"} (${r.fingerprint}) is ${r.state}.`);
+          return 0;
+        }
+        throw new UsageError(`unknown device command ${sub ?? ""}`);
       }
       case "status":
       case "doctor": {
@@ -150,13 +258,15 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           return 0;
         }
         return await session.custody.withLock(async () => {
-        const names = session.custody.listJournal().filter((name) => name.startsWith("op-"));
+        const names = session.custody.listJournal().filter((name) => name.startsWith("op-") || name.startsWith("perm-"));
         const done = [];
         for (const name of names) {
           const { entry, result } = await session.replayOperation(name);
-          done.push({ operation: entry.operation, target: entry.target, outcome: result?.outcome });
+          const item = { operation: entry.operation ?? entry.kind, target: entry.target ?? entry.agent_id ?? null, outcome: result?.outcome };
+          if (entry.operation === "invite.create" && entry.invite_secret) item.invite = inviteOutcome(session, result, entry.invite_secret).invite;
+          done.push(item);
         }
-        print(io, flags, done, (items) => items.map((d) => `${d.operation} ${d.target ?? ""} → ${d.outcome}`).join("\n") || "Nothing to resume.");
+        print(io, flags, done, (items) => items.map((d) => `${d.operation} ${d.target ?? ""} → ${d.outcome}${d.invite ? `\n  link: ${d.invite.link}` : ""}`).join("\n") || "Nothing to resume.");
         return 0;
         });
       }

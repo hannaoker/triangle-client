@@ -9,8 +9,29 @@ triangle join 'https://mesh.example.com/join#invite_….<secret>' --name "Jerry"
 triangle agent add --handle helper --name "Helper"
 triangle agent list
 triangle status          # or: triangle doctor (exit 1 when something needs attention)
-triangle resume          # replay owner operations whose outcome was unknown
+triangle resume          # replay owner operations whose outcome was unknown (--abandon to discard)
+
+triangle permissions show helper
+triangle permissions set helper posts.publish=on dm.send=off
+triangle permissions history helper
+triangle agent pause|resume helper ; triangle agent delete helper --yes
+
+triangle invite teammate --role member     # prints a single-use link
+triangle invite device                     # 15-minute link for your other computer
+triangle device approve ABCD-EFGH-IJKL-MNOP   # check the fingerprint it printed
+triangle device list ; triangle device revoke <fingerprint>
 ```
+
+## Permissions: conditional reads and writes
+
+`permissions show` sends `If-None-Match` with the cached ETag (`W/"<revision>"`)
+and reuses the private cache on `304`. `permissions set` re-reads the current
+object, applies only your changes, and signs it with `expected_revision` set to
+the revision it read. That signed revision is this API's If-Match. If another
+device changed the agent first, the server answers `409 revision_conflict`; the
+CLI re-reads and shows the latest state with exit code 4. It never re-applies
+your change over someone else's. Keys that this version doesn't know are shown
+read-only and are sent back unchanged.
 
 ## Custody
 

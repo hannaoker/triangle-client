@@ -9,3 +9,7 @@ export * from "./session.mjs";
 export * from "./join.mjs";
 export * from "./agents.mjs";
 export * from "./doctor.mjs";
+export * from "./permissions.mjs";
+export * from "./invites.mjs";
+export * from "./devices.mjs";
+export * from "./read-model.mjs";
