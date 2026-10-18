@@ -17,7 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 export const UNAVAILABLE = "unavailable";
@@ -32,6 +32,21 @@ export const OPEN_TRANSACTION_MAX_FAILURES_BEFORE_STUCK = 5;
 /** Default open-transaction age budget; the doctor passes its `maxOpenTxnAgeMs`. */
 export const DEFAULT_MAX_OPEN_TXN_AGE_MS = 15 * 60_000;
 const MAX_JOURNAL_FILES = 5000;
+// Persisted enums (Swift `RuntimeAdapter`, `DeliveryMode`, `EnrollmentJournalState`).
+const RUNTIME_ADAPTERS = new Set(["codex", "hermes", "antigravity", "grok-bot", "cursor-acp"]);
+const DELIVERY_MODES = new Set(["worker", "mcp-interactive", "event-driven", "grok-bot", "headless-app-server", "headless-cursor-acp"]);
+const ENROLLMENT_STATES = new Set(["pending", "outcome_unknown", "registered_not_installed", "pending_verification", "quarantined", "verified"]);
+const REGISTRY_REQUIRED_KEYS = ["version", "instanceId", "profile", "runtimeAdapter", "enabled"];
+const REGISTRY_ALLOWED_KEYS = new Set([...REGISTRY_REQUIRED_KEYS, "deliveryMode"]);
+const ENROLLMENT_KEYS = ["version", "profile", "origin", "state", "agentID", "handle", "reasonCode"];
+const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const AGENT_ID = /^agent_[a-f0-9]{32}$/;
+const MAILBOX_HANDLE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
+const OPEN_TXN_MAX_BYTES = 4096;
+const WORKER_MANIFEST_KEYS = ["version", "nodeSHA256", "projectRoot", "environment", "artifacts"];
+const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7]);
+const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 
 /** Mirrors Swift `ClientInstanceID.derive(profile:)`. */
@@ -61,6 +76,28 @@ export function isValidProfileName(value) {
     && !value.includes("/")
     && !value.includes("\\")
     && !PROFILE_CONTROL_CHARACTER.test(value);
+}
+
+function sameKeys(value, keys) {
+  const present = Object.keys(value);
+  return present.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Mirrors Swift `MeshOrigin` as decoded from disk (https only, bare origin). */
+function isValidMeshOrigin(value) {
+  if (typeof value !== "string") return false;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === "https:" && url.hostname.length > 0 && url.username === "" && url.password === ""
+    && !value.includes("?") && !value.includes("#") && (url.pathname === "/" || url.pathname === "");
 }
 
 function readJsonFile(filePath) {
@@ -149,45 +186,50 @@ export function classifyLane({ runtimeAdapter, deliveryMode }) {
   return { lane: "unknown", support: "unsupported", reason: "unknown_delivery_mode" };
 }
 
+/**
+ * Mirrors Swift `FileClientInstanceStore.list()` + `ClientInstance(from:)`:
+ * exact key set (deliveryMode optional), version 1, enum-valid adapter and
+ * delivery mode, derived instance id, file name == instance id, unique
+ * profiles. A row without deliveryMode decodes as `worker` regardless of
+ * adapter. Any invalid row makes Swift's list() throw, so each is a fault.
+ */
 function readRegistry(clientRoot) {
   const dir = path.join(clientRoot, "instances");
   const listing = listDir(dir);
-  if (listing == null) return { status: "absent", path: dir, entries: [] };
-  if (!Array.isArray(listing)) return { status: "unreadable", path: dir, entries: [], error: listing.error };
+  if (listing == null) return { status: "absent", path: dir, entries: [], strayNames: [] };
+  if (!Array.isArray(listing)) return { status: "unreadable", path: dir, entries: [], strayNames: [], error: listing.error };
   const entries = [];
+  const strayNames = [];
   for (const name of listing.sort()) {
-    if (!name.endsWith(".json")) continue;
+    if (name.startsWith(".tmp-")) continue;
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) {
+      strayNames.push(name);
+      continue;
+    }
     const filePath = path.join(dir, name);
     const fileId = name.slice(0, -".json".length);
     const { value, error } = readJsonFile(filePath);
     const problems = [];
-    if (error != null || value == null || typeof value !== "object") {
+    if (error != null || !isPlainObject(value)) {
       entries.push({ file: name, fileId, profile: null, valid: false, problems: ["unreadable"] });
       continue;
     }
+    if (Object.keys(value).some((key) => !REGISTRY_ALLOWED_KEYS.has(key))) problems.push("unexpected_keys");
+    if (REGISTRY_REQUIRED_KEYS.some((key) => !Object.hasOwn(value, key))) problems.push("missing_keys");
     if (value.version !== 1) problems.push("unsupported_version");
     if (!isValidProfileName(value.profile)) problems.push("invalid_profile");
     if (typeof value.instanceId !== "string" || !INSTANCE_ID.test(value.instanceId)) problems.push("invalid_instance_id");
     if (typeof value.enabled !== "boolean") problems.push("invalid_enabled");
-    if (typeof value.runtimeAdapter !== "string") problems.push("invalid_runtime_adapter");
+    if (!RUNTIME_ADAPTERS.has(value.runtimeAdapter)) problems.push("invalid_runtime_adapter");
+    const hasDeliveryMode = Object.hasOwn(value, "deliveryMode") && value.deliveryMode !== null;
+    if (hasDeliveryMode && !DELIVERY_MODES.has(value.deliveryMode)) problems.push("invalid_delivery_mode");
     if (value.instanceId !== fileId) problems.push("file_name_instance_id_mismatch");
     if (isValidProfileName(value.profile)
       && value.instanceId !== deriveClientInstanceId(value.profile)) {
       problems.push("instance_id_not_derived_from_profile");
     }
-    // Legacy rows without deliveryMode get the Swift default for their adapter.
-    let deliveryMode = typeof value.deliveryMode === "string" ? value.deliveryMode : null;
-    let deliveryModeSource = "registry";
-    if (deliveryMode == null) {
-      deliveryModeSource = "adapter_default";
-      deliveryMode = {
-        codex: "headless-app-server",
-        "grok-bot": "grok-bot",
-        "cursor-acp": "headless-cursor-acp",
-        hermes: "worker",
-        antigravity: "worker",
-      }[value.runtimeAdapter] ?? null;
-    }
+    // Swift decoder: `decodeIfPresent(DeliveryMode) ?? .worker` (not the adapter default).
+    const deliveryMode = hasDeliveryMode ? value.deliveryMode : "worker";
     entries.push({
       file: name,
       fileId,
@@ -195,13 +237,43 @@ function readRegistry(clientRoot) {
       instanceId: typeof value.instanceId === "string" ? value.instanceId : null,
       runtimeAdapter: typeof value.runtimeAdapter === "string" ? value.runtimeAdapter : null,
       deliveryMode,
-      deliveryModeSource,
+      deliveryModeSource: hasDeliveryMode ? "registry" : "decoder_default_worker",
       enabled: typeof value.enabled === "boolean" ? value.enabled : null,
       valid: problems.length === 0,
       problems,
     });
   }
-  return { status: "present", path: dir, entries };
+  const seen = new Map();
+  for (const entry of entries) {
+    if (!entry.valid) continue;
+    if (seen.has(entry.profile)) {
+      entry.valid = false;
+      entry.problems.push("duplicate_profile");
+      seen.get(entry.profile).valid = false;
+      seen.get(entry.profile).problems.push("duplicate_profile");
+    } else {
+      seen.set(entry.profile, entry);
+    }
+  }
+  return { status: "present", path: dir, entries, strayNames };
+}
+
+/**
+ * Mirrors Swift `FileEnrollmentJournal.read(for:)`: the record must decode
+ * (exact keys, version 1, valid origin/state/agentID/handle/reasonCode) and
+ * name the same profile as its file. Anything else is `invalid_record`, which
+ * is never treated as verified.
+ */
+function validateEnrollmentRecord(value, profile) {
+  if (!isPlainObject(value) || !sameKeys(value, ENROLLMENT_KEYS)) return false;
+  return value.version === 1
+    && value.profile === profile
+    && isValidMeshOrigin(value.origin)
+    && ENROLLMENT_STATES.has(value.state)
+    && (value.agentID === null || (typeof value.agentID === "string" && AGENT_ID.test(value.agentID)))
+    && (value.handle === null || (typeof value.handle === "string" && value.handle.length >= 3
+      && value.handle.length <= 32 && MAILBOX_HANDLE.test(value.handle)))
+    && typeof value.reasonCode === "string" && REASON_CODE.test(value.reasonCode);
 }
 
 function readEnrollmentJournal(applicationRoot) {
@@ -220,40 +292,137 @@ function readEnrollmentJournal(applicationRoot) {
       byProfile.set(profile, { state: "unreadable", reasonCode: null, agentId: null, handle: null });
       continue;
     }
+    if (!validateEnrollmentRecord(value, profile)) {
+      byProfile.set(profile, { state: "invalid_record", reasonCode: null, agentId: null, handle: null });
+      continue;
+    }
     byProfile.set(profile, {
-      state: typeof value.state === "string" ? value.state : null,
-      reasonCode: typeof value.reasonCode === "string" ? value.reasonCode : null,
-      agentId: typeof value.agentID === "string" ? value.agentID : null,
-      handle: typeof value.handle === "string" ? value.handle : null,
-      origin: typeof value.origin === "string" ? value.origin : null,
+      state: value.state,
+      reasonCode: value.reasonCode,
+      agentId: value.agentID,
+      handle: value.handle,
+      origin: value.origin,
     });
   }
   return { status: "present", path: dir, byProfile };
 }
 
-function readProfileBinding(filePath, expectedVersion) {
-  const { present, value, error } = readJsonFile(filePath);
-  if (!present) return { status: "absent", path: filePath, common: null, profiles: new Map() };
-  if (error != null || value == null || typeof value !== "object") {
-    return { status: "unreadable", path: filePath, common: null, profiles: new Map() };
+/** Swift `URL(fileURLWithPath:).standardizedFileURL.path` equivalence. */
+function isStandardizedAbsolute(value) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.includes("\0")) return false;
+  let normalized = path.posix.normalize(value);
+  if (normalized.length > 1 && normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  return normalized === value;
+}
+
+function containsSymlinkComponent(absolute) {
+  let current = "/";
+  for (const component of absolute.split("/").filter(Boolean)) {
+    current = path.posix.join(current, component);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch {
+      // A staged suffix may not exist yet (Swift skips it too).
+    }
   }
-  if (value.version !== expectedVersion || !Array.isArray(value.profiles)) {
-    return { status: "unsupported_version", path: filePath, version: value.version ?? null, common: null, profiles: new Map() };
+  return false;
+}
+
+/** client/installation.json as read by Swift `FileClientInstallationIdentityStore`. */
+function readInstallationIdentity(clientRoot) {
+  const { present, value, error } = readJsonFile(path.join(clientRoot, "installation.json"));
+  if (!present) return { status: "absent", installationId: null };
+  if (error != null || !isPlainObject(value) || value.version !== 1
+    || typeof value.installationId !== "string" || !INSTALLATION_ID.test(value.installationId)) {
+    return { status: "invalid", installationId: null };
+  }
+  return { status: "present", installationId: value.installationId };
+}
+
+/**
+ * Lane binding specs mirror Swift `prepareHeadlessWakes` / `prepareCursorAcpWakes`.
+ * Any violation makes Swift throw `invalidBootstrap` for the whole lane, so the
+ * binding is reported `invalid` (never "bound") with sanitized problem codes.
+ */
+const BINDING_SPECS = {
+  codexHeadless: {
+    version: 2,
+    commonKeys: ["adapterVersion", "installationId", "workingDirectory", "codexHome", "command", "pollIntervalMs"],
+    homeKey: "codexHome",
+    requiredProfileKeys: ["profile", "instanceId", "stateRoot"],
+    optionalProfileKeys: [],
+  },
+  cursorAcp: {
+    version: 1,
+    commonKeys: ["adapterVersion", "installationId", "workingDirectory", "cursorHome", "command", "pollIntervalMs"],
+    homeKey: "cursorHome",
+    requiredProfileKeys: ["profile", "instanceId", "stateRoot"],
+    optionalProfileKeys: ["shadowTestProfile"],
+  },
+};
+
+function validateProfileBinding(value, spec, { memberProfiles, installation }) {
+  const problems = [];
+  if (!sameKeys(value, ["version", "common", "profiles"])) problems.push("top_level_keys");
+  if (value.version !== spec.version) problems.push("unsupported_version");
+  const common = isPlainObject(value.common) ? value.common : null;
+  if (common == null || !sameKeys(common, spec.commonKeys)) problems.push("common_keys");
+  if (common != null) {
+    if (common.adapterVersion !== "1") problems.push("adapter_version");
+    if (!Number.isSafeInteger(common.pollIntervalMs) || common.pollIntervalMs < 100 || common.pollIntervalMs > 60_000) {
+      problems.push("poll_interval_ms");
+    }
+    for (const key of ["workingDirectory", spec.homeKey, "command"]) {
+      if (typeof common[key] !== "string" || !common[key].startsWith("/") || common[key].includes("\0")) problems.push(`common_${key}`);
+    }
+    if (installation.status !== "present") problems.push(`installation_identity_${installation.status}`);
+    else if (common.installationId !== installation.installationId) problems.push("installation_id_mismatch");
+  }
+  const rows = Array.isArray(value.profiles) ? value.profiles : null;
+  if (rows == null || rows.length === 0 || rows.length > 100) problems.push("profiles_count");
+  const allowed = new Set([...spec.requiredProfileKeys, ...spec.optionalProfileKeys]);
+  const seen = { profile: new Set(), instanceId: new Set(), stateRoot: new Set() };
+  for (const row of rows ?? []) {
+    if (!isPlainObject(row) || spec.requiredProfileKeys.some((key) => !Object.hasOwn(row, key))
+      || Object.keys(row).some((key) => !allowed.has(key))) {
+      problems.push("profile_keys");
+      continue;
+    }
+    if (Object.hasOwn(row, "shadowTestProfile") && typeof row.shadowTestProfile !== "boolean") problems.push("shadow_test_profile");
+    if (typeof row.profile !== "string" || typeof row.instanceId !== "string") problems.push("profile_fields");
+    if (!isStandardizedAbsolute(row.stateRoot)) problems.push("state_root_not_standardized_absolute");
+    else if (containsSymlinkComponent(row.stateRoot)) problems.push("state_root_symlink");
+    for (const key of ["profile", "instanceId", "stateRoot"]) {
+      if (seen[key].has(row[key])) problems.push(`duplicate_${key}`);
+      seen[key].add(row[key]);
+    }
+    if (typeof row.profile === "string" && !memberProfiles.has(row.profile)) problems.push("entry_not_enabled_lane_member");
+  }
+  return [...new Set(problems)];
+}
+
+function readProfileBinding(filePath, spec, context) {
+  const { present, value, error } = readJsonFile(filePath);
+  if (!present) return { status: "absent", path: filePath, common: null, profiles: new Map(), problems: [] };
+  if (error != null || !isPlainObject(value)) {
+    return { status: "unreadable", path: filePath, common: null, profiles: new Map(), problems: ["unreadable"] };
   }
   const profiles = new Map();
-  for (const entry of value.profiles) {
-    if (!entry || typeof entry.profile !== "string") continue;
+  for (const entry of Array.isArray(value.profiles) ? value.profiles : []) {
+    if (!isPlainObject(entry) || typeof entry.profile !== "string") continue;
     profiles.set(entry.profile, {
       instanceId: typeof entry.instanceId === "string" ? entry.instanceId : null,
       stateRoot: typeof entry.stateRoot === "string" ? entry.stateRoot : null,
       shadowTestProfile: entry.shadowTestProfile === true,
     });
   }
-  const common = value.common && typeof value.common === "object" ? value.common : {};
+  const problems = validateProfileBinding(value, spec, context);
+  const common = isPlainObject(value.common) ? value.common : {};
   return {
-    status: "present",
+    status: problems.length === 0 ? "present" : "invalid",
     path: filePath,
-    version: value.version,
+    version: value.version ?? null,
+    problems,
     common: {
       pollIntervalMs: Number.isSafeInteger(common.pollIntervalMs) ? common.pollIntervalMs : null,
       command: typeof common.command === "string" ? common.command : null,
@@ -277,19 +446,59 @@ function readSingleBinding(filePath) {
   };
 }
 
+/**
+ * Structural mirror of Swift `FileWorkerCommandResolver.resolve` manifest
+ * checks: exact keys, supported version, the exact release environment for the
+ * adapter, project root == TRIANGLE_PROJECT_ROOT == first PATH entry parent,
+ * content-addressed bundle directory beneath worker-runtime/bundles. Artifact
+ * hashes, per-version artifact path sets, and file modes are verified only by
+ * the launcher (reported as integrity "not_verified").
+ */
+function validateWorkerManifest(value, applicationRoot, runtimeAdapter) {
+  const problems = [];
+  if (!isPlainObject(value) || !sameKeys(value, WORKER_MANIFEST_KEYS)) return ["manifest_keys"];
+  if (!WORKER_MANIFEST_VERSIONS.has(value.version)) problems.push("unsupported_version");
+  if (typeof value.nodeSHA256 !== "string" || !/^[a-f0-9]{64}$/.test(value.nodeSHA256)) problems.push("node_sha256");
+  const env = isPlainObject(value.environment) ? value.environment : null;
+  const cli = WORKER_CLI_ENV[runtimeAdapter];
+  const requiredEnv = ["PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS", cli];
+  if (env == null || !sameKeys(env, requiredEnv)) problems.push("environment_keys");
+  if (env != null && Object.values(env).some((v) => typeof v !== "string" || /[\0\r\n]/.test(v))) problems.push("environment_values");
+  const projectRoot = typeof value.projectRoot === "string" ? value.projectRoot : null;
+  if (projectRoot == null || !projectRoot.startsWith("/")) problems.push("project_root");
+  if (env != null && projectRoot != null) {
+    if (env.TRIANGLE_PROJECT_ROOT !== projectRoot) problems.push("project_root_env_mismatch");
+    if (typeof env.PATH !== "string" || env.PATH.split(":")[0] !== `${projectRoot}/bin`) problems.push("path_not_project_bin");
+  }
+  if (projectRoot != null) {
+    const bundles = path.join(applicationRoot, "worker-runtime", "bundles");
+    if (path.dirname(projectRoot) !== bundles || !/^[a-f0-9]{64}$/.test(path.basename(projectRoot))) problems.push("project_root_not_bundle");
+    else if (!existsSync(projectRoot)) problems.push("project_root_missing");
+  }
+  const artifacts = isPlainObject(value.artifacts) ? value.artifacts : null;
+  if (artifacts == null || Object.keys(artifacts).length === 0
+    || Object.values(artifacts).some((hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash))) {
+    problems.push("artifacts");
+  }
+  return problems;
+}
+
 function readWorkerManifest(applicationRoot, runtimeAdapter) {
-  if (typeof runtimeAdapter !== "string" || !/^[a-z0-9-]+$/.test(runtimeAdapter)) {
-    return { status: "absent", path: null };
+  if (!Object.hasOwn(WORKER_CLI_ENV, runtimeAdapter ?? "")) {
+    return { status: "absent", path: null, problems: [] };
   }
   const filePath = path.join(applicationRoot, "worker-runtime", `${runtimeAdapter}.manifest.json`);
   const { present, value, error } = readJsonFile(filePath);
-  if (!present) return { status: "absent", path: filePath };
-  if (error != null || value == null) return { status: "unreadable", path: filePath };
+  if (!present) return { status: "absent", path: filePath, problems: [] };
+  if (error != null || value == null) return { status: "unreadable", path: filePath, problems: ["unreadable"] };
+  const problems = validateWorkerManifest(value, applicationRoot, runtimeAdapter);
   return {
-    status: "present",
+    status: problems.length === 0 ? "present" : "invalid",
     path: filePath,
+    problems,
     version: Number.isSafeInteger(value.version) ? value.version : null,
-    artifactCount: value.artifacts && typeof value.artifacts === "object" ? Object.keys(value.artifacts).length : 0,
+    artifactCount: isPlainObject(value.artifacts) ? Object.keys(value.artifacts).length : 0,
+    integrity: "not_verified",
   };
 }
 
@@ -380,27 +589,85 @@ function readWorkerConversationActivity(modelInstanceRoot) {
   return { rooms: rooms.length, lastUpdatedAt: maxIso(rooms.map((room) => room?.updatedAt)) };
 }
 
-function readOpenTransaction(modelInstanceRoot, now) {
+function prefixedTransactionDigest(prefix, domain, instanceId, deliveryId) {
+  const hash = createHash("sha256");
+  hash.update(Buffer.from(domain, "utf8"));
+  hash.update(Buffer.from([0]));
+  hash.update(Buffer.from(instanceId, "utf8"));
+  hash.update(Buffer.from([0]));
+  hash.update(Buffer.from(String(deliveryId), "utf8"));
+  return prefix + hash.digest("hex").slice(0, 32);
+}
+
+const OPEN_TXN_KEYS = [
+  "version", "instanceId", "protocol", "deliveryId", "roomId", "inboundEventId", "inboundRoomSequence", "replyRequired",
+  "claimId", "replyIdempotencyKey", "state", "replyEventId", "replyResolution", "failureCount", "lastFailureReason", "createdAt",
+];
+const OPEN_TXN_LEGACY_OPTIONAL = new Set(["inboundEventId", "inboundRoomSequence", "replyRequired"]);
+const EVENT_ID = /^event_[a-f0-9]{32}$/;
+
+/**
+ * Mirrors Swift `MailboxOpenTransaction(from:)` + `FileMailboxTransactionStore.readOpen`
+ * (record must belong to this instance). Returns true when Swift would accept it.
+ * (Duplicate JSON members, which Swift also rejects, are not detectable via JSON.parse.)
+ */
+export function isValidOpenTransactionRecord(raw, instanceId) {
+  if (!isPlainObject(raw)) return false;
+  const keys = Object.keys(raw);
+  if (keys.some((key) => !OPEN_TXN_KEYS.includes(key))) return false;
+  if (OPEN_TXN_KEYS.some((key) => !OPEN_TXN_LEGACY_OPTIONAL.has(key) && !Object.hasOwn(raw, key))) return false;
+  if (raw.version !== 1 || raw.instanceId !== instanceId || !INSTANCE_ID.test(raw.instanceId)) return false;
+  if (raw.protocol !== "self-serve-drain" && raw.protocol !== "coordinator-delivery-v1") return false;
+  if (!Number.isSafeInteger(raw.deliveryId) || raw.deliveryId <= 0) return false;
+  if (typeof raw.roomId !== "string" || !/^room_[a-f0-9]{32}$/.test(raw.roomId)) return false;
+  const inboundEvent = raw.inboundEventId ?? null;
+  const inboundSeq = raw.inboundRoomSequence ?? null;
+  if (inboundEvent !== null && (typeof inboundEvent !== "string" || !EVENT_ID.test(inboundEvent))) return false;
+  if ((inboundEvent === null) !== (inboundSeq === null)) return false;
+  if (inboundSeq !== null && (!Number.isSafeInteger(inboundSeq) || inboundSeq <= 0)) return false;
+  if (Object.hasOwn(raw, "replyRequired") && raw.replyRequired !== null && typeof raw.replyRequired !== "boolean") return false;
+  if (raw.claimId !== prefixedTransactionDigest("claim_", "triangle-claim-v1", raw.instanceId, raw.deliveryId)) return false;
+  if (raw.replyIdempotencyKey !== prefixedTransactionDigest("reply_", "triangle-reply-v1", raw.instanceId, raw.deliveryId)) return false;
+  if (!Number.isSafeInteger(raw.failureCount) || raw.failureCount < 0 || raw.failureCount > 10_000) return false;
+  if (raw.lastFailureReason != null && (typeof raw.lastFailureReason !== "string" || !REASON_CODE.test(raw.lastFailureReason))) return false;
+  if (typeof raw.createdAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(raw.createdAt)) return false;
+  const replyEvent = raw.replyEventId ?? null;
+  if (replyEvent !== null && (typeof replyEvent !== "string" || !EVENT_ID.test(replyEvent))) return false;
+  const combo = `${raw.state}|${raw.replyResolution}|${replyEvent === null ? "nil" : "some"}`;
+  return ["prepared|none|nil", "claimed|none|nil", "replied|created|some", "replied|idempotency_conflict|some"].includes(combo);
+}
+
+function readOpenTransaction(modelInstanceRoot, now, instanceId) {
   const dir = path.join(modelInstanceRoot, "mailbox-transactions");
   const openPath = path.join(dir, "open.json");
   const quarantine = listDir(path.join(dir, "quarantine"));
   const quarantinedCount = Array.isArray(quarantine) ? quarantine.length : 0;
-  const row = readJsonFile(openPath);
-  if (!row.present) return { open: null, quarantinedCount, journalPresent: existsSync(dir) };
-  if (row.value == null) return { open: { readable: false }, quarantinedCount, journalPresent: true };
+  if (!existsSync(openPath)) return { open: null, quarantinedCount, journalPresent: existsSync(dir) };
+  let oversized = false;
+  try {
+    oversized = statSync(openPath).size > OPEN_TXN_MAX_BYTES;
+  } catch {
+    oversized = false;
+  }
+  const row = oversized ? { value: null } : readJsonFile(openPath);
+  if (row.value == null) return { open: { readable: false, reason: oversized ? "oversized" : "unreadable" }, quarantinedCount, journalPresent: true };
   const raw = row.value;
+  if (!isValidOpenTransactionRecord(raw, instanceId)) {
+    // Swift readOpen throws invalidRecord: recovery cannot proceed.
+    return { open: { readable: false, reason: "invalid_record" }, quarantinedCount, journalPresent: true };
+  }
   return {
     journalPresent: true,
     quarantinedCount,
     open: {
       readable: true,
-      state: typeof raw.state === "string" ? raw.state : null,
-      protocol: typeof raw.protocol === "string" ? raw.protocol : null,
-      deliveryId: Number.isSafeInteger(raw.deliveryId) ? raw.deliveryId : null,
-      replyRequired: typeof raw.replyRequired === "boolean" ? raw.replyRequired : null,
+      state: raw.state,
+      protocol: raw.protocol,
+      deliveryId: raw.deliveryId,
+      replyRequired: typeof raw.replyRequired === "boolean" ? raw.replyRequired : true,
       replyResolved: raw.replyEventId != null,
-      failureCount: Number.isSafeInteger(raw.failureCount) ? raw.failureCount : null,
-      lastFailureReason: typeof raw.lastFailureReason === "string" ? raw.lastFailureReason.slice(0, 80) : null,
+      failureCount: raw.failureCount,
+      lastFailureReason: raw.lastFailureReason ?? null,
       createdAt: isoOrNull(raw.createdAt),
       ageMs: ageMs(raw.createdAt, now),
     },
@@ -453,7 +720,12 @@ function laneBinding(entry, lanes, applicationRoot) {
   if (lane === "codex-headless" || lane === "cursor-acp") {
     const source = lane === "codex-headless" ? lanes.codexHeadless : lanes.cursorAcp;
     if (source.status !== "present") {
-      return { kind: lane, status: source.status === "absent" ? "missing" : source.status, path: source.path };
+      return {
+        kind: lane,
+        status: source.status === "absent" ? "missing" : source.status,
+        path: source.path,
+        ...(source.problems?.length ? { problems: source.problems } : {}),
+      };
     }
     const row = source.profiles.get(entry.profile);
     if (!row) return { kind: lane, status: "missing", path: source.path };
@@ -478,6 +750,8 @@ function laneBinding(entry, lanes, applicationRoot) {
       path: manifest.path,
       manifestVersion: manifest.version ?? null,
       artifactCount: manifest.artifactCount ?? null,
+      ...(manifest.problems?.length ? { problems: manifest.problems } : {}),
+      ...(manifest.integrity ? { integrity: manifest.integrity } : {}),
     };
   }
   if (lane === "app-server") {
@@ -517,9 +791,18 @@ export function readInstallationInventory({
   const applicationRoot = path.resolve(clientRoot, "..");
   const registry = readRegistry(clientRoot);
   const journal = readEnrollmentJournal(applicationRoot);
+  const installation = readInstallationIdentity(clientRoot);
+  // Swift lane membership (`participatesInHeadlessWake` / `participatesInCursorAcpWake`).
+  const validEntries = registry.entries.filter((entry) => entry.valid && entry.enabled);
+  const laneMembers = {
+    codexHeadless: new Set(validEntries.filter((e) => e.runtimeAdapter === "codex" && e.deliveryMode === "headless-app-server").map((e) => e.profile)),
+    cursorAcp: new Set(validEntries.filter((e) => e.runtimeAdapter === "cursor-acp" && e.deliveryMode === "headless-cursor-acp").map((e) => e.profile)),
+  };
   const lanes = {
-    codexHeadless: readProfileBinding(path.join(clientRoot, "headless-runtime-binding.json"), 2),
-    cursorAcp: readProfileBinding(path.join(clientRoot, "cursor-acp-runtime-binding.json"), 1),
+    codexHeadless: readProfileBinding(path.join(clientRoot, "headless-runtime-binding.json"), BINDING_SPECS.codexHeadless,
+      { memberProfiles: laneMembers.codexHeadless, installation }),
+    cursorAcp: readProfileBinding(path.join(clientRoot, "cursor-acp-runtime-binding.json"), BINDING_SPECS.cursorAcp,
+      { memberProfiles: laneMembers.cursorAcp, installation }),
     appServer: readSingleBinding(path.join(clientRoot, "app-server-binding.json")),
     grokBot: readSingleBinding(path.join(clientRoot, "grok-bot-binding.json")),
   };
@@ -535,14 +818,23 @@ export function readInstallationInventory({
   } else if (registry.entries.length === 0) {
     blockers.push({ code: "registry_empty", message: "installation registry has no profiles" });
   }
+  if (registry.strayNames?.length > 0) {
+    // Swift list() throws invalidRecord on any non-instance file name.
+    blockers.push({ code: "registry_stray_file", message: `installation registry contains ${registry.strayNames.length} non-instance file(s)` });
+  }
   if (journal.status !== "present") {
     warnings.push({ code: "enrollment_journal_unavailable", message: `enrollment journal ${journal.status}` });
   }
   for (const [key, label] of [["codexHeadless", "headless-runtime-binding.json"], ["cursorAcp", "cursor-acp-runtime-binding.json"]]) {
-    const status = lanes[key].status;
-    if (status === "unreadable" || status === "unsupported_version") {
-      blockers.push({ code: "binding_unreadable", message: `${label} ${status}` });
-    }
+    const { status, problems } = lanes[key];
+    if (status !== "unreadable" && status !== "invalid") continue;
+    // Swift only reads a lane binding when the lane has enabled members; then
+    // any violation throws invalidBootstrap for the whole lane.
+    const row = {
+      code: status === "unreadable" ? "binding_unreadable" : "binding_invalid",
+      message: `${label} ${status}${problems.length ? `: ${problems.join(",")}` : ""}`,
+    };
+    (laneMembers[key].size > 0 ? blockers : warnings).push(row);
   }
 
   for (const entry of registry.entries) {
@@ -564,7 +856,7 @@ export function readInstallationInventory({
     const enrollment = journal.byProfile.get(entry.profile) ?? null;
     const binding = laneBinding(entry, lanes, applicationRoot);
     const modelInstanceRoot = path.join(applicationRoot, "model-state", "instances", entry.instanceId);
-    const transactions = readOpenTransaction(modelInstanceRoot, now);
+    const transactions = readOpenTransaction(modelInstanceRoot, now, entry.instanceId);
     const openTxnHealth = evaluateOpenTransaction(transactions.open, { maxOpenTxnAgeMs });
     const credentialFile = path.join(applicationRoot, "credentials", "local", "mailbox", `${entry.profile}.json`);
     const credential = existsSync(credentialFile) ? "file_present" : `${UNAVAILABLE}:keychain_not_inspected`;
@@ -629,7 +921,10 @@ export function readInstallationInventory({
         faults.push({ code: "lane_unsupported", hard: true, reason: classification.reason });
       }
       if (!["bound", UNAVAILABLE, UNSUPPORTED].includes(binding.status)) {
-        faults.push({ code: binding.status === "instance_id_mismatch" ? "binding_mismatch" : "binding_missing", hard: true, reason: `${binding.kind}:${binding.status}` });
+        const code = binding.status === "instance_id_mismatch" ? "binding_mismatch"
+          : binding.status === "missing" || binding.status === "binding_disabled" ? "binding_missing"
+            : "binding_invalid";
+        faults.push({ code, hard: true, reason: `${binding.kind}:${binding.status}${binding.problems ? `:${binding.problems.join(",")}` : ""}` });
       }
       if (binding.status === "bound" && binding.commandPresent === false) {
         faults.push({ code: "runtime_command_missing", hard: true, reason: binding.kind });
@@ -640,7 +935,7 @@ export function readInstallationInventory({
         faults.push({ code: "enrollment_unverified", hard: true, reason: `${enrollment.state}:${enrollment.reasonCode}` });
       }
       if (transactions.open?.readable === false) {
-        faults.push({ code: "unreadable_custody", hard: true, reason: "open transaction unreadable" });
+        faults.push({ code: "unreadable_custody", hard: true, reason: `open transaction ${transactions.open.reason ?? "unreadable"}` });
       }
       // Outstanding-work policy for every lane (see evaluateOpenTransaction);
       // independent of, and not excused by, historical progress timestamps.
@@ -721,7 +1016,7 @@ export function readInstallationInventory({
   // Bindings that name profiles the registry does not contain.
   const orphans = [];
   for (const [kind, source] of [["codex-headless", lanes.codexHeadless], ["cursor-acp", lanes.cursorAcp]]) {
-    if (source.status !== "present") continue;
+    if (source.status !== "present" && source.status !== "invalid") continue;
     for (const profile of source.profiles.keys()) {
       if (!registeredProfiles.has(profile)) {
         orphans.push({ kind, profile });
@@ -736,7 +1031,8 @@ export function readInstallationInventory({
 
   return {
     applicationRoot,
-    registry: { status: registry.status, path: registry.path, count: registry.entries.length },
+    registry: { status: registry.status, path: registry.path, count: registry.entries.length, strayFileCount: registry.strayNames?.length ?? 0 },
+    installationIdentity: installation.status,
     bindings: {
       codexHeadless: { status: lanes.codexHeadless.status, profiles: [...lanes.codexHeadless.profiles.keys()] },
       cursorAcp: { status: lanes.cursorAcp.status, profiles: [...lanes.cursorAcp.profiles.keys()] },

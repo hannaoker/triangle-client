@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { deriveClientInstanceId } from "../src/installation-inventory.mjs";
 import {
+  FIXTURE_INSTALLATION_ID,
+  openTransactionRecord,
+  writeEnrollment,
+  writeInstallationIdentity,
+} from "./inventory-fixture-helpers.mjs";
+import {
   formatDoctorReport,
   runHeadlessEngagementDoctor,
 } from "../src/headless-engagement-doctor.mjs";
 
 function fixture() {
-  const root = mkdtempSync(path.join(tmpdir(), "headless-doctor-"));
+  const root = mkdtempSync(path.join(realpathSync(tmpdir()), "headless-doctor-"));
   const client = path.join(root, "client");
   mkdirSync(client, { recursive: true, mode: 0o700 });
   const workdir = path.join(root, "work");
@@ -36,7 +42,7 @@ function fixture() {
       version: 2,
       common: {
         adapterVersion: "1",
-        installationId: "inst_x",
+        installationId: FIXTURE_INSTALLATION_ID,
         workingDirectory: workdir,
         codexHome,
         command,
@@ -58,11 +64,8 @@ function fixture() {
     path.join(client, "instances", `${bobId}.json`),
     `${JSON.stringify({ version: 1, instanceId: bobId, profile: "bob", runtimeAdapter: "codex", enabled: true, deliveryMode: "headless-app-server" })}\n`,
   );
-  mkdirSync(path.join(root, "enrollment-journal"), { recursive: true });
-  writeFileSync(
-    path.join(root, "enrollment-journal", `profile-${Buffer.from("bob").toString("hex")}.json`),
-    `${JSON.stringify({ version: 1, profile: "bob", state: "verified", reasonCode: "identity_verified", agentID: "agent_bob" })}\n`,
-  );
+  writeEnrollment(root, "bob");
+  writeInstallationIdentity(client);
   writeFileSync(
     path.join(client, "headless-claimer.bob.json"),
     `${JSON.stringify({ version: 1, profile: "bob", owner: "dev.thetriangle.client", pid: 4242, family: "codex" })}\n`,
@@ -127,7 +130,7 @@ test("doctor marks kick-ok drain-stale as degraded without deleting open txns", 
     mkdirSync(openDir, { recursive: true, mode: 0o700 });
     writeFileSync(
       path.join(openDir, "open.json"),
-      `${JSON.stringify({ state: "claimed", deliveryId: 9, protocol: "coordinator-delivery-v1" })}\n`,
+      `${JSON.stringify(openTransactionRecord(bobId, { deliveryId: 9, createdAt: "2026-10-03T21:00:00.000Z" }))}\n`,
       { mode: 0o600 },
     );
     writeFileSync(

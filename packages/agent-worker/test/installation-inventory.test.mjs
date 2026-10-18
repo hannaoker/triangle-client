@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,15 +18,19 @@ import {
   readInstallationInventory,
   UNAVAILABLE,
 } from "../src/installation-inventory.mjs";
+import {
+  enrollmentRecord,
+  FIXTURE_INSTALLATION_ID,
+  openTransactionRecord,
+  writeEnrollment,
+  writeInstallationIdentity,
+  writeJson,
+  writeWorkerManifest,
+} from "./inventory-fixture-helpers.mjs";
 
 const FAKE_TOKEN = "mesh_SENTINEL_TOKEN_must_never_print_0123456789";
 const FAKE_BODY = "SENTINEL MESSAGE BODY must never print";
 const NOW = Date.parse("2026-10-17T20:00:00.000Z");
-
-function writeJson(filePath, value) {
-  mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-}
 
 /**
  * Mixed Codex / Cursor ACP / worker installation, modeled on the live Mini:
@@ -39,7 +43,9 @@ function mixedFixture({
   extraRegistry = [],
   journalOverrides = {},
 } = {}) {
-  const root = mkdtempSync(path.join(tmpdir(), "inventory-"));
+  // Real path: Swift rejects binding state roots with a symlinked component
+  // (macOS /var -> /private/var).
+  const root = mkdtempSync(path.join(realpathSync(tmpdir()), "inventory-"));
   const app = path.join(root, "The Triangle");
   const client = path.join(app, "client");
   const work = path.join(root, "work");
@@ -69,24 +75,14 @@ function mixedFixture({
       enabled: row.enabled,
       ...(row.deliveryMode ? { deliveryMode: row.deliveryMode } : {}),
     });
-    const journal = journalOverrides[row.profile] ?? { state: "verified", reasonCode: "identity_verified" };
-    if (journal !== "absent") {
-      writeJson(path.join(app, "enrollment-journal", `profile-${Buffer.from(row.profile).toString("hex")}.json`), {
-        version: 1,
-        profile: row.profile,
-        handle: row.profile,
-        origin: "https://example.test",
-        agentID: `agent_${row.profile.replace(/-/g, "")}`,
-        ...journal,
-      });
-    }
+    const journal = journalOverrides[row.profile] ?? {};
+    if (journal !== "absent") writeEnrollment(app, row.profile, journal);
   }
   // Backup journal files are never authoritative.
   writeFileSync(path.join(app, "enrollment-journal", `profile-${Buffer.from("bob").toString("hex")}.json.bak-old`), "{}");
   // A verified enrollment with no registry row.
-  writeJson(path.join(app, "enrollment-journal", `profile-${Buffer.from("loner").toString("hex")}.json`), {
-    version: 1, profile: "loner", state: "verified", reasonCode: "identity_verified", agentID: "agent_loner",
-  });
+  writeEnrollment(app, "loner");
+  writeInstallationIdentity(client);
 
   writeJson(path.join(client, "ready.json"), {
     version: 1, generation: "11111111-1111-4111-8111-111111111111", parentPid: 42, configDigest: "x", readyAtMilliseconds: NOW,
@@ -94,23 +90,19 @@ function mixedFixture({
   const bobState = path.join(app, "model-state", "headless-drain", "bob");
   writeJson(path.join(client, "headless-runtime-binding.json"), {
     version: 2,
-    common: { adapterVersion: "1", installationId: "inst_x", workingDirectory: work, codexHome, command: codexCommand, pollIntervalMs: 30000 },
+    common: { adapterVersion: "1", installationId: FIXTURE_INSTALLATION_ID, workingDirectory: work, codexHome, command: codexCommand, pollIntervalMs: 30000 },
     profiles: [{ profile: "bob", instanceId: deriveClientInstanceId("bob"), stateRoot: bobState }],
   });
   writeJson(path.join(client, "cursor-acp-runtime-binding.json"), {
     version: 1,
-    common: { adapterVersion: "1", installationId: "inst_x", workingDirectory: work, cursorHome: path.join(app, "cursor-home"), command: agentCommand, pollIntervalMs: 30000 },
+    common: { adapterVersion: "1", installationId: FIXTURE_INSTALLATION_ID, workingDirectory: work, cursorHome: path.join(app, "cursor-home"), command: agentCommand, pollIntervalMs: 30000 },
     profiles: acpBindingProfiles.map((profile) => ({
       profile,
       instanceId: deriveClientInstanceId(profile),
       stateRoot: path.join(app, "model-state", "cursor-acp-drain", profile),
     })),
   });
-  for (const adapter of workerManifests) {
-    writeJson(path.join(app, "worker-runtime", `${adapter}.manifest.json`), {
-      version: 1, artifacts: { "a.mjs": "0".repeat(64) }, environment: { PATH: "/usr/bin" }, nodeSHA256: "0".repeat(64), projectRoot: "/x",
-    });
-  }
+  for (const adapter of workerManifests) writeWorkerManifest(app, adapter);
   // Claimer locks for codex/acp lanes.
   writeJson(path.join(client, "headless-claimer.bob.json"), {
     version: 1, profile: "bob", owner: "dev.thetriangle.client", pid: 609, family: "codex", acquiredAt: "2026-10-17T04:31:02.758Z", generation: null,
@@ -142,11 +134,11 @@ function mixedFixture({
   writeJson(path.join(app, "credentials", "local", "mailbox", "gravity2.json"), {
     version: 1, origin: "https://example.test", token: FAKE_TOKEN, agentId: "agent_gravity2", handle: "gravity2",
   });
-  // Open transaction for ghost with a stray body field: never echoed.
-  writeJson(path.join(app, "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json"), {
-    version: 1, protocol: "coordinator-delivery-v1", deliveryId: 7, state: "claimed", replyRequired: true,
-    claimId: FAKE_TOKEN, replyIdempotencyKey: FAKE_TOKEN, body: FAKE_BODY, failureCount: 0, createdAt: "2026-10-17T19:50:00.000Z",
-  });
+  // A valid, recent open transaction for ghost.
+  writeJson(
+    path.join(app, "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json"),
+    openTransactionRecord(deriveClientInstanceId("ghost")),
+  );
   return { root, app, client };
 }
 
@@ -304,6 +296,11 @@ test("orphan binding rows and missing registry never yield healthy-by-omission",
   try {
     let result = runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
     assert.ok(result.report.warnings.some((w) => w.code === "binding_orphan" && w.profile === "phantom"));
+    // Swift throws invalidBootstrap for the whole lane when a binding row is not
+    // an enabled lane member, so ghost cannot run either.
+    assert.ok(result.report.blockers.some((b) => b.code === "binding_invalid" && /entry_not_enabled_lane_member/.test(b.message)));
+    assert.equal(result.report.inventory.profiles.find((p) => p.profile === "ghost").status, "fault");
+    assert.equal(result.exitCode, 2);
     rmSync(path.join(client, "instances"), { recursive: true, force: true });
     result = runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
     assert.equal(result.exitCode, 2);
@@ -317,8 +314,14 @@ test("orphan binding rows and missing registry never yield healthy-by-omission",
 test("doctor is read-only and keeps tokens and message bodies out of output", () => {
   const { root, app, client } = mixedFixture();
   try {
+    // A stray-field open transaction carrying a token and a body: invalid for
+    // Swift (custody fault) and never echoed.
+    writeJson(path.join(app, "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json"), {
+      ...openTransactionRecord(deriveClientInstanceId("ghost")), claimId: FAKE_TOKEN, body: FAKE_BODY,
+    });
     const before = snapshot(app);
     const result = runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => false });
+    assert.ok(result.report.inventory.profiles.find((p) => p.profile === "ghost").faults.includes("unreadable_custody"));
     const after = snapshot(app);
     assert.deepEqual(after, before);
     const json = JSON.stringify(result.report);
@@ -340,7 +343,7 @@ test("inventory module uses no mutating filesystem or process APIs", () => {
   const fsImport = /import \{([^}]*)\} from "node:fs";/.exec(source);
   assert.deepEqual(
     fsImport[1].split(",").map((name) => name.trim()).filter(Boolean).sort(),
-    ["existsSync", "readFileSync", "readdirSync"],
+    ["existsSync", "lstatSync", "readFileSync", "readdirSync", "statSync"],
   );
   for (const forbidden of [
     /\bwriteFile/, /\bappendFile/, /\bmkdir/, /\brename/, /\bunlink/, /\brmSync\b/, /\brm\(/, /\bcopyFile/,
@@ -371,10 +374,9 @@ const openTxnPath = (app, profile) =>
   path.join(app, "model-state", "instances", deriveClientInstanceId(profile), "mailbox-transactions", "open.json");
 
 function writeOpenTxn(app, profile, { createdAt = TWO_HOURS_AGO, failureCount = 3, state = "claimed" } = {}) {
-  writeJson(openTxnPath(app, profile), {
-    version: 1, protocol: "coordinator-delivery-v1", deliveryId: 9, state, replyRequired: true,
-    claimId: FAKE_TOKEN, replyIdempotencyKey: FAKE_TOKEN, failureCount, lastFailureReason: "runtime_failed", createdAt,
-  });
+  writeJson(openTxnPath(app, profile), openTransactionRecord(deriveClientInstanceId(profile), {
+    deliveryId: 9, state, failureCount, lastFailureReason: failureCount > 0 ? "runtime_failed" : null, createdAt,
+  }));
 }
 
 /** Restrict the mixed fixture to the named profiles (the review's reduction). */
@@ -581,6 +583,209 @@ test("registry rows outside the Swift contract are still explicit faults", () =>
     assert.equal(invalid.length, 2);
     assert.ok(invalid.every((b) => /invalid_profile/.test(b.message)));
     assert.equal(result.exitCode, 2);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Codex review round 1 (#82): mirror the Swift decoders/validators exactly.
+
+const profileRow = (result, name) => result.report.inventory.profiles.find((p) => p.profile === name);
+
+test("legacy registry row without deliveryMode decodes as worker (Swift decoder default), not the adapter default", () => {
+  const f = mixedFixture({
+    workerManifests: ["antigravity", "hermes", "codex"],
+    extraRegistry: [
+      { profile: "legacy-codex", runtimeAdapter: "codex", enabled: true },
+      { profile: "legacy-hermes", runtimeAdapter: "hermes", enabled: true },
+    ],
+  });
+  try {
+    const result = runDoctor(f.client);
+    const codex = profileRow(result, "legacy-codex");
+    assert.equal(codex.deliveryMode, "worker");
+    assert.equal(codex.deliveryModeSource, "decoder_default_worker");
+    assert.equal(codex.lane, "worker");
+    assert.equal(codex.binding.kind, "worker-runtime-manifest");
+    assert.ok(!codex.faults.includes("binding_missing"), JSON.stringify(codex.faults));
+    assert.equal(profileRow(result, "legacy-hermes").lane, "worker");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("registry rows Swift cannot decode are faults even when disabled", () => {
+  const f = mixedFixture({
+    extraRegistry: [
+      { profile: "bad-adapter", runtimeAdapter: "gemini", deliveryMode: "worker", enabled: false },
+      { profile: "bad-mode", runtimeAdapter: "hermes", deliveryMode: "carrier-pigeon", enabled: false },
+    ],
+  });
+  try {
+    const extraId = deriveClientInstanceId("extra-key");
+    writeJson(path.join(f.client, "instances", `${extraId}.json`), {
+      version: 1, instanceId: extraId, profile: "extra-key", runtimeAdapter: "hermes", enabled: false, deliveryMode: "worker", note: "x",
+    });
+    const missingId = deriveClientInstanceId("missing-enabled");
+    writeJson(path.join(f.client, "instances", `${missingId}.json`), {
+      version: 1, instanceId: missingId, profile: "missing-enabled", runtimeAdapter: "hermes",
+    });
+    const result = runDoctor(f.client);
+    const invalid = result.report.blockers.filter((b) => b.code === "registry_entry_invalid");
+    const messages = invalid.map((b) => `${b.profile}:${b.message}`).join("\n");
+    assert.match(messages, /bad-adapter:.*invalid_runtime_adapter/);
+    assert.match(messages, /bad-mode:.*invalid_delivery_mode/);
+    assert.match(messages, /extra-key:.*unexpected_keys/);
+    assert.match(messages, /missing-enabled:.*missing_keys/);
+    assert.equal(result.exitCode, 2);
+
+    writeFileSync(path.join(f.client, "instances", "notes.txt"), "x");
+    const stray = runDoctor(f.client);
+    assert.ok(stray.report.blockers.some((b) => b.code === "registry_stray_file"));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("enrollment records are trusted only when they decode for the same profile", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost"]);
+    rmSync(openTxnPath(f.app, "ghost"));
+    writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: "2026-10-17T19:00:00.000Z" } } });
+    const journalFile = path.join(f.app, "enrollment-journal", `profile-${Buffer.from("ghost").toString("hex")}.json`);
+    assert.equal(runDoctor(f.client).exitCode, 0);
+    for (const bad of [
+      enrollmentRecord("ghost", { profile: "bob" }),
+      (({ origin, ...rest }) => rest)(enrollmentRecord("ghost")),
+      enrollmentRecord("ghost", { origin: "http://example.test" }),
+      enrollmentRecord("ghost", { agentID: "agent_ghost" }),
+      enrollmentRecord("ghost", { state: "VERIFIED" }),
+      { ...enrollmentRecord("ghost"), extra: true },
+    ]) {
+      writeJson(journalFile, bad);
+      const result = runDoctor(f.client);
+      const ghost = profileRow(result, "ghost");
+      assert.equal(ghost.enrollment.state, "invalid_record", JSON.stringify(bad));
+      assert.ok(ghost.faults.includes("enrollment_unverified"));
+      assert.equal(result.exitCode, 2);
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("lane bindings Swift would reject are invalid (never bound) when the lane has members", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost"]);
+    const bindingPath = path.join(f.client, "cursor-acp-runtime-binding.json");
+    const good = JSON.parse(readFileSync(bindingPath, "utf8"));
+    const cases = {
+      state_root_not_standardized_absolute: (b) => { b.profiles[0].stateRoot = "relative/ghost"; },
+      installation_id_mismatch: (b) => { b.common.installationId = "inst_some_other_installation"; },
+      poll_interval_ms: (b) => { b.common.pollIntervalMs = 5; },
+      common_keys: (b) => { b.common.extra = 1; },
+      profile_keys: (b) => { b.profiles[0].unexpected = true; },
+      shadow_test_profile: (b) => { b.profiles[0].shadowTestProfile = "yes"; },
+    };
+    for (const [problem, mutate] of Object.entries(cases)) {
+      const b = structuredClone(good);
+      mutate(b);
+      writeJson(bindingPath, b);
+      const result = runDoctor(f.client);
+      const ghost = profileRow(result, "ghost");
+      assert.equal(ghost.binding.status, "invalid", problem);
+      assert.ok(ghost.binding.problems.includes(problem), `${problem}: ${ghost.binding.problems}`);
+      assert.ok(ghost.faults.includes("binding_invalid"));
+      assert.ok(result.report.blockers.some((row) => row.code === "binding_invalid"));
+      assert.equal(result.exitCode, 2);
+    }
+    // A symlinked component in the state root.
+    const real = path.join(f.root, "real-state");
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, path.join(f.root, "linked-state"));
+    const b = structuredClone(good);
+    b.profiles[0].stateRoot = path.join(f.root, "linked-state", "ghost");
+    writeJson(bindingPath, b);
+    assert.ok(profileRow(runDoctor(f.client), "ghost").binding.problems.includes("state_root_symlink"));
+    // Missing installation identity: Swift would mint a new id that cannot match.
+    writeJson(bindingPath, good);
+    rmSync(path.join(f.client, "installation.json"));
+    assert.ok(profileRow(runDoctor(f.client), "ghost").binding.problems.includes("installation_identity_absent"));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("an invalid binding for a lane with no enabled members is only a warning", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["gravity2"]);
+    writeJson(path.join(f.client, "cursor-acp-runtime-binding.json"), { version: 1, profiles: [] });
+    const result = runDoctor(f.client);
+    assert.ok(result.report.warnings.some((w) => w.code === "binding_invalid"));
+    assert.ok(!result.report.blockers.some((b) => b.code === "binding_invalid"));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("worker manifests are validated, not just found", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["gravity2"]);
+    const manifestPath = path.join(f.app, "worker-runtime", "antigravity.manifest.json");
+    const good = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(profileRow(runDoctor(f.client), "gravity2").binding.status, "bound");
+    assert.equal(profileRow(runDoctor(f.client), "gravity2").binding.integrity, "not_verified");
+    const cases = {
+      manifest_keys: () => ({}),
+      environment_keys: (m) => ({ ...m, environment: { ...m.environment, HERMES_CLI: "/x" } }),
+      path_not_project_bin: (m) => ({ ...m, environment: { ...m.environment, PATH: "/usr/bin" } }),
+      project_root_not_bundle: (m) => ({ ...m, projectRoot: "/x", environment: { ...m.environment, TRIANGLE_PROJECT_ROOT: "/x", PATH: "/x/bin" } }),
+      unsupported_version: (m) => ({ ...m, version: 1 }),
+    };
+    for (const [problem, make] of Object.entries(cases)) {
+      writeJson(manifestPath, make(structuredClone(good)));
+      const result = runDoctor(f.client);
+      const g = profileRow(result, "gravity2");
+      assert.equal(g.binding.status, "invalid", problem);
+      assert.ok(g.binding.problems.includes(problem), `${problem}: ${g.binding.problems}`);
+      assert.equal(g.status, "fault");
+      assert.equal(result.exitCode, 2);
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("parseable open transactions Swift would reject are custody faults, not ok", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost"]);
+    writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: "2026-10-17T19:50:00.000Z" } } });
+    const id = deriveClientInstanceId("ghost");
+    assert.equal(runDoctor(f.client).exitCode, 0);
+    for (const bad of [
+      openTransactionRecord(deriveClientInstanceId("bob")),
+      { ...openTransactionRecord(id), claimId: `claim_${"0".repeat(32)}` },
+      { ...openTransactionRecord(id), state: "replied" },
+      { ...openTransactionRecord(id), createdAt: "yesterday" },
+      (({ replyResolution, ...rest }) => rest)(openTransactionRecord(id)),
+    ]) {
+      writeJson(openTxnPath(f.app, "ghost"), bad);
+      const result = runDoctor(f.client);
+      const ghost = profileRow(result, "ghost");
+      assert.equal(ghost.journal.openTransaction.readable, false);
+      assert.ok(ghost.faults.includes("unreadable_custody"), JSON.stringify(ghost.faults));
+      assert.equal(result.exitCode, 2);
+    }
+    const legacy = openTransactionRecord(id);
+    delete legacy.inboundEventId; delete legacy.inboundRoomSequence; delete legacy.replyRequired;
+    writeJson(openTxnPath(f.app, "ghost"), legacy);
+    assert.equal(profileRow(runDoctor(f.client), "ghost").status, "ok", "legacy-optional keys may be absent");
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

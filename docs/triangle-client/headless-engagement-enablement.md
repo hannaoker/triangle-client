@@ -92,6 +92,18 @@ Registry profile names follow the persisted Swift `ProfileName` contract: up to
 64 UTF-8 bytes, no `/`, `\`, or control/format characters, case, dots, and
 underscores preserved. Doctor never renames an identity.
 
+Doctor validates persisted records the way the Swift helper decodes them, so it
+never reports healthy for a record the supervisor would reject: registry rows
+(exact keys, known `runtimeAdapter`/`deliveryMode`, a row without
+`deliveryMode` decodes as `worker`, no stray files), enrollment records (exact
+keys, valid origin/agent/handle, same profile as the file), Codex/Cursor ACP
+bindings (exact keys, `installationId` equal to `client/installation.json`,
+standardized symlink-free state roots, every row an enabled lane member),
+worker manifests (structure, release environment, content-addressed bundle;
+artifact hashes stay with the launcher and print `integrity=not_verified`), and
+open transactions (instance, claim/reply ids, state invariants). A violation is
+a hard fault.
+
 ## Defaults
 
 | Selected by default | Not default |

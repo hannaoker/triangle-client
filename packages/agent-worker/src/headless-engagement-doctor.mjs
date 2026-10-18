@@ -274,6 +274,7 @@ export function runHeadlessEngagementDoctor({
     profiles: Object.freeze(profiles),
     inventory: stripSecretKeys({
       registry: inventory.registry,
+      installationIdentity: inventory.installationIdentity,
       bindings: inventory.bindings,
       profiles: inventory.profiles,
       orphanBindings: inventory.orphanBindings,
