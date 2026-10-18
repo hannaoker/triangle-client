@@ -131,6 +131,17 @@ public enum V1ProfileContractCases {
         } catch WorkloadTokenManagerError.originMismatch {}
         try expect(mesh.requests.count == before, "foreign-origin request reached the token exchange")
         _ = try await auth.authorizationHeaders(method: "GET", url: URL(string: credential.origin.value + "/api/v1/agents/me")!)
+        // Same-origin URLs that carry a query (MCP proxy and transaction rewriter
+        // calls) are accepted; the same path and query on another host is not.
+        let query = "/api/v1/mailbox?after=0&limit=1"
+        let queried = try await auth.authorizationHeaders(method: "GET", url: URL(string: credential.origin.value + query)!)
+        try expect(queried["Authorization"]?.hasPrefix("Bearer at_test_") == true && queried["DPoP"] != nil, "same-origin query URL refused")
+        let beforeQueryForeign = mesh.requests.count
+        do {
+            _ = try await auth.authorizationHeaders(method: "GET", url: URL(string: "https://other-origin.example" + query)!)
+            throw ContractFailure("token sent to a foreign origin with a query")
+        } catch WorkloadTokenManagerError.originMismatch {}
+        try expect(mesh.requests.count == beforeQueryForeign, "foreign query request reached the token exchange")
 
         let reader = try V1TestCustody.memoryAgent(profile: "reader", handle: "reader-one", fill: "b", scopes: ["agent.read"])
         let readerMesh = FakeV1Mesh(agents: [reader])

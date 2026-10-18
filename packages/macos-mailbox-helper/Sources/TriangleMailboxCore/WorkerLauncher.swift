@@ -94,8 +94,10 @@ extension WorkerLauncher {
     ]
 
     /// The `triangle` custody home (<home>/agents/<id>/workload-key.json) must
-    /// stay outside every root a reasoning child can read or write; the Node
-    /// sandbox (runner-common.mjs) requires it and denies it explicitly.
+    /// stay outside every root a seatbelt runner child can read or write; the
+    /// Node sandbox (runner-common.mjs) requires it and denies it explicitly.
+    /// The headless Codex app-server and Cursor ACP lanes are not covered
+    /// (same-user runtime, accepted under F1; v1.1 follow-up).
     static func isolatedIdentityRoot(for credential: VerifiedCredential, environment: [String: String]) throws -> String {
         let identityRoot = credential.workloadKeyFile
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

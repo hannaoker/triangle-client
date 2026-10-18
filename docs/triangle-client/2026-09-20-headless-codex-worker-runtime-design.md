@@ -570,6 +570,12 @@ Required policy:
 - the runtime never places tokens, message bodies, or sensitive prompts in
   process arguments or logs.
 
+Permissions v1 (F1): the App Server child is not under the seatbelt runner
+sandbox, and `workspace-write` does not restrict reads, so it can read the
+`triangle` custody home (`<TRIANGLE_HOME>`, workload and owner keys). This is
+accepted in v1 under F1 (same-user local runtime is trusted); denying the
+custody home to this lane is a v1.1 follow-up.
+
 Desktop mode may retain interactive approval behavior, but ownership cannot
 move to headless while an approval or turn is outstanding.
 

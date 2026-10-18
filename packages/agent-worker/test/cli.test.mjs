@@ -80,8 +80,19 @@ test("worker configuration rejects missing selectors, secrets, URLs, identities,
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ keyMode: 0o644 }) }, /chmod 600/],
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentId: "agent_22222222222222222222222222222222" }) }, /different agent/],
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentJson: { agent_id: AGENT } }) }, /agent\.json is invalid/],
-    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); const link = `${real}.link`; symlinkSync(real, link); return link; })() }, /regular file/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); const dir = path.join(mkdtempSync(path.join(os.tmpdir(), "worker-cli-")), "agents", AGENT); mkdirSync(dir, { recursive: true, mode: 0o700 }); const link = path.join(dir, "workload-key.json"); symlinkSync(real, link); return link; })() }, /regular file/],
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); linkSync(real, `${real}.second`); return real; })() }, /hard links/],
+    // Parent directories match Swift V1PrivateDirectory: agents/ must be a real 0700 directory.
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); chmodSync(path.dirname(path.dirname(real)), 0o755); return real; })() }, /agents\/ directory must not be accessible by group or others/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); chmodSync(path.dirname(real), 0o750); return real; })() }, /agent custody directory must not be accessible/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => {
+      // A symlinked agents/ parent: O_NOFOLLOW only guards the last component, so the loader must lstat each parent.
+      const real = custody();
+      const home = mkdtempSync(path.join(os.tmpdir(), "worker-cli-link-"));
+      symlinkSync(path.dirname(path.dirname(real)), path.join(home, "agents"));
+      return path.join(home, "agents", AGENT, "workload-key.json");
+    })() }, /agents\/ directory must be a real directory/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); const other = path.join(path.dirname(path.dirname(path.dirname(real))), "keys", AGENT); mkdirSync(other, { recursive: true, mode: 0o700 }); return path.join(other, "workload-key.json"); })() }, /not under the custody agents\/ directory/],
     [{ meshTokenEnv: "MESH_AGENT_TOKEN" }, env, /meshTokenEnv is not supported/],
     [{}, { ...env, MESH_URL: "http://public.example" }, /meshUrl must use HTTPS/],
     [{}, { ...env, MESH_URL: "https://mesh.example/path" }, /meshUrl must use HTTPS/],

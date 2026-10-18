@@ -15,7 +15,28 @@ The workload key seed and the access tokens it mints remain in trusted-host
 coordinator memory for the active service lifetime of each profile because the
 coordinator performs authenticated mailbox I/O. This known coordinator memory
 boundary is not end-to-end hardware isolation. A reasoning subprocess never
-receives any token or key, and cannot read the custody home.
+receives any token or key through its argv, environment or bootstrap. Whether it
+can *read* the custody home depends on the lane; see "Same-user runtime (F1)"
+below.
+
+### Same-user runtime (F1, accepted in v1)
+
+Permissions v1 trusts the same-user local runtime (decision F1). The custody
+home (`<TRIANGLE_HOME>`, including `agents/<id>/workload-key.json` and
+`owner/owner-key.json`) is ordinary `0600`/`0700` file custody owned by the
+user, so any process running as that user can read it.
+
+- The seatbelt runner lanes (`run-worker` and supervisor-launched
+  `codex`/`hermes`/`antigravity` runners through `runner-common.mjs`) deny the
+  custody home explicitly (`TRIANGLE_IDENTITY_ROOT`).
+- The headless Codex app-server lane and the Cursor ACP lane do **not** run
+  under that seatbelt. Their children are spawned as the user with the real
+  `HOME`, and Codex's pinned `workspace-write` sandbox restricts writes, not
+  reads. Same-user runtime children in these lanes **can read the custody home
+  in v1**, including workload and owner keys. This is accepted under F1.
+- Sandboxing those two lanes (a custody-home read deny) is a **v1.1
+  follow-up**. Until then, do not claim that every reasoning child is isolated
+  from the custody home.
 
 Triangle Client does not protect secrets from a malicious or already
 compromised host administrator, injected code inside the trusted coordinator,
@@ -61,11 +82,13 @@ state is never stored in that shared bundle.
 Keys and tokens are forbidden from process argv, LaunchAgent plists, adapter
 environment, profile registry, model filesystem, temporary filesystem, logs,
 error descriptions, and result JSON. There is no show or export command. The
-adapter sandbox explicitly denies the credential root, the custody home
-(`TRIANGLE_IDENTITY_ROOT`, set by the helper for both `run-worker` and
-supervisor-launched runners, required by the sandbox, and refused if it
-overlaps any model, runtime, project or temp root, compared case-insensitively),
-and environment files.
+seatbelt adapter sandbox used by the runner lanes explicitly denies the
+credential root, the custody home (`TRIANGLE_IDENTITY_ROOT`, set by the helper
+for both `run-worker` and supervisor-launched runners, required by the sandbox,
+and refused if it overlaps any model, runtime, project or temp root, compared
+case-insensitively), and environment files. The headless Codex app-server and
+Cursor ACP lanes are outside this seatbelt; their children can read the custody
+home in v1 (accepted under F1, v1.1 follow-up; see above).
 
 ## Availability and lifecycle safety
 

@@ -63,6 +63,11 @@ test("threat model states the trusted-host and isolation boundaries", () => {
     /workload key/i,
     /DPoP/,
     /TRIANGLE_IDENTITY_ROOT/,
+    // F1: the threat model must not overclaim for the unsandboxed lanes.
+    /Same-user runtime \(F1/,
+    /Cursor ACP lane do \*\*not\*\* run\s+under that seatbelt/,
+    /can read the custody home\s+in v1/,
+    /v1\.1\s+follow-up/,
     /0600/,
     /anonymous pipe|anonymous stdin/i,
     /argv/i,

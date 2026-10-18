@@ -177,7 +177,10 @@ export function sandboxCommand(command, args, env = process.env) {
   const credentials = canonicalRoot(env.TRIANGLE_CREDENTIAL_ROOT, "TRIANGLE_CREDENTIAL_ROOT");
   // Permissions v1: the `triangle` custody home (agents/<id>/workload-key.json,
   // owner key). Required: it is isolated and denied like the credential root
-  // so a reasoning child can never read a workload key.
+  // so a child of this seatbelt runner cannot read a workload key. The
+  // headless Codex app-server and Cursor ACP lanes do not go through this
+  // sandbox; same-user children there can read the custody home in v1
+  // (accepted under F1; sandboxing them is a v1.1 follow-up).
   const identity = canonicalRoot(env.TRIANGLE_IDENTITY_ROOT, "TRIANGLE_IDENTITY_ROOT");
   const secretRoots = [credentials, identity];
   if (!env.HOME) throw new Error("HOME is required for application-owned sandbox state");

@@ -1,5 +1,11 @@
 # Cursor ACP adapter (Triangle client)
 
+> **Permissions v1 (F1).** This lane is not run under the seatbelt runner
+> sandbox. Its children run as the same user and can read the `triangle`
+> custody home (`<TRIANGLE_HOME>`, workload and owner keys) in v1. This is
+> accepted under F1 (same-user local runtime is trusted); a custody-home read
+> deny for this lane is a v1.1 follow-up.
+
 Status: **Swift supervisor wired + Mini live PASS** (draft PR; not production-enrolled)  
 Date: 2026-09-24  
 Baselines: Phase 0 Mini spikes (Project store), headless Codex worker runtime  
