@@ -13,7 +13,6 @@ Companion automation (Darwin, no live MESH):
 
 - `packages/agent-worker/test/keychain-launch-contract.test.mjs`
 - `packages/macos-mailbox-helper/scripts/test-host.sh`
-- `packages/macos-mailbox-helper/scripts/test-keychain-integration.sh` (signed helper)
 
 Live canaries require **macOS**, enrolled profiles, and MESH. A visible reply alone
 does **not** pass; record the full settlement chain below.
@@ -48,8 +47,8 @@ python3 -c 'import json,pathlib; m=json.load(open(pathlib.Path("'"$APP"'")/"work
 
 | Test | Actual flow | Pass condition | Automation / procedure |
 | --- | --- | --- | --- |
-| **Existing-bundle upgrade** | On a Mac that already has **v4 or v5** Codex bundles from the **previous shipped helper**, install **only** the new helper (+ client if bundled). Restart workers/supervisor. Do **not** re-prepare runtime first. | Codex worker and `dev.thetriangle.client` start; logs show no `invalidManifest` / manifest contract mismatch; coordinator resolves v4/v5 bundles unchanged. | Partial: `keychain-launch-contract.test.mjs` simulates v5-without-schema validation and v5→v6 upgrade via `prepare-runtime`. **Required operator:** real v4/v5 bundles from prior release artifact + helper-only upgrade. |
-| **Fresh installation** | Clean `Application Support`, install helper+client, `prepare-runtime`, `agent add`, start service. | Bundle is **v6** (current prepare); supervisor and workers launch from content-addressed bundle only (no checkout paths in argv/env); extracted modules (e.g. `client-supervisor-schema.mjs`) present in manifest and load. | `keychain-launch-contract.test.mjs` (clean prepare); host `clean installed runtime resolves and passes Node syntax smoke`. **Required operator:** full install path on clean Mac. |
+| **Existing-bundle upgrade (permissions v1)** | On a Mac with pre-v8 bundles from the previous helper, install the new helper (+ client) and re-run `prepare-runtime`; wipe pre-v1 profiles and `triangle-mailbox bind` each one. | Pre-v8 bundles are **not** expected to run (no backward compatibility); after re-prepare the bundles are v8 and the coordinator starts. A pre-v8 bundle left in place fails closed (no `mesh_` fallback). | `keychain-launch-contract.test.mjs` (prepare path). **Required operator:** helper upgrade + re-prepare + rebind on one Mac. |
+| **Fresh installation** | Clean `Application Support`, install helper+client, `prepare-runtime`, `triangle-mailbox bind`, `agent add`, start service. | Bundle is **v8** (current prepare); supervisor and workers launch from content-addressed bundle only (no checkout paths in argv/env); extracted modules (e.g. `client-supervisor-schema.mjs`) present in manifest and load. | `keychain-launch-contract.test.mjs` (clean prepare); host `clean installed runtime resolves and passes Node syntax smoke`. **Required operator:** full install path on clean Mac. |
 | **Headless round trip** | Profile `headless-app-server` or dedicated headless worker; send unique MESH message with `replyRequired: true` to that profile’s room. | Threaded reply with nonce appears on MESH; delivery reaches terminal ack; no duplicate replies on replay. | Unit: `headless-drain.test.mjs`, `headless-runtime-phase2.test.mjs`, transaction crash cases. **Required operator:** live send + history inspection. See [headless-supervisor-cutover.md](headless-supervisor-cutover.md). |
 | **Bound desktop round trip** | `mcp-interactive` Codex + durable shared App Server; bind **this** chat’s thread id; leave chat idle; send MESH message with `replyRequired: true`. | **Same** bound thread wakes, assistant answers, MESH gets reply + ack — not another chat. | Unit: `shared-codex-app-server.test.mjs` (admit path). **Required operator:** [shared-codex-app-server-runbook.md](shared-codex-app-server-runbook.md) §5–6. |
 | **Bob round trip** | Codex (bound desktop) sends Bob a unique nonce over MESH with `replyRequired: true`; Bob profile wakes unattended. | Bob’s threaded reply returns; Codex side settles delivery; bound desktop shows echo if designed for round-trip. | **Required operator:** runbook §6 + [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md) Bob checklist. Abandon stale claims first. |
@@ -78,15 +77,14 @@ canaries.
 1. **CI-safe (Darwin build Mac or CI macOS runner)**  
    - `node --test packages/agent-worker/test/keychain-launch-contract.test.mjs`  
    - `bash packages/macos-mailbox-helper/scripts/test-host.sh`  
-   - Optional public ship: `TRIANGLE_RUN_DISPOSABLE_KEYCHAIN_TEST=1 bash packages/macos-mailbox-helper/scripts/test-keychain-integration.sh`
 
 2. **Existing-bundle upgrade (operator, one Mac)**  
-   - Leave v4/v5 bundles from previous release in place.  
-   - Upgrade helper only → restart client + codex worker → confirm no manifest errors.
+   - Upgrade helper + client, then `prepare-runtime` (v8 bundles) and rebind each profile.  
+   - Restart client + codex worker → confirm no manifest errors and `status --profile` verifies.
 
 3. **Fresh installation (operator, clean Mac or wiped `Application Support`)**  
    - Full [e2e-operator-runbook.md](e2e-operator-runbook.md) through `prepare-runtime` and `agent add`.  
-   - Confirm manifest **version 6** and supervisor start.
+   - Confirm manifest **version 8** and supervisor start.
 
 4. **Live wake canaries (operator, repeat ≥3 idle/restart cycles each)**  
    - Headless round trip  
@@ -105,7 +103,7 @@ canaries.
 | Symptom | Likely cause |
 | --- | --- |
 | `invalidManifest` / manifest contract mismatch on startup | Helper expects v6 schema on v5 bundle (should not happen after v6 split); or corrupted manifest |
-| Supervisor exits immediately after upgrade | Bundle version unsupported; run `prepare-runtime` only after confirming v4/v5 still valid |
+| Supervisor exits immediately after upgrade | Pre-v8 bundle or pre-v1 profile; run `prepare-runtime` and rebind (`triangle-mailbox bind`) |
 | Desktop admit lands in wrong chat | Stale `app-server-binding.json` thread id |
 | Reply on MESH but delivery not acked | Treat as **fail** — incomplete settlement chain |
 | Receipt triggers model turn | Receipt-only regression; check helper `transaction-claim-next` and drain flags |

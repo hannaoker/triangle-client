@@ -50,7 +50,7 @@ stable distributed Keychain identity. That is why public installs use portable f
 Agent identities are never in the Keychain in either mode: permissions v1 keeps
 each agent's workload key in `triangle` custody
 (`<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json`, `0600`) and the helper
-keeps only a `0600` pointer per profile (`profiles-v1/<profile>.json`).
+keeps only a `0600` pointer per profile (`profiles-v1/profile-<hex>.json`).
 Custody mode selection therefore governs watch grants only:
 
 - `TRIANGLE_CREDENTIAL_CUSTODY=keychain` with a public install fails before
@@ -257,7 +257,7 @@ See the helper README and Triangle Client guide.
 | LaunchAgent plists | Helper path + `run-supervisor` | Any credential, admission token, or watch secret |
 | Operator shell / docs examples | Profile names, origins, installation ids (`inst_…`), handles | Real tokens in committed files or command history |
 
-Custody paths (non-secret names): profile bindings `profiles-v1/<profile>.json`;
+Custody paths (non-secret names): profile bindings `profiles-v1/profile-<hex>.json`;
 watch grants `credentials/local/watch/<installation>.json` (public) or the
 Keychain service `dev.thetriangle.mesh.mailbox-watch` (`--local-ad-hoc`).
 

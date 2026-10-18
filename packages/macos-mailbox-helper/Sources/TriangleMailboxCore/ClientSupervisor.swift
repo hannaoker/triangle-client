@@ -108,6 +108,15 @@ public struct ClientSupervisor: Sendable {
 
     private let instanceStore: any ClientInstanceStore
     private let gate: VerifiedCredentialGate
+
+    /// Every supervisor lane replies and acknowledges, so a read-only agent
+    /// (bounds without `agent.write`) is omitted instead of failing later at
+    /// token exchange.
+    private func workerCredential(for profile: ProfileName) async throws -> VerifiedCredential {
+        let credential = try await gate.credential(for: profile)
+        guard credential.canWrite else { throw VerifiedCredentialGateError.credentialRefused }
+        return credential
+    }
     private let workloadKeyStore: any WorkloadKeyStore
     private let resolver: any ClientSupervisorCommandResolving
     private let processRunner: any ClientSupervisorProcessRunning
@@ -317,7 +326,7 @@ public struct ClientSupervisor: Sendable {
         for (instance, command) in resolved {
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: instance.profile)
+                credential = try await workerCredential(for: instance.profile)
             } catch {
                 omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
@@ -516,7 +525,7 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: instance.profile)
+                credential = try await workerCredential(for: instance.profile)
             } catch {
                 omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
@@ -620,7 +629,7 @@ public struct ClientSupervisor: Sendable {
         }
         let credential: VerifiedCredential
         do {
-            credential = try await gate.credential(for: primary.profile)
+            credential = try await workerCredential(for: primary.profile)
         } catch {
             omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
             return nil
@@ -734,7 +743,7 @@ public struct ClientSupervisor: Sendable {
         }
         let credential: VerifiedCredential
         do {
-            credential = try await gate.credential(for: primary.profile)
+            credential = try await workerCredential(for: primary.profile)
         } catch {
             omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
             return nil
@@ -932,7 +941,7 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: member.profile)
+                credential = try await workerCredential(for: member.profile)
             } catch {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
@@ -1123,7 +1132,7 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: member.profile)
+                credential = try await workerCredential(for: member.profile)
             } catch {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue

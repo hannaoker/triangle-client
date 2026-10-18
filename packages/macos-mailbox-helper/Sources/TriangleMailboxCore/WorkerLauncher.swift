@@ -64,6 +64,8 @@ public struct WorkerLauncher: Sendable {
         let instance = try ClientInstance(profile: profile, runtimeAdapter: adapter)
         let command = try resolver.resolve(worker, instance: instance)
         let credential = try await gate.credential(for: profile)
+        // Workers reply and acknowledge; a read-only agent cannot run one.
+        guard credential.canWrite else { throw VerifiedCredentialGateError.credentialRefused }
         var environment = command.environment
         environment.keys.filter { key in
             key.hasPrefix("MESH_") || key.hasPrefix("TRIANGLE_WORKLOAD_")

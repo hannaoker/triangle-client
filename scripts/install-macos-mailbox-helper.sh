@@ -13,7 +13,7 @@ IFS=$'\n\t'
 #                   local_ad_hoc). Watch grants may stay in the Keychain;
 #                   TRIANGLE_CREDENTIAL_CUSTODY=file opts into file custody.
 # Agent identities are never helper custody: permissions v1 profiles are 0600
-# pointers (profiles-v1/<profile>.json) to `triangle` workload key files.
+# pointers (profiles-v1/profile-<hex>.json) to `triangle` workload key files.
 # Both modes refuse a quarantined install source (scripts/release/check-quarantine.sh).
 
 usage() {

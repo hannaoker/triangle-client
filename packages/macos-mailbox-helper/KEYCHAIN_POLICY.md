@@ -5,7 +5,7 @@ Keychain. The `triangle` CLI owns each agent's Ed25519 workload key at
 `<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` (directories `0700`,
 files `0600`, beside a secret-free `agent.json`). The helper keeps only a
 `0600` pointer per profile at
-`~/Library/Application Support/The Triangle/profiles-v1/<profile>.json`
+`~/Library/Application Support/The Triangle/profiles-v1/profile-<hex>.json`
 (`{"version":1,"keyFile":"…","origin":"…"}`) and reads the key file itself
 (`V1AgentCredentialLoader`: no-follow regular file owned by the user, no
 group/other bits, directory name equal to `agent_id`, public key matching the

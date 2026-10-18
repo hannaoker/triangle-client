@@ -2,7 +2,7 @@
  * Read-only installation inventory for doctor/status.
  *
  * Enumerates the full installation registry (`client/instances/*.json`), the
- * permissions v1 profile bindings (`profiles-v1/<profile>.json` -> a `triangle`
+ * permissions v1 profile bindings (`profiles-v1/profile-<hex>.json` -> a `triangle`
  * agent key file), and every lane-specific binding (Codex v2 headless,
  * Cursor ACP, worker runtime manifests, App Server, Grok Bot), then reconciles
  * each registered profile with the binding its runtime/delivery mode requires.
@@ -45,7 +45,8 @@ const BINDING_KEYS_ALLOWED = new Set(["version", "keyFile", "origin"]);
 const WORKLOAD_ID = /^workload_[a-f0-9]{32}$/;
 const AGENT_BOUNDS = ["agent.read", "agent.write"];
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
-const PERMISSION_NAME = REASON_CODE;
+// Permission keys are dotted (`dm.send`, `posts.publish`, `tasks.claim`).
+const PERMISSION_NAME = /^(?=.{1,64}$)[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
 const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const MAILBOX_HANDLE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
@@ -338,6 +339,23 @@ function readRegistry(clientRoot) {
   return { status: "present", path: dir, entries, strayNames };
 }
 
+function decodeHexProfile(hex) {
+  if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
+  const text = Buffer.from(hex, "hex").toString("utf8");
+  // Round-trip check rejects invalid UTF-8 that Buffer would replace with U+FFFD.
+  return isValidProfileName(text) && Buffer.from(text, "utf8").toString("hex") === hex ? text : null;
+}
+
+function isPrivateDirectory(dirPath) {
+  try {
+    const meta = lstatSync(dirPath);
+    const uid = currentUid();
+    return meta.isDirectory() && (meta.mode & 0o077) === 0 && (uid == null || meta.uid === uid);
+  } catch {
+    return false;
+  }
+}
+
 /** A `triangle` permissions cache entry: `{ etag, view: { agent_id, revision, permissions } }`. */
 function readCachedPermissions(home, agentId) {
   const file = path.join(home, "cache", "permissions", `${agentId}.json`);
@@ -356,7 +374,7 @@ function readCachedPermissions(home, agentId) {
 
 /**
  * Mirrors Swift `FileV1ProfileBindingStore` + `V1AgentCredentialLoader`:
- * `profiles-v1/<profile>.json` (0700 dir, 0600 file) points at
+ * `profiles-v1/profile-<hex>.json` (0700 dir, 0600 file) points at
  * `<home>/agents/<agent_id>/workload-key.json`; the key file must be a
  * no-follow 0600 regular file (never opened here) beside a valid `agent.json`.
  */
@@ -368,9 +386,10 @@ function readProfileBindings(applicationRoot) {
   if (!Array.isArray(listing)) return { status: "unreadable", path: dir, byProfile };
   if (!isSafeManagedDirectory(dir)) return { status: "unsafe", path: dir, byProfile };
   for (const name of listing) {
-    if (!name.endsWith(".json") || name.startsWith(".")) continue;
-    const profile = name.slice(0, -5);
-    if (!isValidProfileName(profile)) continue;
+    // Swift `FileV1ProfileBindingStore.fileName`: `profile-<utf8 hex>.json`.
+    const match = /^profile-([0-9a-f]+)\.json$/.exec(name);
+    const profile = match ? decodeHexProfile(match[1]) : null;
+    if (profile == null) continue;
     byProfile.set(profile, readOneBinding(path.join(dir, name)));
   }
   return { status: "present", path: dir, byProfile };
@@ -394,6 +413,9 @@ function readOneBinding(file) {
   if (path.basename(keyFile) !== "workload-key.json" || path.basename(path.dirname(agentDir)) !== "agents" || !AGENT_ID.test(path.basename(agentDir))) {
     return fail("invalid_binding", { keyFile });
   }
+  // Swift `V1PrivateDirectory`: the custody home, agents/ and agents/<id>/
+  // must be real directories owned by this user with no group/other bits.
+  if ([home, path.dirname(agentDir), agentDir].some((dir) => !isPrivateDirectory(dir))) return fail("key_unsafe", { keyFile });
   const keyCustody = custodyProblem(keyFile, { maxBytes: AGENT_RECORD_MAX_BYTES });
   if (keyCustody === "absent") return fail("key_missing", { keyFile });
   if (keyCustody != null) return fail("key_unsafe", { keyFile });
@@ -402,18 +424,21 @@ function readOneBinding(file) {
   const record = readJsonFile(recordFile).value;
   if (!isPlainObject(record) || typeof record.agent_id !== "string" || !AGENT_ID.test(record.agent_id)
     || typeof record.workload_id !== "string" || !WORKLOAD_ID.test(record.workload_id)
-    || typeof record.handle !== "string" || !MAILBOX_HANDLE.test(record.handle)) {
+    || typeof record.handle !== "string" || !MAILBOX_HANDLE.test(record.handle)
+    || !isValidMeshOrigin(record.authority)
+    || (record.bounds !== undefined && !Array.isArray(record.bounds))) {
     return fail("agent_record_invalid", { keyFile });
   }
   if (record.agent_id !== path.basename(agentDir)) return fail("agent_mismatch", { keyFile });
   const bounds = Array.isArray(record.bounds) ? AGENT_BOUNDS.filter((bound) => record.bounds.includes(bound)) : [...AGENT_BOUNDS];
+  if (bounds.length === 0) return fail("agent_record_invalid", { keyFile });
   return {
     state: "bound",
     agentId: record.agent_id,
     handle: record.handle,
     workloadId: record.workload_id,
     bounds,
-    origin: value.origin ?? record.authority ?? null,
+    origin: value.origin ?? record.authority,
     keyFile,
     permissions: readCachedPermissions(home, record.agent_id),
   };

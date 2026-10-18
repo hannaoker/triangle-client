@@ -6,7 +6,7 @@ CLI (`triangle join` / `triangle agent add`), which writes the agent's Ed25519 w
 `<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` (mode `0600`, beside a
 secret-free `agent.json`). A helper **profile** is only a `0600` pointer from a
 local profile name to that key file
-(`~/Library/Application Support/The Triangle/profiles-v1/<profile>.json`); the
+(`~/Library/Application Support/The Triangle/profiles-v1/profile-<hex>.json`); the
 helper never registers agents, never stores a static `mesh_` bearer, and has no
 Keychain identity path. Every use re-proves the identity with short-lived DPoP
 workload tokens against `/api/v1/agents/me`. Chatbot transcripts, project
@@ -204,7 +204,7 @@ after a failure (operator-run on the Mac; not claimed from Linux CI):
    be a notify member with a matching App Server binding. `grok-bot` may notify
    (and may act) with a matching Grok Bot binding. `event-driven` remains the
    preferred actor when available.
-4. The profile binding (`profiles-v1/<profile>.json`) must point at an existing
+4. The profile binding (`profiles-v1/profile-<hex>.json`) must point at an existing
    `0600` `workload-key.json`; the watch grant (`credentials/local/watch/` or the
    `dev.thetriangle.mesh.mailbox-watch` Keychain item) appears only after a
    successful ensure.

@@ -69,6 +69,32 @@ public protocol V1ProfileBindingStore: AnyObject, Sendable {
     func write(_ binding: V1ProfileBinding, for profile: ProfileName) throws
     func delete(for profile: ProfileName) throws
     func profiles() throws -> [ProfileName]
+    /// Exclusive, cross-process lock held across a bind's check → verify → write.
+    func acquireBindLock() throws -> V1BindLease
+}
+
+/// Releases a bind lock when released or deallocated.
+public final class V1BindLease: @unchecked Sendable {
+    private var fd: Int32
+    init(fd: Int32) { self.fd = fd }
+    public static func unlocked() -> V1BindLease { V1BindLease(fd: -1) }
+    public func release() {
+        guard fd >= 0 else { return }
+        _ = flock(fd, LOCK_UN)
+        close(fd)
+        fd = -1
+    }
+    deinit { release() }
+}
+
+/// A custody directory: a real directory (no symlink) owned by this user with no
+/// group/other bits, as `triangle` and the helper create them (0700).
+enum V1PrivateDirectory {
+    static func isSafe(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFDIR && info.st_uid == getuid() && (info.st_mode & 0o077) == 0
+    }
 }
 
 public final class FileV1ProfileBindingStore: V1ProfileBindingStore, @unchecked Sendable {
@@ -84,9 +110,51 @@ public final class FileV1ProfileBindingStore: V1ProfileBindingStore, @unchecked 
         self.root = root
     }
 
+    /// `profile-<utf8 hex>.json`: exact-name and case-distinct on
+    /// case-insensitive filesystems (`Foo` and `foo` never share a file).
+    static func fileName(for profile: ProfileName) -> String {
+        "profile-" + profile.value.utf8.map { String(format: "%02x", $0) }.joined() + ".json"
+    }
+
+    static func profile(fromFileName name: String) -> ProfileName? {
+        guard name.hasPrefix("profile-"), name.hasSuffix(".json") else { return nil }
+        let hex = Array(name.dropFirst(8).dropLast(5))
+        guard !hex.isEmpty, hex.count % 2 == 0 else { return nil }
+        var bytes: [UInt8] = []
+        var index = 0
+        while index < hex.count {
+            guard let byte = UInt8(String(hex[index...index + 1]), radix: 16),
+                  String(hex[index...index + 1]) == String(format: "%02x", byte) else { return nil }
+            bytes.append(byte)
+            index += 2
+        }
+        guard let text = String(bytes: bytes, encoding: .utf8) else { return nil }
+        return try? ProfileName(text)
+    }
+
+    private func url(for profile: ProfileName) -> URL {
+        root.appendingPathComponent(Self.fileName(for: profile))
+    }
+
+    private func ensureSafeRoot() throws {
+        guard V1PrivateDirectory.isSafe(root.path) else { throw V1CustodyError.invalidBinding }
+    }
+
+    public func acquireBindLock() throws -> V1BindLease {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try ensureSafeRoot()
+        let fd = open(root.appendingPathComponent(".bind.lock").path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw V1CustodyError.invalidBinding }
+        guard flock(fd, LOCK_EX) == 0 else { close(fd); throw V1CustodyError.invalidBinding }
+        return V1BindLease(fd: fd)
+    }
+
     public func read(for profile: ProfileName) throws -> V1ProfileBinding {
         try lock.withLock {
-            let url = root.appendingPathComponent("\(profile.value).json")
+            var rootInfo = stat()
+            if lstat(root.path, &rootInfo) != 0, errno == ENOENT { throw V1CustodyError.profileNotBound }
+            try ensureSafeRoot()
+            let url = url(for: profile)
             let data: Data
             do {
                 data = try V1PrivateFile.read(url.path)
@@ -106,13 +174,13 @@ public final class FileV1ProfileBindingStore: V1ProfileBindingStore, @unchecked 
     public func write(_ binding: V1ProfileBinding, for profile: ProfileName) throws {
         try lock.withLock {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
-            let url = root.appendingPathComponent("\(profile.value).json")
+            try ensureSafeRoot()
+            let url = url(for: profile)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             var data = try encoder.encode(binding)
             data.append(0x0a)
-            let temporary = root.appendingPathComponent(".\(profile.value).\(UUID().uuidString).tmp")
+            let temporary = root.appendingPathComponent(".\(UUID().uuidString).tmp")
             guard FileManager.default.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
                 throw V1CustodyError.invalidBinding
             }
@@ -127,8 +195,9 @@ public final class FileV1ProfileBindingStore: V1ProfileBindingStore, @unchecked 
 
     public func delete(for profile: ProfileName) throws {
         try lock.withLock {
-            let url = root.appendingPathComponent("\(profile.value).json")
+            let url = url(for: profile)
             guard FileManager.default.fileExists(atPath: url.path) else { throw V1CustodyError.profileNotBound }
+            try ensureSafeRoot()
             try FileManager.default.removeItem(at: url)
         }
     }
@@ -136,9 +205,7 @@ public final class FileV1ProfileBindingStore: V1ProfileBindingStore, @unchecked 
     public func profiles() throws -> [ProfileName] {
         try lock.withLock {
             guard let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return [] }
-            return names.filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }
-                .compactMap { try? ProfileName(String($0.dropLast(5))) }
-                .sorted { $0.value < $1.value }
+            return names.compactMap(Self.profile(fromFileName:)).sorted { $0.value < $1.value }
         }
     }
 }
@@ -164,6 +231,7 @@ public final class InMemoryV1ProfileBindingStore: V1ProfileBindingStore, @unchec
     public func profiles() throws -> [ProfileName] {
         lock.withLock { bindings.keys.sorted { $0.value < $1.value } }
     }
+    public func acquireBindLock() throws -> V1BindLease { .unlocked() }
 }
 
 /// Everything the helper needs about one agent, loaded from v1 custody.
@@ -277,6 +345,11 @@ public enum V1AgentCredentialLoader {
         let agentsDirectory = agentDirectory.deletingLastPathComponent()
         guard agentsDirectory.lastPathComponent == "agents" else { throw V1CustodyError.agentMismatch }
         let home = agentsDirectory.deletingLastPathComponent()
+        // Every custody directory must be a real 0700-style directory owned by
+        // this user, so a symlinked or shared parent cannot redirect the key.
+        for directory in [home, agentsDirectory, agentDirectory] where !V1PrivateDirectory.isSafe(directory.path) {
+            throw V1CustodyError.keyFileUnsafe
+        }
 
         let keyData = try V1PrivateFile.read(keyPath)
         let privateKey = try parsePrivateJWK(keyData)

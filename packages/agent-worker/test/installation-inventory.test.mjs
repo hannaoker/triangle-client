@@ -84,6 +84,8 @@ function mixedFixture({
   }
   // Hidden staging files are never authoritative.
   writeFileSync(path.join(app, "profiles-v1", ".bob.json.tmp"), "{}", { mode: 0o600 });
+  // Legacy plain-name files are not Swift bindings.
+  writeFileSync(path.join(app, "profiles-v1", "bob.json"), "{}", { mode: 0o600 });
   // A bound profile with no registry row.
   writeBinding(app, "loner");
   writeInstallationIdentity(client);
@@ -140,7 +142,7 @@ function mixedFixture({
     kty: "OKP", crv: "Ed25519", x: "x", d: FAKE_TOKEN,
   });
   // `triangle permissions` cached a view for gravity2 only.
-  writePermissionsCache(app, "gravity2", { revision: 3, permissions: { send_messages: true, add_contacts: false } });
+  writePermissionsCache(app, "gravity2", { revision: 3, permissions: { "dm.send": true, "posts.publish": false, "tasks.claim": true, "bad key": true } });
   // A valid, recent open transaction for ghost.
   writeJson(
     path.join(app, "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json"),
@@ -212,7 +214,7 @@ test("mixed Codex/ACP/worker registry: every profile appears, reconciled to its 
     assert.deepEqual(byName.gravity2.identity.bounds, ["agent.read", "agent.write"]);
     assert.equal(byName.gravity2.pollWatch.mode, "poll");
     assert.equal(byName.gravity2.activity.lastConversationUpdateAt, "2026-10-16T22:00:00.000Z");
-    assert.deepEqual(byName.gravity2.permissions, { source: "triangle_cache", revision: 3, values: { send_messages: true, add_contacts: false } });
+    assert.deepEqual(byName.gravity2.permissions, { source: "triangle_cache", revision: 3, values: { "dm.send": true, "posts.publish": false, "tasks.claim": true } });
     assert.deepEqual(byName.ghost.permissions, { source: UNAVAILABLE, reason: "not_cached" });
     assert.equal(byName.gravity2.owner.supervisorAdmission, UNAVAILABLE);
 
@@ -680,6 +682,9 @@ test("profile bindings are trusted only when the pointer, key custody, and agent
       ["key symlink", () => symlinkInPlace(good.keyFile), "key_unsafe"],
       ["agent id mismatch", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), agent_id: boundAgentId("bob") }), "agent_mismatch"],
       ["agent record unsafe", () => chmodSync(path.join(agentDir, "agent.json"), 0o644), "agent_record_invalid"],
+      ["agent record without authority", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), authority: "http://x.test" }), "agent_record_invalid"],
+      ["agent record with empty bounds", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), bounds: ["owner.admin"] }), "agent_record_invalid"],
+      ["agents dir shared", () => chmodSync(path.dirname(agentDir), 0o755), "key_unsafe"],
     ]) {
       mutate();
       const result = runDoctor(f.client);

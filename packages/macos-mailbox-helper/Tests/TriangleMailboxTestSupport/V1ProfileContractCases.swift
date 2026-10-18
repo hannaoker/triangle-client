@@ -19,6 +19,7 @@ public enum V1ProfileContractCases {
         .init(name: "gate retries once after a stale token 401", run: gateRetriesStaleToken),
         .init(name: "bind writes a 0600 pointer only after verification", run: bindVerifiesBeforeWrite),
         .init(name: "bind never silently replaces another agent", run: bindRefusesReplacement),
+        .init(name: "bindings are case-distinct, locked, and custody parents must be private", run: bindingStoreHardening),
         .init(name: "status renders permissions and no key material", run: statusRendersPermissions),
         .init(name: "v1 material and credentials redact the key", run: redaction),
     ]
@@ -189,7 +190,7 @@ public enum V1ProfileContractCases {
         try expect(bound.status == .verified && bound.agentID == agent.agentID.value, "bind failed: \(bound.status)")
         let stored = try bindings.read(for: agent.profile)
         try expect(stored.keyFile == agent.keyFile.path && stored.origin == nil, "binding content changed")
-        let file = root.appendingPathComponent("codex.json")
+        let file = root.appendingPathComponent("profile-" + Data("codex".utf8).map { String(format: "%02x", $0) }.joined() + ".json")
         let fileMode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
         let rootMode = (try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber)?.intValue
         try expect(fileMode == 0o600 && rootMode == 0o700, "binding permissions are not private")
@@ -221,6 +222,54 @@ public enum V1ProfileContractCases {
         // Rebinding the same agent (e.g. new origin) is allowed.
         let rebound = try await service.bind(profile: first.profile, keyFile: first.keyFile, origin: nil)
         try expect(rebound.status == .verified, "same-agent rebind refused")
+    }
+
+    public static func bindingStoreHardening() async throws {
+        let home = try V1TestCustody.temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let upper = try V1TestCustody.makeAgent(home: home, profile: "Foo", handle: "foo-upper", fill: "a")
+        let other = try V1TestCustody.makeAgent(home: home, profile: "foo", handle: "foo-lower", fill: "b")
+        let root = home.appendingPathComponent("profiles-v1", isDirectory: true)
+        let bindings = FileV1ProfileBindingStore(root: root)
+        let mesh = FakeV1Mesh(agents: [upper, other])
+        let service = ProfileBindingService(bindings: bindings, transport: mesh)
+
+        // Case variants never share a binding (case-insensitive APFS).
+        _ = try await service.bind(profile: upper.profile, keyFile: upper.keyFile, origin: nil)
+        let lower = try ProfileName("foo")
+        try expect((try? bindings.read(for: lower)) == nil, "foo resolved Foo's binding")
+        try expect(try bindings.profiles() == [upper.profile], "profile listing lost the exact name")
+        try expectThrows("unbind of foo removed Foo") { try service.unbind(profile: lower) }
+        try expect((try? bindings.read(for: upper.profile)) != nil, "Foo's binding disappeared")
+
+        // A binding whose key no longer loads is not silently replaced.
+        let movedKey = upper.keyFile.deletingLastPathComponent().appendingPathComponent("moved.json")
+        try FileManager.default.moveItem(at: upper.keyFile, to: movedKey)
+        let replaced = try await service.bind(profile: upper.profile, keyFile: other.keyFile, origin: nil)
+        try expect(replaced.status == .identityMismatch, "unloadable binding was replaced: \(replaced.status)")
+        try expect(try bindings.read(for: upper.profile).keyFile == upper.keyFile.path, "binding was overwritten")
+        try FileManager.default.moveItem(at: movedKey, to: upper.keyFile)
+
+        // Custody parents must be private, real directories.
+        let agentsDirectory = home.appendingPathComponent("agents", isDirectory: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agentsDirectory.path)
+        try expectThrows("shared agents directory accepted") { try V1AgentCredentialLoader.load(keyFile: upper.keyFile) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agentsDirectory.path)
+        let alias = home.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createDirectory(at: alias.appendingPathComponent("agents"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let linked = alias.appendingPathComponent("agents/\(upper.agentID.value)")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: upper.keyFile.deletingLastPathComponent())
+        try expectThrows("symlinked agent directory accepted") {
+            try V1AgentCredentialLoader.load(keyFile: linked.appendingPathComponent("workload-key.json"))
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        try expectThrows("shared bindings directory accepted") { try bindings.read(for: upper.profile) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+
+        // Read-only agents verify but cannot run mailbox workers.
+        let reader = try V1TestCustody.makeAgent(home: home, profile: "reader", handle: "reader-one", fill: "c", bounds: ["agent.read"])
+        let credential = try await VerifiedCredentialGate(resolver: V1TestCustody.resolver([reader]), transport: FakeV1Mesh(agents: [reader])).credential(for: reader.profile)
+        try expect(!credential.canWrite, "read-only agent reported write access")
     }
 
     public static func statusRendersPermissions() async throws {

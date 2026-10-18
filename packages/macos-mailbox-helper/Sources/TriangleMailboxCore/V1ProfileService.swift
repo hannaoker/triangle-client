@@ -116,6 +116,8 @@ public struct VerifiedCredential: Sendable, CustomStringConvertible, CustomDebug
     public var handle: MailboxHandle { material.handle }
     public var workloadID: WorkloadID { material.workloadID }
     public var workloadKeyFile: URL { material.keyFile }
+    /// Mailbox workers must be able to reply and acknowledge.
+    public var canWrite: Bool { material.scopes.contains("agent.write") }
     public var workloadRecord: WorkloadKeyRecord { material.workloadRecord }
 
     public init(
@@ -216,10 +218,25 @@ public struct ProfileBindingService: Sendable {
         } catch {
             return ProfileStatus(profile: profile, material: nil, status: .credentialInvalid)
         }
-        if let existing = try? bindings.read(for: profile),
-           let current = try? V1AgentCredentialLoader.load(keyFile: URL(fileURLWithPath: existing.keyFile), originOverride: nil),
-           current.agentID != material.agentID {
-            return ProfileStatus(profile: profile, material: current, status: .identityMismatch)
+        // Serialize check → verify → write across processes.
+        let lease: V1BindLease
+        do { lease = try bindings.acquireBindLock() } catch {
+            return ProfileStatus(profile: profile, material: material, status: .verificationFailed)
+        }
+        defer { lease.release() }
+        // Only an absent binding may be (re)bound freely. A binding that exists
+        // but cannot be read, or whose key no longer loads, is never replaced
+        // silently: the operator must `unbind` first.
+        do {
+            let existing = try bindings.read(for: profile)
+            let current = try? V1AgentCredentialLoader.load(keyFile: URL(fileURLWithPath: existing.keyFile), originOverride: nil)
+            if current?.agentID != material.agentID {
+                return ProfileStatus(profile: profile, material: current, status: .identityMismatch)
+            }
+        } catch V1CustodyError.profileNotBound {
+            // Unbound: proceed.
+        } catch {
+            return ProfileStatus(profile: profile, material: nil, status: .identityMismatch)
         }
         let staged = InMemoryV1ProfileBindingStore()
         let binding = V1ProfileBinding(keyFile: keyFile.path, origin: origin?.value)
@@ -234,6 +251,8 @@ public struct ProfileBindingService: Sendable {
     }
 
     public func unbind(profile: ProfileName) throws {
+        let lease = try bindings.acquireBindLock()
+        defer { lease.release() }
         do { try bindings.delete(for: profile) } catch { throw VerifiedCredentialGateError.profileNotFound }
     }
 

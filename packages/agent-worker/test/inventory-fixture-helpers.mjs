@@ -41,12 +41,12 @@ export function fixtureTriangleHome(app) {
 }
 
 export function bindingFile(app, profile) {
-  return path.join(app, "profiles-v1", `${profile}.json`);
+  return path.join(app, "profiles-v1", `profile-${Buffer.from(profile, "utf8").toString("hex")}.json`);
 }
 
 /**
  * A permissions v1 helper binding as Swift `FileV1ProfileBindingStore` and
- * `triangle` custody persist them: `profiles-v1/<profile>.json` -> the agent's
+ * `triangle` custody persist them: `profiles-v1/profile-<hex>.json` -> the agent's
  * `workload-key.json` beside its `agent.json`. The key is a placeholder; the
  * inventory never opens it.
  * Overrides: `binding` (merged into the pointer record), `agent` (merged into
