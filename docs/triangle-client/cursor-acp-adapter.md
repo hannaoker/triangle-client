@@ -63,15 +63,47 @@ Verified against the installed cursor-agent `2026.09.10-fd3934a` bundle
   > 92 chars is cut to 84 + `-<sha256:7>` (max socket path 104 bytes; the
   bundled Node binds 104, fails EINVAL at 105 on macOS).
 
-The ACP child env pins both roots to Triangle-owned dirs. `CURSOR_DATA_DIR`
-defaults to the Triangle Cursor home and can be moved with
-`TRIANGLE_CURSOR_DATA_DIR`. A conflicting `CURSOR_DATA_DIR` override throws
-`cursor_data_dir_conflict`; a data dir whose `projects/` exceeds 84 chars (or
-whose worker socket would exceed the OS limit) throws
-`cursor_socket_path_too_long` before spawn / session new|load.
+The ACP child env pins both roots to Triangle-owned dirs:
 
-**Operator note:** the default macOS home
-`~/Library/Application Support/The Triangle/model-state/cursor-acp-runtime-home`
-is ~93 chars for a typical user, so it fails the preflight. Set
-`TRIANGLE_CURSOR_DATA_DIR` to a short Triangle-owned dir (<= 75 chars, not
-under `~/.cursor`), e.g. `~/.triangle/cursor-data`, before deploying.
+- `CURSOR_CONFIG_DIR` = the Triangle Cursor home (unchanged from #81).
+- `CURSOR_DATA_DIR` = **`~/.triangle/cursor-data`** by default (created 0700
+  on first use; `/Users/<user>/.triangle/cursor-data/projects` is ~47 chars,
+  well under Cursor's 84-char socket base). Override with
+  `TRIANGLE_CURSOR_DATA_DIR` / `cursorDataDir`. The long
+  `~/Library/Application Support/...` home is deliberately not the data dir.
+
+A conflicting `CURSOR_DATA_DIR` override throws `cursor_data_dir_conflict`; a
+data dir whose `projects/` exceeds 84 chars (or whose worker socket would
+exceed the OS limit) throws `cursor_socket_path_too_long` before spawn /
+session new|load. The chosen dirs are reported by the ACP process
+`status()` (`cursorDataDir`, `cursorDataDirSource`), the worker-pool slot
+status, the headless runtime `status().cursorDirs`, and the exported
+`describeTriangleCursorDirs()` (for doctor/inventory).
+
+### Opt-in legacy migration (never automatic)
+
+Run only while the Cursor ACP drain is stopped. Both helpers copy, never move
+or delete, and revert removes only what apply recorded in its manifest.
+
+- ACP sessions (#81): `plan/apply/revertLegacyCursorAcpSessionCopy` —
+  `~/.cursor/acp-sessions/<id>` -> `<cursor home>/acp-sessions/<id>`.
+- Transcripts: `plan/apply/revertLegacyCursorTranscriptCopy({ workspacePaths })`
+  — `~/.cursor/projects/<slug>/agent-transcripts/**` ->
+  `<data>/projects/<slug>/agent-transcripts/**` (regular files only; existing
+  targets win; symlinks/sockets skipped; worker socket/logs/terminals are not
+  copied). Manifest: `<data>/projects/.triangle-legacy-transcript-copy.json`.
+
+### Deploy notes
+
+1. No env var is required: the default data dir passes the socket preflight
+   on a normal macOS HOME. Set `TRIANGLE_CURSOR_DATA_DIR` only to move it.
+2. After deploy, the first Cursor ACP start creates `~/.triangle/cursor-data`
+   (0700). New transcripts/worker sockets land there instead of
+   `~/.cursor/projects`.
+3. Optional, to keep resume context for existing ghost sessions: with the
+   drain stopped, run the session copy (#81) and the transcript copy for the
+   ghost working directory, then start the drain. Revert with the matching
+   revert helpers if needed.
+4. If a preflight error appears (`cursor_socket_path_too_long`), the message
+   names the reason; unset or shorten `TRIANGLE_CURSOR_DATA_DIR` (<= 75 chars,
+   not under `~/.cursor`).

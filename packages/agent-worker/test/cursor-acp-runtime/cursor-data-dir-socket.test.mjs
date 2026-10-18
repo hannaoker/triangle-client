@@ -17,24 +17,34 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { createCursorAcpProcess } from "../../src/cursor-acp-runtime/acp-process.mjs";
+import { createDefaultCursorAcpShadowProfile } from "../../src/cursor-acp-runtime/config-guards.mjs";
+import { createHeadlessCursorAcpRuntime } from "../../src/cursor-acp-runtime/headless-runtime.mjs";
 import {
+  applyLegacyCursorTranscriptCopy,
   assertCursorSocketPathsFit,
+  CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST,
   buildSanitizedCursorChildEnv,
   CURSOR_DATA_DIR_MAX_CHARS,
   cursorWorkspaceSlug,
+  defaultTriangleCursorDataDir,
+  describeTriangleCursorDirs,
   planCursorSocketPaths,
+  planLegacyCursorTranscriptCopy,
   resolveTriangleCursorDataDir,
   resolveTriangleCursorHome,
+  revertLegacyCursorTranscriptCopy,
 } from "../../src/cursor-acp-runtime/runtime-home.mjs";
 
 function shortTmpRoot() {
@@ -62,16 +72,19 @@ const PROD_CURSOR_HOME = path.join(
   "cursor-acp-runtime-home",
 );
 
-test("child env pins CURSOR_DATA_DIR to the Triangle Cursor home by default", () => {
+test("child env pins CURSOR_DATA_DIR to ~/.triangle/cursor-data by default", () => {
   const { home, cursorHome, cleanup } = fixture();
   try {
     const child = buildSanitizedCursorChildEnv({
       cursorHome,
       parentEnv: { HOME: home, PATH: "/usr/bin", CURSOR_DATA_DIR: path.join(home, ".cursor") },
     });
-    assert.equal(child.CURSOR_DATA_DIR, cursorHome);
-    assert.equal(child.TRIANGLE_CURSOR_DATA_DIR, cursorHome);
+    const expected = path.join(home, ".triangle", "cursor-data");
+    assert.equal(defaultTriangleCursorDataDir({ home }), expected);
+    assert.equal(child.CURSOR_DATA_DIR, expected);
+    assert.equal(child.TRIANGLE_CURSOR_DATA_DIR, expected);
     assert.equal(child.CURSOR_CONFIG_DIR, cursorHome);
+    assert.notEqual(child.CURSOR_DATA_DIR, cursorHome);
     assert.notEqual(child.CURSOR_DATA_DIR, path.join(home, ".cursor"));
   } finally {
     cleanup();
@@ -112,12 +125,22 @@ test("extra cannot redirect CURSOR_DATA_DIR away from the Triangle data dir", ()
         }),
       { code: "cursor_data_dir_conflict" },
     );
+    const defaultDir = path.join(home, ".triangle", "cursor-data");
     const same = buildSanitizedCursorChildEnv({
       cursorHome,
       parentEnv: { HOME: home, PATH: "/usr/bin" },
-      extra: { CURSOR_DATA_DIR: cursorHome },
+      extra: { CURSOR_DATA_DIR: defaultDir },
     });
-    assert.equal(same.CURSOR_DATA_DIR, cursorHome);
+    assert.equal(same.CURSOR_DATA_DIR, defaultDir);
+    assert.throws(
+      () =>
+        buildSanitizedCursorChildEnv({
+          cursorHome,
+          parentEnv: { HOME: home, PATH: "/usr/bin" },
+          extra: { CURSOR_DATA_DIR: cursorHome },
+        }),
+      { code: "cursor_data_dir_conflict" },
+    );
   } finally {
     cleanup();
   }
@@ -136,7 +159,7 @@ test("data dir may not be ~/.cursor, inside it, ~/.codex, /tmp/.cursor, or relat
     ];
     for (const [override, code] of cases) {
       assert.throws(
-        () => resolveTriangleCursorDataDir({ override, cursorHome, home }),
+        () => resolveTriangleCursorDataDir({ override, home }),
         { code },
         override,
       );
@@ -145,7 +168,7 @@ test("data dir may not be ~/.cursor, inside it, ~/.codex, /tmp/.cursor, or relat
     mkdirSync(path.join(home, ".cursor"), { recursive: true });
     symlinkSync(path.join(home, ".cursor"), path.join(home, "sneaky"));
     assert.throws(
-      () => resolveTriangleCursorDataDir({ override: path.join(home, "sneaky"), cursorHome, home }),
+      () => resolveTriangleCursorDataDir({ override: path.join(home, "sneaky"), home }),
       { code: "cursor_data_dir_user_fallback_forbidden" },
     );
   } finally {
@@ -362,6 +385,16 @@ function writeCursorPathsFake(dir) {
   return { command: process.execPath, args: [file] };
 }
 
+const liveHandles = new Set();
+function track(handle) {
+  liveHandles.add(handle);
+  return handle;
+}
+async function closeTracked() {
+  for (const handle of liveHandles) await handle.close().catch(() => {});
+  liveHandles.clear();
+}
+
 function listTree(root) {
   if (!existsSync(root)) return [];
   return readdirSync(root, { recursive: true }).map(String).sort();
@@ -389,22 +422,23 @@ test("restart + session/load resume entirely inside the isolated config/data dir
       XDG_CONFIG_HOME: path.join(home, ".config"),
     };
 
-    const first = createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env });
+    const dataDir = path.join(home, ".triangle", "cursor-data");
+    const first = track(createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env }));
     await first.start();
     const init = await first.initialize();
-    assert.deepEqual(init._meta, { configDir: cursorHome, dataDir: cursorHome });
+    assert.deepEqual(init._meta, { configDir: cursorHome, dataDir });
     await first.authenticate();
     const created = await first.sessionNew({ cwd: workspace });
-    const plan = planCursorSocketPaths({ dataDir: cursorHome, workspacePaths: [workspace] });
+    const plan = planCursorSocketPaths({ dataDir, workspacePaths: [workspace] });
     assert.equal(created._meta.socketPath, plan.sockets[0].socketPath);
-    assert.ok(created._meta.socketPath.startsWith(path.join(cursorHome, "projects") + path.sep));
+    assert.ok(created._meta.socketPath.startsWith(path.join(dataDir, "projects") + path.sep));
     const turn = await first.sessionPrompt({ sessionId: created.sessionId, text: "remember TOKEN_R1" });
     assert.equal(turn.assistantText, "echo:remember TOKEN_R1");
     await first.close();
     assert.equal(existsSync(created._meta.socketPath), false, "worker socket removed on shutdown");
 
     // Restart: a brand-new child resumes from the isolated dirs.
-    const second = createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env });
+    const second = track(createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env }));
     await second.ensureReady();
     const replayed = [];
     const off = second.onEvent((event) => {
@@ -422,12 +456,14 @@ test("restart + session/load resume entirely inside the isolated config/data dir
     assert.ok(existsSync(path.join(cursorHome, "acp-sessions", created.sessionId, "meta.json")));
     assert.ok(
       existsSync(
-        path.join(cursorHome, "projects", cursorWorkspaceSlug(workspace), "agent-transcripts", `${created.sessionId}.jsonl`),
+        path.join(dataDir, "projects", cursorWorkspaceSlug(workspace), "agent-transcripts", `${created.sessionId}.jsonl`),
       ),
     );
+    assert.equal(existsSync(path.join(cursorHome, "projects")), false);
     assert.deepEqual(listTree(path.join(home, ".cursor")), userCursorBefore, "temp ~/.cursor untouched");
     assert.equal(existsSync(path.join(home, ".config", "cursor")), false);
   } finally {
+    await closeTracked();
     cleanup();
     rmSync(toolDir, { recursive: true, force: true });
   }
@@ -443,14 +479,15 @@ test("restart with a separate TRIANGLE_CURSOR_DATA_DIR keeps sessions in config 
     mkdirSync(workspace);
     const env = { HOME: home, PATH: process.env.PATH, TRIANGLE_CURSOR_DATA_DIR: dataDir };
 
-    const first = createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env });
+    const first = track(createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env }));
     assert.equal(first.status().cursorDataDir, realpathSync(dataDir));
+    assert.equal(first.status().cursorDataDirSource, "override");
     await first.ensureReady();
     const created = await first.sessionNew({ cwd: workspace });
     await first.sessionPrompt({ sessionId: created.sessionId, text: "TOKEN_R2" });
     await first.close();
 
-    const second = createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env });
+    const second = track(createCursorAcpProcess({ command: fake.command, args: fake.args, cursorHome, env }));
     await second.ensureReady();
     const loaded = await second.sessionLoad({ sessionId: created.sessionId, cwd: workspace });
     assert.equal(loaded._meta.replayed, 2);
@@ -461,8 +498,249 @@ test("restart with a separate TRIANGLE_CURSOR_DATA_DIR keeps sessions in config 
     assert.equal(existsSync(path.join(dataDir, "acp-sessions")), false);
     assert.equal(existsSync(path.join(cursorHome, "projects")), false);
     assert.equal(existsSync(path.join(home, ".cursor")), false);
+    assert.equal(existsSync(path.join(home, ".triangle")), false);
   } finally {
+    await closeTracked();
     cleanup();
     rmSync(toolDir, { recursive: true, force: true });
+  }
+});
+
+test("real-length default data dir on this machine's HOME passes the socket preflight", () => {
+  // Pure path math against the real HOME (no fs access to it).
+  for (const home of [homedir(), PROD_HOME]) {
+    const dataDir = defaultTriangleCursorDataDir({ home });
+    assert.ok(dataDir.length <= CURSOR_DATA_DIR_MAX_CHARS, `${dataDir} (${dataDir.length})`);
+    const plan = assertCursorSocketPathsFit({
+      dataDir,
+      workspacePaths: [
+        home,
+        path.join(home, "Projects", "The Triangle", "triangle-client"),
+        path.join(home, "Projects", "The Triangle", "worktrees", "l1a2-cursor-data-dir", "deeply", "nested", "workspace"),
+      ],
+    });
+    assert.equal(plan.base.kind, "projects");
+    assert.equal(plan.base.dir, path.join(home, ".triangle", "cursor-data", "projects"));
+  }
+  // /Users/zhenyuhou/.triangle/cursor-data/projects = 47 chars (limit 84).
+  assert.equal(path.join(defaultTriangleCursorDataDir({ home: PROD_HOME }), "projects").length, 47);
+  // The long Cursor home itself would still fail if forced as the data dir.
+  assert.throws(() => assertCursorSocketPathsFit({ dataDir: PROD_CURSOR_HOME }), {
+    code: "cursor_socket_path_too_long",
+  });
+});
+
+test("process creates the default data dir 0700 on first use and reports it in status", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    const expected = path.join(home, ".triangle", "cursor-data");
+    assert.equal(existsSync(expected), false);
+    const handle = createCursorAcpProcess({
+      command: "agent",
+      args: ["acp"],
+      cursorHome,
+      env: { HOME: home, PATH: "/usr/bin" },
+      spawnImpl: () => {
+        throw new Error("not spawned in this test");
+      },
+    });
+    assert.equal(statSync(expected).mode & 0o777, 0o700);
+    assert.equal(statSync(path.join(home, ".triangle")).mode & 0o777, 0o700);
+    assert.equal(handle.status().cursorDataDir, expected);
+    assert.equal(handle.status().cursorDataDirSource, "default");
+    assert.equal(handle.status().cursorHome, cursorHome);
+  } finally {
+    cleanup();
+  }
+});
+
+test("headless runtime status and describeTriangleCursorDirs report the chosen dirs", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    const runtime = createHeadlessCursorAcpRuntime({
+      profileConfig: createDefaultCursorAcpShadowProfile({
+        workingDirectory: path.join(home, "cwd"),
+        workload: "conversational",
+        model: "composer-2.5[fast=true]",
+      }),
+      enableShadow: true,
+      command: "agent",
+      args: ["acp"],
+      cursorHome,
+      env: { HOME: home, PATH: "/usr/bin" },
+      logger: { info() {}, error() {} },
+    });
+    assert.equal(runtime.active, true);
+    const dirs = runtime.status().cursorDirs;
+    assert.equal(dirs.configDir, cursorHome);
+    assert.equal(dirs.dataDir, path.join(home, ".triangle", "cursor-data"));
+    assert.equal(dirs.dataDirSource, "default");
+    assert.equal(dirs.socketPreflight.ok, true);
+    assert.equal(dirs.socketPreflight.base, "projects");
+
+    const bad = describeTriangleCursorDirs({
+      cursorHome,
+      env: { HOME: home, TRIANGLE_CURSOR_DATA_DIR: path.join(home, "y".repeat(90)) },
+    });
+    assert.equal(bad.dataDirSource, "override");
+    assert.equal(bad.socketPreflight.ok, false);
+    assert.deepEqual([...bad.socketPreflight.reasons], ["cursor_socket_dir_escapes_to_shared_tmp"]);
+    const invalid = describeTriangleCursorDirs({
+      cursorHome,
+      env: { HOME: home, TRIANGLE_CURSOR_DATA_DIR: path.join(home, ".cursor") },
+    });
+    assert.equal(invalid.dataDirError, "cursor_data_dir_user_fallback_forbidden");
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- legacy transcript copy (temp HOME only) ----
+
+function seedLegacyTranscripts(home, workspace) {
+  const projectDir = path.join(home, ".cursor", "projects", cursorWorkspaceSlug(workspace));
+  const transcripts = path.join(projectDir, "agent-transcripts");
+  mkdirSync(path.join(transcripts, "nested"), { recursive: true });
+  writeFileSync(path.join(transcripts, "a.jsonl"), "line-a\n");
+  writeFileSync(path.join(transcripts, "b.txt"), "line-b\n");
+  writeFileSync(path.join(transcripts, "nested", "c.jsonl"), "line-c\n");
+  // Non-transcript siblings that must never be copied.
+  writeFileSync(path.join(projectDir, "worker.log"), "log\n");
+  mkdirSync(path.join(projectDir, "terminals"), { recursive: true });
+  writeFileSync(path.join(projectDir, "terminals", "1.txt"), "term\n");
+  return { projectDir, transcripts };
+}
+
+function snapshotTree(root) {
+  return listTree(root).map((relative) => {
+    const absolute = path.join(root, relative);
+    const stat = statSync(absolute);
+    return [relative, stat.isFile() ? readFileSync(absolute, "utf8") : "<dir>", stat.mtimeMs];
+  });
+}
+
+test("legacy transcript copy: plan is read-only, apply copies, revert removes only what apply created", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const workspace = path.join(home, "ws");
+    const other = path.join(home, "never-used");
+    const { transcripts } = seedLegacyTranscripts(home, workspace);
+    symlinkSync(path.join(transcripts, "a.jsonl"), path.join(transcripts, "link.jsonl"));
+    const userCursorBefore = snapshotTree(path.join(home, ".cursor"));
+    const dataDir = path.join(home, ".triangle", "cursor-data");
+    const slug = cursorWorkspaceSlug(workspace);
+    const targetTranscripts = path.join(dataDir, "projects", slug, "agent-transcripts");
+
+    // Pre-existing isolated transcript must win and survive revert.
+    mkdirSync(targetTranscripts, { recursive: true });
+    writeFileSync(path.join(targetTranscripts, "b.txt"), "isolated-b\n");
+
+    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, other] });
+    assert.equal(plan.dataDir, dataDir);
+    const ws = plan.workspaces.find((entry) => entry.slug === slug);
+    assert.equal(ws.action, "copy");
+    assert.deepEqual(
+      ws.files.map((entry) => [entry.relative, entry.action]),
+      [
+        ["a.jsonl", "copy"],
+        ["b.txt", "already_present"],
+        [path.join("nested", "c.jsonl"), "copy"],
+        ["link.jsonl", "unsafe_source"],
+      ],
+    );
+    assert.equal(plan.workspaces.find((entry) => entry.workspacePath === other).action, "missing_source");
+    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "plan is read-only (source)");
+    assert.deepEqual(listTree(targetTranscripts), ["b.txt"], "plan is read-only (target)");
+
+    const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, other] });
+    assert.deepEqual([...applied.copied].sort(), [
+      path.join(slug, "agent-transcripts", "a.jsonl"),
+      path.join(slug, "agent-transcripts", "nested", "c.jsonl"),
+    ]);
+    assert.equal(readFileSync(path.join(targetTranscripts, "a.jsonl"), "utf8"), "line-a\n");
+    assert.equal(readFileSync(path.join(targetTranscripts, "nested", "c.jsonl"), "utf8"), "line-c\n");
+    assert.equal(readFileSync(path.join(targetTranscripts, "b.txt"), "utf8"), "isolated-b\n");
+    assert.equal(existsSync(path.join(targetTranscripts, "link.jsonl")), false);
+    assert.equal(existsSync(path.join(dataDir, "projects", slug, "worker.log")), false);
+    assert.equal(existsSync(path.join(dataDir, "projects", slug, "terminals")), false);
+    assert.equal(
+      Math.trunc(statSync(path.join(targetTranscripts, "a.jsonl")).mtimeMs),
+      Math.trunc(statSync(path.join(transcripts, "a.jsonl")).mtimeMs),
+      "mtime preserved (ms precision)",
+    );
+    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "apply never touches the source");
+    assert.ok(existsSync(path.join(dataDir, "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST)));
+
+    // Idempotent: a second apply copies nothing.
+    const again = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+    assert.deepEqual([...again.copied], []);
+
+    // A file Cursor writes after apply must survive revert (and keep its dir).
+    writeFileSync(path.join(targetTranscripts, "nested", "new-after-apply.jsonl"), "new\n");
+
+    const reverted = revertLegacyCursorTranscriptCopy({ home });
+    assert.equal(reverted.removedFiles.length, 2);
+    assert.deepEqual([...reverted.keptDirs], [path.join(slug, "agent-transcripts", "nested")]);
+    assert.deepEqual(listTree(targetTranscripts).sort(), ["b.txt", "nested", path.join("nested", "new-after-apply.jsonl")]);
+    assert.equal(readFileSync(path.join(targetTranscripts, "b.txt"), "utf8"), "isolated-b\n");
+    assert.equal(existsSync(path.join(dataDir, "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST)), false);
+    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "revert never touches the source");
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy transcript copy into a fresh data dir: revert removes the dirs apply created", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const workspace = path.join(home, "ws2");
+    seedLegacyTranscripts(home, workspace);
+    const dataDir = path.join(home, "cd");
+    mkdirSync(dataDir);
+    applyLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir, workspacePaths: [workspace] });
+    assert.equal(listTree(path.join(dataDir, "projects")).filter((entry) => entry.endsWith(".jsonl") || entry.endsWith(".txt")).length, 3);
+    const reverted = revertLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir });
+    assert.equal(reverted.removedFiles.length, 3);
+    assert.deepEqual([...reverted.keptDirs], []);
+    assert.deepEqual(listTree(path.join(dataDir, "projects")), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy transcript copy rejects bad inputs and tampered manifests", () => {
+  const { home, cleanup } = fixture();
+  try {
+    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: [] }), { code: "cursor_workspace_invalid" });
+    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: ["rel/ws"] }), {
+      code: "cursor_workspace_invalid",
+    });
+    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: ["/"] }), {
+      code: "cursor_workspace_invalid",
+    });
+    assert.throws(
+      () => planLegacyCursorTranscriptCopy({ home, cursorDataDir: path.join(home, ".cursor"), workspacePaths: ["/w"] }),
+      { code: "cursor_data_dir_user_fallback_forbidden" },
+    );
+    // Source dir that is a symlink is refused.
+    const workspace = path.join(home, "ws3");
+    const projectDir = path.join(home, ".cursor", "projects", cursorWorkspaceSlug(workspace));
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(path.join(home, "elsewhere"));
+    symlinkSync(path.join(home, "elsewhere"), path.join(projectDir, "agent-transcripts"));
+    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+    assert.equal(plan.workspaces[0].action, "unsafe_source");
+
+    const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
+    mkdirSync(projectsRoot, { recursive: true });
+    writeFileSync(path.join(home, "victim.txt"), "keep");
+    writeFileSync(
+      path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST),
+      JSON.stringify({ schemaVersion: 1, createdFiles: [{ path: "../../../victim.txt" }], createdDirs: [] }),
+    );
+    assert.throws(() => revertLegacyCursorTranscriptCopy({ home }), { code: "cursor_legacy_manifest_invalid" });
+    assert.equal(readFileSync(path.join(home, "victim.txt"), "utf8"), "keep");
+  } finally {
+    cleanup();
   }
 });

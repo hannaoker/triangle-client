@@ -18,6 +18,7 @@ import {
   resolveCursorAcpRuntimeConfig,
 } from "./config-guards.mjs";
 import { resolveWorkloadMode } from "./acp-protocol.mjs";
+import { describeTriangleCursorDirs } from "./runtime-home.mjs";
 import { createMemoryCursorSessionRegistry } from "./session-registry.mjs";
 import { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
 import { createCursorAcpWorkerPool } from "./worker-pool.mjs";
@@ -437,6 +438,7 @@ export function createHeadlessCursorAcpRuntime({
       active: true,
       started,
       config: resolved,
+      cursorDirs: describeTriangleCursorDirs({ cursorHome, cursorDataDir, env }),
       pool: workerPool.status(),
       lastSettlementTrace: Object.freeze([...lastSettlementTrace]),
     });

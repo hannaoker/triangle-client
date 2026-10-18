@@ -20,8 +20,11 @@
  * and keeps `<dataDir>/projects/<workspace-slug>/` (agent transcripts, worker
  * log, terminals, canvases) plus the per-workspace local worker socket under
  * it. The child env therefore also pins `CURSOR_DATA_DIR` to a Triangle-owned
- * directory (default: the Triangle Cursor home; override with
- * `TRIANGLE_CURSOR_DATA_DIR`).
+ * directory: default `~/.triangle/cursor-data` (short enough for Cursor's
+ * 84-char socket base on a normal macOS HOME; created 0700 on first use),
+ * override with `TRIANGLE_CURSOR_DATA_DIR` / `cursorDataDir`. The long
+ * `~/Library/Application Support/...` Cursor home is NOT used as the data dir
+ * because Cursor would push sockets out of it (see below).
  *
  * Socket-path preflight: Cursor derives the worker socket directory with
  * `paths.js` `kL(workspace)`: `<dataDir>/projects` if <= 84 chars, else
@@ -34,15 +37,20 @@
  */
 
 import {
+  constants as fsConstants,
+  copyFileSync,
   cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -195,19 +203,31 @@ function isSameOrInside(candidate, root) {
 }
 
 /**
- * Resolve the Triangle-owned `CURSOR_DATA_DIR`. Defaults to the Triangle Cursor
- * home; `TRIANGLE_CURSOR_DATA_DIR` (or `override`) may point at a shorter
- * Triangle-owned directory when the home is too long for Cursor's socket base.
- * Never `~/.cursor` (or inside it), never `~/.codex`, never `/tmp/.cursor`.
+ * Default Triangle-owned `CURSOR_DATA_DIR`: `~/.triangle/cursor-data`.
+ * Short on purpose: `<it>/projects` must stay <= 84 chars (Cursor socket base).
+ */
+export function defaultTriangleCursorDataDir({ home = process.env.HOME } = {}) {
+  if (typeof home !== "string" || !home.startsWith("/")) {
+    throw createCodedError("cursor_home_invalid", "HOME must be an absolute path to resolve the Cursor data dir");
+  }
+  return path.join(home, ".triangle", "cursor-data");
+}
+
+/**
+ * Resolve the Triangle-owned `CURSOR_DATA_DIR`. Defaults to
+ * `~/.triangle/cursor-data`; `TRIANGLE_CURSOR_DATA_DIR` (or `override`) may
+ * point elsewhere. Never `~/.cursor` (or inside it), never `~/.codex`, never
+ * `/tmp/.cursor`. `allowCreate` creates it 0700.
  */
 export function resolveTriangleCursorDataDir({
   override = process.env.TRIANGLE_CURSOR_DATA_DIR,
-  cursorHome,
   home = process.env.HOME,
   allowCreate = false,
 } = {}) {
   const candidate =
-    typeof override === "string" && override.length > 0 ? override : cursorHome;
+    typeof override === "string" && override.length > 0
+      ? override
+      : defaultTriangleCursorDataDir({ home });
   if (typeof candidate !== "string" || !candidate.startsWith("/") || candidate.includes("\0")) {
     throw createCodedError("cursor_data_dir_invalid", "TRIANGLE_CURSOR_DATA_DIR must be an absolute path");
   }
@@ -351,13 +371,47 @@ export function assertCursorSocketPathsFit(options = {}) {
   if (plan.ok) return plan;
   const first = plan.problems[0];
   const suggestion =
-    "set TRIANGLE_CURSOR_DATA_DIR to a shorter Triangle-owned directory " +
-    `(<= ${CURSOR_DATA_DIR_MAX_CHARS} chars, not under ~/.cursor), e.g. ~/.triangle/cursor-data`;
+    "unset TRIANGLE_CURSOR_DATA_DIR to use the default ~/.triangle/cursor-data, or set it to a " +
+    `shorter Triangle-owned directory (<= ${CURSOR_DATA_DIR_MAX_CHARS} chars, not under ~/.cursor)`;
   throw createCodedError(
     "cursor_socket_path_too_long",
     `Cursor socket path preflight failed (${first.reason}: ${first.length} > ${first.limit}); ${suggestion}`,
     { reason: first.reason, problems: plan.problems, suggestion },
   );
+}
+
+/**
+ * Non-throwing description of the Cursor dirs Triangle would hand the child,
+ * for status / doctor surfaces: config dir, data dir (+ whether it is the
+ * default or an override), and the socket preflight result.
+ */
+export function describeTriangleCursorDirs({
+  cursorHome,
+  cursorDataDir,
+  env = process.env,
+  workspacePaths = [],
+} = {}) {
+  const override = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR;
+  const dataDirSource =
+    typeof override === "string" && override.length > 0 ? "override" : "default";
+  const result = { configDir: null, dataDir: null, dataDirSource, socketPreflight: null };
+  try {
+    result.configDir = resolveTriangleCursorHome({ override: cursorHome, home: env.HOME, allowCreate: false });
+  } catch (error) {
+    result.configDirError = error?.code ?? "cursor_home_invalid";
+  }
+  try {
+    result.dataDir = resolveTriangleCursorDataDir({ override, home: env.HOME, allowCreate: false });
+    const plan = planCursorSocketPaths({ dataDir: result.dataDir, workspacePaths });
+    result.socketPreflight = Object.freeze({
+      ok: plan.ok,
+      base: plan.base.kind,
+      reasons: Object.freeze(plan.problems.map((problem) => problem.reason)),
+    });
+  } catch (error) {
+    result.dataDirError = error?.code ?? "cursor_data_dir_invalid";
+  }
+  return Object.freeze(result);
 }
 
 /**
@@ -379,7 +433,6 @@ export function buildSanitizedCursorChildEnv({
   });
   const dataDir = resolveTriangleCursorDataDir({
     override: cursorDataDir ?? parentEnv.TRIANGLE_CURSOR_DATA_DIR,
-    cursorHome: home,
     home: parentEnv.HOME,
     allowCreate: false,
   });
@@ -609,4 +662,234 @@ export function revertLegacyCursorAcpSessionCopy({ home = process.env.HOME, curs
   }
   rmSync(manifestPath, { force: true });
   return Object.freeze({ removed: Object.freeze(removed) });
+}
+
+/**
+ * Explicit, reversible copy of a workspace's legacy Cursor transcripts from
+ * `~/.cursor/projects/<slug>/agent-transcripts/` (written before
+ * CURSOR_DATA_DIR isolation) into `<dataDir>/projects/<slug>/agent-transcripts/`.
+ * Nothing here runs automatically.
+ *
+ * - plan: read-only; classifies every regular file per workspace.
+ * - apply: COPIES (never moves/deletes) files that are not already present at
+ *   the target (exclusive create); records each created file and directory in
+ *   a manifest. The source tree is never written.
+ * - revert: removes only the files/directories recorded by apply (directories
+ *   only if empty), then the manifest.
+ *
+ * Only `agent-transcripts/` is copied: the rest of a project dir holds the live
+ * worker socket, logs and terminal scratch that must not be duplicated.
+ * Run apply while the Cursor ACP drain is stopped.
+ */
+export const CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST = ".triangle-legacy-transcript-copy.json";
+export const CURSOR_TRANSCRIPTS_DIRNAME = "agent-transcripts";
+
+function legacyTranscriptRoots({ home, cursorDataDir }) {
+  if (typeof home !== "string" || !home.startsWith("/")) {
+    throw createCodedError("cursor_home_invalid", "HOME must be an absolute path");
+  }
+  const dataDir = resolveTriangleCursorDataDir({ override: cursorDataDir, home, allowCreate: false });
+  return {
+    dataDir,
+    sourceRoot: path.join(home, ".cursor", "projects"),
+    targetRoot: path.join(dataDir, "projects"),
+  };
+}
+
+function assertWorkspacePaths(workspacePaths) {
+  if (!Array.isArray(workspacePaths) || workspacePaths.length === 0) {
+    throw createCodedError("cursor_workspace_invalid", "workspacePaths must be a non-empty array");
+  }
+  const slugs = new Map();
+  for (const workspacePath of workspacePaths) {
+    if (typeof workspacePath !== "string" || !workspacePath.startsWith("/")) {
+      throw createCodedError("cursor_workspace_invalid", "workspace paths must be absolute");
+    }
+    const slug = cursorWorkspaceSlug(workspacePath);
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(slug)) {
+      throw createCodedError("cursor_workspace_invalid", "workspace path has no usable Cursor slug");
+    }
+    if (!slugs.has(slug)) slugs.set(slug, workspacePath);
+  }
+  return [...slugs].map(([slug, workspacePath]) => ({ slug, workspacePath }));
+}
+
+function walkRegularFiles(root) {
+  const files = [];
+  const unsafe = [];
+  const visit = (relativeDir) => {
+    const absoluteDir = path.join(root, relativeDir);
+    for (const name of readdirSync(absoluteDir).sort()) {
+      const relative = path.join(relativeDir, name);
+      const stat = lstatSync(path.join(root, relative));
+      if (stat.isDirectory()) visit(relative);
+      else if (stat.isFile()) files.push(relative);
+      else unsafe.push(relative);
+    }
+  };
+  visit("");
+  return { files, unsafe };
+}
+
+export function planLegacyCursorTranscriptCopy({
+  home = process.env.HOME,
+  cursorDataDir,
+  workspacePaths,
+} = {}) {
+  const workspaces = assertWorkspacePaths(workspacePaths);
+  const { dataDir, sourceRoot, targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
+  const planned = workspaces.map(({ slug, workspacePath }) => {
+    const source = path.join(sourceRoot, slug, CURSOR_TRANSCRIPTS_DIRNAME);
+    const target = path.join(targetRoot, slug, CURSOR_TRANSCRIPTS_DIRNAME);
+    let stat;
+    try {
+      stat = lstatSync(source);
+    } catch {
+      return Object.freeze({ workspacePath, slug, action: "missing_source", source, target, files: Object.freeze([]) });
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      return Object.freeze({ workspacePath, slug, action: "unsafe_source", source, target, files: Object.freeze([]) });
+    }
+    const { files, unsafe } = walkRegularFiles(source);
+    const entries = [
+      ...files.map((relative) =>
+        Object.freeze({
+          relative,
+          action: existsSync(path.join(target, relative)) ? "already_present" : "copy",
+        }),
+      ),
+      ...unsafe.map((relative) => Object.freeze({ relative, action: "unsafe_source" })),
+    ];
+    return Object.freeze({
+      workspacePath,
+      slug,
+      action: entries.some((entry) => entry.action === "copy") ? "copy" : "nothing_to_copy",
+      source,
+      target,
+      files: Object.freeze(entries),
+    });
+  });
+  return Object.freeze({ dataDir, sourceRoot, targetRoot, workspaces: Object.freeze(planned) });
+}
+
+function readTranscriptManifest(targetRoot) {
+  const manifestPath = path.join(targetRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
+  if (!existsSync(manifestPath)) {
+    return { manifestPath, manifest: { schemaVersion: 1, createdFiles: [], createdDirs: [] } };
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (!Array.isArray(manifest?.createdFiles) || !Array.isArray(manifest?.createdDirs)) {
+    throw createCodedError("cursor_legacy_manifest_invalid", "legacy transcript copy manifest is invalid");
+  }
+  return { manifestPath, manifest };
+}
+
+function assertInsideRoot(root, relative) {
+  const absolute = path.resolve(root, relative);
+  const back = path.relative(root, absolute);
+  if (back === "" || back.startsWith("..") || path.isAbsolute(back)) {
+    throw createCodedError("cursor_legacy_manifest_invalid", "manifest entry escapes the projects root");
+  }
+  return absolute;
+}
+
+function mkdirTracked(targetRoot, absoluteDir, createdDirs) {
+  const missing = [];
+  let current = absoluteDir;
+  while (!existsSync(current)) {
+    missing.unshift(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  for (const dir of missing) {
+    mkdirSync(dir, { mode: 0o700 });
+    const relative = path.relative(targetRoot, dir);
+    if (relative && !relative.startsWith("..")) createdDirs.push(relative);
+  }
+}
+
+export function applyLegacyCursorTranscriptCopy({
+  home = process.env.HOME,
+  cursorDataDir,
+  workspacePaths,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir, workspacePaths });
+  mkdirSync(plan.targetRoot, { recursive: true, mode: 0o700 });
+  const { manifestPath, manifest } = readTranscriptManifest(plan.targetRoot);
+  const copied = [];
+  const skipped = [];
+  for (const workspace of plan.workspaces) {
+    if (workspace.action === "missing_source" || workspace.action === "unsafe_source") {
+      skipped.push(Object.freeze({ slug: workspace.slug, action: workspace.action }));
+      continue;
+    }
+    for (const entry of workspace.files) {
+      if (entry.action !== "copy") {
+        skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: entry.action }));
+        continue;
+      }
+      const source = path.join(workspace.source, entry.relative);
+      const target = path.join(workspace.target, entry.relative);
+      const createdDirs = [];
+      mkdirTracked(plan.targetRoot, path.dirname(target), createdDirs);
+      manifest.createdDirs.push(...createdDirs);
+      try {
+        copyFileSync(source, target, fsConstants.COPYFILE_EXCL);
+      } catch (error) {
+        if (error?.code === "EEXIST") {
+          skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: "already_present" }));
+          writeLegacyCopyManifest(manifestPath, manifest);
+          continue;
+        }
+        writeLegacyCopyManifest(manifestPath, manifest);
+        throw error;
+      }
+      const sourceStat = statSync(source);
+      utimesSync(target, sourceStat.atime, sourceStat.mtime);
+      const relativeToRoot = path.relative(plan.targetRoot, target);
+      manifest.createdFiles.push({ path: relativeToRoot, copiedAt: now() });
+      copied.push(relativeToRoot);
+      writeLegacyCopyManifest(manifestPath, manifest);
+    }
+  }
+  return Object.freeze({
+    copied: Object.freeze(copied),
+    skipped: Object.freeze(skipped),
+    manifestPath,
+  });
+}
+
+export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, cursorDataDir } = {}) {
+  const { targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
+  const { manifestPath, manifest } = readTranscriptManifest(targetRoot);
+  const removedFiles = [];
+  const removedDirs = [];
+  const keptDirs = [];
+  for (const { path: relative } of manifest.createdFiles) {
+    const absolute = assertInsideRoot(targetRoot, relative);
+    if (existsSync(absolute)) {
+      rmSync(absolute, { force: true });
+      removedFiles.push(relative);
+    }
+  }
+  const dirs = [...new Set(manifest.createdDirs)].sort((a, b) => b.length - a.length);
+  for (const relative of dirs) {
+    const absolute = assertInsideRoot(targetRoot, relative);
+    if (!existsSync(absolute)) continue;
+    try {
+      rmdirSync(absolute);
+      removedDirs.push(relative);
+    } catch (error) {
+      if (error?.code !== "ENOTEMPTY" && error?.code !== "EEXIST") throw error;
+      keptDirs.push(relative);
+    }
+  }
+  rmSync(manifestPath, { force: true });
+  return Object.freeze({
+    removedFiles: Object.freeze(removedFiles),
+    removedDirs: Object.freeze(removedDirs),
+    keptDirs: Object.freeze(keptDirs),
+  });
 }

@@ -75,6 +75,7 @@ export function createCursorAcpWorkerPool({
       crashCount: slot.crashCount,
       circuitOpen: now() < slot.circuitOpenUntil,
       pid: slot.processHandle?.status?.()?.pid ?? null,
+      cursorDataDir: slot.processHandle?.status?.()?.cursorDataDir ?? null,
     });
   }
 

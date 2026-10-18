@@ -419,7 +419,7 @@ process.stdin.on("end", () => {
  * `command`/`args` default to `agent acp` but tests inject the fake.
  * Cursor home is supplied only via sanitized child env — never argv.
  * `cursorDataDir` (or env `TRIANGLE_CURSOR_DATA_DIR`) selects the Triangle-owned
- * CURSOR_DATA_DIR; it defaults to the Cursor home. Socket-path preflight runs at
+ * CURSOR_DATA_DIR; it defaults to `~/.triangle/cursor-data`. Socket-path preflight runs at
  * construction (data dir) and before session/new|load (per workspace cwd).
  */
 export function createCursorAcpProcess({
@@ -442,9 +442,12 @@ export function createCursorAcpProcess({
     home: env.HOME,
     allowCreate: true,
   });
+  const dataDirOverride = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR;
+  const dataDirSource =
+    typeof dataDirOverride === "string" && dataDirOverride.length > 0 ? "override" : "default";
+  // Default ~/.triangle/cursor-data is created 0700 on first use.
   const resolvedDataDir = resolveTriangleCursorDataDir({
-    override: cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR,
-    cursorHome: resolvedHome,
+    override: dataDirOverride,
     home: env.HOME,
     allowCreate: true,
   });
@@ -800,6 +803,7 @@ export function createCursorAcpProcess({
       authenticated,
       cursorHome: resolvedHome,
       cursorDataDir: resolvedDataDir,
+      cursorDataDirSource: dataDirSource,
       agentCapabilities,
       authMethods,
       stderrBytes,
