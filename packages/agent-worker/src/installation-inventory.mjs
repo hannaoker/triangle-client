@@ -92,6 +92,10 @@ function isPlainObject(value) {
 /** Mirrors Swift `MeshOrigin` as decoded from disk (https only, bare origin). */
 function isValidMeshOrigin(value) {
   if (typeof value !== "string") return false;
+  // Swift checks the raw percent-encoded path; WHATWG URL would normalize
+  // `/a/..` or `/.` to `/` and accept what the helper rejects.
+  const rawPath = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*(.*)$/s.exec(value);
+  if (rawPath == null || (rawPath[1] !== "" && rawPath[1] !== "/")) return false;
   let url;
   try {
     url = new URL(value);

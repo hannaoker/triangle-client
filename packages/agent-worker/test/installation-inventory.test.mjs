@@ -1055,3 +1055,24 @@ test("custody Swift refuses for enrollment, installation identity, and open tran
     }
   }
 });
+
+test("enrollment origins are checked on the raw path, before URL normalization (Codex review r5)", () => {
+  for (const [origin, ok] of [
+    ["https://example.test", true],
+    ["https://example.test/", true],
+    ["https://example.test/a/..", false],
+    ["https://example.test/.", false],
+    ["https://example.test/%2e", false],
+    ["https://example.test//", false],
+    ["https://example.test/api", false],
+  ]) {
+    const { root, client } = mixedFixture({ journalOverrides: { gravity2: { origin } } });
+    try {
+      const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+      const gravity = inventory.profiles.find((p) => p.profile === "gravity2");
+      assert.equal(gravity.enrollment.state, ok ? "verified" : "invalid_record", origin);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
