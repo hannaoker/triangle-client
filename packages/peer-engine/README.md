@@ -78,7 +78,9 @@ are journaled as `duplicate_suppressed` without a second inbox row.
 - A settled `message_id` is never retransmitted; re-sending it returns a
   receipt with `duplicate: true` from the local journal.
 - Settled/refused/expired outbound and consumed inbound tombstones: dropped by
-  compaction after `tombstone_retention` (7 days).
+  compaction after `tombstone_retention` (7 days). This bounds send
+  idempotency: after the window a re-sent id is treated as new (see
+  `docs/IPC_CONTRACT.md`), so message ids must be globally unique.
 - Payloads are stored hex-encoded (2×). Retry attempt counters are in memory
   and reset on restart; expiry uses the durable `queued_at` time.
 

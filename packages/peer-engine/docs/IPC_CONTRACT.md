@@ -95,7 +95,16 @@ duplicate until the tombstone retention (default 7 days) elapses.
 `message_id` (1–256 bytes) is unique per sending device. Re-sending the same id with the same
 payload to the same peer is idempotent (an already-settled id is answered from
 the local journal with `duplicate: true` and is not retransmitted); a different payload or peer is
-`conflict`. The message is journaled `queued_local` (fsync) **after** the
+`conflict`.
+
+**Idempotency window (bounded).** The sender remembers a settled, refused or
+expired id only until its tombstone is compacted, `tombstone_retention`
+(default 7 days) after it reached that state; the receiver's dedupe tombstone
+for an acked item has the same bound. After that window the id is forgotten
+and a re-`send` is treated as a **new** message (it may be delivered again).
+Callers must therefore never reuse a `message_id` for a new logical message
+and must not rely on retry idempotency past the window (generate globally
+unique ids, e.g. UUIDv7). The message is journaled `queued_local` (fsync) **after** the
 encoded frame is validated, then one attempt is made.
 
 | Error code | Meaning | Journaled? |

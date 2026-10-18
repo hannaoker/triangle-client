@@ -479,8 +479,7 @@ impl Journal {
                             self.make_entry(DeliveryState::AddressUpdated, message_id, &hash);
                         entry.peer_endpoint_id = Some(peer_endpoint_id.to_string());
                         entry.peer_addr = Some(peer_addr);
-                        let entry = self.append_durable(entry)?;
-                        self.apply(&entry);
+                        self.append_durable(entry)?;
                     }
                     return Ok(Ok(EnqueueOutcome::Existing(OutboundState::Queued)));
                 }
@@ -501,8 +500,7 @@ impl Journal {
         entry.peer_endpoint_id = Some(peer_endpoint_id.to_string());
         entry.peer_addr = Some(peer_addr);
         entry.queued_at_unix_ms = Some(now);
-        let entry = self.append_durable(entry)?;
-        self.apply(&entry);
+        self.append_durable(entry)?;
         if let Some(rec) = self.outbound.get_mut(message_id) {
             rec.next_attempt_unix_ms = lease_until_unix_ms;
         }
@@ -562,8 +560,7 @@ impl Journal {
         entry.peer_endpoint_id = Some(peer);
         entry.queued_at_unix_ms = Some(queued_at);
         entry.reason = reason;
-        let entry = self.append_durable(entry)?;
-        self.apply(&entry);
+        self.append_durable(entry)?;
         Ok(true)
     }
 
@@ -671,8 +668,7 @@ impl Journal {
         let mut entry = self.make_entry(DeliveryState::ReceivedPeer, message_id, &hash);
         entry.payload_hex = Some(hex::encode(payload.as_bytes()));
         entry.peer_endpoint_id = Some(from_endpoint_id.to_string());
-        let entry = self.append_durable(entry)?;
-        self.apply(&entry);
+        self.append_durable(entry)?;
         Ok(InboundOutcome::Accepted)
     }
 
@@ -703,6 +699,39 @@ impl Journal {
         items
     }
 
+    /// One page of unconsumed inbox items with `seq > after_seq`, bounded by
+    /// `limit` items and `byte_budget` serialized bytes (at least one item is
+    /// returned when any match). Only the returned items are cloned. Returns
+    /// `(items, has_more)`.
+    pub fn inbox_page(&self, after_seq: u64, limit: usize, byte_budget: usize) -> (Vec<InboxItem>, bool) {
+        let mut candidates: Vec<_> = self
+            .inbound
+            .iter()
+            .filter(|(_, r)| !r.consumed && r.seq > after_seq && r.payload.is_some())
+            .collect();
+        candidates.sort_by_key(|(_, r)| r.seq);
+        let mut page = Vec::new();
+        let mut bytes = 0usize;
+        for ((from, id), r) in &candidates {
+            let item = InboxItem {
+                seq: r.seq,
+                message_id: id.clone(),
+                payload_hash: r.payload_hash.clone(),
+                payload: r.payload.clone().unwrap_or_default(),
+                from_endpoint_id: from.clone(),
+                ts_unix_ms: r.ts_unix_ms,
+            };
+            let size = serde_json::to_vec(&item).map(|v| v.len()).unwrap_or(0) + 1;
+            if !page.is_empty() && (page.len() >= limit.max(1) || bytes + size > byte_budget) {
+                break;
+            }
+            bytes += size;
+            page.push(item);
+        }
+        let has_more = page.len() < candidates.len();
+        (page, has_more)
+    }
+
     pub fn unconsumed_count(&self) -> usize {
         self.live_inbound.values().map(|t| t.0).sum()
     }
@@ -719,8 +748,7 @@ impl Journal {
         let hash = rec.payload_hash.clone();
         let mut entry = self.make_entry(DeliveryState::Consumed, message_id, &hash);
         entry.peer_endpoint_id = Some(from_endpoint_id.to_string());
-        let entry = self.append_durable(entry)?;
-        self.apply(&entry);
+        self.append_durable(entry)?;
         Ok(ConsumeOutcome::Acked)
     }
 
@@ -848,7 +876,11 @@ impl Journal {
         }
     }
 
-    fn append_durable(&mut self, entry: JournalEntry) -> Result<JournalEntry> {
+    /// Append one record durably (single write + fsync) and apply it to the
+    /// in-memory index exactly once. Compaction, if due, runs **after** the
+    /// apply, so a record it drops is never re-applied (memory always matches
+    /// what a replay of the file would produce).
+    fn append_durable(&mut self, entry: JournalEntry) -> Result<()> {
         if self.closed {
             bail!("journal is closed (engine shut down)");
         }
@@ -865,19 +897,14 @@ impl Journal {
         file.sync_all()?;
         self.lines += 1;
         self.lines_since_compact += 1;
+        self.apply(&entry);
         if self.lines_since_compact >= self.limits.compact_every_lines {
             // Best effort: entry is already durable; compaction failure is logged.
-            if let Err(err) = self.compact_after_append(&entry) {
+            if let Err(err) = self.compact() {
                 warn!(error = %err, "journal compaction failed");
             }
         }
-        Ok(entry)
-    }
-
-    fn compact_after_append(&mut self, entry: &JournalEntry) -> Result<()> {
-        // Make sure the in-memory index reflects `entry` before snapshotting.
-        self.apply(entry);
-        self.compact()
+        Ok(())
     }
 }
 
@@ -1142,6 +1169,53 @@ mod tests {
         let j = Journal::open_with(dir.path(), limits).unwrap();
         assert_eq!(j.live_inbound.get("p"), Some(&(6, 18)));
         assert_eq!(j.inbox_items().len(), 6);
+    }
+
+    // Regression (Codex fix-round 4 P2): a record dropped by the compaction it
+    // triggered is not re-applied, so memory matches a replay of the file.
+    #[test]
+    fn record_compacted_by_its_own_append_is_not_reapplied() {
+        let dir = tempdir().unwrap();
+        let limits = JournalLimits {
+            tombstone_retention: Duration::ZERO,
+            compact_every_lines: 1,
+            ..Default::default()
+        };
+        let mut j = Journal::open_with(dir.path(), limits.clone()).unwrap();
+        j.accept_inbound("p", "m", "x").unwrap();
+        j.consume("p", "m").unwrap();
+        j.enqueue_outbound("o", "y", "q", addr(), 0).unwrap().unwrap();
+        j.record_settled("o").unwrap();
+        let mem = (j.already_received("p", "m"), j.outbound_state("o"));
+        drop(j);
+        let j = Journal::open_with(dir.path(), limits).unwrap();
+        let disk = (j.already_received("p", "m"), j.outbound_state("o"));
+        assert_eq!(mem, disk, "in-memory index diverged from the durable journal");
+        assert_eq!(disk, (false, None));
+    }
+
+    // Regression (Codex fix-round 4 P2): inbox paging happens inside the
+    // journal and clones only the returned page.
+    #[test]
+    fn inbox_page_is_bounded_and_ordered() {
+        let dir = tempdir().unwrap();
+        let mut j = Journal::open(dir.path()).unwrap();
+        for i in 0..10 {
+            j.accept_inbound("p", &format!("m{i}"), &"z".repeat(100)).unwrap();
+        }
+        j.consume("p", "m0").unwrap();
+        let (page, more) = j.inbox_page(0, 3, usize::MAX);
+        assert_eq!(page.iter().map(|i| i.message_id.as_str()).collect::<Vec<_>>(), ["m1", "m2", "m3"]);
+        assert!(more);
+        let (page2, more) = j.inbox_page(page[2].seq, 100, usize::MAX);
+        assert_eq!(page2.len(), 6);
+        assert!(!more);
+        // Byte budget smaller than one item still returns exactly one item.
+        let (tiny, more) = j.inbox_page(0, 100, 1);
+        assert_eq!(tiny.len(), 1);
+        assert!(more);
+        let (rest, more) = j.inbox_page(page2[5].seq, 10, usize::MAX);
+        assert!(rest.is_empty() && !more);
     }
 
     #[test]

@@ -285,23 +285,7 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
                 .and_then(|v| v.as_u64())
                 .map(|l| (l as usize).clamp(1, INBOX_MAX_LIMIT))
                 .unwrap_or(INBOX_DEFAULT_LIMIT);
-            let all: Vec<_> = engine
-                .inbox()
-                .await
-                .into_iter()
-                .filter(|i| i.seq > after_seq)
-                .collect();
-            let mut page = Vec::new();
-            let mut bytes = 0usize;
-            for item in &all {
-                let size = serde_json::to_vec(item).map(|v| v.len()).unwrap_or(0) + 1;
-                if !page.is_empty() && (page.len() >= limit || bytes + size > INBOX_PAGE_BYTE_BUDGET) {
-                    break;
-                }
-                bytes += size;
-                page.push(item.clone());
-            }
-            let has_more = page.len() < all.len();
+            let (page, has_more) = engine.inbox_page(after_seq, limit, INBOX_PAGE_BYTE_BUDGET).await;
             let next_after_seq = page.last().map(|i| i.seq).unwrap_or(after_seq);
             ok_resp(
                 req.id,

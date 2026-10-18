@@ -328,6 +328,11 @@ impl PeerEngine {
         self.inner.journal.lock().await.inbox_items()
     }
 
+    /// One bounded inbox page (see [`Journal::inbox_page`]).
+    pub async fn inbox_page(&self, after_seq: u64, limit: usize, byte_budget: usize) -> (Vec<InboxItem>, bool) {
+        self.inner.journal.lock().await.inbox_page(after_seq, limit, byte_budget)
+    }
+
     /// Acknowledge an inbox item so it leaves the inbox.
     pub async fn consume(&self, from_endpoint_id: &str, message_id: &str) -> Result<ConsumeOutcome> {
         self.inner.journal.lock().await.consume(from_endpoint_id, message_id)
