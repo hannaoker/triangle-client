@@ -1,4 +1,15 @@
-import { readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 
 import { createCommandRunner, createRunnerEnvironment } from "./command-runner.mjs";
@@ -298,6 +309,239 @@ export function createWatchGrantRenewalRegistry({
   return Object.freeze({ state, recordEnsure, renew, runProactive });
 }
 
+/**
+ * Drain progress evidence journal (`client/headless-progress.json`).
+ *
+ * The doctor / installation inventory (PR #82) reports a profile `degraded`
+ * with `progress_evidence_unavailable` unless it can find claim/reply/ack
+ * evidence for it. Codex headless profiles get that from their per-stateRoot
+ * completion journal; the Cursor ACP and worker (antigravity, hermes, …) drains
+ * have no such journal, so they record it here instead. The reader contract is
+ * `progress.profiles[<profile>].{lastClaimAt,lastReplyAt,lastAckAt}` (ISO 8601).
+ *
+ * Kept inside client-supervisor.mjs on purpose (same reason as the watch-grant
+ * registry above): a new module would change the signed worker bundle artifact
+ * set and need a manifest bump plus helper rebuild before it could load.
+ *
+ * Contract:
+ * - Evidence only. Timestamps + lane per profile; never message bodies, room or
+ *   delivery ids, or credentials.
+ * - Atomic: write tmp (0600) + fsync + rename over the target. Readers never see
+ *   a torn file. A short O_EXCL sidecar lock serializes cross-process writers;
+ *   if it cannot be taken quickly (or is stale) the write still goes through
+ *   atomically and at worst one concurrent field update is lost.
+ * - Monotonic per field: an older stamp never overwrites a newer one.
+ * - Best-effort: recording never throws into the drain; failures are logged
+ *   with a sanitized code only.
+ */
+export const HEADLESS_PROGRESS_FILE = "headless-progress.json";
+export const HEADLESS_PROGRESS_VERSION = 1;
+export const HEADLESS_PROGRESS_FIELDS = Object.freeze({
+  claim: "lastClaimAt",
+  reply: "lastReplyAt",
+  ack: "lastAckAt",
+});
+const PROGRESS_PROFILE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+const PROGRESS_LANES = new Set(["cursor-acp", "worker", "event-driven", "codex-headless"]);
+const PROGRESS_LOCK_WAIT_MS = 250;
+const PROGRESS_LOCK_STALE_MS = 10_000;
+const PROGRESS_MAX_BYTES = 1024 * 1024;
+
+function progressSleepSync(milliseconds) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+  } catch {
+    // Atomics.wait unavailable: fall through and just retry.
+  }
+}
+
+function deriveRegistryInstanceId(profile) {
+  return createHash("sha256")
+    .update(Buffer.concat([Buffer.from("triangle-client-instance-v1"), Buffer.from([0]), Buffer.from(profile)]))
+    .digest("hex");
+}
+
+/** Default production client root: ~/Library/Application Support/The Triangle/client. */
+export function defaultHeadlessProgressClientRoot(env = process.env) {
+  const home = typeof env?.HOME === "string" && env.HOME.startsWith("/") && !env.HOME.includes("\0")
+    ? env.HOME
+    : null;
+  if (home == null) return null;
+  return path.join(home, "Library", "Application Support", "The Triangle", "client");
+}
+
+export function createHeadlessProgressJournal({
+  clientRoot,
+  now = () => Date.now(),
+  logger = null,
+  pid = process.pid,
+  lockWaitMs = PROGRESS_LOCK_WAIT_MS,
+  staleLockMs = PROGRESS_LOCK_STALE_MS,
+} = {}) {
+  if (typeof clientRoot !== "string" || !path.isAbsolute(clientRoot) || clientRoot.includes("\0")) {
+    throw new TypeError("clientRoot must be an absolute path");
+  }
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  const filePath = path.join(clientRoot, HEADLESS_PROGRESS_FILE);
+  const lockPath = `${filePath}.lock`;
+
+  function acquireLock() {
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      try {
+        const fd = openSync(lockPath, "wx", 0o600);
+        closeSync(fd);
+        return true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") return false;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > staleLockMs) {
+            unlinkSync(lockPath);
+            continue;
+          }
+        } catch {
+          continue; // Lock vanished between open and stat: retry immediately.
+        }
+        if (Date.now() >= deadline) return false;
+        progressSleepSync(5);
+      }
+    }
+  }
+
+  function readDocument() {
+    let raw;
+    try {
+      if (statSync(filePath).size > PROGRESS_MAX_BYTES) return null;
+      raw = readFileSync(filePath, "utf8");
+    } catch {
+      return null;
+    }
+    try {
+      const value = JSON.parse(raw);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeDocument(document) {
+    const tmp = `${filePath}.${pid}.${randomBytes(6).toString("hex")}.tmp`;
+    let fd = null;
+    try {
+      fd = openSync(tmp, "wx", 0o600);
+      writeSync(fd, `${JSON.stringify(document, null, 2)}\n`);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(tmp, filePath);
+    } catch (error) {
+      if (fd != null) {
+        try { closeSync(fd); } catch {}
+      }
+      try { unlinkSync(tmp); } catch {}
+      throw error;
+    }
+  }
+
+  function laterIso(existing, candidate) {
+    const existingMs = typeof existing === "string" ? Date.parse(existing) : Number.NaN;
+    return Number.isFinite(existingMs) && existingMs > Date.parse(candidate) ? existing : candidate;
+  }
+
+  /** @returns {boolean} true when the evidence was durably written. */
+  function record({ profile, lane, phase } = {}) {
+    try {
+      if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) {
+        throw Object.assign(new TypeError("profile is invalid"), { code: "progress_profile_invalid" });
+      }
+      if (!PROGRESS_LANES.has(lane)) {
+        throw Object.assign(new TypeError("lane is invalid"), { code: "progress_lane_invalid" });
+      }
+      const field = HEADLESS_PROGRESS_FIELDS[phase];
+      if (field == null || !Object.hasOwn(HEADLESS_PROGRESS_FIELDS, phase)) {
+        throw Object.assign(new TypeError("phase is invalid"), { code: "progress_phase_invalid" });
+      }
+      const at = new Date(now()).toISOString();
+      mkdirSync(clientRoot, { recursive: true, mode: 0o700 });
+      const locked = acquireLock();
+      try {
+        const current = readDocument() ?? {};
+        const profiles = current.profiles && typeof current.profiles === "object" && !Array.isArray(current.profiles)
+          ? { ...current.profiles }
+          : {};
+        const prior = profiles[profile] && typeof profiles[profile] === "object" && !Array.isArray(profiles[profile])
+          ? profiles[profile]
+          : {};
+        profiles[profile] = {
+          ...prior,
+          lane,
+          [field]: laterIso(prior[field], at),
+          updatedAt: laterIso(prior.updatedAt, at),
+        };
+        writeDocument({
+          ...current,
+          version: HEADLESS_PROGRESS_VERSION,
+          updatedAt: laterIso(current.updatedAt, at),
+          profiles,
+        });
+      } finally {
+        if (locked) {
+          try { unlinkSync(lockPath); } catch {}
+        }
+      }
+      return true;
+    } catch (error) {
+      try {
+        logger?.error?.("triangle_client_progress_journal_write_failed", {
+          code: typeof error?.code === "string" ? error.code : "progress_journal_write_failed",
+        });
+      } catch {}
+      return false;
+    }
+  }
+
+  function forProfile(profile, lane) {
+    if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) {
+      throw new TypeError("profile is invalid");
+    }
+    if (!PROGRESS_LANES.has(lane)) throw new TypeError("lane is invalid");
+    return Object.freeze({
+      profile,
+      lane,
+      record(phase) {
+        return record({ profile, lane, phase });
+      },
+    });
+  }
+
+  /**
+   * Worker/eventWake bootstraps carry only the instance id. Resolve the profile
+   * from the installation registry row (`client/instances/<id>.json`) and accept
+   * it only when the id is the one derived from that profile.
+   */
+  function forInstance(instanceId, lane) {
+    if (typeof instanceId !== "string" || !INSTANCE_ID.test(instanceId)) return null;
+    try {
+      const row = JSON.parse(readFileSync(path.join(clientRoot, "instances", `${instanceId}.json`), "utf8"));
+      const profile = row?.profile;
+      if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) return null;
+      if (deriveRegistryInstanceId(profile) !== instanceId) return null;
+      return forProfile(profile, lane);
+    } catch {
+      return null;
+    }
+  }
+
+  return Object.freeze({
+    path: filePath,
+    clientRoot,
+    record,
+    forProfile,
+    forInstance,
+    read: readDocument,
+  });
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
@@ -335,6 +579,13 @@ export function createClientSupervisor({
   /** Clock for watch-grant expiry scheduling (tests inject a virtual clock). */
   now = () => Date.now(),
   /**
+   * Optional drain progress evidence journal (createHeadlessProgressJournal).
+   * When set, worker / eventWake mailbox clients and Cursor ACP drains record
+   * claim/reply/ack timestamps to client/headless-progress.json. Null keeps the
+   * supervisor free of progress writes (tests, embedded use).
+   */
+  progressJournal = null,
+  /**
    * One install watch dispatcher for App Server, headless Codex, and enrolled
    * Cursor ACP. Kicks register only when agentId is on that wake bootstrap.
    */
@@ -342,6 +593,22 @@ export function createClientSupervisor({
 } = {}) {
   if (headlessWake !== LEGACY_HEADLESS_WAKE_UNSET) {
     throw new TypeError("headlessWake is not supported; use headlessWakes");
+  }
+  if (
+    progressJournal != null
+    && (typeof progressJournal.forProfile !== "function" || typeof progressJournal.forInstance !== "function")
+  ) {
+    throw new TypeError("progressJournal must provide forProfile and forInstance");
+  }
+  // Mailbox clients report { phase } after a won claim, a persisted reply, and
+  // an owned ack. Only attach the hook when a journal resolves this instance.
+  function deliveryClientContext(context, lane) {
+    const recorder = progressJournal?.forInstance(context.instanceId, lane) ?? null;
+    if (recorder == null) return context;
+    return Object.freeze({
+      ...context,
+      onProgress: (event) => recorder.record(event?.phase),
+    });
   }
   // Mini Bob / Grok webhook wake path is removed (not deferred). Callers must
   // use appServerWake / eventWake / headlessWakes instead.
@@ -443,7 +710,7 @@ export function createClientSupervisor({
 
     const runnerConfig = validateRunner(instance);
     const context = Object.freeze({ instanceId: instance.instanceId });
-    const deliveryClient = createDeliveryClient({ ...instance.mailbox }, context);
+    const deliveryClient = createDeliveryClient({ ...instance.mailbox }, deliveryClientContext(context, "worker"));
     const adapterRunner = createRunner(runnerConfig, context);
     if (!adapterRunner || typeof adapterRunner.run !== "function") {
       throw new TypeError("createRunner must return a runner");
@@ -482,7 +749,7 @@ export function createClientSupervisor({
     }
     for (const drain of wakeConfig.drains) {
       const context = Object.freeze({ instanceId: drain.instanceId });
-      const deliveryClient = createDeliveryClient({ ...drain.mailbox }, context);
+      const deliveryClient = createDeliveryClient({ ...drain.mailbox }, deliveryClientContext(context, "event-driven"));
       // Ungated: profile-scheduler holds the shared gate around harness preflight/run.
       const adapterRunner = createRunner(drain.runnerConfig, context);
       if (!adapterRunner || typeof adapterRunner.run !== "function") {
@@ -699,9 +966,11 @@ export function createClientSupervisor({
     }
   } else {
     for (const { config: cursorAcpConfig, claimer: cursorAcpClaimer } of cursorAcpAdmissions) {
+      const cursorAcpProgress = progressJournal?.forProfile(cursorAcpConfig.profile, "cursor-acp") ?? null;
       const drain = createCursorAcpDrain(cursorAcpConfig, {
         logger,
         ownerInstanceId: `client-supervisor-${process.pid}`,
+        ...(cursorAcpProgress ? { progress: cursorAcpProgress } : {}),
       });
       if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
         throw new TypeError("createCursorAcpDrain must return a drain");

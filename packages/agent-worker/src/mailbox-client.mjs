@@ -533,6 +533,10 @@ export function createMailboxClient(
     now = () => Date.now(),
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
+    // Progress evidence hook: called with { phase: "claim" | "reply" | "ack" }
+    // after a won claim, a persisted reply, and an owned ack. Never carries ids,
+    // bodies, or credentials; listener failures never affect delivery.
+    onProgress = null,
   } = {},
 ) {
   const {
@@ -555,6 +559,19 @@ export function createMailboxClient(
   }
   if (typeof setTimeoutFn !== "function" || typeof clearTimeoutFn !== "function") {
     throw new TypeError("setTimeoutFn and clearTimeoutFn must be functions");
+  }
+  if (onProgress != null && typeof onProgress !== "function") {
+    throw new TypeError("onProgress must be a function");
+  }
+
+  function emitProgress(phase) {
+    if (onProgress == null) return;
+    try {
+      const pending = onProgress(Object.freeze({ phase }));
+      if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    } catch {
+      // Evidence is best-effort; never let it change delivery outcome.
+    }
   }
 
   let workloadTokenManager = null;
@@ -1127,6 +1144,7 @@ export function createMailboxClient(
     }
     retryDeliveries.delete(metadata.id);
     advanceListCursor(metadata.id);
+    emitProgress("ack");
     return { quarantined: false, acknowledged: true };
   }
 
@@ -1193,6 +1211,7 @@ export function createMailboxClient(
       if (!(await establishClaim(message, metadata, signal))) {
         return { claimed: false, reconciled: false, acknowledged: false };
       }
+      emitProgress("claim");
 
       return await withClaimCustody(metadata, signal, async (ownedSignal) => {
         if (normalized.replyRequired === false) {
@@ -1234,6 +1253,7 @@ export function createMailboxClient(
             await appendReply(normalized, replyText, replyMessageId, ownedSignal);
             metadata.replyPersisted = true;
             reconciled = false;
+            emitProgress("reply");
           }
         }
 
