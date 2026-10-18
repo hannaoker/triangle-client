@@ -156,6 +156,9 @@ test("data dir may not be ~/.cursor, inside it, ~/.codex, /tmp/.cursor, or relat
       [path.join(home, ".cursor"), "cursor_data_dir_user_fallback_forbidden"],
       [path.join(home, ".cursor", "projects"), "cursor_data_dir_user_fallback_forbidden"],
       [path.join(home, ".codex"), "cursor_data_dir_codex_forbidden"],
+      // '..'-prefixed child names are inside the root, not parent traversal (Codex slim r1).
+      [path.join(home, ".cursor", "..triangle-data"), "cursor_data_dir_user_fallback_forbidden"],
+      [path.join(home, ".codex", "..triangle-data"), "cursor_data_dir_codex_forbidden"],
       ["/tmp/.cursor", "cursor_data_dir_shared_forbidden"],
       ["relative/dir", "cursor_data_dir_invalid"],
       [path.join(home, "mesh_watch_ABCDEFGH12345678"), "secret_leak_rejected"],
