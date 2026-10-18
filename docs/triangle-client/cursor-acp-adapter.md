@@ -83,15 +83,38 @@ status, the headless runtime `status().cursorDirs`, and the exported
 ### Opt-in legacy migration (never automatic)
 
 Run only while the Cursor ACP drain is stopped. Both helpers copy, never move
-or delete, and revert removes only what apply recorded in its manifest.
+or delete the `~/.cursor` source, and share `owned-fs.mjs`:
 
-- ACP sessions (#81): `plan/apply/revertLegacyCursorAcpSessionCopy` —
-  `~/.cursor/acp-sessions/<id>` -> `<cursor home>/acp-sessions/<id>`.
-- Transcripts: `plan/apply/revertLegacyCursorTranscriptCopy({ workspacePaths })`
-  — `~/.cursor/projects/<slug>/agent-transcripts/**` ->
-  `<data>/projects/<slug>/agent-transcripts/**` (regular files only; existing
-  targets win; symlinks/sockets skipped; worker socket/logs/terminals are not
-  copied). Manifest: `<data>/projects/.triangle-legacy-transcript-copy.json`.
+- **Physical containment:** the owned anchor (Triangle Cursor home for
+  sessions, data dir for transcripts) is re-resolved with realpath and every
+  path component below it is lstat'ed before any copy, create or remove; a
+  symlinked or non-directory ancestor is rejected. Lexical `path.relative`
+  checks are not relied on. (Node has no `openat`/`unlinkat`, so a hostile
+  concurrent writer is out of scope; every destructive call re-validates
+  immediately before acting.)
+- **Snapshot identity:** apply records each copied file's size, mtime and
+  sha256 plus every directory it created (manifest schema 2).
+- **Undo after use:** revert never deletes recursively and never deletes a
+  file whose identity changed.
+  - Sessions (`plan/apply/revertLegacyCursorAcpSessionCopy`,
+    `~/.cursor/acp-sessions/<id>` -> `<cursor home>/acp-sessions/<id>`):
+    all-or-nothing per session. Removed only if every recorded file is
+    unchanged and no new file exists; otherwise the whole session is kept and
+    reported (`used_after_migration` / `unsafe_path` with file lists).
+  - Transcripts (`plan/apply/revertLegacyCursorTranscriptCopy({ workspacePaths })`,
+    `~/.cursor/projects/<slug>/agent-transcripts/**` ->
+    `<data>/projects/<slug>/agent-transcripts/**`): per file. Unchanged copies
+    are removed; appended/modified copies and copies whose path became unsafe
+    are kept and reported in `keptFiles`; files created after migration are
+    never touched; recorded directories are removed only when empty.
+  - Kept entries stay in the manifest (with `lastRevert`), so a later revert
+    can retry; the manifest is deleted only when nothing remains. Undo is
+    therefore a partial rollback once the new location has been used: it
+    removes only pristine copies and leaves all post-migration work in place.
+- Transcript copy takes regular files only (existing targets win;
+  symlinks/sockets skipped; worker socket/logs/terminals are not copied).
+  Manifests: `<cursor home>/acp-sessions/.triangle-legacy-session-copy.json`,
+  `<data>/projects/.triangle-legacy-transcript-copy.json`.
 
 ### Deploy notes
 
@@ -101,30 +124,9 @@ or delete, and revert removes only what apply recorded in its manifest.
    (0700). New transcripts/worker sockets land there instead of
    `~/.cursor/projects`.
 3. Optional, to keep resume context for existing ghost sessions: with the
-   drain stopped, run the session copy (#81) and the transcript copy for the
-   ghost working directory, then start the drain. Revert with the matching
-   revert helpers if needed.
+   drain stopped, run the session copy and the transcript copy for the ghost
+   working directory, then start the drain. Undo (drain stopped) removes only
+   pristine copies; anything used after migration is kept and reported.
 4. If a preflight error appears (`cursor_socket_path_too_long`), the message
    names the reason; unset or shorten `TRIANGLE_CURSOR_DATA_DIR` (<= 75 chars,
    not under `~/.cursor`).
-
-## Legacy ACP session migration (opt-in, #81)
-
-`plan/apply/revertLegacyCursorAcpSessionCopy` copy referenced sessions from
-`~/.cursor/acp-sessions/<id>` into `<cursor home>/acp-sessions/<id>`. Nothing
-runs automatically; run only while the Cursor ACP drain is stopped.
-
-- Apply copies regular files one by one (exclusive create, never overwrites,
-  never moves or deletes the source) and records each file's size, mtime and
-  sha256 plus every directory it created (manifest schema 2).
-- All target paths are checked physically (`owned-fs.mjs`): the Triangle home
-  is re-resolved with realpath and every component below it is lstat'ed; any
-  symlinked or non-directory ancestor is rejected before copying or removing.
-- **Undo after use:** revert is per session and all-or-nothing. A session is
-  removed only if every recorded file still matches its snapshot and no other
-  files exist in it; then exactly those files and the now-empty recorded
-  directories are removed (never a recursive delete). If the session was used
-  after migration (file changed, missing or added) or any path is unsafe, the
-  whole session is left in place, returned in `kept` with the reason and file
-  lists, and stays in the manifest. The manifest is deleted only when every
-  entry has been undone.

@@ -37,20 +37,14 @@
  */
 
 import {
-  constants as fsConstants,
-  copyFileSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
-  rmdirSync,
-  rmSync,
   statSync,
   unlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -824,31 +818,43 @@ export function revertLegacyCursorAcpSessionCopy({ home = process.env.HOME, curs
  * Explicit, reversible copy of a workspace's legacy Cursor transcripts from
  * `~/.cursor/projects/<slug>/agent-transcripts/` (written before
  * CURSOR_DATA_DIR isolation) into `<dataDir>/projects/<slug>/agent-transcripts/`.
- * Nothing here runs automatically.
+ * Nothing here runs automatically; run only while the Cursor ACP drain is
+ * stopped.
  *
  * - plan: read-only; classifies every regular file per workspace.
- * - apply: COPIES (never moves/deletes) files that are not already present at
- *   the target (exclusive create); records each created file and directory in
- *   a manifest. The source tree is never written.
- * - revert: removes only the files/directories recorded by apply (directories
- *   only if empty), then the manifest.
+ * - apply: COPIES (never moves/deletes) regular files that are not already
+ *   present (exclusive create), preserving mtimes, and records each created
+ *   file's identity (size, mtime, sha256) and each created directory in a
+ *   manifest. Every target path is validated physically below the realpath'd
+ *   data dir (owned-fs.mjs): any symlinked or non-directory ancestor is
+ *   rejected, so apply can never write outside the owned tree.
+ * - revert (undo-after-use contract): per file. A copied file is removed only
+ *   if it still matches its recorded identity and its path is physically
+ *   inside the data dir. Files appended/modified after migration, files whose
+ *   path became unsafe (e.g. a parent replaced by a symlink), and files created
+ *   after migration are left in place; the first two are reported in
+ *   `keptFiles` and stay in the manifest. Recorded directories are removed
+ *   only when empty (never recursively). The manifest is deleted only when
+ *   nothing remains.
  *
  * Only `agent-transcripts/` is copied: the rest of a project dir holds the live
  * worker socket, logs and terminal scratch that must not be duplicated.
- * Run apply while the Cursor ACP drain is stopped.
  */
 export const CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST = ".triangle-legacy-transcript-copy.json";
 export const CURSOR_TRANSCRIPTS_DIRNAME = "agent-transcripts";
+const LEGACY_TRANSCRIPT_MANIFEST_SCHEMA = 2;
+const PROJECTS_DIRNAME = "projects";
+const TRANSCRIPT_MANIFEST_RELATIVE = `${PROJECTS_DIRNAME}/${CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST}`;
 
-function legacyTranscriptRoots({ home, cursorDataDir }) {
+function legacyTranscriptRoots({ home, cursorDataDir, allowCreate = false }) {
   if (typeof home !== "string" || !home.startsWith("/")) {
     throw createCodedError("cursor_home_invalid", "HOME must be an absolute path");
   }
-  const dataDir = resolveTriangleCursorDataDir({ override: cursorDataDir, home, allowCreate: false });
+  const anchor = resolveTriangleCursorDataDir({ override: cursorDataDir, home, allowCreate });
   return {
-    dataDir,
-    sourceRoot: path.join(home, ".cursor", "projects"),
-    targetRoot: path.join(dataDir, "projects"),
+    anchor,
+    sourceRoot: path.join(home, ".cursor", PROJECTS_DIRNAME),
+    targetRoot: path.join(anchor, PROJECTS_DIRNAME),
   };
 }
 
@@ -870,21 +876,23 @@ function assertWorkspacePaths(workspacePaths) {
   return [...slugs].map(([slug, workspacePath]) => ({ slug, workspacePath }));
 }
 
-function walkRegularFiles(root) {
-  const files = [];
-  const unsafe = [];
-  const visit = (relativeDir) => {
-    const absoluteDir = path.join(root, relativeDir);
-    for (const name of readdirSync(absoluteDir).sort()) {
-      const relative = path.join(relativeDir, name);
-      const stat = lstatSync(path.join(root, relative));
-      if (stat.isDirectory()) visit(relative);
-      else if (stat.isFile()) files.push(relative);
-      else unsafe.push(relative);
-    }
-  };
-  visit("");
-  return { files, unsafe };
+function anchorExists(anchor) {
+  try {
+    return lstatSync(anchor).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Physical target state for an anchor-relative path; never throws. */
+function ownedTargetState(anchor, relative) {
+  if (!anchorExists(anchor)) return "missing";
+  try {
+    const resolved = resolveOwnedPath(anchor, relative, { allowMissingLeaf: true, allowMissingAncestors: true });
+    return resolved.leaf == null ? "missing" : "present";
+  } catch {
+    return "unsafe";
+  }
 }
 
 export function planLegacyCursorTranscriptCopy({
@@ -893,76 +901,70 @@ export function planLegacyCursorTranscriptCopy({
   workspacePaths,
 } = {}) {
   const workspaces = assertWorkspacePaths(workspacePaths);
-  const { dataDir, sourceRoot, targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
+  const { anchor, sourceRoot, targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
   const planned = workspaces.map(({ slug, workspacePath }) => {
     const source = path.join(sourceRoot, slug, CURSOR_TRANSCRIPTS_DIRNAME);
-    const target = path.join(targetRoot, slug, CURSOR_TRANSCRIPTS_DIRNAME);
+    const targetRelative = `${PROJECTS_DIRNAME}/${slug}/${CURSOR_TRANSCRIPTS_DIRNAME}`;
+    const target = path.join(anchor, targetRelative);
+    const base = { workspacePath, slug, source, target };
     let stat;
     try {
       stat = lstatSync(source);
     } catch {
-      return Object.freeze({ workspacePath, slug, action: "missing_source", source, target, files: Object.freeze([]) });
+      return Object.freeze({ ...base, action: "missing_source", files: Object.freeze([]) });
     }
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      return Object.freeze({ workspacePath, slug, action: "unsafe_source", source, target, files: Object.freeze([]) });
+      return Object.freeze({ ...base, action: "unsafe_source", files: Object.freeze([]) });
     }
-    const { files, unsafe } = walkRegularFiles(source);
+    if (ownedTargetState(anchor, targetRelative) === "unsafe") {
+      return Object.freeze({ ...base, action: "unsafe_target", files: Object.freeze([]) });
+    }
+    const { files, unsafe } = listRegularFilesNoFollow(source);
     const entries = [
-      ...files.map((relative) =>
-        Object.freeze({
+      ...files.map((relative) => {
+        const state = ownedTargetState(anchor, `${targetRelative}/${relative}`);
+        return Object.freeze({
           relative,
-          action: existsSync(path.join(target, relative)) ? "already_present" : "copy",
-        }),
-      ),
+          action: state === "present" ? "already_present" : state === "unsafe" ? "unsafe_target" : "copy",
+        });
+      }),
       ...unsafe.map((relative) => Object.freeze({ relative, action: "unsafe_source" })),
     ];
     return Object.freeze({
-      workspacePath,
-      slug,
+      ...base,
       action: entries.some((entry) => entry.action === "copy") ? "copy" : "nothing_to_copy",
-      source,
-      target,
       files: Object.freeze(entries),
     });
   });
-  return Object.freeze({ dataDir, sourceRoot, targetRoot, workspaces: Object.freeze(planned) });
+  return Object.freeze({ dataDir: anchor, sourceRoot, targetRoot, workspaces: Object.freeze(planned) });
 }
 
-function readTranscriptManifest(targetRoot) {
-  const manifestPath = path.join(targetRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
-  if (!existsSync(manifestPath)) {
-    return { manifestPath, manifest: { schemaVersion: 1, createdFiles: [], createdDirs: [] } };
+function readTranscriptManifest(anchor) {
+  const resolved = resolveOwnedPath(anchor, TRANSCRIPT_MANIFEST_RELATIVE, {
+    allowMissingLeaf: true,
+    allowMissingAncestors: true,
+  });
+  if (resolved.leaf == null) {
+    return {
+      manifestPath: resolved.absolute,
+      manifest: { schemaVersion: LEGACY_TRANSCRIPT_MANIFEST_SCHEMA, createdFiles: [], createdDirs: [] },
+    };
   }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  if (!resolved.leaf.isFile()) {
+    throw createCodedError("cursor_legacy_manifest_invalid", "legacy transcript copy manifest is not a regular file");
+  }
+  const manifest = JSON.parse(readFileSync(resolved.absolute, "utf8"));
   if (!Array.isArray(manifest?.createdFiles) || !Array.isArray(manifest?.createdDirs)) {
     throw createCodedError("cursor_legacy_manifest_invalid", "legacy transcript copy manifest is invalid");
   }
-  return { manifestPath, manifest };
+  return { manifestPath: resolved.absolute, manifest };
 }
 
-function assertInsideRoot(root, relative) {
-  const absolute = path.resolve(root, relative);
-  const back = path.relative(root, absolute);
-  if (back === "" || back.startsWith("..") || path.isAbsolute(back)) {
-    throw createCodedError("cursor_legacy_manifest_invalid", "manifest entry escapes the projects root");
-  }
-  return absolute;
-}
-
-function mkdirTracked(targetRoot, absoluteDir, createdDirs) {
-  const missing = [];
-  let current = absoluteDir;
-  while (!existsSync(current)) {
-    missing.unshift(current);
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  for (const dir of missing) {
-    mkdirSync(dir, { mode: 0o700 });
-    const relative = path.relative(targetRoot, dir);
-    if (relative && !relative.startsWith("..")) createdDirs.push(relative);
-  }
+function writeTranscriptManifest(anchor, manifest) {
+  // Re-validate the manifest location physically right before writing.
+  const resolved = resolveOwnedPath(anchor, TRANSCRIPT_MANIFEST_RELATIVE, { allowMissingLeaf: true });
+  writeLegacyCopyManifest(resolved.absolute, manifest);
+  return resolved.absolute;
 }
 
 export function applyLegacyCursorTranscriptCopy({
@@ -971,44 +973,42 @@ export function applyLegacyCursorTranscriptCopy({
   workspacePaths,
   now = () => new Date().toISOString(),
 } = {}) {
-  const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir, workspacePaths });
-  mkdirSync(plan.targetRoot, { recursive: true, mode: 0o700 });
-  const { manifestPath, manifest } = readTranscriptManifest(plan.targetRoot);
+  const { anchor } = legacyTranscriptRoots({ home, cursorDataDir, allowCreate: true });
+  const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: anchor, workspacePaths });
+  ensureOwnedDirectory(anchor, PROJECTS_DIRNAME);
+  const { manifestPath, manifest } = readTranscriptManifest(anchor);
+  manifest.schemaVersion = LEGACY_TRANSCRIPT_MANIFEST_SCHEMA;
   const copied = [];
   const skipped = [];
-  for (const workspace of plan.workspaces) {
-    if (workspace.action === "missing_source" || workspace.action === "unsafe_source") {
-      skipped.push(Object.freeze({ slug: workspace.slug, action: workspace.action }));
-      continue;
-    }
-    for (const entry of workspace.files) {
-      if (entry.action !== "copy") {
-        skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: entry.action }));
+  try {
+    for (const workspace of plan.workspaces) {
+      if (workspace.action !== "copy" && workspace.action !== "nothing_to_copy") {
+        skipped.push(Object.freeze({ slug: workspace.slug, action: workspace.action }));
         continue;
       }
-      const source = path.join(workspace.source, entry.relative);
-      const target = path.join(workspace.target, entry.relative);
-      const createdDirs = [];
-      mkdirTracked(plan.targetRoot, path.dirname(target), createdDirs);
-      manifest.createdDirs.push(...createdDirs);
-      try {
-        copyFileSync(source, target, fsConstants.COPYFILE_EXCL);
-      } catch (error) {
-        if (error?.code === "EEXIST") {
-          skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: "already_present" }));
-          writeLegacyCopyManifest(manifestPath, manifest);
+      for (const entry of workspace.files) {
+        if (entry.action !== "copy") {
+          skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: entry.action }));
           continue;
         }
-        writeLegacyCopyManifest(manifestPath, manifest);
-        throw error;
+        const relative = `${PROJECTS_DIRNAME}/${workspace.slug}/${CURSOR_TRANSCRIPTS_DIRNAME}/${entry.relative}`;
+        const result = copyFileIntoOwned({
+          anchor,
+          relative,
+          source: path.join(workspace.source, entry.relative),
+        });
+        manifest.createdDirs.push(...result.createdDirs);
+        if (result.status !== "copied") {
+          skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: result.status }));
+          continue;
+        }
+        manifest.createdFiles.push({ path: relative, ...result.identity, copiedAt: now() });
+        copied.push(relative);
+        writeTranscriptManifest(anchor, manifest);
       }
-      const sourceStat = statSync(source);
-      utimesSync(target, sourceStat.atime, sourceStat.mtime);
-      const relativeToRoot = path.relative(plan.targetRoot, target);
-      manifest.createdFiles.push({ path: relativeToRoot, copiedAt: now() });
-      copied.push(relativeToRoot);
-      writeLegacyCopyManifest(manifestPath, manifest);
     }
+  } finally {
+    writeTranscriptManifest(anchor, manifest);
   }
   return Object.freeze({
     copied: Object.freeze(copied),
@@ -1018,34 +1018,59 @@ export function applyLegacyCursorTranscriptCopy({
 }
 
 export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, cursorDataDir } = {}) {
-  const { targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
-  const { manifestPath, manifest } = readTranscriptManifest(targetRoot);
+  const { anchor } = legacyTranscriptRoots({ home, cursorDataDir });
+  if (!anchorExists(anchor)) {
+    return Object.freeze({
+      removedFiles: Object.freeze([]),
+      removedDirs: Object.freeze([]),
+      keptFiles: Object.freeze([]),
+      keptDirs: Object.freeze([]),
+      manifestPath: null,
+    });
+  }
+  const { manifestPath, manifest } = readTranscriptManifest(anchor);
   const removedFiles = [];
   const removedDirs = [];
+  const keptFiles = [];
   const keptDirs = [];
-  for (const { path: relative } of manifest.createdFiles) {
-    const absolute = assertInsideRoot(targetRoot, relative);
-    if (existsSync(absolute)) {
-      rmSync(absolute, { force: true });
-      removedFiles.push(relative);
+  const remainingFiles = [];
+  for (const file of manifest.createdFiles) {
+    const identity = typeof file?.sha256 === "string" ? file : null;
+    const result = identity
+      ? removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity })
+      : { status: "modified", reason: "no_snapshot" };
+    if (result.status === "removed" || result.status === "missing") {
+      if (result.status === "removed") removedFiles.push(file.path);
+      continue;
     }
+    const reason = result.status === "modified" ? (result.reason ?? "modified_after_migration") : result.status;
+    keptFiles.push(Object.freeze({ path: file.path, reason, detail: result.reason ?? null }));
+    remainingFiles.push({ ...file, lastRevert: { reason, detail: result.reason ?? null } });
   }
+  const remainingDirs = [];
   const dirs = [...new Set(manifest.createdDirs)].sort((a, b) => b.length - a.length);
   for (const relative of dirs) {
-    const absolute = assertInsideRoot(targetRoot, relative);
-    if (!existsSync(absolute)) continue;
-    try {
-      rmdirSync(absolute);
-      removedDirs.push(relative);
-    } catch (error) {
-      if (error?.code !== "ENOTEMPTY" && error?.code !== "EEXIST") throw error;
+    const result = removeOwnedEmptyDirectory({ anchor, relative });
+    if (result.status === "removed") removedDirs.push(relative);
+    if (result.status === "not_empty" || result.status === "unsafe_path") {
       keptDirs.push(relative);
+      remainingDirs.push(relative);
     }
   }
-  rmSync(manifestPath, { force: true });
+  if (remainingFiles.length === 0 && remainingDirs.length === 0) {
+    const resolved = resolveOwnedPath(anchor, TRANSCRIPT_MANIFEST_RELATIVE, {
+      allowMissingLeaf: true,
+      allowMissingAncestors: true,
+    });
+    if (resolved.leaf?.isFile()) unlinkSync(resolved.absolute);
+  } else {
+    writeTranscriptManifest(anchor, { ...manifest, createdFiles: remainingFiles, createdDirs: remainingDirs });
+  }
   return Object.freeze({
     removedFiles: Object.freeze(removedFiles),
     removedDirs: Object.freeze(removedDirs),
+    keptFiles: Object.freeze(keptFiles),
     keptDirs: Object.freeze(keptDirs),
+    manifestPath,
   });
 }
