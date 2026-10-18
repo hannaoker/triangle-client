@@ -33,9 +33,17 @@ export {
 export { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
 
 export {
+  assertCursorSocketPathsFit,
   buildSanitizedCursorChildEnv,
+  CURSOR_DATA_DIR_MAX_CHARS,
+  CURSOR_SOCKET_BASE_MAX_CHARS,
+  cursorWorkspaceSlug,
+  defaultTriangleCursorDataDir,
   defaultTriangleCursorHome,
+  describeTriangleCursorDirs,
+  planCursorSocketPaths,
   resolveCursorAcpPoolGuards,
+  resolveTriangleCursorDataDir,
   resolveTriangleCursorHome,
 } from "./runtime-home.mjs";
 

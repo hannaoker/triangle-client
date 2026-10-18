@@ -16,8 +16,14 @@ import {
 } from "../../src/cursor-acp-runtime/config-guards.mjs";
 import { createMemoryCursorSessionRegistry } from "../../src/cursor-acp-runtime/session-registry.mjs";
 
+// macOS tmpdir() (/var/folders/...) is too long for Cursor's 84-char socket
+// base (see runtime-home.mjs); keep test homes under a short /tmp root.
+function shortTmpRoot() {
+  return process.platform === "win32" ? tmpdir() : "/tmp";
+}
+
 function tempHome() {
-  return mkdtempSync(path.join(tmpdir(), "triangle-cursor-home-"));
+  return mkdtempSync(path.join(shortTmpRoot(), "tch-"));
 }
 
 test("Cursor home rejects user ~/.cursor and mesh secrets", () => {

@@ -28,6 +28,7 @@ function positiveInteger(value, name, minimum = 1) {
 
 export function createCursorAcpWorkerPool({
   cursorHome,
+  cursorDataDir,
   command = "agent",
   args = ["acp"],
   env = process.env,
@@ -74,6 +75,7 @@ export function createCursorAcpWorkerPool({
       crashCount: slot.crashCount,
       circuitOpen: now() < slot.circuitOpenUntil,
       pid: slot.processHandle?.status?.()?.pid ?? null,
+      cursorDataDir: slot.processHandle?.status?.()?.cursorDataDir ?? null,
     });
   }
 
@@ -89,6 +91,7 @@ export function createCursorAcpWorkerPool({
       command,
       args,
       cursorHome,
+      ...(cursorDataDir != null ? { cursorDataDir } : {}),
       env,
       unattendedPolicy,
     });

@@ -18,6 +18,7 @@ import {
   resolveCursorAcpRuntimeConfig,
 } from "./config-guards.mjs";
 import { resolveWorkloadMode } from "./acp-protocol.mjs";
+import { describeTriangleCursorDirs } from "./runtime-home.mjs";
 import { createMemoryCursorSessionRegistry } from "./session-registry.mjs";
 import { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
 import { createCursorAcpWorkerPool } from "./worker-pool.mjs";
@@ -77,6 +78,7 @@ function inactiveRuntime({ resolved, registry, reason }) {
  * @param {object} options.profileConfig
  * @param {{ reply: Function, ack: Function }} [options.transactionProxy]
  * @param {string} [options.cursorHome]
+ * @param {string} [options.cursorDataDir]
  * @param {string} [options.command]
  * @param {string[]} [options.args]
  * @param {NodeJS.ProcessEnv} [options.env]
@@ -86,6 +88,7 @@ export function createHeadlessCursorAcpRuntime({
   profileConfig = {},
   transactionProxy = null,
   cursorHome,
+  cursorDataDir,
   command = "agent",
   args = ["acp"],
   env = process.env,
@@ -126,6 +129,7 @@ export function createHeadlessCursorAcpRuntime({
     pool ??
     createCursorAcpWorkerPool({
       cursorHome,
+      ...(cursorDataDir != null ? { cursorDataDir } : {}),
       command,
       args,
       env,
@@ -434,6 +438,18 @@ export function createHeadlessCursorAcpRuntime({
       active: true,
       started,
       config: resolved,
+      // Preflight the workspace sessions will actually use: the configured
+      // working directory, else the Cursor home (sessionNew's default cwd).
+      cursorDirs: describeTriangleCursorDirs({
+        cursorHome,
+        cursorDataDir,
+        env,
+        workspacePaths:
+          typeof profileConfig.workingDirectory === "string" && profileConfig.workingDirectory.startsWith("/")
+            ? [profileConfig.workingDirectory]
+            : [],
+        defaultWorkspaceToConfigDir: true,
+      }),
       pool: workerPool.status(),
       lastSettlementTrace: Object.freeze([...lastSettlementTrace]),
     });

@@ -22,7 +22,9 @@ import {
   parseNdjsonLine,
 } from "./acp-protocol.mjs";
 import {
+  assertCursorSocketPathsFit,
   buildSanitizedCursorChildEnv,
+  resolveTriangleCursorDataDir,
   resolveTriangleCursorHome,
 } from "./runtime-home.mjs";
 import { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
@@ -416,11 +418,15 @@ process.stdin.on("end", () => {
  *
  * `command`/`args` default to `agent acp` but tests inject the fake.
  * Cursor home is supplied only via sanitized child env — never argv.
+ * `cursorDataDir` (or env `TRIANGLE_CURSOR_DATA_DIR`) selects the Triangle-owned
+ * CURSOR_DATA_DIR; it defaults to `~/.triangle/cursor-data`. Socket-path preflight runs at
+ * construction (data dir) and before session/new|load (per workspace cwd).
  */
 export function createCursorAcpProcess({
   command = "agent",
   args = ["acp"],
   cursorHome,
+  cursorDataDir,
   env = process.env,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   promptTimeoutMs = DEFAULT_PROMPT_TIMEOUT_MS,
@@ -436,9 +442,28 @@ export function createCursorAcpProcess({
     home: env.HOME,
     allowCreate: true,
   });
+  const dataDirOverride = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR;
+  const dataDirSource =
+    typeof dataDirOverride === "string" && dataDirOverride.length > 0 ? "override" : "default";
+  // Default ~/.triangle/cursor-data is created 0700 on first use.
+  const resolvedDataDir = resolveTriangleCursorDataDir({
+    // `?? null`: an absent override must resolve from the injected env only,
+    // never from the host process.env default parameter.
+    override: dataDirOverride ?? null,
+    home: env.HOME,
+    allowCreate: true,
+  });
   assertNoSecretMaterial(command, "command");
   assertNoSecretMaterial(args, "args");
   assertNoSecretMaterial(resolvedHome, "cursorHome");
+  assertNoSecretMaterial(resolvedDataDir, "cursorDataDir");
+  assertCursorSocketPathsFit({ dataDir: resolvedDataDir });
+
+  function preflightWorkspace(cwd) {
+    if (typeof cwd === "string" && cwd.startsWith("/")) {
+      assertCursorSocketPathsFit({ dataDir: resolvedDataDir, workspacePaths: [cwd] });
+    }
+  }
 
   const nextId = createRequestIdFactory(1);
   const pending = new Map();
@@ -540,6 +565,7 @@ export function createCursorAcpProcess({
     if (child) throw createCodedError("already_started", "ACP process already started");
     const childEnv = buildSanitizedCursorChildEnv({
       cursorHome: resolvedHome,
+      cursorDataDir: resolvedDataDir,
       parentEnv: env,
     });
     childExited = false;
@@ -569,7 +595,11 @@ export function createCursorAcpProcess({
     });
     readline = createInterface({ input: child.stdout, crlfDelay: Infinity });
     readline.on("line", handleLine);
-    return Object.freeze({ pid: child.pid ?? null, cursorHome: resolvedHome });
+    return Object.freeze({
+      pid: child.pid ?? null,
+      cursorHome: resolvedHome,
+      cursorDataDir: resolvedDataDir,
+    });
   }
 
   function call(method, params = {}, { timeoutMs = requestTimeoutMs } = {}) {
@@ -626,6 +656,7 @@ export function createCursorAcpProcess({
   }
 
   async function sessionNew({ cwd = resolvedHome, mcpServers = [] } = {}) {
+    preflightWorkspace(cwd);
     await ensureReady();
     if (!Array.isArray(mcpServers)) {
       throw new TypeError("mcpServers must be an array");
@@ -634,6 +665,7 @@ export function createCursorAcpProcess({
   }
 
   async function sessionLoad({ sessionId, cwd = resolvedHome, mcpServers = [] } = {}) {
+    preflightWorkspace(cwd);
     await ensureReady();
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw new TypeError("sessionId is required");
@@ -772,6 +804,8 @@ export function createCursorAcpProcess({
       initialized,
       authenticated,
       cursorHome: resolvedHome,
+      cursorDataDir: resolvedDataDir,
+      cursorDataDirSource: dataDirSource,
       agentCapabilities,
       authMethods,
       stderrBytes,
