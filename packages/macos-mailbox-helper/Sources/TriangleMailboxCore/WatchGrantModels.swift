@@ -382,13 +382,16 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
     public let memberCount: Int
     public let listenerReady: Bool
     public let operatorAction: WatchGrantOperatorAction
+    /// MESH-side expiry of the current grant (ISO 8601 UTC). Omitted from JSON when
+    /// unknown (grants stored by older helpers); callers then renew reactively.
+    public let expiresAt: String?
 
     private enum CodingKeys: String, CodingKey {
         case installationID = "installationId"
         case origin
         case grantID = "grantId"
         case agentIDs = "agentIds"
-        case state, audience, purpose, memberCount, listenerReady, operatorAction
+        case state, audience, purpose, memberCount, listenerReady, operatorAction, expiresAt
     }
 
     public init(
@@ -401,7 +404,8 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
         purpose: String?,
         memberCount: Int? = nil,
         listenerReady: Bool? = nil,
-        operatorAction: WatchGrantOperatorAction? = nil
+        operatorAction: WatchGrantOperatorAction? = nil,
+        expiresAt: String? = nil
     ) {
         self.installationID = installationID
         self.origin = origin
@@ -413,6 +417,7 @@ public struct WatchGrantOperatorStatus: Codable, Equatable, Sendable {
         self.memberCount = memberCount ?? agentIDs.count
         self.listenerReady = listenerReady ?? (state == "finalized" && !agentIDs.isEmpty)
         self.operatorAction = operatorAction ?? Self.action(for: state)
+        self.expiresAt = expiresAt
     }
 
     public static func action(for state: String) -> WatchGrantOperatorAction {
