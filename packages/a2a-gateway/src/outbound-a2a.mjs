@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { createWorkloadAuth, workloadFetch } from "./workload-auth.mjs";
+import { createWorkloadAuth, WorkloadAuthError, workloadFetch } from "./workload-auth.mjs";
 
 import {
   buildOutboundRpc,
@@ -335,7 +335,11 @@ export function createOutboundA2AHandler({
         peer: { id: peer.id, name: peer.name },
         task,
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkloadAuthError) {
+        const { status, body } = error.toResponse();
+        return responseJson(body, status);
+      }
       return responseJson({ error: "outbound_a2a_unavailable" }, 502);
     }
   };

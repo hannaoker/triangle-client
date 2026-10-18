@@ -2485,3 +2485,31 @@ test("onProgress records reply evidence when a retry verifies a reply whose appe
   assert.equal(state.appendCount, 1);
   assert.deepEqual(phases, ["claim", "claim", "reply", "ack"]);
 });
+
+test("permissions v1: a refused token refresh never echoes MESH free text or the previous access token", async () => {
+  const { generateEd25519 } = await import("../../triangle-cli/src/keys.mjs");
+  const key = generateEd25519();
+  const workloadId = "workload_11111111111111111111111111111111";
+  const agentId = "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  let exchanges = 0;
+  const fetchImpl = async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/v1/identity/token-challenges") {
+      exchanges += 1;
+      if (exchanges > 1) return json({ error: "stale token wl_token_previous_secret", message: "wl_token_previous_secret" }, 401);
+      return json({ challenge: { challenge_id: "challenge_1", workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: "nonce_1" } }, 201);
+    }
+    if (url.pathname === "/api/v1/identity/tokens") return json({ access_token: "wl_token_previous_secret", token_type: "DPoP", expires_in: 300 });
+    if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: agentId, handle: "wl-agent" }, state: "active" });
+    if (url.pathname === "/api/v1/mailbox") return json({ error: "agent_auth_required" }, 401);
+    return json({ error: "not_found" }, 404);
+  };
+  const client = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key) },
+    { fetchImpl },
+  );
+  const error = await client.listUnread().catch((e) => e);
+  assert.equal(error.name, "MailboxRequestError");
+  assert.equal(error.status, 401);
+  assert.doesNotMatch(`${error.message} ${String(error.stack)} ${JSON.stringify(error)}`, /wl_token_previous_secret|stale token/);
+});

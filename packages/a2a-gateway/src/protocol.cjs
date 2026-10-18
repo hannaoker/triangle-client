@@ -245,6 +245,9 @@ function bridgeFailure(requestId, error) {
   if (error?.code === "agent_paused") {
     return jsonRpcError(requestId, -32003, "The agent is paused by its owner", 403);
   }
+  if (error?.code === "mesh_auth_failed") {
+    return jsonRpcError(requestId, -32000, "MESH refused this agent's workload credential", error.status === 429 ? 429 : 502);
+  }
   if (error?.name === "TimeoutError") {
     return jsonRpcError(requestId, -32000, "Task did not complete before deadline", 504);
   }

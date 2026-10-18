@@ -11,12 +11,31 @@ import { dpopProof } from "../../triangle-cli/src/workload.mjs";
 const SEED = /^[A-Za-z0-9_-]{43}$/;
 const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024;
 
+/** Token-exchange refusals MESH may report; anything else is reported by status only. */
+const AUTH_ERROR_CODES = new Set([
+  "agent_auth_required",
+  "agent_paused",
+  "dpop_replay",
+  "invalid_workload_proof",
+  "rate_limited",
+  "workload_forbidden",
+]);
+
 export class WorkloadAuthError extends Error {
-  constructor(code, status) {
+  constructor(code, status, { upstreamStatus = null } = {}) {
     super(`Workload authentication failed (${code})`);
     this.name = "WorkloadAuthError";
     this.code = code;
     this.status = status;
+    this.upstreamStatus = upstreamStatus;
+  }
+
+  /** Safe JSON for a gateway response: allowlisted code and upstream status only. */
+  toResponse() {
+    return {
+      status: this.code === "agent_paused" ? 403 : this.status,
+      body: { error: "mesh_auth_failed", upstream_status: this.upstreamStatus, upstream_error: this.code },
+    };
   }
 }
 
@@ -67,7 +86,9 @@ export function createWorkloadAuth({ meshOrigin, workloadId, workloadPrivateKey,
     }));
     const payload = await readJson(response);
     if (!response.ok) {
-      throw new WorkloadAuthError(typeof payload?.error === "string" ? payload.error.slice(0, 64) : `http_${response.status}`, response.status >= 500 ? 503 : 502);
+      const code = AUTH_ERROR_CODES.has(payload?.error) ? payload.error : `http_${response.status}`;
+      const status = response.status >= 500 ? 503 : response.status === 429 ? 429 : 502;
+      throw new WorkloadAuthError(code, status, { upstreamStatus: response.status });
     }
     return payload;
   }

@@ -123,3 +123,61 @@ test("bridge: permission_denied from MESH keeps its code and permission", async 
   assert.equal(error.code, "permission_denied");
   assert.equal(error.permission, "dm.receive");
 });
+
+function refusingExchange(status, payload) {
+  const seen = [];
+  return {
+    seen,
+    fetchImpl: async (request) => {
+      const path = new URL(request.url).pathname;
+      seen.push(path);
+      if (path === "/api/v1/identity/token-challenges") return Response.json(payload, { status });
+      // The peer card is public; only the ticket needs the workload credential.
+      if (path.startsWith("/api/v1/agents/agent_")) {
+        const id = path.split("/").at(-1);
+        return Response.json({ agent: { id, endpointUrl: "https://peer.example/a2a", protocolBinding: "JSONRPC", protocolVersion: "1.0", conformanceStatus: "verified", conformanceReport: JSON.stringify({ method: "SendMessage", responseKind: "task" }) } });
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  };
+}
+
+test("token-exchange refusals keep an allowlisted cause (not an outage) and never echo MESH free text", async () => {
+  const mesh = refusingExchange(403, { error: "workload_forbidden", message: "free text sk_live_should_not_leak" });
+  const realAuth = (options) => createWorkloadAuth({ ...options, fetchImpl: mesh.fetchImpl });
+  const handler = createOutboundA2AHandler({
+    env: { GATEWAY_INTERNAL_TOKEN: "internal-token-with-sufficient-entropy", MESH_ORIGIN: MESH, ...TEST_WORKLOAD_ENV },
+    createWorkloadAuthImpl: realAuth,
+    fetchImpl: mesh.fetchImpl,
+  });
+  const response = await handler(new Request("https://sender.example/internal/a2a/outbound", {
+    method: "POST",
+    headers: { authorization: "Bearer internal-token-with-sufficient-entropy", "content-type": "application/json" },
+    body: JSON.stringify({ operation: "send", recipient_agent_id: `agent_${"c".repeat(32)}`, text: "hi", message_id: "msg_1", context_id: "ctx_1" }),
+  }));
+  const body = await response.json();
+  assert.equal(response.status, 502, JSON.stringify(body));
+  assert.deepEqual(body, { error: "mesh_auth_failed", upstream_status: 403, upstream_error: "workload_forbidden" });
+
+  const odd = refusingExchange(400, { error: "sk_live_should_not_leak" });
+  const bridge = createMeshMailboxBridge({
+    meshOrigin: MESH,
+    recipientAgentId: AGENT,
+    meshAuth: createWorkloadAuth({ meshOrigin: MESH, workloadId: TEST_WORKLOAD_ENV.MESH_WORKLOAD_ID, workloadPrivateKey: TEST_WORKLOAD_ENV.MESH_WORKLOAD_PRIVATE_KEY, fetchImpl: odd.fetchImpl }),
+    fetchImpl: odd.fetchImpl,
+  });
+  const error = await bridge.listTasks({ senderAgentId: `agent_${"b".repeat(32)}`, limit: 1 }).catch((e) => e);
+  assert.equal(error.code, "mesh_auth_failed");
+  assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, /sk_live/);
+
+  const paused = refusingExchange(403, { error: "agent_paused" });
+  const pausedBridge = createMeshMailboxBridge({
+    meshOrigin: MESH,
+    recipientAgentId: AGENT,
+    meshAuth: createWorkloadAuth({ meshOrigin: MESH, workloadId: TEST_WORKLOAD_ENV.MESH_WORKLOAD_ID, workloadPrivateKey: TEST_WORKLOAD_ENV.MESH_WORKLOAD_PRIVATE_KEY, fetchImpl: paused.fetchImpl }),
+    fetchImpl: paused.fetchImpl,
+  });
+  const pausedError = await pausedBridge.listTasks({ senderAgentId: `agent_${"b".repeat(32)}`, limit: 1 }).catch((e) => e);
+  assert.equal(pausedError.code, "agent_paused");
+  assert.equal(pausedError.status, 403);
+});

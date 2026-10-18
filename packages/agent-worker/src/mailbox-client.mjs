@@ -451,9 +451,11 @@ export function createWorkloadTokenManager({
     );
     const payload = await readBoundedJson(response, response.status);
     if (!response.ok) {
+      // Only allowlisted codes reach the message; free text from MESH never does.
+      const code = MESH_ERROR_CODES.has(payload?.error) ? payload.error : null;
       throw new MailboxRequestError(
-        `Workload token request failed with status ${response.status}${typeof payload?.error === "string" ? ` (${payload.error})` : ""}`,
-        { status: response.status, meshError: payload?.error, permission: payload?.permission },
+        `Workload token request failed with status ${response.status}${code ? ` (${code})` : ""}`,
+        { status: response.status, meshError: code ?? undefined, permission: payload?.permission },
       );
     }
     return payload;
@@ -665,11 +667,13 @@ export function createMailboxClient(
       if (callerAborted || error?.name === "AbortError") {
         throw new MailboxRequestError("Mailbox request aborted");
       }
-      if (error instanceof MailboxRequestError) throw error;
       const text = String(error?.message ?? error);
-      if ((accessToken && text.includes(accessToken)) || text.includes(workloadPrivateKey)) {
-        throw new MailboxRequestError("Mailbox request failed");
+      const leaks = (accessToken && text.includes(accessToken)) || text.includes(workloadPrivateKey);
+      if (error instanceof MailboxRequestError) {
+        if (!leaks) throw error;
+        throw new MailboxRequestError("Mailbox request failed", { status: error.status, meshError: error.meshError, permission: error.permission });
       }
+      if (leaks) throw new MailboxRequestError("Mailbox request failed");
       throw error;
     } finally {
       clearTimeout(timeout);

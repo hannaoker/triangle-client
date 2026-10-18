@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { WorkloadAuthError } from "./workload-auth.mjs";
+
 const MAX_ID_BYTES = 180;
 const MAX_AGENT_ID_BYTES = 120;
 const MAX_TEXT_BYTES = 12 * 1024;
@@ -419,6 +421,11 @@ export function createMeshMailboxBridge({
       }
     } catch (error) {
       if (error instanceof MeshMailboxBridgeError) throw error;
+      // A refused token exchange is not an outage: keep the allowlisted cause.
+      if (error instanceof WorkloadAuthError) {
+        if (error.code === "agent_paused") throw new MeshMailboxBridgeError("agent_paused", { status: 403 });
+        throw new MeshMailboxBridgeError("mesh_auth_failed", { status: error.status });
+      }
       throw new MeshMailboxBridgeError("mesh_unavailable", { status: 503 });
     } finally {
       clearTimeout(timeoutId);

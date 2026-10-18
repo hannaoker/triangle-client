@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { createWorkloadAuth, workloadFetch } from "@the-triangle/a2a-gateway/workload-auth";
+import { createWorkloadAuth, WorkloadAuthError, workloadFetch } from "@the-triangle/a2a-gateway/workload-auth";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -226,7 +226,11 @@ export function createMeshActionHandler({
         );
       }
       return json(payload, upstream.status);
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkloadAuthError) {
+        const { status, body } = error.toResponse();
+        return json(body, status);
+      }
       return json({ error: "mesh_upstream_unavailable" }, 502);
     }
   };
