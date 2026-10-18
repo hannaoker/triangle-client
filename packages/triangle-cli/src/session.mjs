@@ -96,12 +96,12 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
   /**
    * Send a journaled request. The journal is removed only after the result is
    * installed locally, or when the very first send is definitively refused
-   * (a 4xx before anything could have committed). Once a send's outcome was
-   * unknown, the entry is marked and kept through any later failure, so the
+   * (a 4xx before anything could have committed). A recovered (replayed) entry
+   * may already have committed, so it is kept through any failure, so the
    * only copy of a new workload key is never lost; `triangle resume --abandon`
    * discards it explicitly.
    */
-  async function sendJournaled(name, entry) {
+  async function sendJournaled(name, entry, { original = false } = {}) {
     let response;
     try {
       response = await transport.request(entry.method ?? "POST", entry.path, { body: entry.body });
@@ -109,9 +109,10 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       if (error instanceof OutcomeUnknownError) {
         error.resumeHint = "triangle resume";
         if (!entry.outcome_unknown) custody.writeJournal(name, { ...entry, outcome_unknown: true });
-      } else if (!entry.outcome_unknown && error instanceof MeshApiError && error.status >= 400 && error.status < 500) {
+      } else if (original && error instanceof MeshApiError && error.status >= 400 && error.status < 500) {
+        // Definitive refusal of the first send, observed by this process: nothing committed.
         custody.removeJournal(name);
-      } else if (entry.outcome_unknown && error instanceof MeshApiError) {
+      } else if (!original && error instanceof MeshApiError) {
         error.message += ` The earlier attempt may have been applied; its request is kept. Retry \`triangle resume\`, or discard it with \`triangle resume --abandon\`.`;
       }
       throw error;
@@ -142,7 +143,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       ...extra,
     };
     custody.writeJournal(name, entry);
-    const response = await sendJournaled(name, entry);
+    const response = await sendJournaled(name, entry, { original: true });
     return response.body;
   }
 

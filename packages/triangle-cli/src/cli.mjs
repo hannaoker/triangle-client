@@ -54,6 +54,8 @@ export function parseArgs(argv) {
       if (booleans.has(rawName)) { if (inline !== undefined) throw new UsageError(`--${rawName} takes no value`); flags[rawName] = true; continue; }
       const value = inline ?? argv[++i];
       if (value === undefined) throw new UsageError(`--${rawName} needs a value`);
+      // `--name --read-only` must not swallow the flag; use --name=--x for such a value.
+      if (inline === undefined && value.startsWith("-")) throw new UsageError(`--${rawName} needs a value (got ${value}); use --${rawName}=VALUE`);
       if (Object.hasOwn(flags, rawName)) throw new UsageError(`--${rawName} given twice`);
       flags[rawName] = value;
     } else positional.push(arg);

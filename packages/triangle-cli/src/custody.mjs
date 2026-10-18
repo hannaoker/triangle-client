@@ -10,7 +10,8 @@
 //   journal/<name>.json         (0600)  signed requests persisted before sending
 //   cache/permissions/<agent_id>.json   last permissions view + ETag
 import { randomBytes } from "node:crypto";
-import { closeSync, chmodSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { createRequire } from "node:module";
+import { closeSync, chmodSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -27,7 +28,14 @@ export function defaultHome(env = process.env, platform = process.platform) {
 }
 
 function ensurePrivateDir(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Create missing ancestors one by one and fsync each parent, so a new
+  // directory entry is durable before anything inside it is relied on.
+  const missing = [];
+  for (let cursor = path.resolve(dir); !existsSync(cursor); cursor = path.dirname(cursor)) missing.unshift(cursor);
+  for (const created of missing) {
+    try { mkdirSync(created, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; }
+    syncDir(path.dirname(created));
+  }
   const stat = lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new LocalStateError(`${dir} is not a directory`);
   if (stat.uid !== process.getuid?.()) throw new LocalStateError(`${dir} is not owned by this user`);
@@ -42,7 +50,7 @@ function syncDir(dir) {
     fsyncSync(fd);
   } catch (error) {
     // Some platforms/filesystems refuse fsync on directories; nothing more we can do there.
-    if (!["EINVAL", "ENOTSUP", "EISDIR", "EPERM", "EBADF"].includes(error.code)) throw error;
+    if (!["EINVAL", "ENOTSUP", "EISDIR", "EPERM", "EBADF", "ENOENT"].includes(error.code)) throw error;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -50,9 +58,7 @@ function syncDir(dir) {
 
 function writeAtomic(file, text, mode) {
   const dir = path.dirname(file);
-  const created = !existsSync(dir);
   ensurePrivateDir(dir);
-  if (created) syncDir(path.dirname(dir));
   const temp = `${file}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   const fd = openSync(temp, "wx", mode);
   try {
@@ -67,17 +73,32 @@ function writeAtomic(file, text, mode) {
 }
 
 function removeDurable(file, options = { force: true }) {
+  if (!existsSync(file)) return;
   rmSync(file, options);
   syncDir(path.dirname(file));
 }
 
 /** Roots locked by this process: re-entry would let two writers interleave. */
 const HELD = new Set();
-const LOCK_INIT_GRACE_MS = 10_000;
-
-function pidAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (probe) { return probe.code === "EPERM"; }
+const require = createRequire(import.meta.url);
+let sqliteModule = null;
+/** node:sqlite (Node ≥22.13 unflagged) without its one-time ExperimentalWarning on stderr. */
+function sqlite() {
+  if (sqliteModule) return sqliteModule;
+  const original = process.emitWarning;
+  process.emitWarning = function filtered(warning, ...rest) {
+    const type = typeof rest[0] === "string" ? rest[0] : rest[0]?.type;
+    if (type === "ExperimentalWarning" && /SQLite/i.test(String(warning?.message ?? warning))) return undefined;
+    return original.call(this, warning, ...rest);
+  };
+  try {
+    sqliteModule = require("node:sqlite");
+  } catch (error) {
+    throw new LocalStateError(`triangle needs Node 22.13 or newer (node:sqlite unavailable: ${error.message}).`);
+  } finally {
+    process.emitWarning = original;
+  }
+  return sqliteModule;
 }
 
 function readJsonFile(file, { secret = false } = {}) {
@@ -108,55 +129,33 @@ export function openCustody(home = defaultHome()) {
   }
 
   /**
-   * Exclusive writer lock. The lock file is created exclusively (O_EXCL) and
-   * holds "<pid>:<token>". A lock is stale only when its pid is dead (an empty
-   * lock is "being created" during a grace period). Stale takeover renames the
-   * lock aside atomically and checks it removed exactly the stale content, so
-   * two contenders can never both win; release deletes the lock only if it
-   * still carries our token. Re-entry from the same process is refused.
+   * Exclusive writer lock, held as an SQLite `BEGIN EXCLUSIVE` transaction on
+   * `<home>/.lock.db`. SQLite uses OS advisory locks (fcntl), which the kernel
+   * releases when the holder exits, so there is no stale-lock takeover at all,
+   * and two processes can never both hold it. Re-entry from the same process
+   * is refused.
    */
   function withLock(fn) {
     init();
     if (HELD.has(root)) throw new LocalStateError(`${root} is already locked by this process.`);
-    const lockFile = p(".lock");
-    const token = `${process.pid}:${randomBytes(12).toString("hex")}`;
-    const readLock = (file) => { try { return readFileSync(file, "utf8"); } catch (error) { if (error.code === "ENOENT") return null; throw error; } };
-    let acquired = false;
-    for (let attempt = 0; attempt < 3 && !acquired; attempt += 1) {
-      try {
-        const fd = openSync(lockFile, "wx", 0o600);
-        try { writeSync(fd, token); fsyncSync(fd); } finally { closeSync(fd); }
-        acquired = true;
-        break;
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-      }
-      const content = readLock(lockFile);
-      if (content === null) continue; // released meanwhile
-      const holder = Number(content.split(":")[0]);
-      if (!content) {
-        let age = 0;
-        try { age = Date.now() - statSync(lockFile).mtimeMs; } catch { continue; }
-        if (age < LOCK_INIT_GRACE_MS) throw new LocalStateError(`Another triangle command is starting on ${root}; try again.`);
-      } else if (pidAlive(holder)) {
-        throw new LocalStateError(`Another triangle command (pid ${holder}) is using ${root}.`);
-      }
-      const aside = `${lockFile}.stale-${randomBytes(6).toString("hex")}`;
-      try { renameSync(lockFile, aside); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
-      if (readLock(aside) !== content) {
-        // We moved a lock someone else just created: put it back (never clobber) and back off.
-        let restored = false;
-        try { linkSync(aside, lockFile); restored = true; } catch {}
-        if (restored) { try { unlinkSync(aside); } catch {} }
-        throw new LocalStateError(`Another triangle command is using ${root}.`);
-      }
-      unlinkSync(aside);
+    const lockFile = p(".lock.db");
+    if (!existsSync(lockFile)) {
+      try { closeSync(openSync(lockFile, "wx", 0o600)); syncDir(root); } catch (error) { if (error.code !== "EEXIST") throw error; }
     }
-    if (!acquired) throw new LocalStateError(`Could not lock ${root}.`);
+    const db = new (sqlite().DatabaseSync)(lockFile);
+    try {
+      db.exec("PRAGMA busy_timeout = 0");
+      db.exec("BEGIN EXCLUSIVE");
+    } catch (error) {
+      db.close();
+      if (/locked|busy/i.test(error.message)) throw new LocalStateError(`Another triangle command is using ${root}; try again when it finishes.`);
+      throw error;
+    }
     HELD.add(root);
     const release = () => {
       HELD.delete(root);
-      try { if (readLock(lockFile) === token) unlinkSync(lockFile); } catch {}
+      try { db.exec("ROLLBACK"); } catch {}
+      try { db.close(); } catch {}
     };
     let result;
     try {

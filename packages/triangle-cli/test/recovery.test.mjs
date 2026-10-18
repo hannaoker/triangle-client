@@ -1,7 +1,7 @@
 // Regression tests for the round-1 review of PR #90: challenge binding,
 // recovery-state retention, locking, transport verification, scopes, JCS input.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -95,6 +95,25 @@ test("a failed replay never discards a request whose earlier outcome was unknown
   assert.ok(existsSync(path.join(home, "agents", created, "workload-key.json")));
 });
 
+test("a journal recovered after a crash (never marked) is kept when its replay fails", async () => {
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { home, run } = await joined(fake);
+  // Simulate: process died right after the server committed (journal written, never marked).
+  fake.state.failNext = "drop-after-commit";
+  fake.state.failPath = /^\/api\/v1\/agents$/;
+  assert.equal((await run("agent", "add", "--handle", "crash-agent")).code, 3);
+  const file = path.join(home, "journal", journals(home)[0]);
+  const entry = JSON.parse((await import("node:fs")).readFileSync(file, "utf8"));
+  delete entry.outcome_unknown;
+  writeFileSync(file, JSON.stringify(entry), { mode: 0o600 });
+  fake.state.failNext = 401;
+  fake.state.failPath = /^\/api\/v1\/agents$/;
+  assert.equal((await run("resume")).code, 1);
+  assert.equal(journals(home).length, 1, "kept");
+  assert.equal((await run("resume")).code, 0);
+  assert.deepEqual(journals(home), []);
+});
+
 test("join: if saving local state fails after the server committed, the journal survives and --resume finishes", async () => {
   const fake = createFakeAuthority({ authority: AUTH });
   const home = tmpHome();
@@ -112,24 +131,27 @@ test("join: if saving local state fails after the server committed, the journal 
   assert.ok(existsSync(path.join(home, "agents", resumed.json().result.agent.agent_id, "workload-key.json")));
 });
 
-test("lock: no same-process re-entry; a dead holder is taken over; a live or just-created lock is respected; release is owner-checked", async () => {
+/** Hold the lock on `home` from a child process until it is killed. */
+async function holdLockInChild(home) {
+  const { spawn } = await import("node:child_process");
+  const custodyUrl = new URL("../src/custody.mjs", import.meta.url).href;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `const { openCustody } = await import(${JSON.stringify(custodyUrl)}); openCustody(${JSON.stringify(home)}).withLock(() => new Promise(() => { console.log("held"); }));`], { stdio: ["ignore", "pipe", "inherit"] });
+  await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("exit", reject); });
+  return child;
+}
+
+test("lock: OS-level exclusive lock; no re-entry; a crashed holder releases it automatically", async () => {
   const custody = openCustody(tmpHome()).init();
-  const lock = path.join(custody.root, ".lock");
   custody.withLock(() => {
     assert.throws(() => custody.withLock(() => {}), /already locked by this process/);
   });
-  assert.equal(existsSync(lock), false);
-  writeFileSync(lock, "999999:deadbeef", { mode: 0o600 });
-  assert.equal(custody.withLock(() => "took over"), "took over");
-  writeFileSync(lock, `${process.ppid}:other`, { mode: 0o600 });
+  assert.equal(custody.withLock(() => "free again"), "free again");
+  const child = await holdLockInChild(custody.root);
   assert.throws(() => custody.withLock(() => {}), /Another triangle command/);
-  writeFileSync(lock, "", { mode: 0o600 });
-  assert.throws(() => custody.withLock(() => {}), /starting on/);
-  rmSync(lock);
-  await custody.withLock(async () => {
-    writeFileSync(lock, "999999:replaced", { mode: 0o600 }); // someone broke our lock
-  });
-  assert.equal(existsSync(lock), true, "release does not delete a lock that is not ours");
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(custody.withLock(() => "after crash"), "after crash", "no stale lock to clean up");
+  assert.equal((statSync(path.join(custody.root, ".lock.db")).mode & 0o077), 0);
 });
 
 test("--via is re-verified by every later session before anything signed is sent", async () => {
@@ -162,11 +184,18 @@ test("CLI: --help works; contradictory join modes are refused; recovery commands
   const run = runner(fake.fetchImpl, home);
   assert.equal((await run("--help")).code, 0);
   assert.equal((await run("join", "--resume", "--abandon")).code, 2);
-  mkdirSync(home, { recursive: true, mode: 0o700 });
-  writeFileSync(path.join(home, ".lock"), `${process.ppid}:busy`, { mode: 0o600 });
-  const abandon = await run("join", "--abandon");
-  assert.equal(abandon.code, 1);
-  assert.match(abandon.err, /Another triangle command/);
+  assert.equal((await run("join", "--abandon")).code, 0, "abandon on a fresh home is a no-op");
+  const child = await holdLockInChild(home);
+  try {
+    const abandon = await run("join", "--abandon");
+    assert.equal(abandon.code, 1);
+    assert.match(abandon.err, /Another triangle command/);
+  } finally {
+    child.kill("SIGKILL");
+  }
+  const swallowed = await run("agent", "add", "--handle", "x-agent", "--name", "--read-only");
+  assert.equal(swallowed.code, 2, "an option-looking value is refused");
+  assert.match(swallowed.err, /use --name=VALUE/);
 });
 
 test("canonical JSON refuses lone surrogates and sparse arrays", () => {
