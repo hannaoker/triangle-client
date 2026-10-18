@@ -78,18 +78,19 @@ chatbot transcripts are not credential stores.
 
 ## Install
 
-Public installation requires the reviewed Developer ID and team settings
-described in the [macOS helper guide](../../packages/macos-mailbox-helper/README.md)
-and [release-bundle.md](release-bundle.md).
-Install both signed command-line tools and the single service:
+Public installation is ad-hoc signed with portable file credential custody;
+Developer ID signing and notarization are out of scope. See the
+[macOS helper guide](../../packages/macos-mailbox-helper/README.md) and
+[release-bundle.md](release-bundle.md) (including the quarantine check).
+Install both ad-hoc signed command-line tools and the single service:
 
 ```sh
 ./scripts/install-macos-mailbox-helper.sh --install-client
 ```
 
-For source development only, add `--local-ad-hoc`. Ad-hoc signing is not a
-public distribution identity and must not be used to claim a production-grade
-installation.
+For source development only (or a host whose profiles are already in the
+Keychain), add `--local-ad-hoc`. That mode is non-public and keeps the legacy
+Keychain compatibility path; it must not be used to claim a release install.
 
 If an older Application Support helper rejects `watch-ensure` as unknown
 (`local_validation_failed`), re-run the installer from current `main` and confirm

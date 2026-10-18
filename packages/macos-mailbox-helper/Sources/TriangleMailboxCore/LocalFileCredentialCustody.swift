@@ -7,9 +7,10 @@ import Darwin
 import Security
 #endif
 
-/// Local Mini / ad-hoc helper custody: 0600 files under Application Support.
-/// Opt in with `TRIANGLE_FILE_CREDENTIALS=1` or an `ENABLED` marker written by
-/// the export script. Production Developer ID builds keep Keychain-only custody.
+/// Portable file custody: 0600 files under Application Support.
+/// Public ad-hoc release builds (`TRIANGLE_FILE_CUSTODY_REQUIRED`) always use it.
+/// Local ad-hoc builds opt in with `TRIANGLE_FILE_CREDENTIALS=1` or an `ENABLED`
+/// marker. Selection lives in `CredentialCustodyPolicy`.
 public enum LocalCredentialStores {
     public static var rootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -21,14 +22,14 @@ public enum LocalCredentialStores {
     }
 
     public static var fileCredentialsEnabled: Bool {
-        #if TRIANGLE_LOCAL_AD_HOC
+        CredentialCustodyPolicy.current(fileOptIn: fileOptInRequested) == .file
+    }
+
+    static var fileOptInRequested: Bool {
         if let raw = getenv("TRIANGLE_FILE_CREDENTIALS"), String(cString: raw) == "1" {
             return true
         }
         return FileManager.default.isReadableFile(atPath: enabledMarkerURL.path)
-        #else
-        return false
-        #endif
     }
 
     public static func mailbox() -> any CredentialStore {

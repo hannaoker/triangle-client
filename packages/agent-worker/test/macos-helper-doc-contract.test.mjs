@@ -53,36 +53,31 @@ chmod 700 "$scratch/release/triangle-client"
   fs.writeFileSync(codesign, `#!/bin/bash
 set -eu
 printf 'codesign %s\\n' "$*" >> "$TRIANGLE_TEST_COMMAND_LOG"
+state="\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}"
 case "$*" in
   *"--verify"*)
     [[ "\${TRIANGLE_TEST_SIGNATURE_VERIFY:-ok}" == ok ]] || exit 71
-    if [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == installed-target-fail && "$*" == *"/bin/triangle-mailbox"* ]]; then exit 71; fi
-    if [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == installed-client-target-fail && "$*" == *"/bin/triangle-client"* ]]; then exit 71; fi
+    if [[ "$state" == installed-target-fail && "$*" == *"/bin/triangle-mailbox"* ]]; then exit 71; fi
+    if [[ "$state" == installed-client-target-fail && "$*" == *"/bin/triangle-client"* ]]; then exit 71; fi
     ;;
-  *"--entitlements :-"*)
-    app="TEAM123456.dev.thetriangle.mailbox"
-    group="$app"
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-entitlement ]] && group="TEAM123456.example.wrong"
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-app-entitlement ]] && app="TEAM123456.example.wrong"
-    extra=""
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == extra-group ]] && extra='<string>TEAM123456.example.extra</string>'
-    printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>application-identifier</key><string>%s</string><key>keychain-access-groups</key><array><string>%s</string>%s</array></dict></plist>\\n' "$app" "$group" "$extra"
-    ;;
-  *"-r-"*)
-    if [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-requirement ]]; then
-      printf 'designated => identifier "example.wrong" and anchor apple generic\\n' >&2
-    else
-      printf 'designated => identifier "dev.thetriangle.mailbox" and anchor apple generic\\n' >&2
+  *"--entitlements"*)
+    if [[ "$state" == keychain-entitlement ]]; then
+      printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>keychain-access-groups</key><array><string>TEAM123456.dev.thetriangle.mailbox</string></array></dict></plist>\\n'
     fi
     ;;
   *"-d"*)
     identifier="dev.thetriangle.mailbox"
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-identifier ]] && identifier="example.wrong"
-    team="TEAM123456"
-    authority="Developer ID Application: Triangle Test (TEAM123456)"
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-team ]] && team="OTHER12345"
-    [[ "\${TRIANGLE_TEST_SIGNATURE_STATE:-ok}" == bad-authority ]] && authority="Apple Development: Triangle Test (TEAM123456)"
-    printf 'Identifier=%s\\nTeamIdentifier=%s\\nAuthority=%s\\n' "$identifier" "$team" "$authority" >&2
+    [[ "$state" == bad-identifier ]] && identifier="example.wrong"
+    signature="adhoc"
+    [[ "$state" == not-adhoc ]] && signature="size=9000"
+    printf 'Identifier=%s\\nCodeDirectory v=20400 size=272 flags=0x2(adhoc) hashes=3+2 location=embedded\\nSignature=%s\\n' "$identifier" "$signature" >&2
+    if [[ "$state" == developer-id ]]; then
+      printf 'Authority=Developer ID Application: Triangle Test (TEAM123456)\\nTeamIdentifier=TEAM123456\\n' >&2
+    elif [[ "$state" == team-set ]]; then
+      printf 'TeamIdentifier=TEAM123456\\n' >&2
+    else
+      printf 'TeamIdentifier=not set\\n' >&2
+    fi
     ;;
 esac
 `, { mode: 0o700 });
@@ -242,12 +237,183 @@ chmod 700 "$scratch/release/triangle-client"
   );
 });
 
-test("installer defaults to public Developer ID mode and rejects missing signing configuration", (t) => {
+function appRoot(f) { return path.join(f.home, "Library", "Application Support", "The Triangle"); }
+function installedHelper(f) { return path.join(appRoot(f), "bin", "triangle-mailbox"); }
+function installedClient(f) { return path.join(appRoot(f), "bin", "triangle-client"); }
+function metadata(f, name = "triangle-mailbox-install.json") {
+  return JSON.parse(fs.readFileSync(path.join(appRoot(f), "install-manifest", name), "utf8"));
+}
+function marker(f) { return path.join(appRoot(f), "credentials", "local", "ENABLED"); }
+function commandLog(f) { return fs.existsSync(f.log) ? fs.readFileSync(f.log, "utf8") : ""; }
+
+test("installer defaults to public ad-hoc release mode with required file custody", (t) => {
   const f = fixture(t);
-  const result = run([], f.env);
+  const result = run(["--install-client"], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /non-public/i);
+  assert.match(result.stderr, /public_ad_hoc/);
+  assert.match(result.stderr, /Credential custody: file/);
+  const log = commandLog(f);
+  assert.match(log, /-Xswiftc -DTRIANGLE_FILE_CUSTODY_REQUIRED/);
+  assert.doesNotMatch(log, /TRIANGLE_LOCAL_AD_HOC/);
+  assert.match(log, /codesign --force --sign - --identifier dev\.thetriangle\.mailbox .*\/triangle-mailbox\n/);
+  assert.match(log, /codesign --force --sign - --identifier dev\.thetriangle\.mailbox .*\/triangle-client\n/);
+  assert.doesNotMatch(log, /--options runtime|--timestamp|--sign Developer/);
+  assert.doesNotMatch(log, /codesign --force[^\n]*--entitlements/);
+  assert.match(log, /codesign --verify --strict/);
+  assert.match(log, /client install/);
+  for (const name of ["triangle-mailbox-install.json", "triangle-client-install.json"]) {
+    const meta = metadata(f, name);
+    assert.equal(meta.signingMode, "public_ad_hoc");
+    assert.equal(meta.teamId, null);
+    assert.equal(meta.credentialCustody, "file");
+  }
+  assert.equal(mode(path.join(appRoot(f), "credentials")), 0o700);
+  assert.equal(mode(path.join(appRoot(f), "credentials", "local")), 0o700);
+  assert.equal(mode(marker(f)), 0o600);
+  assert.equal(fs.lstatSync(marker(f)).isFile(), true);
+  assert.equal(fs.readdirSync(path.join(appRoot(f), "credentials", "local")).some((name) => name.startsWith(".ENABLED.")), false);
+
+  // Upgrade in place keeps the marker and stays on file custody.
+  const again = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two" });
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(metadata(f).credentialCustody, "file");
+});
+
+test("installer refuses Developer ID configuration: signing is ad-hoc only", (t) => {
+  const f = fixture(t);
+  for (const extra of [
+    { TRIANGLE_DEVELOPER_ID: "Developer ID Application: Triangle Test (TEAM123456)" },
+    { TRIANGLE_DEVELOPER_TEAM_ID: "TEAM123456" },
+  ]) {
+    for (const args of [[], ["--local-ad-hoc"]]) {
+      const result = run(args, { ...f.env, ...extra });
+      assert.equal(result.status, 64, result.stderr);
+      assert.match(result.stderr, /Developer ID signing is out of scope/);
+    }
+  }
+  assert.equal(commandLog(f), "", "installer built or signed despite Developer ID configuration");
+  assert.equal(fs.existsSync(installedHelper(f)), false);
+});
+
+test("public ad-hoc install rejects Keychain custody before building", (t) => {
+  const f = fixture(t);
+  let result = run(["--install-client"], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "keychain" });
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /Keychain credential custody is unavailable for public ad-hoc installs/);
+  assert.match(result.stderr, /keychain-access-groups/);
+  assert.match(result.stderr, /credentials\/local/);
+  assert.match(result.stderr, /--local-ad-hoc/);
+  assert.equal(commandLog(f), "");
+  assert.equal(fs.existsSync(installedHelper(f)), false);
+  assert.equal(fs.existsSync(path.join(appRoot(f), "credentials")), false);
+
+  result = run([], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "keyring" });
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /TRIANGLE_CREDENTIAL_CUSTODY must be unset, file, or keychain/);
+
+  result = run([], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "file" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).credentialCustody, "file");
+});
+
+test("public install refuses to strand an existing Keychain-custody install", (t) => {
+  const f = fixture(t);
+  let result = run(["--local-ad-hoc"], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).signingMode, "local_ad_hoc");
+  assert.equal(metadata(f).credentialCustody, "keychain");
+  assert.equal(fs.existsSync(marker(f)), false);
+  const before = fs.readFileSync(installedHelper(f));
+
+  result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two" });
+  assert.equal(result.status, 78);
+  assert.match(result.stderr, /uses keychain credential custody/);
+  assert.match(result.stderr, /TRIANGLE_ACK_CUSTODY_SWITCH=1/);
+  assert.deepEqual(fs.readFileSync(installedHelper(f)), before, "refused switch replaced the helper");
+  assert.equal(fs.existsSync(marker(f)), false);
+
+  // Pre-credentialCustody manifests (developer_id or local_ad_hoc) count as Keychain custody.
+  const manifest = path.join(appRoot(f), "install-manifest", "triangle-mailbox-install.json");
+  const legacy = metadata(f);
+  delete legacy.credentialCustody;
+  legacy.signingMode = "developer_id";
+  fs.writeFileSync(manifest, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+  result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two" });
+  assert.equal(result.status, 78);
+
+  result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_ACK_CUSTODY_SWITCH: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).signingMode, "public_ad_hoc");
+  assert.equal(metadata(f).credentialCustody, "file");
+  assert.equal(mode(marker(f)), 0o600);
+});
+
+test("existing file custody marker lets a local ad-hoc host upgrade to public mode", (t) => {
+  const f = fixture(t);
+  let result = run(["--local-ad-hoc"], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "file" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).signingMode, "local_ad_hoc");
+  assert.equal(metadata(f).credentialCustody, "file");
+  assert.equal(mode(marker(f)), 0o600);
+
+  result = run(["--local-ad-hoc"], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "keychain" });
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /conflicts with the file custody marker/);
+
+  result = run(["--local-ad-hoc"], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).credentialCustody, "file", "marker present means local ad-hoc builds use file custody");
+
+  result = run([], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).signingMode, "public_ad_hoc");
+});
+
+test("installer rejects an unsafe file custody marker or directory", (t) => {
+  const f = fixture(t);
+  const local = path.join(appRoot(f), "credentials", "local");
+  fs.mkdirSync(local, { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.join(appRoot(f), "credentials"), 0o700);
+  fs.chmodSync(local, 0o700);
+  const outside = path.join(f.base, "outside-marker");
+  fs.writeFileSync(outside, "x\n", { mode: 0o600 });
+  fs.symlinkSync(outside, marker(f));
+  let result = run([], f.env);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /TRIANGLE_DEVELOPER_ID/);
-  assert.equal(fs.existsSync(path.join(f.home, "Library", "Application Support", "The Triangle", "bin", "triangle-mailbox")), false);
+  assert.match(result.stderr, /unsafe file custody marker/);
+  assert.equal(fs.existsSync(installedHelper(f)), false);
+
+  fs.unlinkSync(marker(f));
+  fs.chmodSync(local, 0o755);
+  result = run([], f.env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unsafe application directory mode/);
+  assert.equal(fs.existsSync(installedHelper(f)), false);
+});
+
+test("installer refuses a quarantined install source before building", { skip: process.platform !== "darwin" }, (t) => {
+  const f = fixture(t);
+  const source = path.join(f.base, "downloaded-source");
+  fs.mkdirSync(path.join(source, "scripts"), { recursive: true, mode: 0o700 });
+  const file = path.join(source, "scripts", "install-macos-mailbox-helper.sh");
+  fs.writeFileSync(file, "#!/bin/bash\n", { mode: 0o700 });
+  let result = run([], { ...f.env, TRIANGLE_INSTALL_QUARANTINE_SOURCE: source });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr + result.stdout, /not quarantined/);
+
+  const g = fixture(t);
+  const xattr = spawnSync("/usr/bin/xattr", ["-w", "com.apple.quarantine", "0081;00000000;Safari;", file], { encoding: "utf8" });
+  assert.equal(xattr.status, 0, xattr.stderr);
+  result = run(["--install-client"], { ...g.env, TRIANGLE_INSTALL_QUARANTINE_SOURCE: source });
+  assert.equal(result.status, 78);
+  assert.match(result.stderr, /install source is quarantined/);
+  assert.match(result.stderr, /com\.apple\.quarantine/);
+  assert.ok(result.stderr.includes(file), "diagnostic must name the quarantined path");
+  assert.match(result.stderr, /curl -fLO/);
+  assert.match(result.stderr, /xattr -dr com\.apple\.quarantine/);
+  assert.equal(commandLog(g), "", "installer built or signed a quarantined source");
+  assert.equal(fs.existsSync(installedHelper(g)), false);
 });
 
 test("explicit local ad-hoc mode release-builds and atomically installs at the fixed application path", (t) => {
@@ -273,11 +439,15 @@ test("explicit local ad-hoc mode release-builds and atomically installs at the f
   assert.equal(mode(path.join(applicationRoot, "install-manifest", "triangle-client-install.json")), 0o600);
   assert.match(fs.readFileSync(f.log, "utf8"), /swift build -c release .*--scratch-path/);
   assert.match(fs.readFileSync(f.log, "utf8"), /-Xswiftc -DTRIANGLE_LOCAL_AD_HOC/);
+  assert.doesNotMatch(fs.readFileSync(f.log, "utf8"), /TRIANGLE_FILE_CUSTODY_REQUIRED/);
   assert.match(fs.readFileSync(f.log, "utf8"), /codesign --verify --strict/);
   assert.equal(fs.readFileSync(unrelated, "utf8"), "preserve me\n");
   assert.equal(fs.readdirSync(applicationRoot).some((name) => name.startsWith(".mailbox-helper-install.")), false);
   const metadata = JSON.parse(fs.readFileSync(path.join(applicationRoot, "install-manifest", "triangle-mailbox-install.json"), "utf8"));
   assert.deepEqual(metadata.cliSurface, ["watch-ensure", "watch-poll", "watch-status", "watch-revoke"]);
+  assert.equal(metadata.signingMode, "local_ad_hoc");
+  assert.equal(metadata.teamId, null);
+  assert.equal(metadata.credentialCustody, "keychain");
   const helper = path.join(applicationRoot, "bin", "triangle-mailbox");
   const help = spawnSync(helper, ["watch-ensure", "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
@@ -347,29 +517,31 @@ test("failed post-replacement verification restores the exact prior helper", (t)
   }
 });
 
-test("public install rejects identifier, designated requirement, and Keychain entitlement mismatches", (t) => {
+test("installer accepts only a valid ad-hoc signature without Keychain entitlements", (t) => {
   const f = fixture(t);
-  const publicEnv = {
-    ...f.env,
-    TRIANGLE_DEVELOPER_ID: "Developer ID Application: Triangle Test (TEAM123456)",
-    TRIANGLE_DEVELOPER_TEAM_ID: "TEAM123456",
-  };
-  for (const state of ["bad-identifier", "bad-requirement", "bad-entitlement", "bad-app-entitlement", "extra-group", "bad-team", "bad-authority"]) {
-    const result = run([], { ...publicEnv, TRIANGLE_TEST_SIGNATURE_STATE: state });
-    assert.notEqual(result.status, 0, `${state} unexpectedly installed`);
+  for (const state of ["bad-identifier", "not-adhoc", "developer-id", "team-set", "keychain-entitlement"]) {
+    for (const args of [[], ["--local-ad-hoc"]]) {
+      const result = run(args, { ...f.env, TRIANGLE_TEST_SIGNATURE_STATE: state });
+      assert.notEqual(result.status, 0, `${state} ${args.join(" ")} unexpectedly installed`);
+      assert.equal(fs.existsSync(installedHelper(f)), false, `${state} left a helper behind`);
+    }
   }
-  const result = run([], publicEnv);
+  let result = run([], { ...f.env, TRIANGLE_TEST_SIGNATURE_STATE: "keychain-entitlement" });
+  assert.match(result.stderr, /must not embed Keychain access-group entitlements/);
+  result = run([], { ...f.env, TRIANGLE_TEST_SIGNATURE_STATE: "developer-id" });
+  assert.match(result.stderr, /certificate authority/);
+  result = run([], f.env);
   assert.equal(result.status, 0, result.stderr);
 
-  const target = path.join(f.home, "Library", "Application Support", "The Triangle", "bin", "triangle-mailbox");
+  const target = installedHelper(f);
   const before = fs.readFileSync(target);
-  const clientTarget = path.join(f.home, "Library", "Application Support", "The Triangle", "bin", "triangle-client");
+  const clientTarget = installedClient(f);
   const clientBefore = fs.readFileSync(clientTarget);
-  const installedFailure = run([], { ...publicEnv, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_TEST_SIGNATURE_STATE: "installed-target-fail" });
+  const installedFailure = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_TEST_SIGNATURE_STATE: "installed-target-fail" });
   assert.notEqual(installedFailure.status, 0);
   assert.deepEqual(fs.readFileSync(target), before, "installed-target signature failure did not restore prior helper");
   assert.deepEqual(fs.readFileSync(clientTarget), clientBefore, "installed-target signature failure did not restore prior client");
-  const installedClientFailure = run([], { ...publicEnv, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_TEST_SIGNATURE_STATE: "installed-client-target-fail" });
+  const installedClientFailure = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_TEST_SIGNATURE_STATE: "installed-client-target-fail" });
   assert.notEqual(installedClientFailure.status, 0);
   assert.deepEqual(fs.readFileSync(target), before, "installed-client signature failure did not restore prior helper");
   assert.deepEqual(fs.readFileSync(clientTarget), clientBefore, "installed-client signature failure did not restore prior client");
