@@ -17,7 +17,7 @@ function runner(fake, home) {
     const out = [];
     const err = [];
     const code = await main([...argv, "--home", home], { env: {}, fetchImpl: fake.fetchImpl, io: { stdout: (s) => out.push(s), stderr: (s) => err.push(s) } });
-    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")) };
+    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")), lines: () => out.join("\n").split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
   };
 }
 
@@ -118,7 +118,7 @@ test("permissions set: lost response → `triangle resume` replays the signed up
   assert.equal((await run("permissions", "set", "alpha-agent", "posts.publish=on")).code, 3);
   const resumed = await run("resume", "--json");
   assert.equal(resumed.code, 0, resumed.err);
-  assert.deepEqual(resumed.json().map((d) => [d.operation, d.outcome]), [["permissions-update", "replayed"]]);
+  assert.deepEqual(resumed.lines().map((d) => [d.operation, d.outcome]), [["permissions-update", "replayed"]]);
   assert.equal(fake.state.agents.get(agentId).revision, 2, "applied exactly once");
 });
 
@@ -189,6 +189,83 @@ test("agent lifecycle: pause blocks the workload, resume restores it, delete nee
   const deleted = await run("agent", "delete", "alpha-agent", "--yes");
   assert.equal(deleted.code, 0, deleted.err);
   assert.equal(existsSync(path.join(home, "agents", agentId)), false);
+  assert.equal(fake.state.requests.find((r) => r.path === `/api/v1/agents/${agentId}` && r.method !== "GET").method, "DELETE");
+  assert.equal(fake.state.agents.get(agentId)?.state ?? "deleted", "deleted");
+});
+
+test("agent delete: a lost response is replayed with DELETE by `triangle resume`", async () => {
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { run, home, agentId } = await owner(fake);
+  fake.state.failNext = "drop-after-commit";
+  fake.state.failPath = new RegExp(`/agents/${agentId}$`);
+  assert.equal((await run("agent", "delete", "alpha-agent", "--yes")).code, 3);
+  const resumed = await run("resume", "--json");
+  assert.equal(resumed.code, 0, resumed.err);
+  assert.deepEqual(resumed.lines().map((d) => [d.operation, d.outcome]), [["agent.delete", "replayed"]]);
+  assert.ok(fake.state.requests.filter((r) => r.path === `/api/v1/agents/${agentId}`).every((r) => r.method === "DELETE"));
+  assert.equal(existsSync(path.join(home, "agents", agentId)), false);
+});
+
+test("resume: each invite link is printed before its journal is removed, even if a later replay fails", async () => {
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { home } = await owner(fake);
+  for (let i = 0; i < 2; i += 1) {
+    fake.state.failNext = "network";
+    fake.state.failPath = /\/invites$/;
+    assert.equal((await runner(fake, home)("invite", "teammate")).code, 3);
+  }
+  let posts = 0;
+  const throttling = async (input, init) => {
+    const request = new Request(input, init);
+    if (request.method === "POST" && new URL(request.url).pathname === "/api/v1/invites" && ++posts === 2) {
+      return new Response(JSON.stringify({ error: { code: "rate_limited", message: "slow down" } }), { status: 429, headers: { "content-type": "application/json" } });
+    }
+    return fake.fetchImpl(request);
+  };
+  const out = [];
+  const exit = await main(["resume", "--home", home], { env: {}, fetchImpl: throttling, io: { stdout: (s) => out.push(s), stderr: () => {} } });
+  assert.equal(exit, 1);
+  assert.match(out.join("\n"), /link: https:\/\/mesh\.test\//, "the first link was delivered");
+  const { readdirSync } = await import("node:fs");
+  assert.equal(readdirSync(path.join(home, "journal")).filter((n) => n.startsWith("op-")).length, 1, "only the undelivered invite stays journaled");
+});
+
+test("resume: a stored permission update refused with revision_conflict is retired; latest state shown; exit 4", async () => {
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { run, home, agentId } = await owner(fake);
+  fake.state.failNext = "network";
+  fake.state.failPath = /\/permissions$/;
+  assert.equal((await run("permissions", "set", "alpha-agent", "tasks.claim=on")).code, 3);
+  const agent = fake.state.agents.get(agentId);
+  agent.permissions = { ...agent.permissions, "dm.send": false };
+  agent.revision += 1;
+  const resumed = await run("resume", "--json");
+  assert.equal(resumed.code, 4, resumed.err);
+  const [item] = resumed.lines();
+  assert.equal(item.outcome, "revision_conflict");
+  assert.equal(item.latest.revision, agent.revision);
+  assert.equal(fake.state.agents.get(agentId).permissions["tasks.claim"], false, "not applied");
+  const { readdirSync } = await import("node:fs");
+  assert.equal(readdirSync(path.join(home, "journal")).filter((n) => n.startsWith("perm-")).length, 0);
+  assert.equal((await run("resume")).code, 0, "nothing left to retry");
+});
+
+test("permissions set: a conflict whose winner chose the same values is still a conflict (exit 4)", async () => {
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { home, agentId } = await owner(fake);
+  let raced = false;
+  const racing = async (input, init) => {
+    const request = new Request(input, init);
+    if (!raced && request.method === "POST" && request.url.endsWith(`/agents/${agentId}/permissions`)) {
+      raced = true;
+      const agent = fake.state.agents.get(agentId);
+      agent.permissions = { ...agent.permissions, "tasks.claim": true };
+      agent.revision += 1;
+    }
+    return fake.fetchImpl(request);
+  };
+  const exit = await main(["permissions", "set", "alpha-agent", "tasks.claim=on", "--home", home], { env: {}, fetchImpl: racing, io: { stdout: () => {}, stderr: () => {} } });
+  assert.equal(exit, 4);
 });
 
 test("read model for client-console: secret-free, labelled toggles per agent", async () => {

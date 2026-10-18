@@ -194,7 +194,9 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
       [/^\/api\/v1\/owners\/me\/devices\/([A-Za-z0-9_-]{43})\/revoke$/, "owner.device.revoke"],
     ];
     for (const [pattern, operation] of opRoutes) {
-      if (method !== "POST" || !(m = pattern.exec(path))) continue;
+      if (!(m = pattern.exec(path))) continue;
+      // Real method per route: DELETE /agents/:id; everything else POST (a wrong method is a 404 on Vercel).
+      if (method !== (operation === "agent.delete" ? "DELETE" : "POST")) continue;
       const key = `op:${body.controller_id}:${body.idempotency_key}`;
       const requestHash = sha256hex(enc(body));
       const prior = state.receipts.get(key);

@@ -203,14 +203,13 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           allowOnly(flags, sub === "teammate" ? ["role", "name-hint", "email-hint", "expires"] : []);
           if (rest.length) throw new UsageError(`invite ${sub} takes no arguments`);
           if (flags.expires !== undefined && !/^\d{1,7}$/.test(flags.expires)) throw new UsageError("--expires is a number of seconds");
-          const outcome = await createInvite(session, {
+          await createInvite(session, {
             kind: sub,
             role: sub === "teammate" ? flags.role ?? "member" : null,
             displayNameHint: flags["name-hint"] ?? null,
             emailHint: flags["email-hint"] ?? null,
             expiresInSeconds: flags.expires === undefined ? null : Number(flags.expires),
-          });
-          print(io, flags, outcome, renderInvite);
+          }, { deliver: (outcome) => print(io, flags, outcome, renderInvite) });
           return 0;
         }
         if (sub === "revoke") {
@@ -262,14 +261,41 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         return await session.custody.withLock(async () => {
         const names = session.custody.listJournal().filter((name) => name.startsWith("op-") || name.startsWith("perm-"));
         const done = [];
-        for (const name of names) {
-          const { entry, result } = await session.replayOperation(name);
-          const item = { operation: entry.operation ?? entry.kind, target: entry.target ?? entry.agent_id ?? null, outcome: result?.outcome };
-          if (entry.operation === "invite.create" && entry.invite_secret) item.invite = inviteOutcome(session, result, entry.invite_secret).invite;
+        const conflicts = [];
+        // Each result is printed as soon as it is known (an invite link before its
+        // journal is removed), so a later failure cannot swallow earlier output.
+        const emit = (item) => {
           done.push(item);
+          if (flags.json) io.stdout(JSON.stringify(item));
+          else io.stdout(`${item.operation} ${item.target ?? ""} → ${item.outcome}${item.invite ? `\n  link: ${item.invite.link}` : ""}${item.latest ? `\n  not applied: someone changed it first (now revision ${item.latest.revision}); re-run \`triangle permissions set\` if still wanted` : ""}`);
+        };
+        for (const name of names) {
+          const pending = session.custody.readJournal(name);
+          const isInvite = pending?.operation === "invite.create" && Boolean(pending.invite_secret);
+          let replayed;
+          try {
+            replayed = await session.replayOperation(name, { retain: isInvite });
+          } catch (error) {
+            // Receipts are checked before the revision, so a replayed update that
+            // gets revision_conflict never committed: retire it and report the latest state.
+            if (pending?.kind === "permissions-update" && error instanceof MeshApiError && error.code === "revision_conflict") {
+              session.custody.removeJournal(name);
+              const latest = await readPermissions(session, pending.agent_id, { fresh: true });
+              const { from_cache, ...view } = latest;
+              conflicts.push(name);
+              emit({ operation: pending.kind, target: pending.agent_id, outcome: "revision_conflict", latest: view });
+              continue;
+            }
+            throw error;
+          }
+          const { entry, result } = replayed;
+          const item = { operation: entry.operation ?? entry.kind, target: entry.target ?? entry.agent_id ?? null, outcome: result?.outcome };
+          if (isInvite) item.invite = inviteOutcome(session, result, entry.invite_secret).invite;
+          emit(item);
+          if (isInvite) session.custody.removeJournal(name);
         }
-        print(io, flags, done, (items) => items.map((d) => `${d.operation} ${d.target ?? ""} → ${d.outcome}${d.invite ? `\n  link: ${d.invite.link}` : ""}`).join("\n") || "Nothing to resume.");
-        return 0;
+        if (!done.length) print(io, flags, [], () => "Nothing to resume.");
+        return conflicts.length ? 4 : 0;
         });
       }
       case undefined:

@@ -6,7 +6,7 @@ import { randomToken, sha256Hex } from "./keys.mjs";
 
 const INVITE_ID = /^invite_[0-9a-f]{32}$/;
 
-export async function createInvite(session, { kind, role = null, displayNameHint = null, emailHint = null, expiresInSeconds = null }) {
+export async function createInvite(session, { kind, role = null, displayNameHint = null, emailHint = null, expiresInSeconds = null }, { deliver = null } = {}) {
   if (kind !== "teammate" && kind !== "device") throw new TypeError("invite kind must be teammate or device");
   if (kind === "teammate" && role !== "admin" && role !== "member") throw new TypeError("--role must be admin or member");
   if (kind === "device" && (role !== null || displayNameHint !== null || emailHint !== null || expiresInSeconds !== null)) {
@@ -25,8 +25,17 @@ export async function createInvite(session, { kind, role = null, displayNameHint
     secret_sha256: sha256Hex(secret),
   };
   return session.custody.withLock(async () => {
-    const response = await session.ownerOperation("invite.create", null, params, { extra: { invite_secret: secret } });
-    return inviteOutcome(session, response, secret);
+    // The journal (the only copy of the secret) is removed only after `deliver`
+    // has shown the link.
+    let outcome;
+    await session.ownerOperation("invite.create", null, params, {
+      extra: { invite_secret: secret },
+      deliver: async (response) => {
+        outcome = inviteOutcome(session, response, secret);
+        if (deliver) await deliver(outcome);
+      },
+    });
+    return outcome;
   });
 }
 

@@ -81,9 +81,9 @@ function applies(view, changes) {
  * Sign and send a full permission object: the server's current object with
  * only `changes` applied. Keys this client does not know are kept exactly as
  * the server has them and cannot be changed here. On `revision_conflict` the
- * latest state is re-read; if it already has the requested values the change is
- * a no-op, otherwise a RevisionConflictError carries the latest view so the
- * owner can decide (we never silently re-apply over someone else's change).
+ * latest state is re-read and a RevisionConflictError (exit 4) carries it, even
+ * when it happens to match the request: the precondition failed and scripts
+ * must see that (we never silently re-apply over someone else's change).
  */
 export async function setPermissions(session, agentId, changes) {
   for (const key of Object.keys(changes)) {
@@ -117,7 +117,6 @@ export async function setPermissions(session, agentId, changes) {
     } catch (error) {
       if (!(error instanceof MeshApiError) || error.code !== "revision_conflict") throw error;
       const latest = await readPermissions(session, agentId, { fresh: true });
-      if (applies(latest, changes)) return { outcome: "unchanged", ...stripLocal(latest) };
       throw new RevisionConflictError(stripLocal(latest), changes);
     }
   });

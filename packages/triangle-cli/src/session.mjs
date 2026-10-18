@@ -21,6 +21,12 @@ export const OPERATION_PATHS = Object.freeze({
   "admin.owner.remove": (t) => `/api/v1/admin/owners/${t}/remove`,
 });
 
+/** HTTP method per owner operation (POST unless listed). Stored in the journal so a replay uses it too. */
+export const OPERATION_METHODS = Object.freeze({
+  "agent.delete": "DELETE",
+  "admin.agent.delete": "DELETE",
+});
+
 export function transportOptions(env = process.env) {
   return {
     headers: loadTransportHeaders(env.TRIANGLE_TRANSPORT_HEADERS_FILE),
@@ -101,7 +107,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
    * only copy of a new workload key is never lost; `triangle resume --abandon`
    * discards it explicitly.
    */
-  async function sendJournaled(name, entry, { original = false } = {}) {
+  async function sendJournaled(name, entry, { original = false, retain = false } = {}) {
     let response;
     try {
       response = await transport.request(entry.method ?? "POST", entry.path, { body: entry.body });
@@ -118,7 +124,9 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       throw error;
     }
     applyEffect(entry, response.body);
-    custody.removeJournal(name);
+    // `retain`: the caller removes the journal once it has delivered the result
+    // (an invite link exists only in the journal until it has been printed).
+    if (!retain) custody.removeJournal(name);
     return response;
   }
 
@@ -128,7 +136,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
    * replaying the identical request (`triangle resume`), which the server
    * answers from its receipt. Keys are never regenerated on retry.
    */
-  async function ownerOperation(operation, target, params, { workloadKey = null, extra = {} } = {}) {
+  async function ownerOperation(operation, target, params, { workloadKey = null, extra = {}, deliver = null } = {}) {
     const { body: challenge } = await ownerRequest("POST", "/api/v1/owners/me/challenges", { body: { operation, target }, mutating: false });
     const body = buildOwnerOperation({ authority: transport.authority, controllerId: controller.controller_id, ownerKey, challenge, operation, target, params, workloadKey });
     const name = `op-${body.idempotency_key}`;
@@ -136,6 +144,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       kind: "owner-operation",
       operation,
       target,
+      method: OPERATION_METHODS[operation] ?? "POST",
       path: OPERATION_PATHS[operation](target),
       body,
       created_at: new Date().toISOString(),
@@ -143,15 +152,19 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       ...extra,
     };
     custody.writeJournal(name, entry);
-    const response = await sendJournaled(name, entry, { original: true });
+    const response = await sendJournaled(name, entry, { original: true, retain: Boolean(deliver) });
+    if (deliver) {
+      await deliver(response.body);
+      custody.removeJournal(name);
+    }
     return response.body;
   }
 
   /** Replay one stored owner operation or permission update exactly as signed. */
-  async function replayOperation(name) {
+  async function replayOperation(name, { retain = false } = {}) {
     const entry = custody.readJournal(name);
     if (!entry || !["owner-operation", "permissions-update"].includes(entry.kind)) throw new LocalStateError(`No pending operation ${name}.`);
-    const response = await sendJournaled(name, entry);
+    const response = await sendJournaled(name, entry, { retain });
     return { entry, result: response.body };
   }
 
