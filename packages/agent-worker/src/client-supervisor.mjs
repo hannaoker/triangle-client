@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -327,9 +328,16 @@ export function createWatchGrantRenewalRegistry({
  * - Evidence only. Timestamps + lane per profile; never message bodies, room or
  *   delivery ids, or credentials.
  * - Atomic: write tmp (0600) + fsync + rename over the target. Readers never see
- *   a torn file. A short O_EXCL sidecar lock serializes cross-process writers;
- *   if it cannot be taken quickly (or is stale) the write still goes through
- *   atomically and at worst one concurrent field update is lost.
+ *   a torn file.
+ * - Serialized: every read-modify-write runs under an O_EXCL sidecar lock that
+ *   carries a per-write owner token. If the lock cannot be taken within
+ *   `lockWaitMs` the write is skipped (no unlocked read-modify-write) and
+ *   `record()` returns false with the sanitized code
+ *   `progress_journal_lock_unavailable`. A lock older than `staleLockMs` is
+ *   broken by renaming it aside and confirming it is the same stale file; a
+ *   writer re-checks its token immediately before its rename and abandons the
+ *   write if its lock was broken, and only ever releases its own lock. So a
+ *   successful write (true) is never erased by another writer's stale snapshot.
  * - Monotonic per field: an older stamp never overwrites a newer one.
  * - Best-effort: recording never throws into the drain; failures are logged
  *   with a sanitized code only.
@@ -385,26 +393,67 @@ export function createHeadlessProgressJournal({
   const filePath = path.join(clientRoot, HEADLESS_PROGRESS_FILE);
   const lockPath = `${filePath}.lock`;
 
+  function readLockToken() {
+    try {
+      return readFileSync(lockPath, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /** Break a stale lock only if the file moved aside is the one judged stale. */
+  function breakStaleLock(staleStat) {
+    const aside = `${lockPath}.${pid}.${randomBytes(6).toString("hex")}.stale`;
+    try {
+      renameSync(lockPath, aside);
+    } catch {
+      return; // Already gone or replaced: just retry acquisition.
+    }
+    try {
+      const moved = statSync(aside);
+      if (moved.ino !== staleStat.ino || moved.dev !== staleStat.dev) {
+        // A fresh lock replaced the stale one before our rename: put it back
+        // unless someone already took the path (its owner then aborts safely).
+        try { linkSync(aside, lockPath); } catch {}
+      }
+    } catch {}
+    try { unlinkSync(aside); } catch {}
+  }
+
+  /** @returns {string|null} this write's owner token, or null when not acquired. */
   function acquireLock() {
+    const token = `${pid}:${randomBytes(12).toString("hex")}`;
     const deadline = Date.now() + lockWaitMs;
     for (;;) {
       try {
         const fd = openSync(lockPath, "wx", 0o600);
-        closeSync(fd);
-        return true;
-      } catch (error) {
-        if (error?.code !== "EEXIST") return false;
         try {
-          if (Date.now() - statSync(lockPath).mtimeMs > staleLockMs) {
-            unlinkSync(lockPath);
+          writeSync(fd, token);
+        } finally {
+          closeSync(fd);
+        }
+        return token;
+      } catch (error) {
+        if (error?.code !== "EEXIST") return null;
+        try {
+          const lockStat = statSync(lockPath);
+          if (Date.now() - lockStat.mtimeMs > staleLockMs) {
+            breakStaleLock(lockStat);
             continue;
           }
         } catch {
           continue; // Lock vanished between open and stat: retry immediately.
         }
-        if (Date.now() >= deadline) return false;
+        if (Date.now() >= deadline) return null;
         progressSleepSync(5);
       }
+    }
+  }
+
+  function releaseLock(token) {
+    // Never delete a lock this write does not own (e.g. after a stale break).
+    if (readLockToken() === token) {
+      try { unlinkSync(lockPath); } catch {}
     }
   }
 
@@ -424,7 +473,7 @@ export function createHeadlessProgressJournal({
     }
   }
 
-  function writeDocument(document) {
+  function writeDocument(document, token) {
     const tmp = `${filePath}.${pid}.${randomBytes(6).toString("hex")}.tmp`;
     let fd = null;
     try {
@@ -433,6 +482,9 @@ export function createHeadlessProgressJournal({
       fsyncSync(fd);
       closeSync(fd);
       fd = null;
+      if (readLockToken() !== token) {
+        throw Object.assign(new Error("progress journal lock lost"), { code: "progress_journal_lock_lost" });
+      }
       renameSync(tmp, filePath);
     } catch (error) {
       if (fd != null) {
@@ -463,7 +515,12 @@ export function createHeadlessProgressJournal({
       }
       const at = new Date(now()).toISOString();
       mkdirSync(clientRoot, { recursive: true, mode: 0o700 });
-      const locked = acquireLock();
+      const token = acquireLock();
+      if (token == null) {
+        // Never fall back to an unlocked read-modify-write: it could replace a
+        // concurrent writer's successful update with a stale snapshot.
+        throw Object.assign(new Error("progress journal lock unavailable"), { code: "progress_journal_lock_unavailable" });
+      }
       try {
         const current = readDocument() ?? {};
         const profiles = current.profiles && typeof current.profiles === "object" && !Array.isArray(current.profiles)
@@ -483,11 +540,9 @@ export function createHeadlessProgressJournal({
           version: HEADLESS_PROGRESS_VERSION,
           updatedAt: laterIso(current.updatedAt, at),
           profiles,
-        });
+        }, token);
       } finally {
-        if (locked) {
-          try { unlinkSync(lockPath); } catch {}
-        }
+        releaseLock(token);
       }
       return true;
     } catch (error) {
