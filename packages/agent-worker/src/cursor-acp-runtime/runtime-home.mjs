@@ -587,33 +587,59 @@ function legacyCopyRoots({ home, cursorHome }) {
     throw createCodedError("cursor_home_invalid", "HOME must be an absolute path");
   }
   const anchor = resolveTriangleCursorHome({ override: cursorHome, home, allowCreate: false });
+  // Legacy sources are resolved physically below realpath(HOME): `.cursor`,
+  // `acp-sessions` and every session component must be real directories (a
+  // symlinked ancestor would import files from outside the legacy tree).
+  let sourceAnchor = null;
+  try {
+    sourceAnchor = realpathSync(home);
+  } catch {
+    sourceAnchor = null;
+  }
   return {
     anchor,
+    sourceAnchor,
+    sourceRootRelative: `.cursor/${CURSOR_ACP_SESSIONS_DIRNAME}`,
     sourceRoot: path.join(home, ".cursor", CURSOR_ACP_SESSIONS_DIRNAME),
     targetRoot: path.join(anchor, CURSOR_ACP_SESSIONS_DIRNAME),
   };
 }
 
-/** Regular files below `root` (relative paths); anything else is "unsafe". */
+/**
+ * Entries below `root` (relative paths, never following symlinks): regular
+ * `files`, real `dirs`, and anything else as `unsafe`.
+ */
 export function listRegularFilesNoFollow(root) {
   const files = [];
+  const dirs = [];
   const unsafe = [];
   const visit = (relativeDir) => {
     for (const name of readdirSync(path.join(root, relativeDir)).sort()) {
       const relative = relativeDir ? `${relativeDir}/${name}` : name;
       const stat = lstatSync(path.join(root, relative));
-      if (stat.isDirectory()) visit(relative);
-      else if (stat.isFile()) files.push(relative);
+      if (stat.isDirectory()) {
+        dirs.push(relative);
+        visit(relative);
+      } else if (stat.isFile()) files.push(relative);
       else unsafe.push(relative);
     }
   };
   visit("");
-  return { files, unsafe };
+  return { files, dirs, unsafe };
+}
+
+function ancestorDirs(relativeFiles) {
+  const dirs = new Set();
+  for (const relative of relativeFiles) {
+    const parts = relative.split("/");
+    for (let depth = 1; depth < parts.length; depth += 1) dirs.add(parts.slice(0, depth).join("/"));
+  }
+  return dirs;
 }
 
 export function planLegacyCursorAcpSessionCopy({ home = process.env.HOME, cursorHome, sessionIds } = {}) {
   const ids = assertCursorSessionIds(sessionIds);
-  const { anchor, sourceRoot, targetRoot } = legacyCopyRoots({ home, cursorHome });
+  const { anchor, sourceAnchor, sourceRootRelative, sourceRoot, targetRoot } = legacyCopyRoots({ home, cursorHome });
   const entries = ids.map((sessionId) => {
     const source = path.join(sourceRoot, sessionId);
     const target = path.join(targetRoot, sessionId);
@@ -627,16 +653,21 @@ export function planLegacyCursorAcpSessionCopy({ home = process.env.HOME, cursor
       return Object.freeze({ sessionId, action: "unsafe_target", source, target });
     }
     if (targetState.leaf != null) return Object.freeze({ sessionId, action: "already_present", source, target });
-    let stat;
+    if (sourceAnchor == null) return Object.freeze({ sessionId, action: "missing_source", source, target });
+    let sourceState;
     try {
-      stat = lstatSync(source);
+      sourceState = resolveOwnedPath(sourceAnchor, `${sourceRootRelative}/${sessionId}`, {
+        allowMissingLeaf: true,
+        allowMissingAncestors: true,
+      });
     } catch {
-      return Object.freeze({ sessionId, action: "missing_source", source, target });
-    }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
       return Object.freeze({ sessionId, action: "unsafe_source", source, target });
     }
-    const { files, unsafe } = listRegularFilesNoFollow(source);
+    if (sourceState.leaf == null) return Object.freeze({ sessionId, action: "missing_source", source, target });
+    if (!sourceState.leaf.isDirectory()) {
+      return Object.freeze({ sessionId, action: "unsafe_source", source, target });
+    }
+    const { files, unsafe } = listRegularFilesNoFollow(sourceState.absolute);
     if (unsafe.length > 0) {
       return Object.freeze({ sessionId, action: "unsafe_source", source, target });
     }
@@ -670,6 +701,24 @@ function writeLegacyCopyManifest(manifestPath, manifest) {
   renameSync(temporary, manifestPath);
 }
 
+/**
+ * Best-effort rollback of a session whose copy failed midway: remove only the
+ * files this apply copied (identity-checked) and the directories it created
+ * (empty only). Returns true when nothing of the attempt remains.
+ */
+function rollbackIncompleteSession(anchor, record) {
+  let clean = true;
+  for (const file of record.files) {
+    const result = removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity: file });
+    if (result.status !== "removed" && result.status !== "missing") clean = false;
+  }
+  for (const dir of [...new Set(record.createdDirs)].sort((a, b) => b.length - a.length)) {
+    const result = removeOwnedEmptyDirectory({ anchor, relative: dir });
+    if (result.status !== "removed" && result.status !== "missing") clean = false;
+  }
+  return clean;
+}
+
 export function applyLegacyCursorAcpSessionCopy({
   home = process.env.HOME,
   cursorHome,
@@ -677,37 +726,62 @@ export function applyLegacyCursorAcpSessionCopy({
   now = () => new Date().toISOString(),
 } = {}) {
   const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds });
-  const { anchor } = legacyCopyRoots({ home, cursorHome });
+  const { anchor, sourceAnchor, sourceRootRelative } = legacyCopyRoots({ home, cursorHome });
   const rootCreated = ensureOwnedDirectory(anchor, CURSOR_ACP_SESSIONS_DIRNAME);
   const { manifestPath, manifest } = readLegacyCopyManifest(anchor);
   manifest.schemaVersion = LEGACY_SESSION_MANIFEST_SCHEMA;
   const copied = [];
+  const failed = [];
   for (const entry of plan.entries) {
     if (entry.action !== "copy") continue;
     const record = { sessionId: entry.sessionId, copiedAt: now(), files: [], createdDirs: [] };
-    manifest.copied.push(record);
     try {
       record.createdDirs.push(...ensureOwnedDirectory(anchor, `${CURSOR_ACP_SESSIONS_DIRNAME}/${entry.sessionId}`)
         .filter((dir) => !rootCreated.includes(dir)));
       for (const relative of entry.files) {
         const targetRelative = `${CURSOR_ACP_SESSIONS_DIRNAME}/${entry.sessionId}/${relative}`;
-        const result = copyFileIntoOwned({
-          anchor,
-          relative: targetRelative,
-          source: path.join(entry.source, relative),
-        });
-        record.createdDirs.push(...result.createdDirs);
-        if (result.status === "copied") {
-          record.files.push({ path: targetRelative, ...result.identity });
+        let result;
+        try {
+          result = copyFileIntoOwned({
+            anchor,
+            relative: targetRelative,
+            sourceAnchor,
+            sourceRelative: `${sourceRootRelative}/${entry.sessionId}/${relative}`,
+          });
+        } catch (error) {
+          if (Array.isArray(error?.createdDirs)) record.createdDirs.push(...error.createdDirs);
+          throw error;
         }
+        record.createdDirs.push(...result.createdDirs);
+        if (result.status !== "copied") {
+          // The target appeared under us: the copy is no longer a faithful snapshot.
+          throw createCodedError("cursor_legacy_copy_target_changed", "session target changed during copy");
+        }
+        record.files.push({ path: targetRelative, ...result.identity });
       }
-    } finally {
-      writeLegacyCopyManifest(manifestPath, manifest);
+    } catch (error) {
+      // A partial copy must never look like a migrated session: roll back what
+      // this attempt created; if that is not fully possible, record it as
+      // incomplete so revert can still clean it up identity-checked.
+      const clean = rollbackIncompleteSession(anchor, record);
+      if (!clean) {
+        manifest.copied.push({ ...record, incomplete: true });
+        writeLegacyCopyManifest(manifestPath, manifest);
+      }
+      failed.push(Object.freeze({
+        sessionId: entry.sessionId,
+        code: typeof error?.code === "string" ? error.code : "cursor_legacy_copy_failed",
+        rolledBack: clean,
+      }));
+      continue;
     }
+    manifest.copied.push(record);
+    writeLegacyCopyManifest(manifestPath, manifest);
     copied.push(entry.sessionId);
   }
   return Object.freeze({
     copied: Object.freeze(copied),
+    failed: Object.freeze(failed),
     skipped: Object.freeze(
       plan.entries
         .filter((entry) => entry.action !== "copy")
@@ -715,6 +789,14 @@ export function applyLegacyCursorAcpSessionCopy({
     ),
     manifestPath,
   });
+}
+
+function safeOwnedParts(relative) {
+  try {
+    return normalizeOwnedRelative(relative);
+  } catch {
+    return null;
+  }
 }
 
 function revertOneSession(anchor, record) {
@@ -735,24 +817,44 @@ function revertOneSession(anchor, record) {
 
   const recorded = new Map();
   for (const file of record.files) {
-    const parts = normalizeOwnedRelative(file.path);
-    if (parts[0] !== CURSOR_ACP_SESSIONS_DIRNAME || parts[1] !== sessionId) {
+    const parts = safeOwnedParts(file?.path);
+    if (parts == null || parts[0] !== CURSOR_ACP_SESSIONS_DIRNAME || parts[1] !== sessionId || parts.length < 3) {
       return { status: "kept", reason: "unsafe_path", detail: "manifest_entry_outside_session" };
     }
     recorded.set(parts.slice(2).join("/"), file);
   }
+  const dirs = [...new Set(record.createdDirs ?? [])].sort((a, b) => b.length - a.length);
+  for (const dir of dirs) {
+    const parts = safeOwnedParts(dir);
+    if (parts == null || parts[0] !== CURSOR_ACP_SESSIONS_DIRNAME || parts[1] !== sessionId) {
+      return { status: "kept", reason: "unsafe_path", detail: "manifest_entry_outside_session" };
+    }
+  }
+  // Full preflight BEFORE any unlink: the session tree must contain exactly
+  // the recorded regular files and their ancestor directories, each file
+  // still identical. Any extra entry (file, directory, symlink, socket), type
+  // change, modification or missing file keeps the whole session.
   const present = listRegularFilesNoFollow(sessionDir.absolute);
-  const newFiles = present.files.filter((relative) => !recorded.has(relative));
   if (present.unsafe.length > 0) {
     return { status: "kept", reason: "unsafe_path", detail: "non_regular_entry", newFiles: present.unsafe };
   }
+  const expectedDirs = ancestorDirs(recorded.keys());
+  const newFiles = [
+    ...present.files.filter((relative) => !recorded.has(relative)),
+    ...present.dirs.filter((relative) => !expectedDirs.has(relative) && !recorded.has(relative)).map((dir) => `${dir}/`),
+  ];
   const modifiedFiles = [];
   const missingFiles = [];
   for (const [relative, file] of recorded) {
-    const resolved = resolveOwnedPath(anchor, `${sessionRelative}/${relative}`, { allowMissingLeaf: true });
+    let resolved;
+    try {
+      resolved = resolveOwnedPath(anchor, `${sessionRelative}/${relative}`, { allowMissingLeaf: true });
+    } catch (error) {
+      return { status: "kept", reason: "unsafe_path", detail: error?.code ?? null };
+    }
     if (resolved.leaf == null) {
       missingFiles.push(relative);
-    } else if (!identitiesEqual(ownedFileIdentity(resolved.absolute), file)) {
+    } else if (!resolved.leaf.isFile() || !identitiesEqual(ownedFileIdentity(resolved.absolute), file)) {
       modifiedFiles.push(relative);
     }
   }
@@ -767,7 +869,6 @@ function revertOneSession(anchor, record) {
     }
     removed.push(relative);
   }
-  const dirs = [...new Set(record.createdDirs ?? [])].sort((a, b) => b.length - a.length);
   const keptDirs = [];
   for (const dir of dirs) {
     const result = removeOwnedEmptyDirectory({ anchor, relative: dir });
