@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
+  fstatSync,
   fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -329,17 +330,15 @@ export function createWatchGrantRenewalRegistry({
  *   delivery ids, or credentials.
  * - Atomic: write tmp (0600) + fsync + rename over the target. Readers never see
  *   a torn file.
- * - Serialized: every read-modify-write runs under an O_EXCL sidecar lock that
- *   carries a per-write owner token. If the lock cannot be taken within
- *   `lockWaitMs` the write is skipped (no unlocked read-modify-write) and
- *   `record()` returns false with the sanitized code
- *   `progress_journal_lock_unavailable`. A lock is only broken when its owner
- *   pid is dead (or, for a lock with no parseable owner, after `staleLockMs`),
- *   so a live-but-paused writer keeps its lock through its commit. Breaking
- *   renames the lock aside and confirms it is the same stale file; a writer
- *   re-checks its token right before its rename and abandons the write if its
- *   lock was broken, and only ever releases its own lock. So a successful write
- *   (true) is never erased by another writer's stale snapshot.
+ * - Serialized: every read-modify-write runs under a kernel advisory lock
+ *   (Darwin O_EXLOCK) on the permanent sidecar `headless-progress.json.lock`,
+ *   held on an open fd until the rename commits. If the lock cannot be taken
+ *   within `lockWaitMs` the write is skipped (no unlocked read-modify-write)
+ *   and `record()` returns false with the sanitized code
+ *   `progress_journal_lock_unavailable`. The kernel releases the lock when its
+ *   owner exits, so there is no stale-lock takeover to race: a successful
+ *   write (true) is never erased by another writer's stale snapshot. Other
+ *   platforms fail closed (`progress_journal_lock_unsupported_platform`).
  * - Monotonic per field: an older stamp never overwrites a newer one.
  * - Best-effort: recording never throws into the drain; failures are logged
  *   with a sanitized code only.
@@ -370,17 +369,12 @@ function isValidProgressProfileName(value) {
     && !PROGRESS_PROFILE_CONTROL.test(value);
 }
 
-function defaultProgressPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
+// Darwin sys/fcntl.h. Duplicated from claimer-advisory-lock.mjs, which v5/v6
+// worker bundles do not ship.
+const PROGRESS_DARWIN_O_EXLOCK = 0x20;
+const PROGRESS_DARWIN_O_NOFOLLOW = 0x100;
 const PROGRESS_LANES = new Set(["cursor-acp", "worker", "event-driven", "codex-headless"]);
 const PROGRESS_LOCK_WAIT_MS = 250;
-const PROGRESS_LOCK_STALE_MS = 10_000;
 const PROGRESS_MAX_BYTES = 1024 * 1024;
 
 function progressSleepSync(milliseconds) {
@@ -412,8 +406,7 @@ export function createHeadlessProgressJournal({
   logger = null,
   pid = process.pid,
   lockWaitMs = PROGRESS_LOCK_WAIT_MS,
-  staleLockMs = PROGRESS_LOCK_STALE_MS,
-  pidAlive = defaultProgressPidAlive,
+  platform = process.platform,
 } = {}) {
   if (typeof clientRoot !== "string" || !path.isAbsolute(clientRoot) || clientRoot.includes("\0")) {
     throw new TypeError("clientRoot must be an absolute path");
@@ -422,89 +415,43 @@ export function createHeadlessProgressJournal({
   const filePath = path.join(clientRoot, HEADLESS_PROGRESS_FILE);
   const lockPath = `${filePath}.lock`;
 
-  function readLockToken() {
-    try {
-      return readFileSync(lockPath, "utf8");
-    } catch {
+  /**
+   * Mutual exclusion is a kernel advisory lock (Darwin O_EXLOCK) held on an
+   * open fd for the whole read-modify-write. The kernel drops it when the
+   * owner closes the fd or dies, so there is no stale-lock takeover: a live
+   * owner, however slow, can never be displaced, and a crashed owner never
+   * blocks the next writer. The lock file itself is permanent and is never
+   * unlinked (unlinking would let two writers lock different inodes).
+   *
+   * @returns {number|null} the locked fd, or null when not acquired in time.
+   */
+  function acquireLock() {
+    if (platform !== "darwin") {
+      throw Object.assign(new Error("progress journal lock requires macOS"), { code: "progress_journal_lock_unsupported_platform" });
+    }
+    const flags = fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_NONBLOCK
+      | PROGRESS_DARWIN_O_EXLOCK | PROGRESS_DARWIN_O_NOFOLLOW;
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      let fd;
+      try {
+        fd = openSync(lockPath, flags, 0o600);
+      } catch (error) {
+        if (error?.code !== "EAGAIN" && error?.code !== "EWOULDBLOCK") return null;
+        if (Date.now() >= deadline) return null;
+        progressSleepSync(5);
+        continue;
+      }
+      try {
+        if (fstatSync(fd).isFile()) return fd;
+      } catch {}
+      try { closeSync(fd); } catch {}
       return null;
     }
   }
 
-  /**
-   * A lock whose owner process is alive is never stale, however old: taking it
-   * over could let the paused owner later rename a stale snapshot over a newer
-   * successful write. A lock naming a dead owner is stale immediately; a lock
-   * without a parseable owner (mid-creation or foreign) only after staleLockMs.
-   */
-  function isLockStale(lockStat) {
-    const owner = /^(\d+):[0-9a-f]+$/.exec(readLockToken() ?? "");
-    if (owner) {
-      const ownerPid = Number(owner[1]);
-      let alive = true;
-      try {
-        alive = pidAlive(ownerPid) !== false;
-      } catch {
-        alive = true;
-      }
-      return !alive;
-    }
-    return Date.now() - lockStat.mtimeMs > staleLockMs;
-  }
-
-  /** Break a stale lock only if the file moved aside is the one judged stale. */
-  function breakStaleLock(staleStat) {
-    const aside = `${lockPath}.${pid}.${randomBytes(6).toString("hex")}.stale`;
-    try {
-      renameSync(lockPath, aside);
-    } catch {
-      return; // Already gone or replaced: just retry acquisition.
-    }
-    try {
-      const moved = statSync(aside);
-      if (moved.ino !== staleStat.ino || moved.dev !== staleStat.dev) {
-        // A fresh lock replaced the stale one before our rename: put it back
-        // unless someone already took the path (its owner then aborts safely).
-        try { linkSync(aside, lockPath); } catch {}
-      }
-    } catch {}
-    try { unlinkSync(aside); } catch {}
-  }
-
-  /** @returns {string|null} this write's owner token, or null when not acquired. */
-  function acquireLock() {
-    const token = `${pid}:${randomBytes(12).toString("hex")}`;
-    const deadline = Date.now() + lockWaitMs;
-    for (;;) {
-      try {
-        const fd = openSync(lockPath, "wx", 0o600);
-        try {
-          writeSync(fd, token);
-        } finally {
-          closeSync(fd);
-        }
-        return token;
-      } catch (error) {
-        if (error?.code !== "EEXIST") return null;
-        try {
-          const lockStat = statSync(lockPath);
-          if (isLockStale(lockStat)) {
-            breakStaleLock(lockStat);
-            continue;
-          }
-        } catch {
-          continue; // Lock vanished between open and stat: retry immediately.
-        }
-        if (Date.now() >= deadline) return null;
-        progressSleepSync(5);
-      }
-    }
-  }
-
-  function releaseLock(token) {
-    // Never delete a lock this write does not own (e.g. after a stale break).
-    if (readLockToken() === token) {
-      try { unlinkSync(lockPath); } catch {}
-    }
+  function releaseLock(fd) {
+    try { closeSync(fd); } catch {}
   }
 
   function readDocument() {
@@ -523,7 +470,7 @@ export function createHeadlessProgressJournal({
     }
   }
 
-  function writeDocument(document, token) {
+  function writeDocument(document) {
     const tmp = `${filePath}.${pid}.${randomBytes(6).toString("hex")}.tmp`;
     let fd = null;
     try {
@@ -532,9 +479,6 @@ export function createHeadlessProgressJournal({
       fsyncSync(fd);
       closeSync(fd);
       fd = null;
-      if (readLockToken() !== token) {
-        throw Object.assign(new Error("progress journal lock lost"), { code: "progress_journal_lock_lost" });
-      }
       renameSync(tmp, filePath);
     } catch (error) {
       if (fd != null) {
@@ -565,20 +509,22 @@ export function createHeadlessProgressJournal({
       }
       const at = new Date(now()).toISOString();
       mkdirSync(clientRoot, { recursive: true, mode: 0o700 });
-      const token = acquireLock();
-      if (token == null) {
+      const lockFd = acquireLock();
+      if (lockFd == null) {
         // Never fall back to an unlocked read-modify-write: it could replace a
         // concurrent writer's successful update with a stale snapshot.
         throw Object.assign(new Error("progress journal lock unavailable"), { code: "progress_journal_lock_unavailable" });
       }
       try {
         const current = readDocument() ?? {};
-        const profiles = current.profiles && typeof current.profiles === "object" && !Array.isArray(current.profiles)
-          ? { ...current.profiles }
-          : {};
-        const prior = profiles[profile] && typeof profiles[profile] === "object" && !Array.isArray(profiles[profile])
-          ? profiles[profile]
-          : {};
+        // Null-prototype map: every Swift ProfileName, including "__proto__",
+        // is stored as an own JSON property.
+        const profiles = Object.create(null);
+        if (current.profiles && typeof current.profiles === "object" && !Array.isArray(current.profiles)) {
+          for (const [name, row] of Object.entries(current.profiles)) profiles[name] = row;
+        }
+        const existing = Object.hasOwn(profiles, profile) ? profiles[profile] : null;
+        const prior = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
         profiles[profile] = {
           ...prior,
           lane,
@@ -590,9 +536,9 @@ export function createHeadlessProgressJournal({
           version: HEADLESS_PROGRESS_VERSION,
           updatedAt: laterIso(current.updatedAt, at),
           profiles,
-        }, token);
+        });
       } finally {
-        releaseLock(token);
+        releaseLock(lockFd);
       }
       return true;
     } catch (error) {

@@ -43,6 +43,27 @@ function tempClientRoot() {
   return { root, app, client, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+/** Hold the journal's kernel lock on a separate open file description. */
+function holdLock(lockPath) {
+  return fs.openSync(lockPath, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NONBLOCK | 0x20, 0o600);
+}
+
+/** True when some other open file description holds the exclusive lock. */
+function heldByOther(lockPath) {
+  if (!existsSync(lockPath)) return false;
+  try {
+    fs.closeSync(fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | 0x10));
+    return false;
+  } catch (error) {
+    if (error?.code === "EAGAIN" || error?.code === "EWOULDBLOCK") return true;
+    throw error;
+  }
+}
+
+function progressPause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function clock(start = Date.parse("2026-10-17T20:00:00.000Z")) {
   let current = start;
   return { now: () => current, advance(ms) { current += ms; } };
@@ -88,8 +109,10 @@ test("journal writes claim/reply/ack per profile atomically with the doctor sche
       lastClaimAt: "2026-10-17T20:00:03.000Z",
       updatedAt: "2026-10-17T20:00:03.000Z",
     });
-    // No temp or lock files left behind.
-    assert.deepEqual(readdirSync(client).sort(), [HEADLESS_PROGRESS_FILE]);
+    // No temp files left behind; the lock file is permanent (0600) and unheld.
+    assert.deepEqual(readdirSync(client).sort(), [HEADLESS_PROGRESS_FILE, `${HEADLESS_PROGRESS_FILE}.lock`]);
+    assert.equal(statSync(`${filePath}.lock`).mode & 0o777, 0o600);
+    assert.equal(heldByOther(`${filePath}.lock`), false);
   } finally {
     cleanup();
   }
@@ -149,31 +172,48 @@ test("journal is best-effort: invalid input or unwritable root returns false and
   }
 });
 
-test("journal breaks a stale lock and skips (never writes unlocked) when a live lock is held", () => {
+test("a held kernel lock makes a writer skip (never unlocked); a leftover lock file never blocks", () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
     const lockPath = `${filePath}.lock`;
-    writeFileSync(lockPath, "");
-    const old = new Date(Date.now() - 60_000);
+    // Leftover lock file from a crashed writer, however old: not a held lock.
+    writeFileSync(lockPath, "999999:leftover");
+    const old = new Date(Date.now() - 60 * 60_000);
     utimesSync(lockPath, old, old);
     const journal = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20 });
     assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), true);
-    assert.equal(existsSync(lockPath), false, "stale lock removed and our lock released");
+    assert.equal(heldByOther(lockPath), false, "our lock is released after the write");
 
     const before = readFileSync(filePath, "utf8");
-    writeFileSync(lockPath, "foreign-owner");
-    const logged = [];
-    const blocked = createHeadlessProgressJournal({
-      clientRoot: client, lockWaitMs: 20, logger: { error: (event, fields) => logged.push({ event, fields }) },
-    });
-    assert.equal(blocked.record({ profile: "ghost", lane: "cursor-acp", phase: "reply" }), false);
-    assert.equal(existsSync(lockPath), true, "a live foreign lock is never deleted");
-    assert.equal(readFileSync(lockPath, "utf8"), "foreign-owner");
-    assert.equal(readFileSync(filePath, "utf8"), before, "no unlocked read-modify-write");
-    assert.equal(JSON.parse(before).profiles.ghost.lastReplyAt, undefined);
-    assert.deepEqual(logged, [{ event: "triangle_client_progress_journal_write_failed", fields: { code: "progress_journal_lock_unavailable" } }]);
+    const held = holdLock(lockPath);
+    try {
+      const logged = [];
+      const blocked = createHeadlessProgressJournal({
+        clientRoot: client, lockWaitMs: 20, logger: { error: (event, fields) => logged.push({ event, fields }) },
+      });
+      assert.equal(blocked.record({ profile: "ghost", lane: "cursor-acp", phase: "reply" }), false);
+      assert.equal(readFileSync(filePath, "utf8"), before, "no unlocked read-modify-write");
+      assert.equal(JSON.parse(before).profiles.ghost.lastReplyAt, undefined);
+      assert.deepEqual(logged, [{ event: "triangle_client_progress_journal_write_failed", fields: { code: "progress_journal_lock_unavailable" } }]);
+    } finally {
+      fs.closeSync(held);
+    }
+    assert.equal(existsSync(lockPath), true, "the lock file is permanent; only the kernel lock comes and goes");
     assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".tmp")), [], "no temp files left behind");
+  } finally {
+    cleanup();
+  }
+});
+
+test("non-macOS platforms fail closed instead of writing unlocked", () => {
+  const { client, cleanup } = tempClientRoot();
+  try {
+    const logged = [];
+    const journal = createHeadlessProgressJournal({ clientRoot: client, platform: "linux", logger: { error: (_e, f) => logged.push(f.code) } });
+    assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), false);
+    assert.deepEqual(logged, ["progress_journal_lock_unsupported_platform"]);
+    assert.equal(existsSync(path.join(client, HEADLESS_PROGRESS_FILE)), false);
   } finally {
     cleanup();
   }
@@ -228,7 +268,7 @@ test("two-process contention: a writer that cannot lock returns false and cannot
     assert.equal(retry.status, 0, retry.stderr);
     assert.deepEqual(JSON.parse(retry.stdout.trim()), [true]);
     assert.deepEqual(Object.keys(JSON.parse(readFileSync(filePath, "utf8")).profiles).sort(), ["alice", "bob"]);
-    assert.equal(existsSync(`${filePath}.lock`), false);
+    assert.equal(heldByOther(`${filePath}.lock`), false);
   } finally {
     fs.renameSync = realRename;
     syncBuiltinESMExports();
@@ -258,89 +298,77 @@ test("concurrent real processes: no successful write is ever lost", async () => 
       }
     }
     assert.ok(successes > 0);
-    assert.equal(existsSync(path.join(client, `${HEADLESS_PROGRESS_FILE}.lock`)), false);
+    assert.equal(heldByOther(path.join(client, `${HEADLESS_PROGRESS_FILE}.lock`)), false);
     assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".tmp") || n.endsWith(".stale")), []);
   } finally {
     cleanup();
   }
 });
 
-test("a stale-broken writer abandons its write and never deletes the new owner's lock", () => {
-  const { client, cleanup } = tempClientRoot();
-  const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
-  const lockPath = `${filePath}.lock`;
-  const realFsync = fs.fsyncSync;
-  try {
-    const journal = createHeadlessProgressJournal({ clientRoot: client });
-    assert.equal(journal.record({ profile: "seed", lane: "worker", phase: "claim" }), true);
-    // While A is between reading the document and renaming its snapshot, its
-    // lock is (wrongly) judged stale and taken over by another owner.
-    let hijacked = false;
-    fs.fsyncSync = (fd) => {
-      realFsync(fd);
-      if (!hijacked) {
-        hijacked = true;
-        fs.unlinkSync(lockPath);
-        fs.writeFileSync(lockPath, "new-owner");
-      }
-    };
-    syncBuiltinESMExports();
-    const logged = [];
-    const a = createHeadlessProgressJournal({ clientRoot: client, logger: { error: (_e, f) => logged.push(f.code) } });
-    assert.equal(a.record({ profile: "alice", lane: "worker", phase: "claim" }), false);
-    assert.deepEqual(logged, ["progress_journal_lock_lost"]);
-    assert.equal(readFileSync(lockPath, "utf8"), "new-owner", "the new owner's lock survives");
-    assert.deepEqual(Object.keys(JSON.parse(readFileSync(filePath, "utf8")).profiles), ["seed"]);
-    assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".tmp")), []);
-  } finally {
-    fs.fsyncSync = realFsync;
-    syncBuiltinESMExports();
-    cleanup();
-  }
-});
-
-test("a live lock owner is never treated as stale, however old its lock (Codex review r1)", () => {
+test("a crashed lock owner is released by the kernel, so the next writer proceeds (Codex review r2)", async () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
     const lockPath = `${filePath}.lock`;
-    writeFileSync(lockPath, `${process.pid}:abcdef0123`);
-    const old = new Date(Date.now() - 60 * 60_000);
-    utimesSync(lockPath, old, old);
-    const journal = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20, staleLockMs: 10 });
-    assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), false);
-    assert.equal(readFileSync(lockPath, "utf8"), `${process.pid}:abcdef0123`, "live owner's lock kept");
-    assert.equal(existsSync(filePath), false);
-
-    // A lock naming a dead owner is broken at once, without waiting for staleLockMs.
-    writeFileSync(lockPath, "999999:abcdef0123");
-    const recovering = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20, pidAlive: (pid) => pid !== 999999 });
-    assert.equal(recovering.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), true);
-    assert.equal(existsSync(lockPath), false);
-    assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".stale")), []);
+    const source = `import fs from "node:fs";
+fs.openSync(${JSON.stringify(lockPath)}, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NONBLOCK | 0x20, 0o600);
+console.log("held");
+setInterval(() => {}, 1000);`;
+    const proc = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+    await new Promise((resolve, reject) => {
+      proc.stdout.on("data", (chunk) => { if (String(chunk).includes("held")) resolve(); });
+      proc.on("error", reject);
+      proc.on("close", (code) => reject(new Error(`holder exited ${code}`)));
+    });
+    const journal = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20 });
+    assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), false, "held by a live process");
+    const exited = new Promise((resolve) => proc.once("exit", resolve));
+    proc.kill("SIGKILL");
+    await exited;
+    assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), true, "released by the kernel on exit");
+    assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".tmp") || n.endsWith(".stale")), []);
   } finally {
     cleanup();
   }
 });
 
-test("two processes: a writer paused past staleLockMs keeps its lock, so no successful write is overwritten (Codex review r1)", () => {
+test("a live owner keeps the lock however long it holds it (Codex review r1/r2)", () => {
+  const { client, cleanup } = tempClientRoot();
+  try {
+    const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
+    const lockPath = `${filePath}.lock`;
+    const held = holdLock(lockPath);
+    try {
+      progressPause(60);
+      const journal = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20 });
+      assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), false);
+      assert.equal(existsSync(filePath), false);
+    } finally {
+      fs.closeSync(held);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("two processes: a paused writer keeps its lock, so no successful write is overwritten (Codex review r1/r2)", () => {
   const { client, cleanup } = tempClientRoot();
   const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
   const realRename = fs.renameSync;
   let child = null;
   try {
-    // A (this live process) pauses at its rename well past B's staleLockMs.
+    // A (this live process) pauses at its rename well past B's lock wait.
     fs.renameSync = (src, dst) => {
       if (dst === filePath && child == null) {
         const source = `import {createHeadlessProgressJournal} from ${JSON.stringify(SUPERVISOR_URL)};
-const j = createHeadlessProgressJournal({clientRoot: ${JSON.stringify(client)}, staleLockMs: 20, lockWaitMs: 300});
+const j = createHeadlessProgressJournal({clientRoot: ${JSON.stringify(client)}, lockWaitMs: 300});
 console.log(JSON.stringify([j.record({profile: "bob", lane: "worker", phase: "claim"})]));`;
         child = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8" });
       }
       return realRename(src, dst);
     };
     syncBuiltinESMExports();
-    const journal = createHeadlessProgressJournal({ clientRoot: client, staleLockMs: 20 });
+    const journal = createHeadlessProgressJournal({ clientRoot: client });
     const aResult = journal.record({ profile: "alice", lane: "worker", phase: "claim" });
     fs.renameSync = realRename;
     syncBuiltinESMExports();
@@ -378,6 +406,26 @@ test("progress accepts every Swift ProfileName (spaces, non-ASCII, dots, 64 byte
       assert.equal(journal.record({ profile: bad, lane: "worker", phase: "claim" }), false, JSON.stringify(bad));
       assert.throws(() => journal.forProfile(bad, "worker"), TypeError);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("profile names that are Object.prototype keys are stored as own properties (Codex review r2)", () => {
+  const { client, cleanup } = tempClientRoot();
+  try {
+    const journal = createHeadlessProgressJournal({ clientRoot: client });
+    for (const name of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      assert.equal(journal.forProfile(name, "worker").record("claim"), true, name);
+    }
+    assert.equal(journal.record({ profile: "__proto__", lane: "worker", phase: "reply" }), true);
+    const raw = readFileSync(path.join(client, HEADLESS_PROGRESS_FILE), "utf8");
+    const doc = JSON.parse(raw);
+    assert.deepEqual(Object.keys(doc.profiles).sort(), ["__proto__", "constructor", "hasOwnProperty", "toString"]);
+    assert.ok(Object.hasOwn(doc.profiles, "__proto__"));
+    assert.equal(typeof doc.profiles.__proto__.lastClaimAt, "string");
+    assert.equal(typeof doc.profiles.__proto__.lastReplyAt, "string");
+    assert.equal(Object.getPrototypeOf(doc.profiles), Object.prototype, "JSON stays a plain object");
   } finally {
     cleanup();
   }
