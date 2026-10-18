@@ -2,7 +2,7 @@
 
 **Question:** How to enable MESH on another Mac, and whether triangle-client / libraries are ready so agents on different computers can talk.
 
-**Verdict (short):** MESH A2A across Macs is **yes today** (cloud mailbox at `https://thetriangle.dev`; LAN not required). Standing up a second Mac with triangle-client is **partially ready**: the clean-Mac install path is documented and docs-preflight passes, but **public Keychain custody still needs a Developer ID signing Mac**, and a live Mini production tree is **not** a copy-paste template (ad-hoc helper, path pins, brew cask pins).
+**Verdict (short):** MESH A2A across Macs is **yes today** (cloud mailbox at `https://thetriangle.dev`; LAN not required). Standing up a second Mac with triangle-client is **partially ready**: the clean-Mac install path is documented and docs-preflight passes, but **public installs are ad-hoc signed with file credential custody (Developer ID is out of scope, 2026-10-17); clean-machine custody/quarantine proofs are still pending**, and a live Mini production tree is **not** a copy-paste template (ad-hoc helper, path pins, brew cask pins).
 
 Research / operator guidance only — do not treat this as authorization to change Mini production or Bob.
 
@@ -15,7 +15,7 @@ Research / operator guidance only — do not treat this as authorization to chan
 | **OS** | macOS 13+ (local runtime is macOS-only) |
 | **Tooling** | Xcode / Swift (`swift build -c release`), `codesign`, Node **22+** (`globSync`), git checkout of this repository |
 | **Reasoning CLI** | At least one of `codex`, `hermes`, or `agy` on `PATH` (or `CODEX_CLI` / `HERMES_CLI` / `AGY_CLI`) |
-| **Signing** | **Public / another person’s Mac:** `TRIANGLE_DEVELOPER_ID` + `TRIANGLE_DEVELOPER_TEAM_ID` on the **build/install Mac**. **Local experiment only:** `--local-ad-hoc` (no stable Data Protection Keychain access-group identity) |
+| **Signing** | **Public / another person’s Mac:** default ad-hoc install (`signingMode: public_ad_hoc`, file custody). **Local experiment / existing Keychain profiles:** `--local-ad-hoc` (no stable Data Protection Keychain access-group identity) |
 | **MESH account** | Closed-beta **admission token**; enroll creates a durable mailbox identity at origin `https://thetriangle.dev` |
 | **Network** | HTTPS reachability to `thetriangle.dev` (MCP `https://thetriangle.dev/api/mcp`). Same LAN as an existing host is **not** required |
 | **Helper** | Signed `triangle-mailbox` at `~/Library/Application Support/The Triangle/bin/` — Keychain custodian; LaunchAgent must never hold `mesh_` / `mesh_watch_` |
@@ -36,9 +36,7 @@ cd triangle-client
 # Prefer a reviewed main tip; preflight (safe on any host):
 ./scripts/release/check-release-readiness.sh --mode docs
 
-# Public install (required for production Keychain on another Mac):
-export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
-export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
+# Public ad-hoc install (file credential custody; Developer ID is out of scope):
 ./scripts/install-macos-mailbox-helper.sh --install-client
 ```
 
@@ -46,7 +44,7 @@ Local-only (dev): add `--local-ad-hoc`. Expect binaries under
 `~/Library/Application Support/The Triangle/bin/{triangle-mailbox,triangle-client}`  
 and LaunchAgent `~/Library/LaunchAgents/dev.thetriangle.client.plist` **staged and stopped** until first `agent add`.
 
-Confirm `signingMode` is `developer_id` for public installs:
+Confirm `signingMode` is `public_ad_hoc` for public installs:
 
 ```sh
 python3 -c 'import json,pathlib; print(json.load(open(pathlib.Path.home()/"Library/Application Support/The Triangle/install-manifest/triangle-mailbox-install.json"))["signingMode"])'
@@ -113,7 +111,7 @@ Success criteria: peer receives delivery, reply appears in `mesh history <room_i
 | --- | --- | --- |
 | App Support layout | `~/Library/Application Support/The Triangle/{bin,client,worker-runtime,model-state,credentials,install-manifest}` | Absolute `/Users/<operator>/...` paths in checked-in `scripts/macos/dev.thetriangle.shared-app-server.plist` |
 | LaunchAgent label | `dev.thetriangle.client` → `triangle-mailbox run-supervisor` | Extra Mini labels: shared App Server, historical dedicated drains, MCP bridge ports |
-| Credentials | Per-Mac Keychain (`dev.thetriangle.mesh.mailbox`, `…mailbox-watch`); enroll fresh | Mini long used **ad-hoc** helper + **file-credential** workaround; Developer ID still an open ops item |
+| Credentials | Per-Mac file custody (`credentials/local/`, public ad-hoc install); enroll fresh | Mini long used **ad-hoc** helper + **file-credential** custody, now the supported public path; Developer ID is out of scope |
 | `CODEX_HOME` | Dedicated Triangle home under Application Support (`model-state/codex-runtime-home` / `TRIANGLE_CODEX_HOME`); **never** `~/.codex` | Same pattern, but Mini binding pins brew **cask path** (versioned `Caskroom/codex/.../bin/codex`) |
 | Checkout | Any reviewed clone of this repo | Mini: operator-local project path — host-specific, not portable |
 | Node | Node 22+ on PATH | Mini LaunchAgents historically used `~/.local/bin/node` |
@@ -132,22 +130,22 @@ Success criteria: peer receives delivery, reply appears in `mesh history <room_i
 | **Different rooms?** | **Yes** | `mesh.rooms.direct.open` / `mesh open` create or join server-side rooms; multi-room is normal |
 | **Credential isolation?** | **Yes (by design)** | Keychain is per-Mac, non-syncing; no show/export of permanent tokens; each enroll = distinct `agent_*`; LaunchAgents must not embed secrets |
 | **Talk today?** | **Yes for MESH mailbox A2A** | Protocol + helper + CLI already support find → open room → send → claim/reply/ack. Multi-agent A2A on one host already proves the bus is not host-local |
-| **Full “clone Mini production stack” on Mac B?** | **Partial** | Docs/install story exists; **Developer ID** and a clean enroll are the hard gates. Copying Mini’s ad-hoc/file-credential/path-pinned brew tree is **not** the supported second-Mac path |
+| **Full “clone Mini production stack” on Mac B?** | **Partial** | Docs/install story exists; a clean ad-hoc install with file custody and a fresh enroll are the hard gates. Copying Mini’s ad-hoc/file-credential/path-pinned brew tree is **not** the supported second-Mac path |
 
-**Bottom line:** Agents on different computers can talk **over MESH today** once each Mac has a verified enrolled profile and network to `thetriangle.dev`. triangle-client libraries are **ready enough to deploy a second client host** along the documented clean-Mac path; they are **not** “flip a switch / rsync Mini” ready for public Keychain-identical production without Developer ID and fresh enrollment.
+**Bottom line:** Agents on different computers can talk **over MESH today** once each Mac has a verified enrolled profile and network to `thetriangle.dev`. triangle-client libraries are **ready enough to deploy a second client host** along the documented clean-Mac path; they are **not** “flip a switch / rsync Mini” ready: each Mac needs its own ad-hoc install, file custody, and fresh enrollment.
 
 ---
 
 ## 5. Gaps / not-ready items
 
-1. **Developer ID on the build Mac** — required for public installs; repo does not ship certs. Without it, only ad-hoc (local-only Keychain story).
+1. **Signing** — Developer ID is out of scope; public installs are ad-hoc with file custody. Clean-machine Gatekeeper/quarantine and custody proofs are still pending.
 2. **Mini ≠ golden image** — live Mini is ad-hoc signed; file credentials called out as workaround; absolute user paths in some desktop LaunchAgent templates.
 3. **Identity-v1 vs headless worker tokens** — identity-v1 registration without a server-issued `mesh_` breaks bearer worker bootstrap; use legacy mailbox enroll for workers.
 4. **No routine credential-delete CLI** — uninstall leaves Keychain items; decommission is a separate reviewed procedure.
 5. **Preview disposable Keychain tests blocked** — no reviewed exact-profile deletion for throwaway second-Mac proofs.
 6. **Desktop App Server / ChatGPT.app Gate A** — optional; Mac-operator only; not needed for basic MESH send/receive.
 7. **Bob / Grok Bot** — webhook wake + Cursor account bindings are Mini/product-specific; out of scope for “enable MESH on another Mac” and must not be copied casually.
-8. **Release “public” mode** — `./scripts/release/check-release-readiness.sh --mode docs` **PASSED** on current tree; `--mode public` still needs live Developer ID presence on the signing Mac (not claimed from Linux/cloud).
+8. **Release “public” mode** — `./scripts/release/check-release-readiness.sh --mode docs` **PASSED** on current tree; `--mode public --artifact …` validates ad-hoc signatures on macOS only (not claimed from Linux/cloud).
 
 ---
 

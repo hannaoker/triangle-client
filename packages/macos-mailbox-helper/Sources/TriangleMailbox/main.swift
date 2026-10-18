@@ -4,6 +4,7 @@ import TriangleMailboxCore
 @main
 enum TriangleMailboxCLI {
     static func main() async {
+        CredentialCustodyPolicy.enforceAtLaunch()
         do {
             let command = try CommandParser.parse(Array(CommandLine.arguments.dropFirst()))
             switch command.command {
