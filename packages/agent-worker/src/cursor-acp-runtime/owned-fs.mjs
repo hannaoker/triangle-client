@@ -21,10 +21,13 @@
 import { createHash } from "node:crypto";
 import {
   constants as fsConstants,
+  closeSync,
   copyFileSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
+  readSync,
   realpathSync,
   rmdirSync,
   unlinkSync,
@@ -130,14 +133,34 @@ export function resolveOwnedPath(anchor, relative, {
   throw createCodedError("owned_path_invalid", "unreachable");
 }
 
+const IDENTITY_HASH_CHUNK_BYTES = 1024 * 1024;
+
 /** Snapshot identity of a regular file (never follows symlinks). */
 export function ownedFileIdentity(absolute) {
   const stat = lstatSync(absolute);
   if (!stat.isFile()) {
     throw createCodedError("owned_path_not_file", "identity requires a regular file");
   }
-  const sha256 = createHash("sha256").update(readFileSync(absolute)).digest("hex");
-  return Object.freeze({ size: stat.size, mtimeMs: stat.mtimeMs, sha256 });
+  // Stream the hash in fixed chunks: a multi-GB store.db/transcript must not
+  // be read into one buffer (readFileSync caps at 2 GiB and spikes memory).
+  // O_NOFOLLOW + same-inode check keep the no-symlink guarantee.
+  const fd = openSync(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.ino !== stat.ino || opened.dev !== stat.dev) {
+      throw createCodedError("owned_path_not_file", "identity target changed while hashing");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(IDENTITY_HASH_CHUNK_BYTES);
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+    }
+    return Object.freeze({ size: opened.size, mtimeMs: opened.mtimeMs, sha256: hash.digest("hex") });
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function identitiesEqual(left, right) {

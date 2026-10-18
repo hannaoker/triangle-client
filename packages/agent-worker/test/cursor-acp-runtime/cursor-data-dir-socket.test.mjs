@@ -1017,6 +1017,29 @@ test("codex r2: transcript apply runs the socket preflight before creating or co
   }
 });
 
+test("codex #88 r1: transcript preflight checks the PHYSICAL data dir below a short symlink", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const workspace = path.join(home, "ws6");
+    seedLegacyTranscripts(home, workspace);
+    // Short lexical alias -> long physical dir; the data dir itself is missing.
+    const longPhysical = path.join(home, "L".repeat(90));
+    mkdirSync(longPhysical, { mode: 0o700 });
+    symlinkSync(longPhysical, path.join(home, "s"), "dir");
+    const cursorDataDir = path.join(home, "s", "cd");
+    assert.ok(path.join(cursorDataDir, "projects").length <= 84, "lexical path alone would pass");
+    const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir, workspacePaths: [workspace] });
+    assert.equal(plan.socketPreflight.ok, false, "plan reports the physical socket problem");
+    assert.throws(
+      () => applyLegacyCursorTranscriptCopy({ home, cursorDataDir, workspacePaths: [workspace] }),
+      { code: "cursor_socket_path_too_long" },
+    );
+    assert.deepEqual(readdirSync(longPhysical), [], "nothing created below the long physical dir");
+  } finally {
+    cleanup();
+  }
+});
+
 test("runtime status preflights the configured workspace, not just the data dir", () => {
   const { home, cursorHome, cleanup } = fixture();
   try {

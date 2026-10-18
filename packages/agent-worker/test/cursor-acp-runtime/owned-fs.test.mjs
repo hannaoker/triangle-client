@@ -3,6 +3,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  closeSync,
+  ftruncateSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -19,6 +22,7 @@ import {
   copyFileIntoOwned,
   ensureOwnedDirectory,
   normalizeOwnedRelative,
+  ownedFileIdentity,
   removeOwnedEmptyDirectory,
   removeOwnedFileIfUnchanged,
   resolveOwnedPath,
@@ -122,6 +126,26 @@ test("directory removal is never recursive and never follows symlinks", () => {
     assert.ok(existsSync(outside));
     rmSync(path.join(anchor, "x/y/keep.txt"));
     assert.equal(removeOwnedEmptyDirectory({ anchor, relative: "x/y" }).status, "removed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex #88 r1: file identity hashes in chunks (files larger than one Node buffer read)", () => {
+  const { anchor, cleanup } = fixture();
+  try {
+    // Sparse file just over readFileSync's 2 GiB cap: whole-file reads throw
+    // ERR_FS_FILE_TOO_LARGE, streaming the hash must not.
+    const big = path.join(anchor, "store.db");
+    const fd = openSync(big, "w");
+    try {
+      ftruncateSync(fd, 2 ** 31 + 1);
+    } finally {
+      closeSync(fd);
+    }
+    const identity = ownedFileIdentity(big);
+    assert.equal(identity.size, 2 ** 31 + 1);
+    assert.match(identity.sha256, /^[0-9a-f]{64}$/);
   } finally {
     cleanup();
   }

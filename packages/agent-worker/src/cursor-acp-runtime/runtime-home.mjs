@@ -1234,8 +1234,10 @@ export function planLegacyCursorTranscriptCopy({
       files: Object.freeze(entries),
     });
   });
+  // Preflight where the data dir physically is (or WOULD be created): a
+  // missing dir below a short symlink resolves to the long target later.
   const socketPlan = planCursorSocketPaths({
-    dataDir: anchor,
+    dataDir: physicalProjection(anchor),
     workspacePaths: workspaces.map((entry) => entry.workspacePath),
   });
   return Object.freeze({
@@ -1286,14 +1288,16 @@ export function applyLegacyCursorTranscriptCopy({
 } = {}) {
   // Fail closed BEFORE creating or copying anything: never migrate context
   // into a data dir the ACP runtime would refuse (cursor_socket_path_too_long).
+  // The check runs on the PHYSICAL projection (a missing dir below a short
+  // symlink is created at the symlink target), and again on the created
+  // realpath before any copy, matching what the runtime later checks.
+  const preflightWorkspaces = assertWorkspacePaths(workspacePaths).map((entry) => entry.workspacePath);
   {
     const { anchor: candidate } = legacyTranscriptRoots({ home, cursorDataDir });
-    assertCursorSocketPathsFit({
-      dataDir: candidate,
-      workspacePaths: assertWorkspacePaths(workspacePaths).map((entry) => entry.workspacePath),
-    });
+    assertCursorSocketPathsFit({ dataDir: physicalProjection(candidate), workspacePaths: preflightWorkspaces });
   }
   const { anchor, sourceAnchor } = legacyTranscriptRoots({ home, cursorDataDir, allowCreate: true });
+  assertCursorSocketPathsFit({ dataDir: anchor, workspacePaths: preflightWorkspaces });
   const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: anchor, workspacePaths });
   const projectsCreated = ensureOwnedDirectory(anchor, PROJECTS_DIRNAME).length > 0;
   const { manifestPath, manifest } = readTranscriptManifest(anchor);
