@@ -1243,6 +1243,9 @@ export function createMailboxClient(
           if (existing.found) {
             metadata.replyPersisted = true;
             reconciled = true;
+            // A verified durable reply (e.g. its append response was lost) is
+            // reply evidence too; the stamp is when it was verified.
+            emitProgress("reply");
           } else {
             assertStillOwner(metadata, ownedSignal);
             // Runner calls are at-least-once; adapters must dedupe using messageId/taskId.

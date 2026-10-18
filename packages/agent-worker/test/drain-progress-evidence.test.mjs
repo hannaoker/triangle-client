@@ -17,12 +17,16 @@ import {
   createHeadlessProgressJournal,
   defaultHeadlessProgressClientRoot,
 } from "../src/client-supervisor.mjs";
-import { resolveProgressClientRoot } from "../src/client-supervisor-cli.mjs";
+import { progressClientRootFromModule, resolveProgressClientRoot } from "../src/client-supervisor-cli.mjs";
 import { instrumentCursorAcpProgress } from "../src/cursor-acp-runtime/headless-drain-service.mjs";
 import { createHeadlessCursorAcpDrain } from "../src/cursor-acp-runtime/headless-drain.mjs";
 
 const SENTINEL_TOKEN = "mesh_SENTINEL_TOKEN_must_never_be_journaled_0123456789";
 const SENTINEL_BODY = "SENTINEL BODY must never be journaled";
+
+// The progress journal's lock is Darwin O_EXLOCK and fails closed elsewhere
+// (the supervisor only runs on macOS), so tests that expect writes are macOS-only.
+const DARWIN_JOURNAL = process.platform === "darwin" ? {} : { skip: "progress journal lock is Darwin-only (O_EXLOCK)" };
 
 function instanceIdFor(profile) {
   return createHash("sha256")
@@ -77,7 +81,7 @@ function registryRow(client, profile, runtimeAdapter, deliveryMode) {
   return instanceId;
 }
 
-test("journal writes claim/reply/ack per profile atomically with the doctor schema", () => {
+test("journal writes claim/reply/ack per profile atomically with the doctor schema", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const time = clock();
@@ -118,7 +122,7 @@ test("journal writes claim/reply/ack per profile atomically with the doctor sche
   }
 });
 
-test("journal is monotonic, preserves foreign keys, and replaces a corrupt file", () => {
+test("journal is monotonic, preserves foreign keys, and replaces a corrupt file", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
@@ -172,7 +176,7 @@ test("journal is best-effort: invalid input or unwritable root returns false and
   }
 });
 
-test("a held kernel lock makes a writer skip (never unlocked); a leftover lock file never blocks", () => {
+test("a held kernel lock makes a writer skip (never unlocked); a leftover lock file never blocks", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
@@ -231,7 +235,7 @@ for (let i = 0; i < ${count}; i += 1) out.push(j.record({profile: ${JSON.stringi
 console.log(JSON.stringify(out));`;
 }
 
-test("two-process contention: a writer that cannot lock returns false and cannot erase or be erased (review F5 repro)", async () => {
+test("two-process contention: a writer that cannot lock returns false and cannot erase or be erased (review F5 repro)", DARWIN_JOURNAL, async () => {
   const { client, cleanup } = tempClientRoot();
   const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
   const realRename = fs.renameSync;
@@ -276,7 +280,7 @@ test("two-process contention: a writer that cannot lock returns false and cannot
   }
 });
 
-test("concurrent real processes: no successful write is ever lost", async () => {
+test("concurrent real processes: no successful write is ever lost", DARWIN_JOURNAL, async () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const profiles = ["p0", "p1", "p2", "p3", "p4", "p5"];
@@ -305,7 +309,7 @@ test("concurrent real processes: no successful write is ever lost", async () => 
   }
 });
 
-test("a crashed lock owner is released by the kernel, so the next writer proceeds (Codex review r2)", async () => {
+test("a crashed lock owner is released by the kernel, so the next writer proceeds (Codex review r2)", DARWIN_JOURNAL, async () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
@@ -332,7 +336,7 @@ setInterval(() => {}, 1000);`;
   }
 });
 
-test("a live owner keeps the lock however long it holds it (Codex review r1/r2)", () => {
+test("a live owner keeps the lock however long it holds it (Codex review r1/r2)", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
@@ -351,7 +355,7 @@ test("a live owner keeps the lock however long it holds it (Codex review r1/r2)"
   }
 });
 
-test("two processes: a paused writer keeps its lock, so no successful write is overwritten (Codex review r1/r2)", () => {
+test("two processes: a paused writer keeps its lock, so no successful write is overwritten (Codex review r1/r2)", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
   const realRename = fs.renameSync;
@@ -387,7 +391,7 @@ console.log(JSON.stringify([j.record({profile: "bob", lane: "worker", phase: "cl
   }
 });
 
-test("progress accepts every Swift ProfileName (spaces, non-ASCII, dots, 64 bytes) via forInstance and forProfile (Codex review r1)", () => {
+test("progress accepts every Swift ProfileName (spaces, non-ASCII, dots, 64 bytes) via forInstance and forProfile (Codex review r1)", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const names = ["Agent One", "café", "Agent_One.v2", `w${"é".repeat(31)}x`.slice(0, 33), "x".repeat(64)];
@@ -411,7 +415,7 @@ test("progress accepts every Swift ProfileName (spaces, non-ASCII, dots, 64 byte
   }
 });
 
-test("profile names that are Object.prototype keys are stored as own properties (Codex review r2)", () => {
+test("profile names that are Object.prototype keys are stored as own properties (Codex review r2)", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const journal = createHeadlessProgressJournal({ clientRoot: client });
@@ -457,6 +461,29 @@ test("progress client root follows the helper install, else HOME", () => {
     "/Users/u/Library/Application Support/The Triangle/client",
   );
   assert.equal(defaultHeadlessProgressClientRoot({}), null);
+  // Worker-only supervisor: no helper path and no HOME (the Swift coordinator
+  // passes only PATH/LANG/LC_ALL/NO_COLOR), so the root comes from the bundle
+  // the CLI runs from (Codex review r3).
+  const bundleCli = pathToFileURL(`/Users/u/Library/Application Support/The Triangle/worker-runtime/bundles/${"a".repeat(64)}/packages/agent-worker/src/client-supervisor-cli.mjs`).href;
+  assert.equal(
+    resolveProgressClientRoot({ instances: [] }, {}, bundleCli),
+    "/Users/u/Library/Application Support/The Triangle/client",
+  );
+  assert.equal(progressClientRootFromModule(bundleCli), "/Users/u/Library/Application Support/The Triangle/client");
+  for (const notBundle of [
+    pathToFileURL("/repo/packages/agent-worker/src/client-supervisor-cli.mjs").href,
+    pathToFileURL(`/x/worker-runtime/bundles/${"g".repeat(64)}/packages/agent-worker/src/client-supervisor-cli.mjs`).href,
+    pathToFileURL(`/x/worker-runtime/other/${"a".repeat(64)}/packages/agent-worker/src/client-supervisor-cli.mjs`).href,
+    "not a url",
+  ]) {
+    assert.equal(progressClientRootFromModule(notBundle), null, notBundle);
+  }
+  assert.equal(resolveProgressClientRoot({ instances: [] }, {}, pathToFileURL("/repo/packages/agent-worker/src/client-supervisor-cli.mjs").href), null);
+  // A helper path still wins over the bundle location.
+  assert.equal(
+    resolveProgressClientRoot({ eventWake: { helperPath: "/opt/T/bin/triangle-mailbox" } }, {}, bundleCli),
+    "/opt/T/client",
+  );
 });
 
 function fakeCursorAcpRuntime(proxy, { failReply = false } = {}) {
@@ -501,7 +528,7 @@ const DELIVERY = Object.freeze({
   replyRequired: true,
 });
 
-test("Cursor ACP drain records claim, reply, and ack through the instrumented helper proxy", async () => {
+test("Cursor ACP drain records claim, reply, and ack through the instrumented helper proxy", DARWIN_JOURNAL, async () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const time = clock();
@@ -542,7 +569,7 @@ test("Cursor ACP drain records claim, reply, and ack through the instrumented he
   }
 });
 
-test("Cursor ACP drain records no reply/ack when the helper reply fails, and errors still propagate", async () => {
+test("Cursor ACP drain records no reply/ack when the helper reply fails, and errors still propagate", DARWIN_JOURNAL, async () => {
   const { client, cleanup } = tempClientRoot();
   try {
     const journal = createHeadlessProgressJournal({ clientRoot: client });
@@ -604,7 +631,7 @@ function workerInstance(profile) {
   };
 }
 
-test("supervisor wires worker mailbox progress and Cursor ACP drain progress into the journal", () => {
+test("supervisor wires worker mailbox progress and Cursor ACP drain progress into the journal", DARWIN_JOURNAL, () => {
   const { client, cleanup } = tempClientRoot();
   try {
     registryRow(client, "gravity2", "antigravity", "worker");
@@ -703,6 +730,8 @@ function inventoryFixture(helpers) {
   registryRow(client, "gravity2", "antigravity", "worker");
   for (const profile of ["ghost", "gravity2"]) helpers.writeEnrollment(app, profile);
   helpers.writeInstallationIdentity(client);
+  // Registry custody Swift requires (helper present once #82 has it).
+  helpers.secureRegistry?.(app);
   writeJson(path.join(client, "cursor-acp-runtime-binding.json"), {
     version: 1,
     common: { adapterVersion: "1", installationId: helpers.FIXTURE_INSTALLATION_ID, workingDirectory: root, cursorHome: path.join(app, "cursor-home"), command: agent, pollIntervalMs: 30000 },
@@ -716,7 +745,7 @@ function inventoryFixture(helpers) {
   return fixture;
 }
 
-test("doctor inventory: ghost and gravity2 are degraded without evidence and ok once the drains record it", async (t) => {
+test("doctor inventory: ghost and gravity2 are degraded without evidence and ok once the drains record it", DARWIN_JOURNAL, async (t) => {
   const inventory = await loadInventory();
   if (inventory == null) {
     t.skip("installation-inventory.mjs (PR #82) not on this branch");
@@ -763,7 +792,7 @@ test("doctor inventory: ghost and gravity2 are degraded without evidence and ok 
   }
 });
 
-test("doctor inventory: a drain's first claim stamp never masks a stalled open transaction (review F3 with #85)", async (t) => {
+test("doctor inventory: a drain's first claim stamp never masks a stalled open transaction (review F3 with #85)", DARWIN_JOURNAL, async (t) => {
   const inventory = await loadInventory();
   if (inventory == null || typeof inventory.evaluateOpenTransaction !== "function") {
     t.skip("installation-inventory.mjs with the open-transaction policy (PR #82) not on this branch");

@@ -800,12 +800,36 @@ async function waitForPrivateActivation({ path: markerPath, generation, parentPi
   throw new Error("activation timed out");
 }
 
+const WORKER_BUNDLE_CLI_SUFFIX = ["packages", "agent-worker", "src"];
+
+/**
+ * `<app>/client` when this CLI runs from a verified worker bundle
+ * (`<app>/worker-runtime/bundles/<sha256>/packages/agent-worker/src`), the
+ * path the Swift coordinator launches; else null.
+ */
+export function progressClientRootFromModule(moduleUrl = import.meta.url) {
+  let dir;
+  try {
+    dir = path.dirname(fileURLToPath(moduleUrl));
+  } catch {
+    return null;
+  }
+  const parts = dir.split(path.sep);
+  const n = parts.length;
+  if (n < 7 || parts.slice(n - 3).join("/") !== WORKER_BUNDLE_CLI_SUFFIX.join("/")) return null;
+  if (!/^[a-f0-9]{64}$/.test(parts[n - 4]) || parts[n - 5] !== "bundles" || parts[n - 6] !== "worker-runtime") return null;
+  const app = parts.slice(0, n - 6).join(path.sep);
+  return app.startsWith("/") ? path.join(app, "client") : null;
+}
+
 /**
  * Client root for headless-progress.json: next to the helper's install
  * (`<root>/bin/triangle-mailbox` → `<root>/client`, the same directory the
- * claimer locks use), else `$HOME/Library/Application Support/The Triangle/client`.
+ * claimer locks use); else beside the worker bundle this CLI was launched
+ * from (worker-only supervisors get no helper path, and the coordinator's
+ * environment carries no HOME); else `$HOME/Library/Application Support/The Triangle/client`.
  */
-export function resolveProgressClientRoot(bootstrap, env = process.env) {
+export function resolveProgressClientRoot(bootstrap, env = process.env, moduleUrl = import.meta.url) {
   const helperPaths = [
     bootstrap?.eventWake?.helperPath,
     bootstrap?.appServerWake?.helperPath,
@@ -817,7 +841,7 @@ export function resolveProgressClientRoot(bootstrap, env = process.env) {
       return path.resolve(path.dirname(helperPath), "..", "client");
     }
   }
-  return defaultHeadlessProgressClientRoot(env);
+  return progressClientRootFromModule(moduleUrl) ?? defaultHeadlessProgressClientRoot(env);
 }
 
 export async function runClientSupervisorCLI({

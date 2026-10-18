@@ -2430,3 +2430,58 @@ test("onProgress must be a function when provided", () => {
     recipientId: "agent_11111111111111111111111111111111",
   }, { fetchImpl: async () => json({}), onProgress: "nope" }), /onProgress must be a function/);
 });
+
+test("onProgress records reply evidence when a retry verifies a reply whose append response was lost (Codex review r3)", async () => {
+  const phases = [];
+  let appendCall = 0;
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: { items: [{
+      deliveryId: 44,
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      eventId: "event_00000000000000000000000000000002",
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }] },
+    roomHistoryByRoom: new Map([["room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [canonicalEvent({
+      id: "event_00000000000000000000000000000002",
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      text: "please reply",
+    })]]]),
+    appendEvent: (roomId, body, stateObj) => {
+      stateObj.appendCount += 1;
+      const existing = stateObj.roomHistoryByRoom.get(roomId) ?? [];
+      const event = {
+        id: "event_00000000000000000000000000000016",
+        roomId,
+        sequence: existing.reduce((value, row) => Math.max(value, row.sequence), 0) + 1,
+        senderAgentId: "agent_11111111111111111111111111111111",
+        type: "message.created",
+        idempotencyKey: body.idempotency_key,
+        body: body.body,
+      };
+      existing.push(event);
+      stateObj.roomHistoryByRoom.set(roomId, existing);
+      appendCall += 1;
+      if (appendCall === 1) throw new Error("reply response dropped");
+      return { event };
+    },
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, { fetchImpl, onProgress: (event) => phases.push(event.phase) });
+  const [message] = await client.listUnread();
+  const generate = () => ({ status: "completed", text: "reply text" });
+  await assert.rejects(client.completeAndAcknowledge(message, generate), /response dropped/);
+  assert.deepEqual(phases, ["claim"], "an unconfirmed append is not evidence");
+  const result = await client.completeAndAcknowledge(message, generate);
+  assert.deepEqual(result, { reconciled: true, acknowledged: true });
+  assert.equal(state.appendCount, 1);
+  assert.deepEqual(phases, ["claim", "claim", "reply", "ack"]);
+});
