@@ -474,6 +474,21 @@ export function instrumentCursorAcpProgress({ transactionProxy, progress = null,
   }
   const instrumented = Object.freeze({
     ...transactionProxy,
+    ...(typeof transactionProxy.claimNext === "function"
+      ? {
+        // The helper claims and acknowledges a receipt-only delivery inside
+        // claim-next and reports `receiptOnly: true` only after that ack and
+        // the local clear; the resolver then returns null, so record it here.
+        async claimNext(...args) {
+          const status = await transactionProxy.claimNext(...args);
+          if (status && typeof status === "object" && status.receiptOnly === true) {
+            recordProgress(progress, "claim", logger);
+            recordProgress(progress, "ack", logger);
+          }
+          return status;
+        },
+      }
+      : {}),
     async reply(...args) {
       const result = await transactionProxy.reply(...args);
       recordProgress(progress, "reply", logger);

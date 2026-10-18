@@ -20,6 +20,7 @@ import {
 import { progressClientRootFromModule, resolveProgressClientRoot } from "../src/client-supervisor-cli.mjs";
 import { instrumentCursorAcpProgress } from "../src/cursor-acp-runtime/headless-drain-service.mjs";
 import { createHeadlessCursorAcpDrain } from "../src/cursor-acp-runtime/headless-drain.mjs";
+import { createHelperDurableDeliveryResolver } from "../src/helper-transaction-proxy.mjs";
 
 const SENTINEL_TOKEN = "mesh_SENTINEL_TOKEN_must_never_be_journaled_0123456789";
 const SENTINEL_BODY = "SENTINEL BODY must never be journaled";
@@ -616,6 +617,32 @@ test("Cursor ACP instrumentation is a no-op without a recorder and survives a th
   assert.ok(errors.every((entry) => entry.detail.code === "ENOSPC"));
 });
 
+test("Cursor ACP receipt-only deliveries settled inside claim-next record claim and ack (Codex review r4)", async () => {
+  const phases = [];
+  const statuses = [
+    { replyRequired: false, receiptOnly: true, open: null, shouldStartModel: false },
+    { replyRequired: true, open: null, shouldStartModel: false },
+  ];
+  const helper = fakeHelperProxy();
+  const proxy = Object.freeze({ ...helper.proxy, async claimNext() { return statuses.shift() ?? null; } });
+  const instrumentation = instrumentCursorAcpProgress({
+    transactionProxy: proxy,
+    progress: { record(phase) { phases.push(phase); return true; } },
+    logger: { error() {} },
+  });
+  const resolveDelivery = instrumentation.wrapResolveDelivery(createHelperDurableDeliveryResolver({
+    helperPath: "/trusted/bin/triangle-mailbox",
+    profile: "ghost",
+    protocol: "self-serve-drain",
+    createProxy: () => instrumentation.transactionProxy,
+  }));
+  assert.equal(await resolveDelivery(), null, "receipt-only never admits model work");
+  assert.deepEqual(phases, ["claim", "ack"]);
+  assert.equal(await resolveDelivery(), null, "nothing pending");
+  assert.deepEqual(phases, ["claim", "ack"], "an idle claim-next records nothing");
+  assert.deepEqual(helper.calls, [], "no extra helper ack or reply");
+});
+
 function workerInstance(profile) {
   const instanceId = instanceIdFor(profile);
   return {
@@ -807,7 +834,8 @@ test("doctor inventory: a drain's first claim stamp never masks a stalled open t
     assert.equal(journal.forProfile("ghost", "cursor-acp").record("claim"), true);
     assert.equal(journal.forInstance(instanceIdFor("gravity2"), "worker").record("claim"), true);
     for (const profile of ["ghost", "gravity2"]) {
-      writeJson(
+      // Helper writer keeps the 0700/0600 custody the Swift transaction store requires.
+      inventory.helpers.writeJson(
         path.join(fixture.app, "model-state", "instances", instanceIdFor(profile), "mailbox-transactions", "open.json"),
         inventory.helpers.openTransactionRecord(instanceIdFor(profile), {
           failureCount: 3, lastFailureReason: "runtime_failed", createdAt: new Date(TWO_HOURS_AGO).toISOString(),
