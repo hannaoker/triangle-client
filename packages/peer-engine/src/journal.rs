@@ -217,6 +217,13 @@ pub struct Journal {
     inbound: HashMap<(String, String), InboundRecord>,
     /// Set by [`Journal::close`]; every later write fails.
     closed: bool,
+    /// Set when a failed append left bytes that could not be rolled back;
+    /// every later write fails until a restart recovers the tail.
+    tail_damaged: bool,
+    /// Test-only fault injection: the next append writes this many bytes of
+    /// the record and then fails.
+    #[cfg(test)]
+    fail_next_append_after: Option<usize>,
     /// Live (unconsumed) inbound totals per sender: (count, payload bytes).
     live_inbound: HashMap<String, (usize, u64)>,
 }
@@ -253,6 +260,9 @@ impl Journal {
             outbound: HashMap::new(),
             inbound: HashMap::new(),
             closed: false,
+            tail_damaged: false,
+            #[cfg(test)]
+            fail_next_append_after: None,
             live_inbound: HashMap::new(),
         };
 
@@ -876,6 +886,16 @@ impl Journal {
         }
     }
 
+    fn write_record(&mut self, file: &mut File, line: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(n) = self.fail_next_append_after.take() {
+            file.write_all(&line[..n.min(line.len())])?;
+            return Err(std::io::Error::other("injected write failure"));
+        }
+        file.write_all(line)?;
+        file.sync_all()
+    }
+
     /// Append one record durably (single write + fsync) and apply it to the
     /// in-memory index exactly once. Compaction, if due, runs **after** the
     /// apply, so a record it drops is never re-applied (memory always matches
@@ -883,6 +903,9 @@ impl Journal {
     fn append_durable(&mut self, entry: JournalEntry) -> Result<()> {
         if self.closed {
             bail!("journal is closed (engine shut down)");
+        }
+        if self.tail_damaged {
+            bail!("journal tail damaged by an earlier failed write; restart the engine to recover");
         }
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
@@ -892,9 +915,19 @@ impl Journal {
             .mode(0o600)
             .open(&self.path)
             .with_context(|| format!("open journal {}", self.path.display()))?;
+        let start_len = file.metadata()?.len();
         // One write per record so a crash leaves at most one torn final line.
-        file.write_all(&line)?;
-        file.sync_all()?;
+        if let Err(err) = self.write_record(&mut file, &line) {
+            // A failed write/fsync may have left part of the record on disk.
+            // Roll the file back to the previous record boundary so the next
+            // (acknowledged) record is never glued onto a torn line. If that
+            // fails too, refuse further writes until restart recovery.
+            if let Err(rollback) = file.set_len(start_len).and_then(|()| file.sync_all()) {
+                self.tail_damaged = true;
+                warn!(error = %rollback, "journal rollback after failed append failed; refusing writes");
+            }
+            return Err(err).context("append journal record");
+        }
         self.lines += 1;
         self.lines_since_compact += 1;
         self.apply(&entry);
@@ -1216,6 +1249,25 @@ mod tests {
         assert!(more);
         let (rest, more) = j.inbox_page(page2[5].seq, 10, usize::MAX);
         assert!(rest.is_empty() && !more);
+    }
+
+    // Regression (Codex fix-round 5 P1): a failed partial append is rolled
+    // back, so the next acknowledged record is not glued onto a torn line and
+    // lost (or made fatal) on restart.
+    #[test]
+    fn failed_partial_append_is_rolled_back() {
+        let dir = tempdir().unwrap();
+        let mut j = Journal::open(dir.path()).unwrap();
+        j.accept_inbound("p", "m1", "first").unwrap();
+        j.fail_next_append_after = Some(10);
+        assert!(j.accept_inbound("p", "m2", "lost-on-failure").is_err());
+        assert!(!j.already_received("p", "m2"), "failed append must not be applied");
+        assert_eq!(j.accept_inbound("p", "m3", "acked").unwrap(), InboundOutcome::Accepted);
+        j.accept_inbound("p", "m4", "also acked").unwrap();
+        drop(j);
+        let j = Journal::open(dir.path()).expect("restart must not fail");
+        let ids: Vec<_> = j.inbox_items().into_iter().map(|i| i.message_id).collect();
+        assert_eq!(ids, ["m1", "m3", "m4"]);
     }
 
     #[test]

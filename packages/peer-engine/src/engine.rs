@@ -99,6 +99,12 @@ pub struct EngineConfig {
     pub max_inbound_handlers: usize,
     /// Max concurrent inbound connection handlers per admitted peer.
     pub max_inbound_per_peer: usize,
+    /// Max concurrent unauthenticated (in-handshake) inbound connections.
+    /// Separate from `max_inbound_handlers` so stalled handshakes cannot
+    /// occupy the handler slots of admitted peers.
+    pub max_pending_handshakes: usize,
+    /// Max time an inbound QUIC/TLS handshake may take before it is dropped.
+    pub handshake_timeout: Duration,
 }
 
 impl EngineConfig {
@@ -112,6 +118,8 @@ impl EngineConfig {
             limits: JournalLimits::default(),
             max_inbound_handlers: 64,
             max_inbound_per_peer: 8,
+            max_pending_handshakes: 32,
+            handshake_timeout: Duration::from_secs(10),
         }
     }
 
@@ -178,6 +186,8 @@ struct EngineInner {
     retry: RetryPolicy,
     retry_slots: Arc<Semaphore>,
     inbound_slots: Arc<Semaphore>,
+    handshake_slots: Arc<Semaphore>,
+    handshake_timeout: Duration,
     inbound_per_peer: std::sync::Mutex<std::collections::HashMap<EndpointId, usize>>,
     max_inbound_per_peer: usize,
     relay_enabled: bool,
@@ -247,6 +257,8 @@ impl PeerEngine {
                 roster: RwLock::new(config.allowed_peers.iter().copied().collect()),
                 retry_slots: Arc::new(Semaphore::new(config.retry.max_in_flight.max(1))),
                 inbound_slots: Arc::new(Semaphore::new(config.max_inbound_handlers.max(1))),
+                handshake_slots: Arc::new(Semaphore::new(config.max_pending_handshakes.max(1))),
+                handshake_timeout: config.handshake_timeout,
                 inbound_per_peer: std::sync::Mutex::new(std::collections::HashMap::new()),
                 max_inbound_per_peer: config.max_inbound_per_peer.max(1),
                 retry: config.retry,
@@ -586,17 +598,17 @@ impl PeerEngine {
     async fn accept_loop(self) -> Result<()> {
         let endpoint = self.inner.endpoint.clone();
         while let Some(incoming) = endpoint.accept().await {
-            // Global bound on concurrent handlers (incl. handshakes): refuse
-            // rather than queue unboundedly.
-            let Ok(permit) = self.inner.inbound_slots.clone().try_acquire_owned() else {
-                warn!("inbound handler limit reached; refusing connection");
+            // Pre-authentication bound: handshakes get their own small pool
+            // and a timeout, so unadmitted/stalled clients cannot consume the
+            // message-handler slots of admitted peers.
+            let Ok(hs_permit) = self.inner.handshake_slots.clone().try_acquire_owned() else {
+                warn!("pending handshake limit reached; refusing connection");
                 incoming.refuse();
                 continue;
             };
             let engine = self.clone();
             tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(err) = engine.handle_incoming(incoming).await {
+                if let Err(err) = engine.handle_incoming(incoming, hs_permit).await {
                     debug!(error = %err, "incoming connection handler failed");
                 }
             });
@@ -604,8 +616,16 @@ impl PeerEngine {
         Ok(())
     }
 
-    async fn handle_incoming(&self, incoming: iroh::endpoint::Incoming) -> Result<()> {
-        let conn = incoming.await.context("accept connection")?;
+    async fn handle_incoming(
+        &self,
+        incoming: iroh::endpoint::Incoming,
+        hs_permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<()> {
+        let conn = tokio::time::timeout(self.inner.handshake_timeout, incoming)
+            .await
+            .context("inbound handshake timed out")?
+            .context("accept connection")?;
+        drop(hs_permit);
         let remote_id = conn.remote_id();
         // Admission BEFORE reading any frame. The TLS handshake already proved
         // possession of `remote_id`'s key, so a wrong key == a non-member.
@@ -614,6 +634,13 @@ impl PeerEngine {
             conn.close(CLOSE_NOT_MEMBER.into(), b"not_member");
             return Ok(());
         }
+        // Global bound on concurrent (authenticated) handlers: refuse rather
+        // than queue unboundedly.
+        let Ok(_handler_permit) = self.inner.inbound_slots.clone().try_acquire_owned() else {
+            warn!(remote = %remote_id, "inbound handler limit reached");
+            conn.close(CLOSE_BUSY.into(), b"busy");
+            return Ok(());
+        };
         // Per-peer bound so one member cannot occupy every handler slot.
         let _peer_slot = match PeerSlot::acquire(self, remote_id) {
             Some(slot) => slot,

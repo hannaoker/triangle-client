@@ -74,7 +74,12 @@ are journaled as `duplicate_suppressed` without a second inbox row.
 - Replay and compaction stream records (no whole-file buffering); background
   retries are capped at `max_in_flight` (16) concurrent attempts; inbound
   handlers are capped globally (`max_inbound_handlers`, 64) and per peer
-  (`max_inbound_per_peer`, 8).
+  (`max_inbound_per_peer`, 8), counted only after the TLS handshake and
+  roster check; unauthenticated handshakes have their own pool
+  (`max_pending_handshakes`, 32) and a 10 s `handshake_timeout`.
+- A failed journal append is rolled back to the previous record boundary
+  (or further writes are refused until restart), so a later acknowledged
+  record is never glued onto a torn line.
 - A settled `message_id` is never retransmitted; re-sending it returns a
   receipt with `duplicate: true` from the local journal.
 - Settled/refused/expired outbound and consumed inbound tombstones: dropped by
