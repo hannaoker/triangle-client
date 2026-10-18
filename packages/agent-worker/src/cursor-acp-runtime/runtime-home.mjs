@@ -78,20 +78,25 @@ export function resolveTriangleCursorHome({
   }
 
   const userCursor = typeof home === "string" ? path.join(home, ".cursor") : null;
-  if (userCursor && pathsEqual(candidate, userCursor)) {
-    throw createCodedError(
-      "cursor_home_user_fallback_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.cursor",
-    );
-  }
-
   const userCodex = typeof home === "string" ? path.join(home, ".codex") : null;
-  if (userCodex && pathsEqual(candidate, userCodex)) {
-    throw createCodedError(
-      "cursor_home_codex_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.codex or CODEX_HOME",
-    );
-  }
+  // Neither ~/.cursor nor ~/.codex, nor anything inside them (canonicalized,
+  // projected through existing symlinked ancestors), checked before mkdir and
+  // again on the resolved path.
+  const assertNotForbidden = (value) => {
+    if (userCursor && isSameOrInside(value, userCursor)) {
+      throw createCodedError(
+        "cursor_home_user_fallback_forbidden",
+        "dedicated Triangle Cursor home must not resolve to or inside ~/.cursor",
+      );
+    }
+    if (userCodex && isSameOrInside(value, userCodex)) {
+      throw createCodedError(
+        "cursor_home_codex_forbidden",
+        "dedicated Triangle Cursor home must not resolve to or inside ~/.codex or CODEX_HOME",
+      );
+    }
+  };
+  assertNotForbidden(candidate);
 
   if (allowCreate) {
     mkdirSync(candidate, { recursive: true, mode: 0o700 });
@@ -110,12 +115,7 @@ export function resolveTriangleCursorHome({
     }
   }
 
-  if (userCursor && pathsEqual(resolved, userCursor)) {
-    throw createCodedError(
-      "cursor_home_user_fallback_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.cursor",
-    );
-  }
+  assertNotForbidden(resolved);
 
   try {
     const mode = statSync(resolved).mode & 0o777;
@@ -135,6 +135,33 @@ function pathsEqual(left, right) {
   } catch {
     return path.resolve(left) === path.resolve(right);
   }
+}
+
+/**
+ * Physical projection of a possibly-missing path: realpath of its deepest
+ * existing ancestor joined with the missing suffix. A not-yet-created dir
+ * below a symlink therefore projects to where it WOULD be created.
+ */
+function physicalProjection(value) {
+  let existing = path.resolve(value);
+  const suffix = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(existing), ...suffix.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) return path.resolve(value);
+      suffix.push(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+function isSameOrInside(candidate, root) {
+  const relative = path.relative(physicalProjection(root), physicalProjection(candidate));
+  // Only an exact `..` component means "outside": `..triangle` is a child name.
+  return relative === "" || !(relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
 }
 
 /**

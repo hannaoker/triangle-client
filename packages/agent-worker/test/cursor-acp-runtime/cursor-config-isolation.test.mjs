@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
+  existsSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -130,6 +131,24 @@ test("ACP process spawns cursor-agent with CURSOR_CONFIG_DIR set to the Triangle
     assert.equal(spawned[0].env.CURSOR_CONFIG_DIR, cursorHome);
     assert.ok(!spawned[0].args.some((arg) => String(arg).includes("CURSOR_CONFIG_DIR")));
     await processHandle.close?.().catch(() => {});
+  } finally {
+    cleanup();
+  }
+});
+
+test("Triangle Cursor home may not be inside ~/.cursor or ~/.codex (incl. '..'-prefixed child names)", () => {
+  const { home, cleanup } = fixture();
+  try {
+    for (const [root, code] of [[".cursor", "cursor_home_user_fallback_forbidden"], [".codex", "cursor_home_codex_forbidden"]]) {
+      for (const child of ["triangle", "..triangle"]) {
+        const override = path.join(home, root, child);
+        assert.throws(() => resolveTriangleCursorHome({ override, home, allowCreate: true }), { code }, override);
+        assert.equal(existsSync(override), false, `nothing created at ${override}`);
+      }
+    }
+    // A sibling whose name merely starts with ".cursor" is fine.
+    const sibling = resolveTriangleCursorHome({ override: path.join(home, ".cursor-triangle"), home, allowCreate: true });
+    assert.equal(sibling, path.join(home, ".cursor-triangle"));
   } finally {
     cleanup();
   }
