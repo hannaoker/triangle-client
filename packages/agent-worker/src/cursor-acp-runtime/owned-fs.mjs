@@ -225,6 +225,15 @@ export function copyFileIntoOwned({ anchor, relative, source, sourceAnchor, sour
     if (error?.code === "EEXIST") {
       return Object.freeze({ status: "already_present", createdDirs, identity: null });
     }
+    // The exclusive create succeeded before the copy failed (e.g. EACCES on a
+    // later read, ENOSPC): the partial target is ours, so remove it rather
+    // than leave an unrecorded torn file behind. Re-validate first.
+    try {
+      const partial = resolveOwnedPath(anchor, parts.join("/"), { allowMissingLeaf: true });
+      if (partial.leaf?.isFile()) unlinkSync(partial.absolute);
+    } catch {
+      // Unsafe or vanished: leave it; callers report the failure.
+    }
     throw Object.assign(error, { createdDirs });
   }
   // Re-validate before touching metadata: the parent must still be physical.
