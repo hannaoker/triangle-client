@@ -9,6 +9,8 @@ import {
   APP_SERVER_BINDING_KEYS as EXACT_APP_SERVER_BINDING_KEYS,
   APP_SERVER_WAKE_KEYS as EXACT_APP_SERVER_WAKE_KEYS,
   createClientSupervisor,
+  createHeadlessProgressJournal,
+  defaultHeadlessProgressClientRoot,
   GROK_BOT_BINDING_KEYS as EXACT_GROK_BOT_BINDING_KEYS,
   GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
 } from "./client-supervisor.mjs";
@@ -798,6 +800,50 @@ async function waitForPrivateActivation({ path: markerPath, generation, parentPi
   throw new Error("activation timed out");
 }
 
+const WORKER_BUNDLE_CLI_SUFFIX = ["packages", "agent-worker", "src"];
+
+/**
+ * `<app>/client` when this CLI runs from a verified worker bundle
+ * (`<app>/worker-runtime/bundles/<sha256>/packages/agent-worker/src`), the
+ * path the Swift coordinator launches; else null.
+ */
+export function progressClientRootFromModule(moduleUrl = import.meta.url) {
+  let dir;
+  try {
+    dir = path.dirname(fileURLToPath(moduleUrl));
+  } catch {
+    return null;
+  }
+  const parts = dir.split(path.sep);
+  const n = parts.length;
+  if (n < 7 || parts.slice(n - 3).join("/") !== WORKER_BUNDLE_CLI_SUFFIX.join("/")) return null;
+  if (!/^[a-f0-9]{64}$/.test(parts[n - 4]) || parts[n - 5] !== "bundles" || parts[n - 6] !== "worker-runtime") return null;
+  const app = parts.slice(0, n - 6).join(path.sep);
+  return app.startsWith("/") ? path.join(app, "client") : null;
+}
+
+/**
+ * Client root for headless-progress.json: next to the helper's install
+ * (`<root>/bin/triangle-mailbox` → `<root>/client`, the same directory the
+ * claimer locks use); else beside the worker bundle this CLI was launched
+ * from (worker-only supervisors get no helper path, and the coordinator's
+ * environment carries no HOME); else `$HOME/Library/Application Support/The Triangle/client`.
+ */
+export function resolveProgressClientRoot(bootstrap, env = process.env, moduleUrl = import.meta.url) {
+  const helperPaths = [
+    bootstrap?.eventWake?.helperPath,
+    bootstrap?.appServerWake?.helperPath,
+    ...(Array.isArray(bootstrap?.headlessWakes) ? bootstrap.headlessWakes.map((wake) => wake?.helperPath) : []),
+    ...(Array.isArray(bootstrap?.cursorAcpWakes) ? bootstrap.cursorAcpWakes.map((wake) => wake?.helperPath) : []),
+  ];
+  for (const helperPath of helperPaths) {
+    if (typeof helperPath === "string" && helperPath.startsWith("/") && !helperPath.includes("\0")) {
+      return path.resolve(path.dirname(helperPath), "..", "client");
+    }
+  }
+  return progressClientRootFromModule(moduleUrl) ?? defaultHeadlessProgressClientRoot(env);
+}
+
 export async function runClientSupervisorCLI({
   argv = process.argv.slice(2),
   input = process.stdin,
@@ -808,6 +854,8 @@ export async function runClientSupervisorCLI({
   awaitActivation = async () => {},
   parentPid = process.ppid,
   startParentMonitor = monitorParentProcess,
+  env = process.env,
+  createProgressJournal = createHeadlessProgressJournal,
 } = {}) {
   if (!Array.isArray(argv) || argv.length !== 0) {
     stderr.write("triangle-client: invalid invocation\n");
@@ -833,6 +881,18 @@ export async function runClientSupervisorCLI({
       return 64;
     }
     try {
+      const logger = sanitizedLogger(stderr);
+      // Drain progress evidence (client/headless-progress.json) for the doctor.
+      // Construction does no I/O; an unresolvable HOME just disables it.
+      let progressJournal = null;
+      const progressClientRoot = resolveProgressClientRoot(bootstrap, env);
+      if (progressClientRoot != null && typeof createProgressJournal === "function") {
+        try {
+          progressJournal = createProgressJournal({ clientRoot: progressClientRoot, logger });
+        } catch {
+          progressJournal = null;
+        }
+      }
       const supervisor = createSupervisor({
         instances: bootstrap.instances,
         eventWake: bootstrap.eventWake ?? null,
@@ -849,7 +909,8 @@ export async function runClientSupervisorCLI({
           || (Array.isArray(bootstrap.headlessWakes)
             && bootstrap.headlessWakes.some((wake) => wake?.agentId && wake?.installationId)),
         ),
-        logger: sanitizedLogger(stderr),
+        logger,
+        progressJournal,
         ...(bootstrap.appServerWake
           ? {
             resolveDelivery: createProductionAppServerDeliveryResolver({

@@ -438,10 +438,85 @@ export function normalizeCursorAcpWakeConfig(cursorAcpWake) {
   });
 }
 
+function recordProgress(progress, phase, logger) {
+  if (progress == null) return;
+  try {
+    progress.record(phase);
+  } catch (error) {
+    logger?.error?.("triangle_cursor_acp_progress_record_failed", {
+      code: typeof error?.code === "string" ? error.code : null,
+    });
+  }
+}
+
+/**
+ * Wrap the helper transaction proxy and durable delivery resolver so the drain
+ * records claim/reply/ack progress evidence (client/headless-progress.json):
+ * - claim: the resolver returned an open, reply-required claim to run;
+ * - reply: `transaction-reply` returned (reply durable in MESH via helper);
+ * - ack:   `transaction-ack` returned, including the resolver's ack of a
+ *          verified replied-but-unacked transaction after a crash.
+ * Evidence is recorded only after the helper call succeeds and never alters
+ * the call's result or error. `progress` is `{ record(phase) }` or null.
+ */
+export function instrumentCursorAcpProgress({ transactionProxy, progress = null, logger = console } = {}) {
+  if (transactionProxy == null || typeof transactionProxy !== "object") {
+    throw new TypeError("transactionProxy is required");
+  }
+  if (progress != null && typeof progress.record !== "function") {
+    throw new TypeError("progress.record must be a function");
+  }
+  if (progress == null) {
+    return Object.freeze({
+      transactionProxy,
+      wrapResolveDelivery: (resolveDelivery) => resolveDelivery,
+    });
+  }
+  const instrumented = Object.freeze({
+    ...transactionProxy,
+    ...(typeof transactionProxy.claimNext === "function"
+      ? {
+        // The helper claims and acknowledges a receipt-only delivery inside
+        // claim-next and reports `receiptOnly: true` only after that ack and
+        // the local clear; the resolver then returns null, so record it here.
+        async claimNext(...args) {
+          const status = await transactionProxy.claimNext(...args);
+          if (status && typeof status === "object" && status.receiptOnly === true) {
+            recordProgress(progress, "claim", logger);
+            recordProgress(progress, "ack", logger);
+          }
+          return status;
+        },
+      }
+      : {}),
+    async reply(...args) {
+      const result = await transactionProxy.reply(...args);
+      recordProgress(progress, "reply", logger);
+      return result;
+    },
+    async ack(...args) {
+      const result = await transactionProxy.ack(...args);
+      recordProgress(progress, "ack", logger);
+      return result;
+    },
+  });
+  function wrapResolveDelivery(resolveDelivery) {
+    if (typeof resolveDelivery !== "function") throw new TypeError("resolveDelivery is required");
+    return async function resolveDeliveryWithProgress(...args) {
+      const delivery = await resolveDelivery(...args);
+      if (delivery != null) recordProgress(progress, "claim", logger);
+      return delivery;
+    };
+  }
+  return Object.freeze({ transactionProxy: instrumented, wrapResolveDelivery });
+}
+
 export function createInstalledCursorAcpDrain(config, {
   logger = console,
   ownerInstanceId = `cursor-acp-drain-${process.pid}`,
   env = process.env,
+  /** Optional `{ record(phase) }` progress recorder for this profile. */
+  progress = null,
 } = {}) {
   const normalized = normalizeCursorAcpWakeConfig(config);
   assertCursorAcpDrainIdentity({
@@ -454,17 +529,22 @@ export function createInstalledCursorAcpDrain(config, {
     home: env.HOME,
     allowCreate: true,
   });
-  const transactionProxy = createHelperTrustedTransactionProxy({
-    helperPath: normalized.helperPath,
-    profile: normalized.profile,
-    protocol: "self-serve-drain",
+  const instrumentation = instrumentCursorAcpProgress({
+    transactionProxy: createHelperTrustedTransactionProxy({
+      helperPath: normalized.helperPath,
+      profile: normalized.profile,
+      protocol: "self-serve-drain",
+    }),
+    progress,
+    logger,
   });
-  const resolveDelivery = createHelperDurableDeliveryResolver({
+  const { transactionProxy } = instrumentation;
+  const resolveDelivery = instrumentation.wrapResolveDelivery(createHelperDurableDeliveryResolver({
     helperPath: normalized.helperPath,
     profile: normalized.profile,
     protocol: "self-serve-drain",
     createProxy: () => transactionProxy,
-  });
+  }));
   const profileConfig = createDefaultCursorAcpShadowProfile({
     profileId: normalized.profile,
     workingDirectory: normalized.workingDirectory,

@@ -63,6 +63,64 @@ node ./scripts/triangle-headless-engagement-doctor.mjs --json
 
 Missing runtime auth fails doctor/enable clearly (no silent empty drain).
 
+Doctor is a read-only, complete inventory. It enumerates every
+`client/instances/*.json` registry row (enabled and disabled) and reconciles each
+with the binding its lane needs: `headless-runtime-binding.json` (Codex
+headless), `cursor-acp-runtime-binding.json` (Cursor ACP), or
+`worker-runtime/<adapter>.manifest.json` (worker mode). Per profile it reports
+runtime, delivery mode, enabled state, enrollment, owner/generation, effective
+poll/watch selection, backlog, and last claim/reply/ack evidence. A field the
+local journal does not record prints `unavailable`. Retry/expiry,
+capabilities, live watch/grant health, and supervisor admission currently print
+`unavailable`. An enabled profile with no binding, unverified enrollment, or an
+invalid registry row exits 2. An enabled profile with no progress evidence exits 1.
+Disabled profiles are listed and never started. Credential files are checked for
+existence only, and message bodies are never read into output.
+
+Outstanding work is judged separately from historical progress. For every lane
+(Codex headless, Cursor ACP, worker) doctor reads the profile's helper
+`mailbox-transactions/open.json` and applies one policy with the
+`maxOpenTxnAgeMs` budget (default 15 minutes): five or more recorded failures
+(the helper's own "stuck" threshold) or an over-budget transaction with any
+failure exits 2; an over-budget transaction without failures, a transaction
+with failures inside the budget, or one without a readable `createdAt` exits 1.
+An old `lastClaimAt`/`lastReplyAt`/`lastAckAt` never excuses an open
+transaction, and an idle profile with no open transaction is never reported
+stalled however old its last completed work is.
+
+Registry profile names follow the persisted Swift `ProfileName` contract: up to
+64 UTF-8 bytes, no `/`, `\`, or control/format characters, case, dots, and
+underscores preserved. Doctor never renames an identity.
+
+Doctor validates persisted records the way the Swift helper decodes them, so it
+never reports healthy for a record the supervisor would reject: registry rows
+(0700 owned real application/client/instances directories; no-follow 0600
+single-link files of at most 2048 bytes; exact keys, known
+`runtimeAdapter`/`deliveryMode`, a row without `deliveryMode` decodes as
+`worker`, no stray files), enrollment records (0700 journal directory,
+no-follow 0600 file of at most 4096 bytes; exact keys, valid
+origin/agent/handle, same profile as the file), `client/installation.json`
+(no-follow single-link 0600 file of at most 512 bytes in 0700 directories), Codex/Cursor ACP
+bindings (exact keys, `installationId` equal to `client/installation.json`,
+standardized symlink-free state roots, every row an enabled lane member),
+worker manifests for worker and event-driven profiles (structure, release
+environment, content-addressed bundle;
+artifact hashes stay with the launcher and print `integrity=not_verified`), and
+open transactions (0700 directories, no-follow single-link 0600 file of
+at most 4096 bytes; instance, claim/reply ids, state invariants), and the App
+Server binding (readable `app-server-ws.token`, `adapterVersion` "1",
+`enabled`, ws/wss endpoint, non-empty room scope/server identity/thread, and
+installation and agent ids that match; the agent id is checked against the
+verified enrollment record because doctor does not read the keychain). Bound
+Codex/Cursor ACP commands must be executable regular files. A violation is a
+hard fault. App Server watch membership follows the binding's
+`instanceId`, as `WatchGrantService` does. Both claimer families holding
+advisory locks for one profile is a hard `dual_claimer_conflict` on every lane.
+Journals larger than the scan limit report their full count, and activity
+comes from the newest rows by mtime (`scanLimited=true`). An enabled `grok-bot`
+profile stays `lane_unsupported`: Swift still prepares the wake, but the Node
+supervisor rejects any `grokBotWake`.
+
 ## Defaults
 
 | Selected by default | Not default |

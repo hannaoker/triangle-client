@@ -1,4 +1,17 @@
-import { readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import path from "node:path";
 
 import { createCommandRunner, createRunnerEnvironment } from "./command-runner.mjs";
@@ -298,6 +311,288 @@ export function createWatchGrantRenewalRegistry({
   return Object.freeze({ state, recordEnsure, renew, runProactive });
 }
 
+/**
+ * Drain progress evidence journal (`client/headless-progress.json`).
+ *
+ * The doctor / installation inventory (PR #82) reports a profile `degraded`
+ * with `progress_evidence_unavailable` unless it can find claim/reply/ack
+ * evidence for it. Codex headless profiles get that from their per-stateRoot
+ * completion journal; the Cursor ACP and worker (antigravity, hermes, …) drains
+ * have no such journal, so they record it here instead. The reader contract is
+ * `progress.profiles[<profile>].{lastClaimAt,lastReplyAt,lastAckAt}` (ISO 8601).
+ *
+ * Kept inside client-supervisor.mjs on purpose (same reason as the watch-grant
+ * registry above): a new module would change the signed worker bundle artifact
+ * set and need a manifest bump plus helper rebuild before it could load.
+ *
+ * Contract:
+ * - Evidence only. Timestamps + lane per profile; never message bodies, room or
+ *   delivery ids, or credentials.
+ * - Atomic: write tmp (0600) + fsync + rename over the target. Readers never see
+ *   a torn file.
+ * - Serialized: every read-modify-write runs under a kernel advisory lock
+ *   (Darwin O_EXLOCK) on the permanent sidecar `headless-progress.json.lock`,
+ *   held on an open fd until the rename commits. If the lock cannot be taken
+ *   within `lockWaitMs` the write is skipped (no unlocked read-modify-write)
+ *   and `record()` returns false with the sanitized code
+ *   `progress_journal_lock_unavailable`. The kernel releases the lock when its
+ *   owner exits, so there is no stale-lock takeover to race: a successful
+ *   write (true) is never erased by another writer's stale snapshot. Other
+ *   platforms fail closed (`progress_journal_lock_unsupported_platform`).
+ * - Monotonic per field: an older stamp never overwrites a newer one.
+ * - Best-effort: recording never throws into the drain; failures are logged
+ *   with a sanitized code only.
+ */
+export const HEADLESS_PROGRESS_FILE = "headless-progress.json";
+export const HEADLESS_PROGRESS_VERSION = 1;
+export const HEADLESS_PROGRESS_FIELDS = Object.freeze({
+  claim: "lastClaimAt",
+  reply: "lastReplyAt",
+  ack: "lastAckAt",
+});
+// Swift `CharacterSet.controlCharacters` is Unicode general categories Cc + Cf.
+const PROGRESS_PROFILE_CONTROL = /[\p{Cc}\p{Cf}]/u;
+
+/**
+ * Persisted profile-name contract (Swift `ProfileName`): non-empty, at most 64
+ * UTF-8 bytes, no "/" or "\\", no control/format characters. Kept identical to
+ * `isValidProfileName` in installation-inventory.mjs (duplicated so the signed
+ * worker bundle artifact set is unchanged).
+ */
+function isValidProgressProfileName(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.isWellFormed()
+    && Buffer.byteLength(value, "utf8") <= 64
+    && !value.includes("/")
+    && !value.includes("\\")
+    && !PROGRESS_PROFILE_CONTROL.test(value);
+}
+
+// Darwin sys/fcntl.h. Duplicated from claimer-advisory-lock.mjs, which v5/v6
+// worker bundles do not ship.
+const PROGRESS_DARWIN_O_EXLOCK = 0x20;
+const PROGRESS_DARWIN_O_NOFOLLOW = 0x100;
+const PROGRESS_LANES = new Set(["cursor-acp", "worker", "event-driven", "codex-headless"]);
+const PROGRESS_LOCK_WAIT_MS = 250;
+const PROGRESS_MAX_BYTES = 1024 * 1024;
+
+function progressSleepSync(milliseconds) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+  } catch {
+    // Atomics.wait unavailable: fall through and just retry.
+  }
+}
+
+function deriveRegistryInstanceId(profile) {
+  return createHash("sha256")
+    .update(Buffer.concat([Buffer.from("triangle-client-instance-v1"), Buffer.from([0]), Buffer.from(profile)]))
+    .digest("hex");
+}
+
+/** Default production client root: ~/Library/Application Support/The Triangle/client. */
+export function defaultHeadlessProgressClientRoot(env = process.env) {
+  const home = typeof env?.HOME === "string" && env.HOME.startsWith("/") && !env.HOME.includes("\0")
+    ? env.HOME
+    : null;
+  if (home == null) return null;
+  return path.join(home, "Library", "Application Support", "The Triangle", "client");
+}
+
+export function createHeadlessProgressJournal({
+  clientRoot,
+  now = () => Date.now(),
+  logger = null,
+  pid = process.pid,
+  lockWaitMs = PROGRESS_LOCK_WAIT_MS,
+  platform = process.platform,
+} = {}) {
+  if (typeof clientRoot !== "string" || !path.isAbsolute(clientRoot) || clientRoot.includes("\0")) {
+    throw new TypeError("clientRoot must be an absolute path");
+  }
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  const filePath = path.join(clientRoot, HEADLESS_PROGRESS_FILE);
+  const lockPath = `${filePath}.lock`;
+
+  /**
+   * Mutual exclusion is a kernel advisory lock (Darwin O_EXLOCK) held on an
+   * open fd for the whole read-modify-write. The kernel drops it when the
+   * owner closes the fd or dies, so there is no stale-lock takeover: a live
+   * owner, however slow, can never be displaced, and a crashed owner never
+   * blocks the next writer. The lock file itself is permanent and is never
+   * unlinked (unlinking would let two writers lock different inodes).
+   *
+   * @returns {number|null} the locked fd, or null when not acquired in time.
+   */
+  function acquireLock() {
+    if (platform !== "darwin") {
+      throw Object.assign(new Error("progress journal lock requires macOS"), { code: "progress_journal_lock_unsupported_platform" });
+    }
+    const flags = fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_NONBLOCK
+      | PROGRESS_DARWIN_O_EXLOCK | PROGRESS_DARWIN_O_NOFOLLOW;
+    const deadline = Date.now() + lockWaitMs;
+    for (;;) {
+      let fd;
+      try {
+        fd = openSync(lockPath, flags, 0o600);
+      } catch (error) {
+        if (error?.code !== "EAGAIN" && error?.code !== "EWOULDBLOCK") return null;
+        if (Date.now() >= deadline) return null;
+        progressSleepSync(5);
+        continue;
+      }
+      try {
+        if (fstatSync(fd).isFile()) return fd;
+      } catch {}
+      try { closeSync(fd); } catch {}
+      return null;
+    }
+  }
+
+  function releaseLock(fd) {
+    try { closeSync(fd); } catch {}
+  }
+
+  function readDocument() {
+    let raw;
+    try {
+      if (statSync(filePath).size > PROGRESS_MAX_BYTES) return null;
+      raw = readFileSync(filePath, "utf8");
+    } catch {
+      return null;
+    }
+    try {
+      const value = JSON.parse(raw);
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeDocument(document) {
+    const tmp = `${filePath}.${pid}.${randomBytes(6).toString("hex")}.tmp`;
+    let fd = null;
+    try {
+      fd = openSync(tmp, "wx", 0o600);
+      writeSync(fd, `${JSON.stringify(document, null, 2)}\n`);
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(tmp, filePath);
+    } catch (error) {
+      if (fd != null) {
+        try { closeSync(fd); } catch {}
+      }
+      try { unlinkSync(tmp); } catch {}
+      throw error;
+    }
+  }
+
+  function laterIso(existing, candidate) {
+    const existingMs = typeof existing === "string" ? Date.parse(existing) : Number.NaN;
+    return Number.isFinite(existingMs) && existingMs > Date.parse(candidate) ? existing : candidate;
+  }
+
+  /** @returns {boolean} true when the evidence was durably written. */
+  function record({ profile, lane, phase } = {}) {
+    try {
+      if (!isValidProgressProfileName(profile)) {
+        throw Object.assign(new TypeError("profile is invalid"), { code: "progress_profile_invalid" });
+      }
+      if (!PROGRESS_LANES.has(lane)) {
+        throw Object.assign(new TypeError("lane is invalid"), { code: "progress_lane_invalid" });
+      }
+      const field = HEADLESS_PROGRESS_FIELDS[phase];
+      if (field == null || !Object.hasOwn(HEADLESS_PROGRESS_FIELDS, phase)) {
+        throw Object.assign(new TypeError("phase is invalid"), { code: "progress_phase_invalid" });
+      }
+      const at = new Date(now()).toISOString();
+      mkdirSync(clientRoot, { recursive: true, mode: 0o700 });
+      const lockFd = acquireLock();
+      if (lockFd == null) {
+        // Never fall back to an unlocked read-modify-write: it could replace a
+        // concurrent writer's successful update with a stale snapshot.
+        throw Object.assign(new Error("progress journal lock unavailable"), { code: "progress_journal_lock_unavailable" });
+      }
+      try {
+        const current = readDocument() ?? {};
+        // Null-prototype map: every Swift ProfileName, including "__proto__",
+        // is stored as an own JSON property.
+        const profiles = Object.create(null);
+        if (current.profiles && typeof current.profiles === "object" && !Array.isArray(current.profiles)) {
+          for (const [name, row] of Object.entries(current.profiles)) profiles[name] = row;
+        }
+        const existing = Object.hasOwn(profiles, profile) ? profiles[profile] : null;
+        const prior = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
+        profiles[profile] = {
+          ...prior,
+          lane,
+          [field]: laterIso(prior[field], at),
+          updatedAt: laterIso(prior.updatedAt, at),
+        };
+        writeDocument({
+          ...current,
+          version: HEADLESS_PROGRESS_VERSION,
+          updatedAt: laterIso(current.updatedAt, at),
+          profiles,
+        });
+      } finally {
+        releaseLock(lockFd);
+      }
+      return true;
+    } catch (error) {
+      try {
+        logger?.error?.("triangle_client_progress_journal_write_failed", {
+          code: typeof error?.code === "string" ? error.code : "progress_journal_write_failed",
+        });
+      } catch {}
+      return false;
+    }
+  }
+
+  function forProfile(profile, lane) {
+    if (!isValidProgressProfileName(profile)) {
+      throw new TypeError("profile is invalid");
+    }
+    if (!PROGRESS_LANES.has(lane)) throw new TypeError("lane is invalid");
+    return Object.freeze({
+      profile,
+      lane,
+      record(phase) {
+        return record({ profile, lane, phase });
+      },
+    });
+  }
+
+  /**
+   * Worker/eventWake bootstraps carry only the instance id. Resolve the profile
+   * from the installation registry row (`client/instances/<id>.json`) and accept
+   * it only when the id is the one derived from that profile.
+   */
+  function forInstance(instanceId, lane) {
+    if (typeof instanceId !== "string" || !INSTANCE_ID.test(instanceId)) return null;
+    try {
+      const row = JSON.parse(readFileSync(path.join(clientRoot, "instances", `${instanceId}.json`), "utf8"));
+      const profile = row?.profile;
+      if (!isValidProgressProfileName(profile)) return null;
+      if (deriveRegistryInstanceId(profile) !== instanceId) return null;
+      return forProfile(profile, lane);
+    } catch {
+      return null;
+    }
+  }
+
+  return Object.freeze({
+    path: filePath,
+    clientRoot,
+    record,
+    forProfile,
+    forInstance,
+    read: readDocument,
+  });
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
@@ -335,6 +630,13 @@ export function createClientSupervisor({
   /** Clock for watch-grant expiry scheduling (tests inject a virtual clock). */
   now = () => Date.now(),
   /**
+   * Optional drain progress evidence journal (createHeadlessProgressJournal).
+   * When set, worker / eventWake mailbox clients and Cursor ACP drains record
+   * claim/reply/ack timestamps to client/headless-progress.json. Null keeps the
+   * supervisor free of progress writes (tests, embedded use).
+   */
+  progressJournal = null,
+  /**
    * One install watch dispatcher for App Server, headless Codex, and enrolled
    * Cursor ACP. Kicks register only when agentId is on that wake bootstrap.
    */
@@ -342,6 +644,22 @@ export function createClientSupervisor({
 } = {}) {
   if (headlessWake !== LEGACY_HEADLESS_WAKE_UNSET) {
     throw new TypeError("headlessWake is not supported; use headlessWakes");
+  }
+  if (
+    progressJournal != null
+    && (typeof progressJournal.forProfile !== "function" || typeof progressJournal.forInstance !== "function")
+  ) {
+    throw new TypeError("progressJournal must provide forProfile and forInstance");
+  }
+  // Mailbox clients report { phase } after a won claim, a persisted reply, and
+  // an owned ack. Only attach the hook when a journal resolves this instance.
+  function deliveryClientContext(context, lane) {
+    const recorder = progressJournal?.forInstance(context.instanceId, lane) ?? null;
+    if (recorder == null) return context;
+    return Object.freeze({
+      ...context,
+      onProgress: (event) => recorder.record(event?.phase),
+    });
   }
   // Mini Bob / Grok webhook wake path is removed (not deferred). Callers must
   // use appServerWake / eventWake / headlessWakes instead.
@@ -443,7 +761,7 @@ export function createClientSupervisor({
 
     const runnerConfig = validateRunner(instance);
     const context = Object.freeze({ instanceId: instance.instanceId });
-    const deliveryClient = createDeliveryClient({ ...instance.mailbox }, context);
+    const deliveryClient = createDeliveryClient({ ...instance.mailbox }, deliveryClientContext(context, "worker"));
     const adapterRunner = createRunner(runnerConfig, context);
     if (!adapterRunner || typeof adapterRunner.run !== "function") {
       throw new TypeError("createRunner must return a runner");
@@ -482,7 +800,7 @@ export function createClientSupervisor({
     }
     for (const drain of wakeConfig.drains) {
       const context = Object.freeze({ instanceId: drain.instanceId });
-      const deliveryClient = createDeliveryClient({ ...drain.mailbox }, context);
+      const deliveryClient = createDeliveryClient({ ...drain.mailbox }, deliveryClientContext(context, "event-driven"));
       // Ungated: profile-scheduler holds the shared gate around harness preflight/run.
       const adapterRunner = createRunner(drain.runnerConfig, context);
       if (!adapterRunner || typeof adapterRunner.run !== "function") {
@@ -699,9 +1017,11 @@ export function createClientSupervisor({
     }
   } else {
     for (const { config: cursorAcpConfig, claimer: cursorAcpClaimer } of cursorAcpAdmissions) {
+      const cursorAcpProgress = progressJournal?.forProfile(cursorAcpConfig.profile, "cursor-acp") ?? null;
       const drain = createCursorAcpDrain(cursorAcpConfig, {
         logger,
         ownerInstanceId: `client-supervisor-${process.pid}`,
+        ...(cursorAcpProgress ? { progress: cursorAcpProgress } : {}),
       });
       if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
         throw new TypeError("createCursorAcpDrain must return a drain");
