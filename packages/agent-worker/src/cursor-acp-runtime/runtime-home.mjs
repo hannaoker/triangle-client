@@ -272,13 +272,36 @@ export function resolveTriangleCursorDataDir({
     mkdirSync(candidate, { recursive: true, mode: 0o700 });
   }
   let resolved = candidate;
+  let exists = false;
   try {
     resolved = realpathSync(candidate);
+    exists = true;
   } catch {
     // Cursor creates it on demand; keep the lexical path.
   }
   assertNotForbidden(resolved);
+  if (exists) assertPrivateDataDir(resolved);
   return resolved;
+}
+
+/**
+ * An existing data dir must be a directory owned by this user with no
+ * group/other permissions: `mkdir(..., 0o700)` does not tighten an existing
+ * shared dir such as `/tmp`, and transcripts/sockets would land in it.
+ */
+function assertPrivateDataDir(resolved) {
+  const stat = statSync(resolved);
+  if (!stat.isDirectory()) {
+    throw createCodedError("cursor_data_dir_invalid", "Triangle CURSOR_DATA_DIR is not a directory");
+  }
+  if (typeof process.getuid !== "function") return;
+  if (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) {
+    throw createCodedError(
+      "cursor_data_dir_not_private",
+      "Triangle CURSOR_DATA_DIR must be owned by the current user with mode 0700 (no group/other access)",
+      { mode: (stat.mode & 0o777).toString(8) },
+    );
+  }
 }
 
 /** Cursor `workspace-paths.js` `r_`: non-alphanumerics -> "-", collapsed, trimmed. */

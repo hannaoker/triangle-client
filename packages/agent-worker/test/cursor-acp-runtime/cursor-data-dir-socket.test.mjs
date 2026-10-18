@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -91,7 +92,7 @@ test("TRIANGLE_CURSOR_DATA_DIR selects a separate Triangle-owned data dir", () =
   const { home, cursorHome, cleanup } = fixture();
   try {
     const dataDir = path.join(home, "cd");
-    mkdirSync(dataDir);
+    mkdirSync(dataDir, { mode: 0o700 });
     const viaEnv = buildSanitizedCursorChildEnv({
       cursorHome,
       parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
@@ -586,6 +587,38 @@ test("headless runtime status and describeTriangleCursorDirs report the chosen d
       env: { HOME: home, TRIANGLE_CURSOR_DATA_DIR: path.join(home, ".cursor") },
     });
     assert.equal(invalid.dataDirError, "cursor_data_dir_user_fallback_forbidden");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an existing data dir with group/other access is rejected, not silently used", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const dataDir = path.join(home, "shared-data");
+    mkdirSync(dataDir, { mode: 0o755 });
+    // mkdir's mode is masked by umask; force the shared mode explicitly.
+    chmodSync(dataDir, 0o755);
+    assert.throws(
+      () => resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: true }),
+      { code: "cursor_data_dir_not_private" },
+    );
+    chmodSync(dataDir, 0o700);
+    assert.equal(resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: true }), dataDir);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a data dir path that is a regular file is rejected", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const dataDir = path.join(home, "a-file");
+    writeFileSync(dataDir, "not a directory");
+    assert.throws(
+      () => resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: false }),
+      { code: "cursor_data_dir_invalid" },
+    );
   } finally {
     cleanup();
   }
