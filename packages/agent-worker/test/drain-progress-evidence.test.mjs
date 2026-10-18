@@ -629,3 +629,41 @@ test("doctor inventory: ghost and gravity2 are degraded without evidence and ok 
     fixture.cleanup();
   }
 });
+
+test("doctor inventory: a drain's first claim stamp never masks a stalled open transaction (review F3 with #85)", async (t) => {
+  const inventory = await loadInventory();
+  if (inventory == null || typeof inventory.evaluateOpenTransaction !== "function") {
+    t.skip("installation-inventory.mjs with the open-transaction policy (PR #82) not on this branch");
+    return;
+  }
+  const fixture = inventoryFixture();
+  try {
+    const NOW = Date.parse("2026-10-17T20:00:00.000Z");
+    const TWO_HOURS_AGO = NOW - 2 * 60 * 60_000;
+    // Only the claim is recorded (execution never replied or acked).
+    const journal = createHeadlessProgressJournal({ clientRoot: fixture.client, now: () => TWO_HOURS_AGO });
+    assert.equal(journal.forProfile("ghost", "cursor-acp").record("claim"), true);
+    assert.equal(journal.forInstance(instanceIdFor("gravity2"), "worker").record("claim"), true);
+    for (const profile of ["ghost", "gravity2"]) {
+      writeJson(path.join(fixture.app, "model-state", "instances", instanceIdFor(profile), "mailbox-transactions", "open.json"), {
+        version: 1, protocol: "coordinator-delivery-v1", deliveryId: 7, state: "claimed", replyRequired: true,
+        failureCount: 3, lastFailureReason: "runtime_failed", createdAt: new Date(TWO_HOURS_AGO).toISOString(),
+      });
+    }
+    const result = inventory.readInstallationInventory({
+      clientRoot: fixture.client,
+      now: NOW,
+      pidAlive: () => true,
+      advisoryHeldAt: () => true,
+      progress: JSON.parse(readFileSync(journal.path, "utf8")),
+    });
+    for (const profile of ["ghost", "gravity2"]) {
+      const row = result.profiles.find((entry) => entry.profile === profile);
+      assert.notEqual(row.activity.lastClaimAt, "unavailable");
+      assert.equal(row.status, "fault", `${profile}: ${JSON.stringify(row.faults)}`);
+      assert.ok(row.faults.includes("open_transaction_stalled"));
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
