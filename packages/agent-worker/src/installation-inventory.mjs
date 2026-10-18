@@ -342,9 +342,15 @@ function readRegistry(clientRoot) {
 /** Swift loader: `authority.json` `via` applies only when its `authority` matches the agent's. */
 function transportVia(home, authority) {
   const file = path.join(home, "authority.json");
-  if (custodyProblem(file, { maxBytes: AGENT_RECORD_MAX_BYTES }) != null) return null;
+  if (custodyProblem(file, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true }) != null) return null;
   const { value } = readJsonFile(file);
-  return isPlainObject(value) && value.authority === authority && isValidMeshOrigin(value.via) ? value.via : null;
+  // Swift compares canonical MeshOrigins, so compare URL origins, not raw strings.
+  return isPlainObject(value) && isValidMeshOrigin(value.authority) && isValidMeshOrigin(authority)
+    && canonicalOrigin(value.authority) === canonicalOrigin(authority) && isValidMeshOrigin(value.via) ? value.via : null;
+}
+
+function canonicalOrigin(value) {
+  try { return new URL(value).origin; } catch { return null; }
 }
 
 function decodeHexProfile(hex) {
@@ -405,7 +411,7 @@ function readProfileBindings(applicationRoot) {
 
 function readOneBinding(file) {
   const fail = (state, extra = {}) => ({ state, agentId: null, handle: null, keyFile: null, permissions: { source: UNAVAILABLE }, ...extra });
-  const custody = custodyProblem(file, { maxBytes: PROFILE_BINDING_MAX_BYTES });
+  const custody = custodyProblem(file, { maxBytes: PROFILE_BINDING_MAX_BYTES, singleLink: true });
   if (custody != null) return fail(custody === "oversized" ? "invalid_binding" : "unsafe_storage");
   const { value, error } = readJsonFile(file);
   if (error != null || !isPlainObject(value) || value.version !== 1

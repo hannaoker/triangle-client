@@ -2210,7 +2210,7 @@ test("permissions v1: the workload key exchanges a canonical token proof (agent 
   const fetchImpl = async (request) => {
     const url = new URL(request.url);
     const body = request.method === "GET" ? null : await request.json();
-    calls.push({ url, method: request.method, headers: Object.fromEntries(request.headers.entries()), body });
+    calls.push({ url, method: request.method, headers: Object.fromEntries(request.headers.entries()), body, redirect: request.redirect });
     if (url.pathname === "/api/v1/identity/token-challenges") {
       return json({ challenge: { challenge_id: `challenge_${issued}`, workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: `nonce_${issued}` } }, 201);
     }
@@ -2236,6 +2236,8 @@ test("permissions v1: the workload key exchanges a canonical token proof (agent 
     "/api/v1/agents/me",
     "/api/v1/mailbox",
   ]);
+  // Redirects are never followed: proof bodies and DPoP headers stay on the origin (round 4 P2).
+  assert.ok(calls.every((c) => c.redirect === "manual"), "every token exchange and agent call refuses redirects");
   assert.equal(calls[0].body.workload_id, workloadId);
   assert.deepEqual(calls[1].body.requested_scopes, ["agent.read", "agent.write"]);
   const [h, p, sig] = calls[1].body.proof.split(".");

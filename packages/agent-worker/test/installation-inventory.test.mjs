@@ -706,6 +706,20 @@ test("profile bindings are trusted only when the pointer, key custody, and agent
     assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://via.example.test");
     writeJson(authorityFile, { authority: "https://other.example.test", via: "https://via.example.test" });
     assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://example.test");
+    // Canonical origin compare like Swift MeshOrigin (round 4 P2): host case does not matter.
+    writeJson(authorityFile, { authority: "https://EXAMPLE.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://via.example.test");
+    // A hard-linked authority.json is refused like Swift V1PrivateFile (nlink == 1).
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    const authorityLink = path.join(f.root, "authority-link.json");
+    linkSync(authorityFile, authorityLink);
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://example.test");
+    rmSync(authorityLink);
+    // A hard-linked profile pointer is unsafe storage.
+    const pointerLink = path.join(f.root, "pointer-link.json");
+    linkSync(bindingFile(f.app, "ghost"), pointerLink);
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.state, "unsafe_storage");
+    rmSync(pointerLink);
     writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
     writeJson(bindingFile(f.app, "ghost"), { ...good, origin: "https://override.example.test" });
     assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://override.example.test");

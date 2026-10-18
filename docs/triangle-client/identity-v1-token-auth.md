@@ -1,5 +1,7 @@
 # Identity-v1 mailbox registration and local token custody
 
+> **Superseded by permissions v1 (PR D, #93).** Enrollment, `mesh_` bearers and Keychain identity custody described below are removed. Agents are created with `triangle join` / `triangle agent add`; the helper binds a profile to the `triangle` key file (`profiles-v1/`) and authenticates with workload tokens + DPoP. Kept for history only.
+
 ## Summary
 
 Identity-v1 mailbox registration (`mesh.registration_challenge` +

@@ -181,7 +181,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 safeToRetry: true,
                 detail: "Workload authentication is unavailable for watch grant operations.",
                 operatorNotes: [
-                    "Confirm Keychain item dev.thetriangle.mesh.workload-key exists for the actor profile.",
+                    "Confirm every member profile is bound (profiles-v1) to a triangle workload-key.json on the same origin as the actor.",
                     "Workload mint/DPoP failures are fail-closed; rebind or repair the workload key file without printing secrets.",
                 ] + keychainSigningNotes
             )
