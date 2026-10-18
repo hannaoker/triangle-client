@@ -159,7 +159,74 @@ test("public readiness requires both shipped artifacts, macOS, and no Developer 
   assert.equal(result.status, 64, "--artifact is only valid with --mode public");
 });
 
-const hasCc = isDarwin && spawnSync("/usr/bin/xcrun", ["--find", "cc"], { encoding: "utf8" }).status === 0;
+// Stub that leaves a marker if it is ever executed. The marker path is baked
+// into the script because the custody probe runs it under `env -i`.
+function markerArtifact(dir, name) {
+  const marker = path.join(dir, `${name}.launched`);
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, `#!/bin/bash
+: > ${JSON.stringify(marker)}
+exit 64
+`, { mode: 0o700 });
+  return { file, marker };
+}
+
+// Simulated com.apple.quarantine (works on every platform): exits non-zero for
+// the listed paths. With TRIANGLE_TEST_QUARANTINE_AFTER=N, a path counts as
+// quarantined only from its Nth check on (quarantine appearing mid-validation).
+function quarantineStub(dir, quarantined, { after = 1 } = {}) {
+  const stub = path.join(dir, "quarantine-check");
+  const counts = path.join(dir, "quarantine-counts");
+  fs.mkdirSync(counts);
+  fs.writeFileSync(stub, `#!/bin/bash
+target=$1
+count_file=${JSON.stringify(counts)}/$(printf '%s' "$target" | /usr/bin/cksum | /usr/bin/cut -d' ' -f1)
+n=$(( $(/bin/cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$count_file"
+case "$target" in
+${quarantined.map((q) => `  ${JSON.stringify(q)}) [[ $n -ge ${after} ]] && exit 78 ;;`).join("\n")}
+esac
+exit 0
+`, { mode: 0o700 });
+  return stub;
+}
+
+test("public readiness never launches a quarantined artifact", (t) => {
+  const dir = tempDir(t);
+  const env = stubTools(dir);
+  const helper = markerArtifact(dir, "triangle-mailbox");
+  const client = stubArtifact(dir, "triangle-client");
+  const quarantineCommand = quarantineStub(dir, [helper.file]);
+  const result = runReadiness(["--mode", "public", "--artifact", helper.file, "--artifact", client],
+    { ...env, TRIANGLE_READINESS_QUARANTINE_COMMAND: quarantineCommand });
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /artifact triangle-mailbox carries com\.apple\.quarantine/);
+  assert.equal(fs.existsSync(helper.marker), false, "readiness executed a quarantined artifact (would show a Gatekeeper dialog)");
+  assert.doesNotMatch(result.output, /triangle-mailbox (signature verifies|is ad-hoc signed|enforces public file custody|is not a public file-custody build)/);
+  // The clean artifact is still fully validated.
+  assert.match(result.output, /artifact triangle-client enforces public file custody/);
+});
+
+test("custody probe re-checks quarantine immediately before launching", (t) => {
+  const dir = tempDir(t);
+  const env = stubTools(dir);
+  const helper = markerArtifact(dir, "triangle-mailbox");
+  const client = stubArtifact(dir, "triangle-client");
+  // Clean at the first (validation) check, quarantined by the probe-time check.
+  const quarantineCommand = quarantineStub(dir, [helper.file], { after: 2 });
+  const result = runReadiness(["--mode", "public", "--artifact", helper.file, "--artifact", client],
+    { ...env, TRIANGLE_READINESS_QUARANTINE_COMMAND: quarantineCommand });
+  assert.notEqual(result.status, 0, result.output);
+  assert.match(result.output, /artifact triangle-mailbox is not quarantined/);
+  assert.match(result.output, /artifact triangle-mailbox is quarantined; refusing to launch the custody probe/);
+  assert.equal(fs.existsSync(helper.marker), false, "custody probe executed a quarantined artifact");
+});
+
+// Launching a real Mach-O can invoke Gatekeeper (a blocking GUI dialog when
+// the file is quarantined), so the real-exec test is opt-in, not part of the
+// default `npm test`: TRIANGLE_RUN_MACOS_EXEC_TESTS=1 npm test
+const runMacosExecTests = process.env.TRIANGLE_RUN_MACOS_EXEC_TESTS === "1";
+const hasCc = isDarwin && runMacosExecTests && spawnSync("/usr/bin/xcrun", ["--find", "cc"], { encoding: "utf8" }).status === 0;
 
 // A real Mach-O that implements the same launch-time custody refusal as a
 // TRIANGLE_FILE_CUSTODY_REQUIRED build.
@@ -188,7 +255,7 @@ function adhocSign(file) {
   assert.equal(sign.status, 0, sign.stderr);
 }
 
-test("public readiness validates real ad-hoc signatures, custody probe, and quarantine on macOS", { skip: !hasCc }, (t) => {
+test("public readiness validates real ad-hoc signatures, custody probe, and quarantine on macOS", { skip: hasCc ? false : "set TRIANGLE_RUN_MACOS_EXEC_TESTS=1 on macOS with cc to run real-exec checks" }, (t) => {
   const dir = tempDir(t);
   const artifact = compileProbe(dir, "triangle-mailbox");
   const client = compileProbe(dir, "triangle-client");
@@ -215,6 +282,9 @@ test("public readiness validates real ad-hoc signatures, custody probe, and quar
   result = runReadiness(args(), cleanEnv);
   assert.notEqual(result.status, 0);
   assert.match(result.output, /carries com\.apple\.quarantine/);
+  assert.doesNotMatch(result.output, /triangle-mailbox (enforces public file custody|is not a public file-custody build)/,
+    "readiness must not launch (custody-probe) a quarantined artifact");
+  assert.doesNotMatch(result.output, /triangle-mailbox signature verifies/, "a quarantined artifact is not inspected further");
 
   // A correctly ad-hoc signed Keychain-default build fails the custody probe.
   fs.rmSync(artifact);
