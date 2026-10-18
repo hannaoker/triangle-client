@@ -6,7 +6,7 @@
   "description": "triangle: the permissions-v1 owner custodian and MESH protocol core (join, agents, permissions, workload tokens).",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "bin": {
     "triangle": "./src/cli.mjs"
