@@ -221,6 +221,18 @@ test("Darwin sandbox is a canonical allowlist with explicit safe model roots", a
   assert.doesNotMatch(profile, /\(allow file-read\* \((?:literal|subpath) "\/tmp"\)\)/);
   assert.doesNotMatch(profile, /sysctl\*|mach\*|iokit\*/);
   assert.ok(profile.includes(realpathSync(boundedModel).replaceAll('"', '\\"')));
+  // Permissions v1 custody home: denied in the profile, and rejected when it
+  // overlaps the instance model root (a reasoning child could read the key).
+  const identityRoot = realpathSync(mkdtempSync(join(tmpdir(), "triangle-identity-")));
+  t.after(() => rmSync(identityRoot, { recursive: true, force: true }));
+  const sandboxEnv = { ...process.env, HOME: base, TRIANGLE_PROJECT_ROOT: project, TRIANGLE_CREDENTIAL_ROOT: credentials, TRIANGLE_MODEL_STATE_BASE: modelBase, TRIANGLE_MODEL_ROOTS: boundedModel, TRIANGLE_RUNTIME_ROOTS: join(process.execPath, ".."), TRIANGLE_INSTANCE_ID: instanceId, TRIANGLE_INSTANCE_TEMP_ROOT: fixedTemporary, CODEX_HOME: boundedModel, HERMES_HOME: undefined, TMPDIR: temporary };
+  const identityProfile = sandboxCommand(process.execPath, ["-e", ""], { ...sandboxEnv, TRIANGLE_IDENTITY_ROOT: identityRoot }).args[1];
+  assert.ok(identityProfile.includes(`(deny file-read* file-write* (subpath "${identityRoot}"))`));
+  const nestedIdentity = join(boundedModel, "v1"); mkdirSync(nestedIdentity, { recursive: true });
+  assert.throws(() => sandboxCommand(process.execPath, [], { ...sandboxEnv, TRIANGLE_IDENTITY_ROOT: nestedIdentity }), /overlap/i);
+  const projectIdentity = join(project, "v1"); mkdirSync(projectIdentity, { recursive: true });
+  assert.throws(() => sandboxCommand(process.execPath, [], { ...sandboxEnv, TRIANGLE_IDENTITY_ROOT: projectIdentity }), /overlap/i);
+  rmSync(projectIdentity, { recursive: true, force: true });
   assert.throws(() => sandboxCommand(process.execPath, [], { ...process.env, HOME: base, TRIANGLE_PROJECT_ROOT: project, TRIANGLE_CREDENTIAL_ROOT: credentials, TRIANGLE_MODEL_STATE_BASE: modelBase, TRIANGLE_MODEL_ROOTS: model, TRIANGLE_RUNTIME_ROOTS: join(process.execPath, ".."), TMPDIR: temporary }), /beneath|model state/i);
   assert.throws(() => sandboxCommand(process.execPath, [], { ...process.env, HOME: base, TRIANGLE_PROJECT_ROOT: project, TRIANGLE_CREDENTIAL_ROOT: credentials, TRIANGLE_MODEL_STATE_BASE: arbitraryModelBase, TRIANGLE_MODEL_ROOTS: arbitraryBoundedModel, TRIANGLE_RUNTIME_ROOTS: join(process.execPath, ".."), TMPDIR: temporary }), /application-owned|model state base/i);
   assert.throws(() => sandboxCommand(process.execPath, [], { ...process.env, HOME: base, TRIANGLE_PROJECT_ROOT: project, TRIANGLE_CREDENTIAL_ROOT: credentials, TRIANGLE_MODEL_STATE_BASE: modelBase, TRIANGLE_MODEL_ROOTS: boundedModel, TRIANGLE_RUNTIME_ROOTS: arbitraryRuntime, CODEX_HOME: boundedModel, HERMES_HOME: undefined, TMPDIR: temporary }), /runtime root|installation/i);

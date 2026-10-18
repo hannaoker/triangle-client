@@ -10,6 +10,7 @@ public enum WorkerLauncherContractCases {
     public static let all: [ContractCase] = [
         .init(name: "closed worker kinds receive exact credential environment", run: exactEnvironment),
         .init(name: "ambient credentials and selectors are replaced", run: inheritedSecretsAreReplaced),
+        .init(name: "triangle custody home is passed and must not overlap worker roots", run: identityRootIsIsolated),
         .init(name: "credential never enters worker arguments", run: noSecretInArguments),
         .init(name: "ineligible credential gate never executes", run: gateFailureNeverExecutes),
         .init(name: "resolver is validated before credential release", run: resolverFailureNeverRequestsCredential),
@@ -88,6 +89,33 @@ public enum WorkerLauncherContractCases {
         try expect(env["MESH_OTHER_SELECTOR"] == nil && env["HERMES_AGENT_ID"] == nil && env["ANTIGRAVITY_AGENT_ID"] == nil, "ambient selector survived")
         try expect(env["TRIANGLE_PROJECT_ROOT"] == "/trusted" && env["TRIANGLE_CREDENTIAL_ROOT"] == nil, "caller selected project or credential root")
         try expect(env["PATH"] == "/trusted/bin" && env["UNRELATED_SECRET"] == nil, "ambient environment was inherited")
+    }
+
+    public static func identityRootIsIsolated() async throws {
+        let home = agent.keyFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let executor = RecordingWorkerExecutor()
+        let safe = WorkerCommand(executable: URL(fileURLWithPath: "/trusted/node"), arguments: [], workingDirectory: URL(fileURLWithPath: "/trusted"),
+                                 environment: ["TRIANGLE_PROJECT_ROOT": "/trusted", "TRIANGLE_MODEL_ROOTS": "/model/instance", "TRIANGLE_IDENTITY_ROOT": "/evil"])
+        try await WorkerLauncher(gate: try gate(), resolver: FixedWorkerResolver(safe), executor: executor)
+            .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: [:])
+        let launched = try require(executor.request, "worker missing")
+        try expect(launched.environment["TRIANGLE_IDENTITY_ROOT"] == home.path, "identity root not exact")
+        let overlapping: [[String: String]] = [
+            ["TRIANGLE_MODEL_ROOTS": home.appendingPathComponent("..").standardizedFileURL.path],
+            ["CODEX_HOME": home.path],
+            ["TRIANGLE_RUNTIME_ROOTS": "/usr/bin:" + home.appendingPathComponent("agents").path],
+            ["TRIANGLE_INSTANCE_TEMP_ROOT": home.path + "/tmp"],
+        ]
+        for environment in overlapping {
+            let blocked = RecordingWorkerExecutor()
+            let command = WorkerCommand(executable: URL(fileURLWithPath: "/trusted/node"), arguments: [], workingDirectory: URL(fileURLWithPath: "/trusted"), environment: environment)
+            do {
+                try await WorkerLauncher(gate: try gate(), resolver: FixedWorkerResolver(command), executor: blocked)
+                    .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: [:])
+                throw WorkerContractFailure("overlapping custody home launched: \(environment.keys.sorted())")
+            } catch WorkerLauncherError.unsafeInstallation {}
+            try expect(blocked.request == nil, "overlap executed worker")
+        }
     }
 
     public static func noSecretInArguments() async throws {

@@ -489,8 +489,7 @@ public struct WatchGrantService: Sendable {
     }
 
     /// Headless Codex profiles whose instanceId appears in headless-runtime-binding.json.
-    /// When file-credential custody is enabled, also require a local workload key file so
-    /// auto-ensure does not fail closed on a bound profile that cannot join yet.
+    /// Members also need a permissions v1 profile binding.
     private static func headlessBoundCodexMembers(from instances: [ClientInstance]) -> [ClientInstance] {
         let headless = instances.filter(\.participatesInHeadlessWake)
         guard !headless.isEmpty else { return [] }
@@ -508,24 +507,17 @@ public struct WatchGrantService: Sendable {
         })
         guard !boundInstanceIds.isEmpty else { return [] }
         let bound = headless.filter { boundInstanceIds.contains($0.instanceID.value) }
-        let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
-        let fileCustodyEnabled = FileManager.default.isReadableFile(
-            atPath: credentialsRoot.appendingPathComponent("ENABLED").path
-        )
-        guard fileCustodyEnabled else { return bound }
-        return bound.filter { instance in
-            let workloadURL = credentialsRoot
-                .appendingPathComponent("workload")
-                .appendingPathComponent("\(instance.profile.value).json")
-            return FileManager.default.isReadableFile(atPath: workloadURL.path)
-        }
+        // Permissions v1: a member must have a readable profile binding
+        // (`triangle-mailbox bind`) so auto-ensure does not fail closed on a
+        // bound runtime profile that has no identity yet.
+        let bindings = FileV1ProfileBindingStore()
+        return bound.filter { (try? bindings.read(for: $0.profile)) != nil }
     }
 
     /// Cursor ACP profiles whose instanceId appears in
     /// cursor-acp-runtime-binding.json. `shadowTestProfile` is accepted and ignored
     /// for membership (missing or false still joins).
-    /// File-credential custody, when enabled, also requires a local workload key
-    /// so auto-ensure does not fail closed on a bound profile that cannot join yet.
+    /// Members also need a permissions v1 profile binding.
     private func cursorAcpBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
         let cursorAcp = instances.filter(\.participatesInCursorAcpWake)
         guard !cursorAcp.isEmpty else { return [] }
@@ -549,17 +541,11 @@ public struct WatchGrantService: Sendable {
         // An injected binding URL is the test fixture. Do not consult the
         // operator home for file custody, or host tests depend on $HOME.
         guard cursorAcpBindingURL == nil else { return bound }
-        let credentialsRoot = home.appendingPathComponent("Library/Application Support/The Triangle/credentials/local")
-        let fileCustodyEnabled = FileManager.default.isReadableFile(
-            atPath: credentialsRoot.appendingPathComponent("ENABLED").path
-        )
-        guard fileCustodyEnabled else { return bound }
-        return bound.filter { instance in
-            let workloadURL = credentialsRoot
-                .appendingPathComponent("workload")
-                .appendingPathComponent("\(instance.profile.value).json")
-            return FileManager.default.isReadableFile(atPath: workloadURL.path)
-        }
+        // Permissions v1: a member must have a readable profile binding
+        // (`triangle-mailbox bind`) so auto-ensure does not fail closed on a
+        // bound runtime profile that has no identity yet.
+        let bindings = FileV1ProfileBindingStore()
+        return bound.filter { (try? bindings.read(for: $0.profile)) != nil }
     }
 }
 

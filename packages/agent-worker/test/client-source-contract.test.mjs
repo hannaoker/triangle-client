@@ -60,7 +60,10 @@ test("threat model states the trusted-host and isolation boundaries", () => {
     /trusted macOS host/i,
     /coordinator memory/i,
     /reasoning subprocess.*never.*token/is,
-    /Keychain/i,
+    /workload key/i,
+    /DPoP/,
+    /TRIANGLE_IDENTITY_ROOT/,
+    /0600/,
     /anonymous pipe|anonymous stdin/i,
     /argv/i,
     /environment/i,
@@ -70,6 +73,7 @@ test("threat model states the trusted-host and isolation boundaries", () => {
     /rollback/i,
     /not.*malicious.*host|does not protect.*host/is,
   ], "threat model");
+  assert.doesNotMatch(text, /Enrollment sends|Data Protection Keychain|permanent (?:MESH )?(?:mailbox )?token/i, "threat model still describes removed enrollment/Keychain identity");
 });
 
 test("repository is the complete standalone client source and contains no MESH server", () => {

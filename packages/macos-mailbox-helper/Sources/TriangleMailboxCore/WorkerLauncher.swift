@@ -68,13 +68,20 @@ public struct WorkerLauncher: Sendable {
         guard credential.canWrite else { throw VerifiedCredentialGateError.credentialRefused }
         var environment = command.environment
         environment.keys.filter { key in
-            key.hasPrefix("MESH_") || key.hasPrefix("TRIANGLE_WORKLOAD_")
+            key.hasPrefix("MESH_") || key.hasPrefix("TRIANGLE_WORKLOAD_") || key == "TRIANGLE_IDENTITY_ROOT"
                 || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
         }.forEach { environment.removeValue(forKey: $0) }
         environment["MESH_ORIGIN"] = credential.origin.value
         // Permissions v1: the worker reads this agent's own key file (0600);
         // key material never travels through the environment.
         environment["TRIANGLE_WORKLOAD_KEY_FILE"] = credential.workloadKeyFile.path
+        // The `triangle` custody home (<home>/agents/<id>/workload-key.json)
+        // must stay outside every root a reasoning child can read or write,
+        // and the Node sandbox denies it explicitly.
+        let identityRoot = credential.workloadKeyFile
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        try Self.requireIsolatedIdentityRoot(identityRoot, from: command.environment)
+        environment["TRIANGLE_IDENTITY_ROOT"] = identityRoot.path
         environment[worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")] = credential.agentID.value
         try executor.execute(WorkerExecutionRequest(
             executable: command.executable,
@@ -82,6 +89,30 @@ public struct WorkerLauncher: Sendable {
             workingDirectory: command.workingDirectory,
             environment: environment
         ))
+    }
+}
+
+extension WorkerLauncher {
+    static let sandboxRootKeys = [
+        "TRIANGLE_PROJECT_ROOT", "TRIANGLE_CREDENTIAL_ROOT", "TRIANGLE_MODEL_STATE_BASE", "TRIANGLE_MODEL_ROOTS",
+        "TRIANGLE_RUNTIME_ROOTS", "TRIANGLE_WRITABLE_RUNTIME_ROOTS", "TRIANGLE_INSTANCE_TEMP_ROOT",
+        "CODEX_HOME", "HERMES_HOME", "ANTIGRAVITY_HOME",
+    ]
+
+    static func requireIsolatedIdentityRoot(_ identityRoot: URL, from environment: [String: String]) throws {
+        func canonical(_ path: String) -> String {
+            URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        func overlaps(_ left: String, _ right: String) -> Bool {
+            left == right || left.hasPrefix(right == "/" ? "/" : right + "/") || right.hasPrefix(left == "/" ? "/" : left + "/")
+        }
+        let identity = canonical(identityRoot.path)
+        for key in sandboxRootKeys {
+            guard let value = environment[key] else { continue }
+            for entry in value.split(separator: ":").map(String.init) where entry.hasPrefix("/") {
+                if overlaps(identity, canonical(entry)) { throw WorkerLauncherError.unsafeInstallation }
+            }
+        }
     }
 }
 

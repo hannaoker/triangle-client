@@ -685,6 +685,8 @@ test("profile bindings are trusted only when the pointer, key custody, and agent
       ["agent record without authority", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), authority: "http://x.test" }), "agent_record_invalid"],
       ["agent record with empty bounds", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), bounds: ["owner.admin"] }), "agent_record_invalid"],
       ["agents dir shared", () => chmodSync(path.dirname(agentDir), 0o755), "key_unsafe"],
+      ["handle too short", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), handle: "ab" }), "agent_record_invalid"],
+      ["handle too long", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), handle: "a".repeat(33) }), "agent_record_invalid"],
     ]) {
       mutate();
       const result = runDoctor(f.client);
@@ -697,6 +699,16 @@ test("profile bindings are trusted only when the pointer, key custody, and agent
       writeBinding(f.app, "ghost");
       assert.equal(runDoctor(f.client).exitCode, 0, `${label}: restored`);
     }
+    // Transport origin follows Swift: binding override, then a matching authority.json `via`, then the authority.
+    const authorityFile = path.join(fixtureTriangleHome(f.app), "authority.json");
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://via.example.test");
+    writeJson(authorityFile, { authority: "https://other.example.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://example.test");
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    writeJson(bindingFile(f.app, "ghost"), { ...good, origin: "https://override.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://override.example.test");
+    rmSync(authorityFile);
     // Output never carries the key file contents.
     chmodSync(good.keyFile, 0o600);
     assert.ok(!JSON.stringify(runDoctor(f.client).report).includes("fixture-not-a-key"));

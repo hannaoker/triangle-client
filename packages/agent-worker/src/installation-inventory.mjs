@@ -339,6 +339,14 @@ function readRegistry(clientRoot) {
   return { status: "present", path: dir, entries, strayNames };
 }
 
+/** Swift loader: `authority.json` `via` applies only when its `authority` matches the agent's. */
+function transportVia(home, authority) {
+  const file = path.join(home, "authority.json");
+  if (custodyProblem(file, { maxBytes: AGENT_RECORD_MAX_BYTES }) != null) return null;
+  const { value } = readJsonFile(file);
+  return isPlainObject(value) && value.authority === authority && isValidMeshOrigin(value.via) ? value.via : null;
+}
+
 function decodeHexProfile(hex) {
   if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
   const text = Buffer.from(hex, "hex").toString("utf8");
@@ -425,12 +433,14 @@ function readOneBinding(file) {
   if (!isPlainObject(record) || typeof record.agent_id !== "string" || !AGENT_ID.test(record.agent_id)
     || typeof record.workload_id !== "string" || !WORKLOAD_ID.test(record.workload_id)
     || typeof record.handle !== "string" || !MAILBOX_HANDLE.test(record.handle)
-    || !isValidMeshOrigin(record.authority)
-    || (record.bounds !== undefined && !Array.isArray(record.bounds))) {
+    || Buffer.byteLength(record.handle, "utf8") < 3 || Buffer.byteLength(record.handle, "utf8") > 32
+    || !isValidMeshOrigin(record.authority)) {
     return fail("agent_record_invalid", { keyFile });
   }
   if (record.agent_id !== path.basename(agentDir)) return fail("agent_mismatch", { keyFile });
-  const bounds = Array.isArray(record.bounds) ? AGENT_BOUNDS.filter((bound) => record.bounds.includes(bound)) : [...AGENT_BOUNDS];
+  // Swift: `bounds as? [String]` filters the known bounds; anything else means all bounds.
+  const stringBounds = Array.isArray(record.bounds) && record.bounds.every((bound) => typeof bound === "string");
+  const bounds = stringBounds ? AGENT_BOUNDS.filter((bound) => record.bounds.includes(bound)) : [...AGENT_BOUNDS];
   if (bounds.length === 0) return fail("agent_record_invalid", { keyFile });
   return {
     state: "bound",
@@ -438,7 +448,7 @@ function readOneBinding(file) {
     handle: record.handle,
     workloadId: record.workload_id,
     bounds,
-    origin: value.origin ?? record.authority,
+    origin: value.origin ?? transportVia(home, record.authority) ?? record.authority,
     keyFile,
     permissions: readCachedPermissions(home, record.agent_id),
   };
