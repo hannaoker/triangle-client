@@ -102,8 +102,13 @@ test("version-1 bootstrap accepts only the bounded exact schema", () => {
   assert.equal(parsed.version, 1);
   assert.equal(parsed.maxConcurrentReasoners, 2);
   assert.deepEqual(parsed.instances, [instance()]);
+  // A read-only agent's registered bounds ride in the bootstrap (optional).
+  const readOnly = { ...bootstrap(), instances: [{ ...instance(), mailbox: { ...instance().mailbox, workloadScopes: ["agent.read"] } }] };
+  assert.deepEqual(parseClientSupervisorBootstrap(JSON.stringify(readOnly)).instances[0].mailbox.workloadScopes, ["agent.read"]);
 
   for (const candidate of [
+    { ...bootstrap(), instances: [{ ...instance(), mailbox: { ...instance().mailbox, workloadScopes: [] } }] },
+    { ...bootstrap(), instances: [{ ...instance(), mailbox: { ...instance().mailbox, workloadScopes: ["agent.admin"] } }] },
     { ...bootstrap(), version: 2 },
     { ...bootstrap(), maxConcurrentReasoners: 0 },
     { ...bootstrap(), maxConcurrentReasoners: 17 },

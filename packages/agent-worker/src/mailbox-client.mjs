@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 // One JWS/DPoP implementation for the whole client (permissions v1): the
 // triangle-cli protocol core. Bundled into every worker (installer manifest v8).
 import { compactJws, assertPrivateJwk } from "../../triangle-cli/src/keys.mjs";
-import { AGENT_BOUNDS, WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE } from "../../triangle-cli/src/protocol.mjs";
+import { WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE, workloadScopes } from "../../triangle-cli/src/protocol.mjs";
 import { dpopProof } from "../../triangle-cli/src/workload.mjs";
 
 const DEFAULT_LIMIT = 1;
@@ -365,6 +365,7 @@ export function validateMailboxClientOptions(
     pageLimit = DEFAULT_LIMIT,
     workloadId,
     workloadPrivateKey,
+    workloadScopes: scopes,
     ...rest
   } = {},
 ) {
@@ -388,6 +389,8 @@ export function validateMailboxClientOptions(
     pageLimit,
     workloadId: id,
     workloadPrivateKey: key,
+    // Registered bounds, only when supplied (absent → both, like agent.json).
+    ...(scopes === undefined ? {} : { workloadScopes: Object.freeze(workloadScopes(scopes, "workloadScopes")) }),
   });
 }
 
@@ -430,11 +433,13 @@ export function createWorkloadTokenManager({
   origin,
   workloadId,
   workloadPrivateKey,
+  scopes,
   fetchImpl,
   now = () => Date.now(),
 }) {
   const workloadKey = parseWorkloadPrivateKey(workloadPrivateKey);
-  const requestedScopes = [...AGENT_BOUNDS];
+  // The agent's registered bounds; a read-only agent asks for agent.read only.
+  const requestedScopes = workloadScopes(scopes, "workloadScopes");
   let cachedToken = null;
   let cachedTokenExpiresAt = 0;
   let refreshPromise = null;
@@ -547,6 +552,7 @@ export function createMailboxClient(
     pageLimit,
     workloadId,
     workloadPrivateKey,
+    workloadScopes: scopes,
   } = validateMailboxClientOptions(options);
   validatePositiveInteger(requestTimeoutMs, "requestTimeoutMs");
   validatePositiveInteger(maxDeliveryAttempts, "maxDeliveryAttempts");
@@ -580,6 +586,7 @@ export function createMailboxClient(
     origin,
     workloadId,
     workloadPrivateKey,
+    scopes,
     fetchImpl,
     now,
   });

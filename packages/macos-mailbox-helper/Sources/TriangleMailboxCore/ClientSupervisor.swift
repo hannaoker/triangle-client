@@ -339,7 +339,8 @@ public struct ClientSupervisor: Sendable {
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
                     workloadId: credential.workloadID.value,
-                    workloadPrivateKey: credential.material.workloadPrivateKeySeed
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed,
+                    workloadScopes: credential.material.scopes
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
@@ -542,7 +543,8 @@ public struct ClientSupervisor: Sendable {
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
                     workloadId: credential.workloadID.value,
-                    workloadPrivateKey: credential.material.workloadPrivateKeySeed
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed,
+                    workloadScopes: credential.material.scopes
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
@@ -1261,6 +1263,9 @@ private struct PreparedBootstrapMailbox: Encodable {
     /// Permissions v1: the agent's workload id and its key as an unpadded base64url seed.
     let workloadId: String
     let workloadPrivateKey: String
+    /// The agent's registered bounds (agent.json `bounds`): a read-only agent's
+    /// worker asks MESH for agent.read only, since MESH refuses more.
+    let workloadScopes: [String]
 }
 private struct PreparedBootstrapRunner: Encodable {
     let command: String

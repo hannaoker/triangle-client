@@ -44,6 +44,7 @@ test("worker configuration is mailbox-only and resolves exact selectors", () => 
     pageLimit: 2,
     workloadId: TEST_WORKLOAD.workloadId,
     workloadPrivateKey: TEST_WORKLOAD.workloadPrivateKey,
+    workloadScopes: ["agent.read", "agent.write"],
   });
   assert.equal("transport" in config, false);
   assert.equal("gateway" in config, false);
@@ -126,4 +127,16 @@ test("package and CLI source contain no deprecated gateway transport", async () 
   ]);
   const source = await readFile(new URL("../src/cli.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /gateway-client|createGatewayClient|gatewayUrlEnv|gatewayTokenEnv|\/inbox|internal\/tasks\/update/);
+});
+
+test("worker requests the agent's registered bounds from agent.json (read-only agent)", () => {
+  const readOnly = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds: ["agent.read"] } });
+  const config = resolveWorkerConfig(raw, "/tmp/config/worker.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: readOnly });
+  assert.deepEqual(config.mailbox.workloadScopes, ["agent.read"]);
+  const both = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds: ["agent.write", "agent.read"] } });
+  assert.deepEqual(resolveWorkerConfig(raw, "/tmp/config/worker.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: both }).mailbox.workloadScopes, ["agent.read", "agent.write"]);
+  for (const bounds of [[], ["agent.admin"], "agent.read", ["agent.read", "agent.read"]]) {
+    const bad = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds } });
+    assert.throws(() => resolveWorkerConfig(raw, "/tmp/config.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: bad }), /agent\.json bounds are invalid/, JSON.stringify(bounds));
+  }
 });

@@ -13,6 +13,24 @@ export const OWNER_REQUEST_TYP = "mesh-owner-request+jwt";
 export const OWNER_PROOF_HEADER = "mesh-owner-proof";
 export const AGENT_BOUNDS = Object.freeze(["agent.read", "agent.write"]);
 
+/**
+ * The scopes a workload may request: its registered bounds (`agent.json`
+ * `bounds`, or the gateway's `MESH_WORKLOAD_SCOPES`). MESH refuses a token
+ * request that asks for more (`workload_forbidden`) and never narrows it, so a
+ * read-only agent must ask for `agent.read` only. Absent → both bounds
+ * (matching the Swift loader); otherwise a non-empty subset of AGENT_BOUNDS,
+ * returned in canonical order. Accepts an array or a comma/space-separated string.
+ */
+export function workloadScopes(value, name = "workload scopes") {
+  if (value === undefined || value === null) return [...AGENT_BOUNDS];
+  const list = typeof value === "string" ? value.split(/[\s,]+/).filter(Boolean) : value;
+  if (!Array.isArray(list) || list.length === 0 || list.some((scope) => typeof scope !== "string" || !AGENT_BOUNDS.includes(scope))
+    || new Set(list).size !== list.length) {
+    throw new TypeError(`${name} must be a non-empty subset of ${AGENT_BOUNDS.join(", ")}`);
+  }
+  return AGENT_BOUNDS.filter((scope) => list.includes(scope));
+}
+
 /** Catalog keys this client knows (§4.1). Unknown future keys are shown read-only. */
 export const PERMISSION_KEYS = Object.freeze(["dm.receive", "dm.send", "posts.publish", "tasks.claim", "directory.listed"]);
 export const DEFAULT_PERMISSIONS = Object.freeze({

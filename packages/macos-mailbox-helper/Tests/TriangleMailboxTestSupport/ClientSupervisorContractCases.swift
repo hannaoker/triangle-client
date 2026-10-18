@@ -113,6 +113,7 @@ public enum ClientSupervisorContractCases {
             try expect(instance.mailbox.workloadId == specification.agent.workloadID.value, "workload id crossed profiles")
             try expect(instance.mailbox.recipientId == specification.agentID.value, "agent ID crossed profiles")
             try expect(instance.mailbox.pageLimit == 1, "mailbox page limit changed")
+            try expect(instance.mailbox.workloadScopes == specification.agent.material.scopes, "registered bounds not handed to the worker")
             try expect(instance.runnerEnvironment["TRIANGLE_INSTANCE_ID"] == identifier, "runner instance binding changed")
             try expect(instance.runnerEnvironment["TRIANGLE_IDENTITY_ROOT"]?.hasPrefix("/") == true, "runner custody home deny missing")
             let activeHome = specification.adapter == .codex ? "CODEX_HOME" : "HERMES_HOME"
@@ -1071,10 +1072,10 @@ private struct InstanceSpecification: Sendable {
     var handle: MailboxHandle { agent.handle }
     let verificationFails: Bool
 
-    init(profile: String, adapter: RuntimeAdapter, digit: Character, verificationFails: Bool = false) throws {
+    init(profile: String, adapter: RuntimeAdapter, digit: Character, verificationFails: Bool = false, scopes: [String] = V1AgentMaterial.agentBounds) throws {
         self.profile = try ProfileName(profile)
         self.adapter = adapter
-        agent = try V1TestCustody.memoryAgent(profile: profile, handle: "agent-" + String(repeating: digit, count: 3), fill: digit)
+        agent = try V1TestCustody.memoryAgent(profile: profile, handle: "agent-" + String(repeating: digit, count: 3), fill: digit, scopes: scopes)
         self.verificationFails = verificationFails
     }
 }
@@ -1402,12 +1403,12 @@ private struct TestBootstrapInstance: Decodable {
 }
 /// Exactly the keys the Node supervisor schema accepts (client-supervisor-schema.mjs).
 private struct TestMailbox: Decodable {
-    let meshUrl: String; let recipientId: String; let pageLimit: Int; let workloadId: String; let workloadPrivateKey: String
+    let meshUrl: String; let recipientId: String; let pageLimit: Int; let workloadId: String; let workloadPrivateKey: String; let workloadScopes: [String]
     private struct AnyKey: CodingKey { let stringValue: String; let intValue: Int? = nil; init?(stringValue: String) { self.stringValue = stringValue }; init?(intValue: Int) { nil } }
-    private enum CodingKeys: String, CodingKey { case meshUrl, recipientId, pageLimit, workloadId, workloadPrivateKey }
+    private enum CodingKeys: String, CodingKey { case meshUrl, recipientId, pageLimit, workloadId, workloadPrivateKey, workloadScopes }
     init(from decoder: Decoder) throws {
         let keys = Set(try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue))
-        guard keys == ["meshUrl", "recipientId", "pageLimit", "workloadId", "workloadPrivateKey"] else {
+        guard keys == ["meshUrl", "recipientId", "pageLimit", "workloadId", "workloadPrivateKey", "workloadScopes"] else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "bootstrap mailbox keys \(keys.sorted())"))
         }
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -1416,6 +1417,10 @@ private struct TestMailbox: Decodable {
         pageLimit = try values.decode(Int.self, forKey: .pageLimit)
         workloadId = try values.decode(String.self, forKey: .workloadId)
         workloadPrivateKey = try values.decode(String.self, forKey: .workloadPrivateKey)
+        workloadScopes = try values.decode([String].self, forKey: .workloadScopes)
+        guard !workloadScopes.isEmpty, workloadScopes == V1AgentMaterial.agentBounds.filter({ workloadScopes.contains($0) }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "workload scopes are not canonical bounds"))
+        }
         guard workloadPrivateKey.wholeMatch(of: /^[A-Za-z0-9_-]{43}$/) != nil else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "workload key is not an unpadded base64url seed"))
         }

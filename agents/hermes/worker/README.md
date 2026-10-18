@@ -8,7 +8,8 @@ provider credentials.
 Permissions v1: the agent is created by its owner with `triangle agent add`
 (or at `triangle join`), and its workload key lives in triangle custody at
 `agents/<agent_id>/workload-key.json` (0600) beside `agent.json`. There is no
-permanent `mesh_` token. The macOS `triangle-mailbox` helper reads only that
+permanent `mesh_` token, and v1 no longer stores agent credentials in the
+macOS Keychain: the key lives only in that v1 key file. The macOS `triangle-mailbox` helper reads only that
 agent's workload credential, never the owner key. The LaunchAgent
 invokes `triangle-mailbox run-worker --profile hermes-mailbox-live --worker hermes`;
 only that trusted controller receives the credential environment. The tracked

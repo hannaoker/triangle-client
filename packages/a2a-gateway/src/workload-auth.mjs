@@ -5,7 +5,7 @@
 import crypto from "node:crypto";
 
 import { assertPrivateJwk, compactJws } from "../../triangle-cli/src/keys.mjs";
-import { AGENT_BOUNDS, WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE } from "../../triangle-cli/src/protocol.mjs";
+import { WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE, workloadScopes } from "../../triangle-cli/src/protocol.mjs";
 import { dpopProof } from "../../triangle-cli/src/workload.mjs";
 
 const SEED = /^[A-Za-z0-9_-]{43}$/;
@@ -67,11 +67,13 @@ async function readJson(response) {
  * request to `url` (the DPoP `htu` is that full URL). Callers retry once with
  * `refresh: true` after a 401.
  */
-export function createWorkloadAuth({ meshOrigin, workloadId, workloadPrivateKey, fetchImpl = globalThis.fetch, now = () => Date.now() }) {
+export function createWorkloadAuth({ meshOrigin, workloadId, workloadPrivateKey, scopes: registeredScopes, fetchImpl = globalThis.fetch, now = () => Date.now() }) {
   if (typeof workloadId !== "string" || !WORKLOAD_ID.test(workloadId)) throw new TypeError("MESH_WORKLOAD_ID is invalid");
   const key = parseWorkloadKey(workloadPrivateKey);
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
-  const scopes = [...AGENT_BOUNDS];
+  // The workload's registered bounds (MESH_WORKLOAD_SCOPES; absent → both).
+  // MESH refuses a request beyond them, so a read-only agent asks for agent.read.
+  const scopes = workloadScopes(registeredScopes, "MESH_WORKLOAD_SCOPES");
   let cached = null;
   let inflight = null;
 
