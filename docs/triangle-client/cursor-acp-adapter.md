@@ -60,11 +60,19 @@ runs automatically; run only while the Cursor ACP drain is stopped.
 - All target paths are checked physically (`owned-fs.mjs`): the Triangle home
   is re-resolved with realpath and every component below it is lstat'ed; any
   symlinked or non-directory ancestor is rejected before copying or removing.
+  Legacy sources are checked the same way below `realpath(HOME)`: a symlinked
+  `~/.cursor`, `~/.cursor/acp-sessions` or session directory is reported as
+  `unsafe_source` and not copied (move the real tree into place first).
+- A session whose copy fails midway is rolled back (only the files this apply
+  copied, identity-checked, and the empty directories it created) and returned
+  in `failed`; it is not recorded, so a later apply can retry it. If rollback
+  cannot finish, the record is kept with `incomplete: true` for revert.
 - **Undo after use:** revert is per session and all-or-nothing. A session is
   removed only if every recorded file still matches its snapshot and no other
   files exist in it; then exactly those files and the now-empty recorded
   directories are removed (never a recursive delete). If the session was used
-  after migration (file changed, missing or added) or any path is unsafe, the
+  after migration (file changed, missing, added, replaced by another type, or a
+  new directory created) or any path or manifest entry is unsafe, the
   whole session is left in place, returned in `kept` with the reason and file
   lists, and stays in the manifest. The manifest is deleted only when every
   entry has been undone.

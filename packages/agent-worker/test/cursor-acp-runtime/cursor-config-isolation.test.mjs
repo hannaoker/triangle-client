@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -376,6 +377,121 @@ test("apply refuses to copy through a symlinked acp-sessions root", () => {
       { code: "owned_path_symlink_rejected" },
     );
     assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r1: a copy that fails midway is rolled back, not recorded, and can be retried", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const source = seedLegacySession(home, SESSION_A, "legacy-a");
+  try {
+    // meta.json copies first (sorted), then store.db fails with EACCES.
+    chmodSync(path.join(source, "store.db"), 0o000);
+    const result = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(result.copied, []);
+    assert.equal(result.failed.length, 1);
+    assert.equal(result.failed[0].sessionId, SESSION_A);
+    assert.equal(result.failed[0].rolledBack, true);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    assert.equal(existsSync(manifestPath), false);
+
+    chmodSync(path.join(source, "store.db"), 0o600);
+    const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    assert.equal(plan.entries[0].action, "copy");
+    const retry = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(retry.copied, [SESSION_A]);
+    assert.equal(
+      readFileSync(path.join(cursorHome, "acp-sessions", SESSION_A, "store.db"), "utf8"),
+      "db:legacy-a",
+    );
+  } finally {
+    try { chmodSync(path.join(source, "store.db"), 0o600); } catch {}
+    cleanup();
+  }
+});
+
+test("codex r1: undo preflight treats a new empty directory as use and deletes nothing", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const targetA = path.join(cursorHome, "acp-sessions", SESSION_A);
+    mkdirSync(path.join(targetA, "new-empty-dir"));
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, []);
+    assert.equal(reverted.kept[0].reason, "used_after_migration");
+    assert.deepEqual(reverted.kept[0].newFiles, ["new-empty-dir/"]);
+    assert.ok(existsSync(path.join(targetA, "meta.json")));
+    assert.ok(existsSync(path.join(targetA, "store.db")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r1: a recorded file replaced by a directory keeps the whole session without throwing", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const targetA = path.join(cursorHome, "acp-sessions", SESSION_A);
+    rmSync(path.join(targetA, "store.db"));
+    mkdirSync(path.join(targetA, "store.db"));
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, []);
+    assert.equal(reverted.kept[0].reason, "used_after_migration");
+    assert.deepEqual(reverted.kept[0].modifiedFiles, ["store.db"]);
+    assert.ok(existsSync(path.join(targetA, "meta.json")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r1: plan/apply refuse symlinked legacy source ancestors (~/.cursor, acp-sessions)", () => {
+  for (const linked of [".cursor", ".cursor/acp-sessions"]) {
+    const { home, cursorHome, cleanup } = fixture();
+    try {
+      const outside = path.join(home, "outside-legacy");
+      const outsideSession = path.join(
+        outside,
+        ...(linked === ".cursor" ? ["acp-sessions"] : []),
+        SESSION_A,
+      );
+      mkdirSync(outsideSession, { recursive: true });
+      writeFileSync(path.join(outsideSession, "store.db"), "db:outside");
+      if (linked === ".cursor/acp-sessions") mkdirSync(path.join(home, ".cursor"));
+      symlinkSync(outside, path.join(home, linked), "dir");
+      const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+      assert.equal(plan.entries[0].action, "unsafe_source", linked);
+      const result = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+      assert.deepEqual(result.copied, []);
+      assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("codex r1: tampered manifest createdDirs outside the session are never removed", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const victim = path.join(cursorHome, "victim-empty-dir");
+    mkdirSync(victim);
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.copied[0].createdDirs.push("victim-empty-dir");
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.equal(reverted.kept[0].reason, "unsafe_path");
+    assert.equal(reverted.kept[0].detail, "manifest_entry_outside_session");
+    assert.ok(existsSync(victim));
+    assert.ok(existsSync(manifestPath));
+    // Preflight rejects the record before anything is unlinked.
+    assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "store.db")));
+    assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "meta.json")));
   } finally {
     cleanup();
   }

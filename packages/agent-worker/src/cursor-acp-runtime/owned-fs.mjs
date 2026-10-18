@@ -176,13 +176,40 @@ export function ensureOwnedDirectory(anchor, relativeDir) {
 }
 
 /**
+ * Resolve a copy SOURCE physically: `sourceRelative` below the canonical
+ * `sourceAnchor` with every component lstat'ed (no symlinked ancestors, no
+ * symlinked leaf). Returns { absolute, stat } of a regular file.
+ */
+export function resolveOwnedSourceFile(sourceAnchor, sourceRelative) {
+  let resolved;
+  try {
+    resolved = resolveOwnedPath(sourceAnchor, sourceRelative);
+  } catch (error) {
+    throw createCodedError("owned_source_unsafe", "copy source is not physically contained", {
+      causeCode: error?.code ?? null,
+    });
+  }
+  if (!resolved.leaf.isFile()) {
+    throw createCodedError("owned_source_unsafe", "copy source must be a regular file");
+  }
+  return { absolute: resolved.absolute, stat: resolved.leaf };
+}
+
+/**
  * Copy a regular source file to `relative` below `anchor` with exclusive
  * create (never overwrites), preserving atime/mtime. Target ancestors are
- * created/validated physically. Returns { status, createdDirs, identity }.
+ * created/validated physically. The source is given either as
+ * `{ sourceAnchor, sourceRelative }` (physically validated, preferred) or as a
+ * plain `source` path (leaf lstat only). Returns { status, createdDirs, identity }.
  * status: "copied" | "already_present".
  */
-export function copyFileIntoOwned({ anchor, relative, source }) {
-  const sourceStat = lstatSync(source);
+export function copyFileIntoOwned({ anchor, relative, source, sourceAnchor, sourceRelative }) {
+  let sourceStat;
+  if (sourceAnchor != null) {
+    ({ absolute: source, stat: sourceStat } = resolveOwnedSourceFile(sourceAnchor, sourceRelative));
+  } else {
+    sourceStat = lstatSync(source);
+  }
   if (!sourceStat.isFile()) {
     throw createCodedError("owned_source_unsafe", "copy source must be a regular file");
   }
