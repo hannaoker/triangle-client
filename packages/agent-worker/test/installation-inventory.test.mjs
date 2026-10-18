@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -343,7 +343,7 @@ test("inventory module uses no mutating filesystem or process APIs", () => {
   const fsImport = /import \{([^}]*)\} from "node:fs";/.exec(source);
   assert.deepEqual(
     fsImport[1].split(",").map((name) => name.trim()).filter(Boolean).sort(),
-    ["existsSync", "lstatSync", "readFileSync", "readdirSync", "statSync"],
+    ["accessSync", "existsSync", "lstatSync", "readFileSync", "readdirSync", "statSync"],
   );
   for (const forbidden of [
     /\bwriteFile/, /\bappendFile/, /\bmkdir/, /\brename/, /\bunlink/, /\brmSync\b/, /\brm\(/, /\bcopyFile/,
@@ -788,5 +788,102 @@ test("parseable open transactions Swift would reject are custody faults, not ok"
     assert.equal(profileRow(runDoctor(f.client), "ghost").status, "ok", "legacy-optional keys may be absent");
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+function appServerBinding(profile, overrides = {}) {
+  return {
+    adapterVersion: "1",
+    enabled: true,
+    installationId: FIXTURE_INSTALLATION_ID,
+    instanceId: deriveClientInstanceId(profile),
+    agentId: enrollmentRecord(profile).agentID,
+    roomScope: "room_scope_1",
+    serverIdentity: "server-1",
+    endpoint: "ws://127.0.0.1:4500",
+    threadId: "thread_1",
+    ...overrides,
+  };
+}
+
+test("App Server binding mirrors prepareAppServerWake prerequisites and watch membership", () => {
+  const appsRow = { profile: "apps", runtimeAdapter: "codex", deliveryMode: "mcp-interactive", enabled: true };
+  const cases = [
+    { name: "valid", binding: appServerBinding("apps"), token: true, status: "bound", watch: true },
+    { name: "token missing", binding: appServerBinding("apps"), token: false, status: "missing", watch: true, code: "binding_missing" },
+    { name: "installation mismatch", binding: appServerBinding("apps", { installationId: "inst_other_installation_9" }), token: true, status: "instance_id_mismatch", watch: true, code: "binding_mismatch" },
+    { name: "agent mismatch", binding: appServerBinding("apps", { agentId: `agent_${"0".repeat(32)}` }), token: true, status: "instance_id_mismatch", watch: true, code: "binding_mismatch" },
+    { name: "agent absent", binding: appServerBinding("apps", { agentId: undefined }), token: true, status: "instance_id_mismatch", watch: true, code: "binding_mismatch" },
+    { name: "http endpoint", binding: appServerBinding("apps", { endpoint: "http://127.0.0.1:4500" }), token: true, status: "invalid", watch: true, code: "binding_invalid" },
+    { name: "disabled", binding: appServerBinding("apps", { enabled: false }), token: true, status: "invalid", watch: true, code: "binding_invalid" },
+    { name: "empty thread", binding: appServerBinding("apps", { threadId: "" }), token: true, status: "invalid", watch: true, code: "binding_invalid" },
+    { name: "other instance", binding: appServerBinding("other"), token: true, status: "missing", watch: false, code: "binding_missing" },
+    { name: "no binding", binding: null, token: true, status: "missing", watch: false, code: "binding_missing" },
+  ];
+  for (const c of cases) {
+    const { root, client } = mixedFixture({ extraRegistry: [appsRow] });
+    try {
+      if (c.binding) writeJson(path.join(client, "app-server-binding.json"), c.binding);
+      if (c.token) writeFileSync(path.join(client, "app-server-ws.token"), `${FAKE_TOKEN}\n`, { mode: 0o600 });
+      const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+      const apps = inventory.profiles.find((p) => p.profile === "apps");
+      assert.equal(apps.binding.status, c.status, c.name);
+      assert.equal(apps.pollWatch.watchMember, c.watch, c.name);
+      if (c.code) {
+        assert.ok(apps.faults.includes(c.code), `${c.name}: ${apps.faults}`);
+        assert.equal(apps.status, "fault", c.name);
+      } else {
+        assert.ok(!apps.faults.some((f) => f.startsWith("binding_")), c.name);
+      }
+      assert.doesNotMatch(JSON.stringify(inventory), /SENTINEL_TOKEN/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("both claimer families holding locks for one Cursor ACP profile is a hard conflict", () => {
+  const { root, client } = mixedFixture();
+  try {
+    writeJson(path.join(client, "headless-claimer.ghost.json"), {
+      version: 1, profile: "ghost", owner: "dev.thetriangle.client", pid: 610, family: "codex", acquiredAt: "2026-10-17T04:31:02.800Z", generation: null,
+    });
+    const result = runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+    const ghost = result.report.inventory.profiles.find((p) => p.profile === "ghost");
+    assert.ok(ghost.faults.includes("dual_claimer_conflict"));
+    assert.equal(ghost.status, "fault");
+    assert.ok(result.report.blockers.some((b) => b.code === "dual_claimer_conflict" && b.profile === "ghost"));
+    assert.equal(result.exitCode, 2);
+    // Only one held: no conflict.
+    const single = runHeadlessEngagementDoctor({
+      clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: (file) => !file.endsWith("headless-claimer.ghost.json"),
+    });
+    assert.ok(!single.report.blockers.some((b) => b.code === "dual_claimer_conflict"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("journal activity uses the newest rows when a journal exceeds the scan limit", () => {
+  const { root, client } = mixedFixture();
+  try {
+    const app = path.dirname(client);
+    const completions = path.join(app, "model-state", "headless-drain", "bob", "completions");
+    const old = new Date("2026-10-01T00:00:00.000Z");
+    for (let i = 0; i < 5005; i += 1) {
+      const file = path.join(completions, `a-old-${String(i).padStart(5, "0")}.json`);
+      writeFileSync(file, `${JSON.stringify({ version: 1, completed_at: "2026-10-01T00:00:00.000Z" })}\n`);
+      utimesSync(file, old, old);
+    }
+    // Sorts last by name, newest by mtime.
+    writeJson(path.join(completions, "z-newest.json"), { version: 1, completed_at: "2026-10-17T19:59:00.000Z" });
+    const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+    const bob = inventory.profiles.find((p) => p.profile === "bob");
+    assert.equal(bob.journal.completions.count, 5008);
+    assert.equal(bob.journal.completions.scanLimited, true);
+    assert.equal(bob.journal.completions.lastCompletedAt, "2026-10-17T19:59:00.000Z");
+    assert.equal(bob.activity.lastReplyAt, "2026-10-17T19:59:00.000Z");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

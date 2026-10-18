@@ -17,7 +17,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { accessSync, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 export const UNAVAILABLE = "unavailable";
@@ -181,6 +181,9 @@ export function classifyLane({ runtimeAdapter, deliveryMode }) {
   if (deliveryMode === "event-driven") return { lane: "event-driven", support: "supported", reason: null };
   if (deliveryMode === "mcp-interactive") return { lane: "app-server", support: "supported", reason: null };
   if (deliveryMode === "grok-bot") {
+    // Swift still prepares a grokBotWake bootstrap, but the Node supervisor
+    // (runClientSupervisor) throws on any non-null grokBotWake: the Mini Bob
+    // webhook path is retired, so an enabled grok-bot profile is never served.
     return { lane: "grok-bot", support: "unsupported", reason: "grok_bot_wake_path_removed" };
   }
   return { lane: "unknown", support: "unsupported", reason: "unknown_delivery_mode" };
@@ -433,16 +436,59 @@ function readProfileBinding(filePath, spec, context) {
   };
 }
 
+const APP_SERVER_BINDING_REQUIRED_STRINGS = ["roomScope", "serverIdentity", "threadId"];
+
+/**
+ * Mirrors Swift `prepareAppServerWake`: binding and `app-server-ws.token` must
+ * both be readable (else members are omitted as binding_missing); then the
+ * binding must carry adapterVersion "1", enabled true, non-empty roomScope /
+ * serverIdentity / threadId, a ws:// or wss:// endpoint (else invalidBootstrap),
+ * and instanceId / agentId / installationId that match the member, its
+ * credential and client/installation.json (else binding_mismatch). Token
+ * contents are never read; only readability is checked.
+ */
+function readAppServerBinding(filePath, tokenPath) {
+  const base = readSingleBinding(filePath);
+  if (base.status !== "present") return base;
+  const value = base.value;
+  const problems = [];
+  if (value.adapterVersion !== "1") problems.push("adapter_version");
+  if (value.enabled !== true) problems.push("not_enabled");
+  for (const key of APP_SERVER_BINDING_REQUIRED_STRINGS) {
+    if (typeof value[key] !== "string" || value[key].length === 0) problems.push(key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`));
+  }
+  if (typeof value.endpoint !== "string" || !(value.endpoint.startsWith("ws://") || value.endpoint.startsWith("wss://"))) {
+    problems.push("endpoint");
+  }
+  return {
+    ...base,
+    tokenReadable: isReadableFile(tokenPath),
+    agentId: typeof value.agentId === "string" ? value.agentId : null,
+    installationId: typeof value.installationId === "string" ? value.installationId : null,
+    problems,
+  };
+}
+
+function isReadableFile(filePath) {
+  try {
+    accessSync(filePath, 4); // R_OK
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function readSingleBinding(filePath) {
   const { present, value, error } = readJsonFile(filePath);
   if (!present) return { status: "absent", path: filePath };
-  if (error != null || value == null) return { status: "unreadable", path: filePath };
+  if (error != null || !isPlainObject(value)) return { status: "unreadable", path: filePath };
   return {
     status: "present",
     path: filePath,
     enabled: value.enabled === true,
     profile: typeof value.profile === "string" ? value.profile : null,
     instanceId: typeof value.instanceId === "string" ? value.instanceId : null,
+    value: isPlainObject(value) ? value : {},
   };
 }
 
@@ -526,6 +572,26 @@ function readClaimerLock(filePath, { pidAlive, advisoryHeldAt }) {
   };
 }
 
+/**
+ * The newest MAX_JOURNAL_FILES `.json` rows by mtime (readdir order is
+ * unspecified), plus the full count. Journal rows are written once by
+ * atomic rename, so mtime tracks the record's own timestamp.
+ */
+function newestJsonFiles(dir, names) {
+  const json = names.filter((name) => name.endsWith(".json"));
+  if (json.length <= MAX_JOURNAL_FILES) return { total: json.length, newest: json };
+  const stamped = [];
+  for (const name of json) {
+    try {
+      stamped.push({ name, mtimeMs: lstatSync(path.join(dir, name)).mtimeMs });
+    } catch {
+      // Raced away; it is no longer part of the journal.
+    }
+  }
+  stamped.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { total: json.length, newest: stamped.slice(0, MAX_JOURNAL_FILES).map((row) => row.name) };
+}
+
 /** Codex headless drain state root: ownership row + completion journal. */
 function readCodexDrainState(stateRoot, now) {
   if (typeof stateRoot !== "string" || !stateRoot.startsWith("/")) return null;
@@ -544,27 +610,36 @@ function readCodexDrainState(stateRoot, now) {
       updatedAt: isoOrNull(owner.value.updated_at),
     };
   }
-  const completions = listDir(path.join(stateRoot, "completions"));
+  const completionsDir = path.join(stateRoot, "completions");
+  const completions = listDir(completionsDir);
   if (Array.isArray(completions)) {
-    const files = completions.filter((name) => name.endsWith(".json")).slice(0, MAX_JOURNAL_FILES);
+    const { total, newest } = newestJsonFiles(completionsDir, completions);
     const stamps = [];
-    for (const name of files) {
-      const row = readJsonFile(path.join(stateRoot, "completions", name));
+    for (const name of newest) {
+      const row = readJsonFile(path.join(completionsDir, name));
       if (row.value) stamps.push(row.value.completed_at);
     }
-    out.completions = { count: files.length, lastCompletedAt: maxIso(stamps) };
+    out.completions = { count: total, scanned: newest.length, scanLimited: newest.length < total, lastCompletedAt: maxIso(stamps) };
   }
-  const conversations = listDir(path.join(stateRoot, "conversations"));
+  const conversationsDir = path.join(stateRoot, "conversations");
+  const conversations = listDir(conversationsDir);
   if (Array.isArray(conversations)) {
+    const { total, newest } = newestJsonFiles(conversationsDir, conversations);
     let active = 0;
     const updated = [];
-    for (const name of conversations.filter((n) => n.endsWith(".json")).slice(0, MAX_JOURNAL_FILES)) {
-      const row = readJsonFile(path.join(stateRoot, "conversations", name));
+    for (const name of newest) {
+      const row = readJsonFile(path.join(conversationsDir, name));
       if (!row.value) continue;
       if (row.value.active_delivery_id != null) active += 1;
       updated.push(row.value.updated_at);
     }
-    out.conversations = { count: updated.length, activeDeliveries: active, lastUpdatedAt: maxIso(updated) };
+    out.conversations = {
+      count: total,
+      scanned: newest.length,
+      scanLimited: newest.length < total,
+      activeDeliveries: active,
+      lastUpdatedAt: maxIso(updated),
+    };
   }
   return out;
 }
@@ -715,7 +790,7 @@ export function evaluateOpenTransaction(open, { maxOpenTxnAgeMs = DEFAULT_MAX_OP
   return { verdict: "ok", fault: null };
 }
 
-function laneBinding(entry, lanes, applicationRoot) {
+function laneBinding(entry, lanes, applicationRoot, { enrollment = null, installation = null } = {}) {
   const { lane } = classifyLane(entry);
   if (lane === "codex-headless" || lane === "cursor-acp") {
     const source = lane === "codex-headless" ? lanes.codexHeadless : lanes.cursorAcp;
@@ -757,8 +832,20 @@ function laneBinding(entry, lanes, applicationRoot) {
   if (lane === "app-server") {
     const b = lanes.appServer;
     if (b.status !== "present") return { kind: lane, status: b.status === "absent" ? "missing" : b.status, path: b.path };
+    if (!b.tokenReadable) return { kind: lane, status: "missing", path: b.path, problems: ["auth_token_file_unreadable"] };
+    if (installation?.status !== "present") {
+      return { kind: lane, status: "invalid", path: b.path, problems: ["installation_identity_absent"] };
+    }
     if (b.instanceId !== entry.instanceId) return { kind: lane, status: "missing", path: b.path };
-    return { kind: lane, status: b.enabled ? "bound" : "binding_disabled", path: b.path };
+    const mismatch = [];
+    if (b.installationId !== installation.installationId) mismatch.push("installation_id_mismatch");
+    // Swift compares agentId with the verified credential; the keychain is not
+    // inspected here, so the verified enrollment record stands in for it.
+    if (b.agentId == null || !AGENT_ID.test(b.agentId)) mismatch.push("agent_id");
+    else if (enrollment?.state === "verified" && enrollment.agentId !== b.agentId) mismatch.push("agent_id_mismatch");
+    if (mismatch.length > 0) return { kind: lane, status: "instance_id_mismatch", path: b.path, problems: mismatch };
+    if (b.problems.length > 0) return { kind: lane, status: "invalid", path: b.path, problems: b.problems };
+    return { kind: lane, status: "bound", path: b.path };
   }
   if (lane === "grok-bot") {
     const b = lanes.grokBot;
@@ -803,7 +890,7 @@ export function readInstallationInventory({
       { memberProfiles: laneMembers.codexHeadless, installation }),
     cursorAcp: readProfileBinding(path.join(clientRoot, "cursor-acp-runtime-binding.json"), BINDING_SPECS.cursorAcp,
       { memberProfiles: laneMembers.cursorAcp, installation }),
-    appServer: readSingleBinding(path.join(clientRoot, "app-server-binding.json")),
+    appServer: readAppServerBinding(path.join(clientRoot, "app-server-binding.json"), path.join(clientRoot, "app-server-ws.token")),
     grokBot: readSingleBinding(path.join(clientRoot, "grok-bot-binding.json")),
   };
   const blockers = [];
@@ -854,7 +941,7 @@ export function readInstallationInventory({
     registeredProfiles.add(entry.profile);
     const classification = classifyLane(entry);
     const enrollment = journal.byProfile.get(entry.profile) ?? null;
-    const binding = laneBinding(entry, lanes, applicationRoot);
+    const binding = laneBinding(entry, lanes, applicationRoot, { enrollment, installation });
     const modelInstanceRoot = path.join(applicationRoot, "model-state", "instances", entry.instanceId);
     const transactions = readOpenTransaction(modelInstanceRoot, now, entry.instanceId);
     const openTxnHealth = evaluateOpenTransaction(transactions.open, { maxOpenTxnAgeMs });
@@ -866,7 +953,8 @@ export function readInstallationInventory({
       const lock = readClaimerLock(path.join(clientRoot, `${prefix}.${entry.profile}.json`), { pidAlive, advisoryHeldAt });
       if (lock) claimers.push({ lock: prefix, ...lock });
     }
-    const heldClaimer = claimers.find((c) => c.advisoryHeld === true) ?? null;
+    const heldClaimers = claimers.filter((c) => c.advisoryHeld === true);
+    const heldClaimer = heldClaimers[0] ?? null;
 
     let drain = null;
     if (binding.status === "bound" && classification.lane === "codex-headless") {
@@ -886,8 +974,12 @@ export function readInstallationInventory({
       pollWatch = { mode: "watch+poll", pollIntervalMs: binding.pollIntervalMs ?? UNAVAILABLE, watchMember: binding.status === "bound" };
     } else if (classification.lane === "worker") {
       pollWatch = { mode: "poll", pollIntervalMs: UNAVAILABLE, watchMember: false };
-    } else if (classification.lane === "event-driven" || classification.lane === "app-server") {
+    } else if (classification.lane === "event-driven") {
       pollWatch = { mode: "watch", pollIntervalMs: UNSUPPORTED, watchMember: true };
+    } else if (classification.lane === "app-server") {
+      // WatchGrantService.appServerBoundInteractiveMembers: readable binding whose instanceId matches.
+      const member = lanes.appServer.status === "present" && lanes.appServer.instanceId === entry.instanceId;
+      pollWatch = { mode: "watch", pollIntervalMs: UNSUPPORTED, watchMember: member };
     } else {
       pollWatch = { mode: UNSUPPORTED, pollIntervalMs: UNSUPPORTED, watchMember: false };
     }
@@ -916,6 +1008,10 @@ export function readInstallationInventory({
 
     const faults = [];
     const notes = [];
+    if (heldClaimers.length > 1) {
+      // Both claimer families hold advisory locks for one profile, whatever its lane.
+      faults.push({ code: "dual_claimer_conflict", hard: true, reason: `held: ${heldClaimers.map((c) => c.lock).join(",")}` });
+    }
     if (entry.enabled) {
       if (classification.support === "unsupported") {
         faults.push({ code: "lane_unsupported", hard: true, reason: classification.reason });

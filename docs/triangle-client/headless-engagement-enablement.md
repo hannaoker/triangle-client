@@ -101,8 +101,18 @@ bindings (exact keys, `installationId` equal to `client/installation.json`,
 standardized symlink-free state roots, every row an enabled lane member),
 worker manifests (structure, release environment, content-addressed bundle;
 artifact hashes stay with the launcher and print `integrity=not_verified`), and
-open transactions (instance, claim/reply ids, state invariants). A violation is
-a hard fault.
+open transactions (instance, claim/reply ids, state invariants), and the App
+Server binding (readable `app-server-ws.token`, `adapterVersion` "1",
+`enabled`, ws/wss endpoint, non-empty room scope/server identity/thread, and
+installation and agent ids that match; the agent id is checked against the
+verified enrollment record because doctor does not read the keychain). A
+violation is a hard fault. App Server watch membership follows the binding's
+`instanceId`, as `WatchGrantService` does. Both claimer families holding
+advisory locks for one profile is a hard `dual_claimer_conflict` on every lane.
+Journals larger than the scan limit report their full count, and activity
+comes from the newest rows by mtime (`scanLimited=true`). An enabled `grok-bot`
+profile stays `lane_unsupported`: Swift still prepares the wake, but the Node
+supervisor rejects any `grokBotWake`.
 
 ## Defaults
 
