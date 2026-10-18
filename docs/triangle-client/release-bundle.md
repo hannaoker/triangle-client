@@ -53,11 +53,21 @@ stable distributed Keychain identity. That is why public installs use portable f
   exits 78 with the same explanation. There is no silent backend fallback.
 - Protected files are `0600` under `0700` directories; they are **not**
   encrypted at rest.
-- Installing public mode over an existing Keychain-custody install (no
-  `ENABLED` marker, `credentialCustody` absent or `keychain`) is refused
-  (exit 78) because those Keychain profiles would no longer be visible. Keep
-  that Mac on `--local-ad-hoc`, or re-enroll deliberately with
-  `TRIANGLE_ACK_CUSTODY_SWITCH=1`.
+- Selecting file custody (public mode, or `--local-ad-hoc` with
+  `TRIANGLE_CREDENTIAL_CUSTODY=file` / `TRIANGLE_FILE_CREDENTIALS=1`) over an
+  existing Keychain-custody install (no `ENABLED` marker, `credentialCustody`
+  absent or `keychain`) is refused (exit 78) because those Keychain profiles
+  would no longer be visible. Keep that Mac on `--local-ad-hoc` Keychain
+  custody, or switch deliberately with `TRIANGLE_ACK_CUSTODY_SWITCH=1`: the
+  switch refuses `--install-client` / `--install-worker` (exit 64) and
+  requires every `dev.thetriangle.*` LaunchAgent to be uninstalled first
+  (exit 78). Re-enroll each profile, then reinstall the service.
+- The `ENABLED` marker is created inside the install transaction and removed
+  if any later install gate fails.
+- `check-release-readiness.sh --mode public` requires both `triangle-mailbox`
+  and `triangle-client` artifacts and probes each one's compiled custody
+  policy (it must refuse `TRIANGLE_CREDENTIAL_CUSTODY=keychain` with exit 78),
+  so a `--local-ad-hoc` build cannot pass on its signature alone.
 
 Install manifests under
 `~/Library/Application Support/The Triangle/install-manifest/` record
@@ -77,7 +87,8 @@ blocked doctor cannot diagnose itself. So:
 - The installer runs `scripts/release/check-quarantine.sh` on its own source
   tree before building and fails with exit 78, the quarantined paths, and the
   fix if any file (outside `.git`, `node_modules`, `.build`) carries
-  `com.apple.quarantine`.
+  `com.apple.quarantine`. If any part of the tree cannot be scanned it fails
+  closed with exit 74.
 - Check a downloaded archive before extracting it, with `bash` (the check is a
   script, so it is not itself subject to a Gatekeeper launch block):
 

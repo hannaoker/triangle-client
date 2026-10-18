@@ -14,7 +14,7 @@
 # a guarantee that Gatekeeper will never assess the binary.
 #
 # Exit codes: 0 clean (or non-macOS: skipped), 64 usage, 66 missing path,
-# 78 quarantined source.
+# 74 incomplete scan, 78 quarantined source.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -42,11 +42,20 @@ for source in "$@"; do
   fi
   # BSD find's -xattrname matches the attribute without executing anything.
   # Build products and VCS metadata are never launched from the source tree.
+  # An incomplete scan (unreadable directory, find error) is not evidence of
+  # absence: fail closed (exit 74) instead of reporting the source clean.
+  scan_status=0
+  scan_output=$("$find_command" "$source" \
+      \( -type d \( -name .git -o -name node_modules -o -name .build \) -prune \) \
+      -o -xattrname "$attribute" -print 2>/dev/null) || scan_status=$?
+  if [[ $scan_status -ne 0 ]]; then
+    echo "FAIL could not scan every path under ${source} for ${attribute} (find exit ${scan_status})." >&2
+    echo "     Fix permissions so the whole install source is readable, then re-run." >&2
+    exit 74
+  fi
   while IFS= read -r hit; do
     [[ -n "$hit" ]] && quarantined+=("$hit")
-  done < <("$find_command" "$source" \
-      \( -type d \( -name .git -o -name node_modules -o -name .build \) -prune \) \
-      -o -xattrname "$attribute" -print 2>/dev/null || true)
+  done <<<"$scan_output"
 done
 
 if [[ ${#quarantined[@]} -eq 0 ]]; then

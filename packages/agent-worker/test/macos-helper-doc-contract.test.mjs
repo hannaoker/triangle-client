@@ -385,6 +385,34 @@ test("file custody marker is part of the install transaction and rolls back with
   assert.equal(fs.readdirSync(path.join(appRoot(f), "credentials", "local")).some((name) => name.startsWith("ENABLED.")), false);
 });
 
+test("local ad-hoc file opt-in over a Keychain install is guarded like a public switch", (t) => {
+  const f = fixture(t);
+  let result = run(["--local-ad-hoc"], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  for (const extra of [{ TRIANGLE_CREDENTIAL_CUSTODY: "file" }, { TRIANGLE_FILE_CREDENTIALS: "1" }]) {
+    result = run(["--local-ad-hoc", "--install-client"], { ...f.env, ...extra });
+    assert.equal(result.status, 78, result.stderr);
+    assert.match(result.stderr, /uses keychain credential custody/);
+    assert.equal(fs.existsSync(marker(f)), false);
+    result = run(["--local-ad-hoc", "--install-client"], { ...f.env, ...extra, TRIANGLE_ACK_CUSTODY_SWITCH: "1" });
+    assert.equal(result.status, 64, result.stderr);
+    assert.match(result.stderr, /custody switch cannot also install or restart a service/);
+  }
+  assert.doesNotMatch(commandLog(f), /client install/);
+});
+
+test("legacy TRIANGLE_FILE_CREDENTIALS=1 opt-in is recorded as file custody with a marker", (t) => {
+  const f = fixture(t);
+  let result = run(["--local-ad-hoc"], { ...f.env, TRIANGLE_FILE_CREDENTIALS: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).credentialCustody, "file");
+  assert.equal(mode(marker(f)), 0o600);
+  // A later public upgrade is not treated as a Keychain switch.
+  result = run([], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(metadata(f).signingMode, "public_ad_hoc");
+});
+
 test("existing file custody marker lets a local ad-hoc host upgrade to public mode", (t) => {
   const f = fixture(t);
   let result = run(["--local-ad-hoc"], { ...f.env, TRIANGLE_CREDENTIAL_CUSTODY: "file" });

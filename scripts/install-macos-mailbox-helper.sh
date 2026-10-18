@@ -138,7 +138,11 @@ else
   signing_mode=local_ad_hoc
   echo "WARNING: --local-ad-hoc is non-public and only for local testing or development." >&2
   credential_custody=keychain
-  [[ "$requested_custody" != file ]] || credential_custody=file
+  # Mirror CredentialCustodyPolicy: an explicit request wins; otherwise the
+  # legacy TRIANGLE_FILE_CREDENTIALS=1 opt-in also selects file custody.
+  if [[ "$requested_custody" == file || ( -z "$requested_custody" && "${TRIANGLE_FILE_CREDENTIALS:-}" == "1" ) ]]; then
+    credential_custody=file
+  fi
 fi
 
 quarantine_check="${project_root}/scripts/release/check-quarantine.sh"
@@ -250,9 +254,10 @@ if [[ $local_ad_hoc -eq 1 && $file_custody_enabled -eq 1 ]]; then
   credential_custody=file
 fi
 
-# A public install switches credential custody to files. Refuse to strand an
-# existing Keychain-custody install's enrolled profiles unless acknowledged.
-if [[ $local_ad_hoc -eq 0 && $file_custody_enabled -eq 0 && -e "$metadata_target" ]]; then
+# Selecting file custody (public mode, or --local-ad-hoc with a file opt-in)
+# over an existing Keychain-custody install would strand its enrolled
+# profiles. Refuse unless acknowledged, and never restart services then.
+if [[ "$credential_custody" == file && $file_custody_enabled -eq 0 && -e "$metadata_target" ]]; then
   prior_custody=$(/usr/bin/python3 - "$metadata_target" <<'PY'
 import json, sys
 try:
@@ -265,9 +270,9 @@ else:
 PY
 )
   if [[ "$prior_custody" != file && "${TRIANGLE_ACK_CUSTODY_SWITCH:-}" != "1" ]]; then
-    echo "The existing Triangle install uses ${prior_custody} credential custody. A public ad-hoc install uses file custody," >&2
+    echo "The existing Triangle install uses ${prior_custody} credential custody. This ${signing_mode} install selects file custody," >&2
     echo "so profiles enrolled in the Keychain would no longer be visible to the helper." >&2
-    echo "Either keep this machine on --local-ad-hoc, or re-enroll after installing and set TRIANGLE_ACK_CUSTODY_SWITCH=1." >&2
+    echo "Either keep this machine on --local-ad-hoc Keychain custody, or re-enroll after installing and set TRIANGLE_ACK_CUSTODY_SWITCH=1." >&2
     exit 78
   fi
   # A switched helper has no file credentials until re-enrollment, so no

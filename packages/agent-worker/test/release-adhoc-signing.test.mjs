@@ -265,6 +265,24 @@ test("quarantine check detects browser-style quarantine on archives and extracte
   assert.ok(result.stderr.includes(archive));
 });
 
+test("quarantine check fails closed when the scan is incomplete", { skip: !isDarwin || process.getuid() === 0 }, (t) => {
+  const dir = tempDir(t);
+  const tree = path.join(dir, "triangle-client");
+  const locked = path.join(tree, "locked");
+  fs.mkdirSync(locked, { recursive: true });
+  fs.writeFileSync(path.join(locked, "hidden.sh"), "#!/bin/bash\n");
+  fs.chmodSync(locked, 0o000);
+  let result;
+  try {
+    result = spawnSync("/bin/bash", [quarantine, tree], { encoding: "utf8" });
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+  assert.equal(result.status, 74, result.stdout + result.stderr);
+  assert.match(result.stderr, /could not scan every path/);
+  assert.doesNotMatch(result.stdout, /not quarantined/);
+});
+
 test("quarantine check fails clearly on usage errors and missing paths", () => {
   let result = spawnSync("/bin/bash", [quarantine], { encoding: "utf8" });
   assert.equal(result.status, 64);
