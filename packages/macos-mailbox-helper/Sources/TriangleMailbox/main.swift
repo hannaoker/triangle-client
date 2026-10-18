@@ -453,7 +453,8 @@ enum TriangleMailboxCLI {
             transport: transport,
             auth: WorkloadWatchGrantAuthProvider(gate: gate, workloadKeyStore: workloadKeyStore, transport: transport),
             credentialGate: gate,
-            instanceStore: FileClientInstanceStore()
+            instanceStore: FileClientInstanceStore(),
+            expiryStore: FileWatchGrantExpiryStore()
         )
 
         do {

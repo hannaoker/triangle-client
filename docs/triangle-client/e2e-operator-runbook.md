@@ -199,6 +199,18 @@ Held poll (operator/debug; Node wake clients use the same helper boundary):
 "$HELPER" watch-poll --installation "$INSTALLATION" --cursor 0
 ```
 
+Watch poll cadence (selected M0a operating mode, 2026-10-17): the client
+supervisor's install watch dispatcher waits **safe idle, 30,000 ms**
+(`INSTALL_WATCH_SAFE_IDLE_POLL_MS`) plus up to 10% jitter after each *empty*
+held poll, on top of the server-side hold (`pollTimeoutSeconds`). A poll that
+returns events re-polls immediately. The 2,000 ms held-poll reconnect idle
+(`INSTALL_WATCH_HELD_POLL_IDLE_MS`) is a distinct mode that the supervisor does
+not use; it was retired on 2026-10-05 (`77575e4`) because a 2 s reconnect kept
+one always-on watcher at roughly 44 GB-hrs/day of Hobby Fluid memory. Switching
+back is a deliberate cadence change with its own cost/latency evidence, not a
+test fix. Mailbox worker poll timers and per-lane drain/fallback timers are
+separate and unchanged.
+
 Revoke when decommissioning the grant:
 
 ```sh

@@ -73,6 +73,21 @@ struct WatchGrantTests {
         try await WatchGrantContractCases.failedStaleRecreateKeepsLocalBinding()
     }
 
+    @Test("ensure and status report grant expiry")
+    func ensureAndStatusReportExpiry() async throws {
+        try await WatchGrantContractCases.ensureAndStatusReportExpiry()
+    }
+
+    @Test("expiry omitted for legacy bindings and stale sidecars")
+    func expiryOmittedForLegacyAndStaleSidecar() async throws {
+        try await WatchGrantContractCases.expiryOmittedForLegacyAndStaleSidecar()
+    }
+
+    @Test("file expiry sidecar")
+    func fileExpirySidecar() async throws {
+        try await WatchGrantContractCases.fileExpirySidecar()
+    }
+
 #if canImport(Security)
     @Test("Keychain query policy")
     func keychainQueryPolicy() throws {

@@ -152,6 +152,20 @@ INSTALLATION='inst_YOUR_INSTALLATION_ID'
 "$HELPER" watch-revoke --installation "$INSTALLATION"
 ```
 
+#### Grant expiry and proactive renewal
+
+MESH fixes a watch grant's `expires_at` when it is created (TTL capped at
+3600 s; finalize does not extend it). `watch-ensure` and `watch-status` include
+`"expiresAt"` (ISO 8601 UTC) when the helper knows it. The helper keeps it in a
+secret-free sidecar,
+`~/Library/Application Support/The Triangle/client/watch-grant-expiry/<installation>.json`
+(0600), keyed by grant id. It is not part of the stored credential record, so an
+older helper can still read the credential after a rollback. Grants stored by
+older helpers have no sidecar, so `expiresAt` is omitted until the next
+`watch-ensure`. The supervisor renews once per installation at about 85 % of the
+grant lifetime. When `expiresAt` is missing it falls back to renewing after
+MESH rejects the credential (`watch_credential_invalid`).
+
 `mcp-interactive` profiles may join watch membership as **notify-only** members
 when an App Server binding matches their instance (so `appServerWake` receives
 hints). `grok-bot` profiles may likewise join watch membership as notify members
