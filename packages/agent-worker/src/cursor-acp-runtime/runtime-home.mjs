@@ -194,15 +194,29 @@ function pathsEqual(left, right) {
   }
 }
 
-function isSameOrInside(candidate, root) {
-  const resolveReal = (value) => {
+/**
+ * Physical projection of a possibly-missing path: realpath of its deepest
+ * existing ancestor joined with the missing suffix. A not-yet-created dir
+ * below a symlink therefore projects to where it WOULD be created.
+ */
+function physicalProjection(value) {
+  let existing = path.resolve(value);
+  const suffix = [];
+  for (;;) {
     try {
-      return realpathSync(value);
-    } catch {
-      return path.resolve(value);
+      return path.join(realpathSync(existing), ...suffix.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) return path.resolve(value);
+      suffix.push(path.basename(existing));
+      existing = parent;
     }
-  };
-  const relative = path.relative(resolveReal(root), resolveReal(candidate));
+  }
+}
+
+function isSameOrInside(candidate, root) {
+  const relative = path.relative(physicalProjection(root), physicalProjection(candidate));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
@@ -260,6 +274,9 @@ export function resolveTriangleCursorDataDir({
       );
     }
   };
+  // `isSameOrInside` projects through existing symlinked ancestors, so a
+  // missing dir below a symlink into ~/.cursor or ~/.codex is rejected here,
+  // BEFORE mkdir can create anything inside the forbidden tree.
   assertNotForbidden(candidate);
   if (allowCreate) {
     mkdirSync(candidate, { recursive: true, mode: 0o700 });
@@ -952,8 +969,16 @@ function legacyTranscriptRoots({ home, cursorDataDir, allowCreate = false }) {
     throw createCodedError("cursor_home_invalid", "HOME must be an absolute path");
   }
   const anchor = resolveTriangleCursorDataDir({ override: cursorDataDir, home, allowCreate });
+  let sourceAnchor = null;
+  try {
+    sourceAnchor = realpathSync(home);
+  } catch {
+    sourceAnchor = null;
+  }
   return {
     anchor,
+    sourceAnchor,
+    sourceRootRelative: `.cursor/${PROJECTS_DIRNAME}`,
     sourceRoot: path.join(home, ".cursor", PROJECTS_DIRNAME),
     targetRoot: path.join(anchor, PROJECTS_DIRNAME),
   };
@@ -1002,25 +1027,40 @@ export function planLegacyCursorTranscriptCopy({
   workspacePaths,
 } = {}) {
   const workspaces = assertWorkspacePaths(workspacePaths);
-  const { anchor, sourceRoot, targetRoot } = legacyTranscriptRoots({ home, cursorDataDir });
+  const { anchor, sourceAnchor, sourceRootRelative, sourceRoot, targetRoot } = legacyTranscriptRoots({
+    home,
+    cursorDataDir,
+  });
   const planned = workspaces.map(({ slug, workspacePath }) => {
     const source = path.join(sourceRoot, slug, CURSOR_TRANSCRIPTS_DIRNAME);
+    const sourceRelative = `${sourceRootRelative}/${slug}/${CURSOR_TRANSCRIPTS_DIRNAME}`;
     const targetRelative = `${PROJECTS_DIRNAME}/${slug}/${CURSOR_TRANSCRIPTS_DIRNAME}`;
     const target = path.join(anchor, targetRelative);
-    const base = { workspacePath, slug, source, target };
-    let stat;
-    try {
-      stat = lstatSync(source);
-    } catch {
+    const base = { workspacePath, slug, source, sourceRelative, target };
+    if (sourceAnchor == null) {
       return Object.freeze({ ...base, action: "missing_source", files: Object.freeze([]) });
     }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    // Physical source check below realpath(HOME): `.cursor`, `projects`, the
+    // slug dir and `agent-transcripts` must all be real directories.
+    let sourceState;
+    try {
+      sourceState = resolveOwnedPath(sourceAnchor, sourceRelative, {
+        allowMissingLeaf: true,
+        allowMissingAncestors: true,
+      });
+    } catch {
+      return Object.freeze({ ...base, action: "unsafe_source", files: Object.freeze([]) });
+    }
+    if (sourceState.leaf == null) {
+      return Object.freeze({ ...base, action: "missing_source", files: Object.freeze([]) });
+    }
+    if (!sourceState.leaf.isDirectory()) {
       return Object.freeze({ ...base, action: "unsafe_source", files: Object.freeze([]) });
     }
     if (ownedTargetState(anchor, targetRelative) === "unsafe") {
       return Object.freeze({ ...base, action: "unsafe_target", files: Object.freeze([]) });
     }
-    const { files, unsafe } = listRegularFilesNoFollow(source);
+    const { files, unsafe } = listRegularFilesNoFollow(sourceState.absolute);
     const entries = [
       ...files.map((relative) => {
         const state = ownedTargetState(anchor, `${targetRelative}/${relative}`);
@@ -1074,7 +1114,7 @@ export function applyLegacyCursorTranscriptCopy({
   workspacePaths,
   now = () => new Date().toISOString(),
 } = {}) {
-  const { anchor } = legacyTranscriptRoots({ home, cursorDataDir, allowCreate: true });
+  const { anchor, sourceAnchor } = legacyTranscriptRoots({ home, cursorDataDir, allowCreate: true });
   const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: anchor, workspacePaths });
   ensureOwnedDirectory(anchor, PROJECTS_DIRNAME);
   const { manifestPath, manifest } = readTranscriptManifest(anchor);
@@ -1093,11 +1133,18 @@ export function applyLegacyCursorTranscriptCopy({
           continue;
         }
         const relative = `${PROJECTS_DIRNAME}/${workspace.slug}/${CURSOR_TRANSCRIPTS_DIRNAME}/${entry.relative}`;
-        const result = copyFileIntoOwned({
-          anchor,
-          relative,
-          source: path.join(workspace.source, entry.relative),
-        });
+        let result;
+        try {
+          result = copyFileIntoOwned({
+            anchor,
+            relative,
+            sourceAnchor,
+            sourceRelative: `${workspace.sourceRelative}/${entry.relative}`,
+          });
+        } catch (error) {
+          if (Array.isArray(error?.createdDirs)) manifest.createdDirs.push(...error.createdDirs);
+          throw error;
+        }
         manifest.createdDirs.push(...result.createdDirs);
         if (result.status !== "copied") {
           skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: result.status }));
@@ -1118,6 +1165,32 @@ export function applyLegacyCursorTranscriptCopy({
   });
 }
 
+const TRANSCRIPT_SLUG = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+
+/** Manifest file entries must be `projects/<slug>/agent-transcripts/<file...>`. */
+function isTranscriptFileEntry(relative) {
+  const parts = safeOwnedParts(relative);
+  return (
+    parts != null &&
+    parts.length >= 4 &&
+    parts[0] === PROJECTS_DIRNAME &&
+    TRANSCRIPT_SLUG.test(parts[1]) &&
+    parts[2] === CURSOR_TRANSCRIPTS_DIRNAME
+  );
+}
+
+/** Manifest dir entries: `projects/<slug>` or `projects/<slug>/agent-transcripts[/...]`. */
+function isTranscriptDirEntry(relative) {
+  const parts = safeOwnedParts(relative);
+  return (
+    parts != null &&
+    parts.length >= 2 &&
+    parts[0] === PROJECTS_DIRNAME &&
+    TRANSCRIPT_SLUG.test(parts[1]) &&
+    (parts.length === 2 || parts[2] === CURSOR_TRANSCRIPTS_DIRNAME)
+  );
+}
+
 export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, cursorDataDir } = {}) {
   const { anchor } = legacyTranscriptRoots({ home, cursorDataDir });
   if (!anchorExists(anchor)) {
@@ -1136,6 +1209,13 @@ export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, curs
   const keptDirs = [];
   const remainingFiles = [];
   for (const file of manifest.createdFiles) {
+    if (!isTranscriptFileEntry(file?.path)) {
+      const reason = "unsafe_path";
+      const detail = "manifest_entry_outside_transcripts";
+      keptFiles.push(Object.freeze({ path: file?.path ?? null, reason, detail }));
+      remainingFiles.push({ ...file, lastRevert: { reason, detail } });
+      continue;
+    }
     const identity = typeof file?.sha256 === "string" ? file : null;
     const result = identity
       ? removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity })
@@ -1151,6 +1231,11 @@ export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, curs
   const remainingDirs = [];
   const dirs = [...new Set(manifest.createdDirs)].sort((a, b) => b.length - a.length);
   for (const relative of dirs) {
+    if (!isTranscriptDirEntry(relative)) {
+      keptDirs.push(relative);
+      remainingDirs.push(relative);
+      continue;
+    }
     const result = removeOwnedEmptyDirectory({ anchor, relative });
     if (result.status === "removed") removedDirs.push(relative);
     if (result.status === "not_empty" || result.status === "unsafe_path") {

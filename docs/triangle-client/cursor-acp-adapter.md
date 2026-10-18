@@ -92,14 +92,32 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
   checks are not relied on. (Node has no `openat`/`unlinkat`, so a hostile
   concurrent writer is out of scope; every destructive call re-validates
   immediately before acting.)
+  Legacy sources are checked the same way below `realpath(HOME)`: a symlinked
+  `~/.cursor`, `~/.cursor/acp-sessions`, `~/.cursor/projects`, slug,
+  session or `agent-transcripts` directory is reported as `unsafe_source` and
+  nothing is copied from it (move the real tree into place first).
+- **Data dir creation:** the forbidden-root check (`~/.cursor`, `~/.codex`,
+  `/tmp/.cursor`) projects a not-yet-existing data dir through the realpath
+  of its deepest existing ancestor, so a path below a symlink into a
+  forbidden tree is rejected before anything is created.
 - **Snapshot identity:** apply records each copied file's size, mtime and
-  sha256 plus every directory it created (manifest schema 2).
+  sha256 plus every directory it created (manifest schema 2). Manifest
+  entries are constrained on revert: session entries to
+  `acp-sessions/<id>/...`, transcript entries to
+  `projects/<slug>/agent-transcripts/...` (dirs: `projects/<slug>[/agent-transcripts/...]`);
+  anything else is kept as `unsafe_path` and never removed.
+- **Failed apply:** a copy that fails midway removes its own torn target file.
+  A session copy that fails is rolled back (identity-checked) and returned in
+  `failed` without being recorded, so a later apply can retry it (if rollback
+  cannot finish the record is kept with `incomplete: true` for revert).
+  Transcript copies are per file: files already copied stay recorded.
 - **Undo after use:** revert never deletes recursively and never deletes a
   file whose identity changed.
   - Sessions (`plan/apply/revertLegacyCursorAcpSessionCopy`,
     `~/.cursor/acp-sessions/<id>` -> `<cursor home>/acp-sessions/<id>`):
     all-or-nothing per session. Removed only if every recorded file is
-    unchanged and no new file exists; otherwise the whole session is kept and
+    unchanged and no new file or directory exists (full preflight before any
+    unlink); otherwise the whole session is kept and
     reported (`used_after_migration` / `unsafe_path` with file lists).
   - Transcripts (`plan/apply/revertLegacyCursorTranscriptCopy({ workspacePaths })`,
     `~/.cursor/projects/<slug>/agent-transcripts/**` ->

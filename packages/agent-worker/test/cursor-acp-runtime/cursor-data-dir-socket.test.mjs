@@ -752,12 +752,13 @@ test("legacy transcript copy rejects bad inputs and tampered manifests", () => {
         createdFiles: [
           { path: "../../victim.txt", ...victimIdentity },
           { path: path.join(home, "victim.txt"), ...victimIdentity },
-          { path: "projects/no-snapshot.txt" },
+          { path: "projects/ws-x/agent-transcripts/no-snapshot.txt" },
         ],
         createdDirs: ["../.."],
       }),
     );
-    writeFileSync(path.join(projectsRoot, "no-snapshot.txt"), "v1 entry");
+    mkdirSync(path.join(projectsRoot, "ws-x", "agent-transcripts"), { recursive: true });
+    writeFileSync(path.join(projectsRoot, "ws-x", "agent-transcripts", "no-snapshot.txt"), "v1 entry");
     const reverted = revertLegacyCursorTranscriptCopy({ home });
     assert.deepEqual(reverted.removedFiles, []);
     assert.deepEqual(
@@ -765,7 +766,7 @@ test("legacy transcript copy rejects bad inputs and tampered manifests", () => {
       ["unsafe_path", "unsafe_path", "no_snapshot"],
     );
     assert.equal(readFileSync(path.join(home, "victim.txt"), "utf8"), "keep");
-    assert.ok(existsSync(path.join(projectsRoot, "no-snapshot.txt")));
+    assert.ok(existsSync(path.join(projectsRoot, "ws-x", "agent-transcripts", "no-snapshot.txt")));
     assert.ok(existsSync(manifestPath), "manifest preserved on conflict");
   } finally {
     cleanup();
@@ -869,5 +870,90 @@ test("F1: apply never copies through a symlinked target parent or projects root"
     assert.deepEqual(readdirSync(outside), []);
   } finally {
     cleanup();
+  }
+});
+
+test("codex r1: tampered transcript manifest cannot name non-transcript files or dirs, even with matching identity", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
+    const slugDir = path.join(projectsRoot, "ws-y");
+    mkdirSync(path.join(slugDir, "unrelated-empty"), { recursive: true });
+    const log = path.join(slugDir, "worker.log");
+    writeFileSync(log, "live worker log");
+    const stat = statSync(log);
+    const identity = {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      sha256: createHash("sha256").update("live worker log").digest("hex"),
+    };
+    const manifestPath = path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        createdFiles: [{ path: "projects/ws-y/worker.log", ...identity }],
+        createdDirs: ["projects/ws-y/unrelated-empty", "projects"],
+      }),
+    );
+    const reverted = revertLegacyCursorTranscriptCopy({ home });
+    assert.deepEqual(reverted.removedFiles, []);
+    assert.deepEqual(reverted.removedDirs, []);
+    assert.equal(reverted.keptFiles[0].reason, "unsafe_path");
+    assert.equal(reverted.keptFiles[0].detail, "manifest_entry_outside_transcripts");
+    assert.deepEqual([...reverted.keptDirs].sort(), ["projects", "projects/ws-y/unrelated-empty"]);
+    assert.equal(readFileSync(log, "utf8"), "live worker log");
+    assert.ok(existsSync(path.join(slugDir, "unrelated-empty")));
+    assert.ok(existsSync(manifestPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r1: transcript plan/apply refuse symlinked legacy source ancestors", () => {
+  for (const linked of ["projects", "slug"]) {
+    const { home, cleanup } = fixture();
+    try {
+      const workspace = path.join(home, "ws4");
+      const slug = cursorWorkspaceSlug(workspace);
+      const outside = path.join(home, "outside-legacy");
+      const outsideTranscripts = path.join(outside, ...(linked === "projects" ? [slug] : []), "agent-transcripts");
+      mkdirSync(outsideTranscripts, { recursive: true });
+      writeFileSync(path.join(outsideTranscripts, "t.jsonl"), "outside transcript");
+      mkdirSync(path.join(home, ".cursor", ...(linked === "slug" ? ["projects"] : [])), { recursive: true });
+      symlinkSync(
+        outside,
+        linked === "projects" ? path.join(home, ".cursor", "projects") : path.join(home, ".cursor", "projects", slug),
+        "dir",
+      );
+      const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+      assert.equal(plan.workspaces[0].action, "unsafe_source", linked);
+      const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+      assert.deepEqual(applied.copied, []);
+      assert.equal(
+        existsSync(path.join(home, ".triangle", "cursor-data", "projects", slug, "agent-transcripts", "t.jsonl")),
+        false,
+      );
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("codex r1: data dir below a symlink into ~/.cursor or ~/.codex is rejected before mkdir", () => {
+  for (const forbidden of [".cursor", ".codex"]) {
+    const { home, cleanup } = fixture();
+    try {
+      mkdirSync(path.join(home, forbidden));
+      symlinkSync(path.join(home, forbidden), path.join(home, "alias"), "dir");
+      const override = path.join(home, "alias", "new", "data");
+      assert.throws(
+        () => resolveTriangleCursorDataDir({ override, home, allowCreate: true }),
+        { code: forbidden === ".cursor" ? "cursor_data_dir_user_fallback_forbidden" : "cursor_data_dir_codex_forbidden" },
+      );
+      assert.deepEqual(readdirSync(path.join(home, forbidden)), [], `nothing created inside ${forbidden}`);
+    } finally {
+      cleanup();
+    }
   }
 });
