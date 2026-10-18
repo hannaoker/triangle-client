@@ -319,9 +319,8 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
             if items.len() > ACK_MAX_ITEMS {
                 return err_resp(req.id, "invalid_params", format!("at most {ACK_MAX_ITEMS} items"));
             }
-            let mut acked = 0u64;
-            let mut already = 0u64;
-            let mut unknown = Vec::new();
+            // Validate the whole batch before consuming anything.
+            let mut parsed = Vec::with_capacity(items.len());
             for it in items {
                 let (Some(from), Some(id)) = (
                     it.get("from_endpoint_id").and_then(|v| v.as_str()),
@@ -329,6 +328,12 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
                 ) else {
                     return err_resp(req.id, "invalid_params", "each item needs from_endpoint_id and message_id");
                 };
+                parsed.push((from, id, it));
+            }
+            let mut acked = 0u64;
+            let mut already = 0u64;
+            let mut unknown = Vec::new();
+            for (from, id, it) in parsed {
                 match engine.consume(from, id).await {
                     Ok(crate::journal::ConsumeOutcome::Acked) => acked += 1,
                     Ok(crate::journal::ConsumeOutcome::AlreadyAcked) => already += 1,

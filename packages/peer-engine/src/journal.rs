@@ -215,7 +215,12 @@ pub struct Journal {
     lines_since_compact: u64,
     outbound: HashMap<String, OutboundRecord>,
     inbound: HashMap<(String, String), InboundRecord>,
+    /// Set by [`Journal::close`]; every later write fails.
+    closed: bool,
 }
+
+/// Maximum `message_id` length (bytes) accepted on either side.
+pub const MAX_MESSAGE_ID_BYTES: usize = 256;
 
 impl Journal {
     /// Open or create `state_dir/journal/peer.jsonl` with default limits.
@@ -243,6 +248,7 @@ impl Journal {
             lines_since_compact: 0,
             outbound: HashMap::new(),
             inbound: HashMap::new(),
+            closed: false,
         };
 
         if path.exists() {
@@ -254,12 +260,16 @@ impl Journal {
                     mode
                 );
             }
-            let entries = read_entries_recovering_tail(&path)?;
-            journal.lines = entries.len() as u64;
-            for entry in entries {
-                journal.next_seq = journal.next_seq.max(entry.seq.saturating_add(1));
+            // Replay incrementally: only the index is retained in memory.
+            let mut lines = 0u64;
+            let mut next_seq = 1u64;
+            read_entries_recovering_tail(&path, |entry| {
+                lines += 1;
+                next_seq = next_seq.max(entry.seq.saturating_add(1));
                 journal.apply(&entry);
-            }
+            })?;
+            journal.lines = lines;
+            journal.next_seq = next_seq;
             journal.compact()?;
         } else {
             let file = OpenOptions::new()
@@ -279,6 +289,16 @@ impl Journal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Permanently stop writes (used by engine shutdown before releasing the
+    /// state-dir lock, so a surviving clone can never append).
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     pub fn limits(&self) -> &JournalLimits {
@@ -684,6 +704,9 @@ impl Journal {
     /// inbound, and terminal/consumed tombstones younger than
     /// `tombstone_retention`. Original `seq` values are preserved.
     pub fn compact(&mut self) -> Result<()> {
+        if self.closed {
+            bail!("journal is closed (engine shut down)");
+        }
         let now = now_unix_ms();
         let retention = self.limits.tombstone_retention.as_millis() as u64;
         let fresh = |ts: u64| now.saturating_sub(ts) < retention;
@@ -800,6 +823,9 @@ impl Journal {
     }
 
     fn append_durable(&mut self, entry: JournalEntry) -> Result<JournalEntry> {
+        if self.closed {
+            bail!("journal is closed (engine shut down)");
+        }
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
         let mut file = OpenOptions::new()
@@ -832,9 +858,8 @@ impl Journal {
 /// Stream JSONL entries. If the **last** record is unterminated or does not
 /// parse, truncate the file to the end of the previous good record (it was
 /// never fsynced/acknowledged as a whole). Any other bad record is fatal.
-fn read_entries_recovering_tail(path: &Path) -> Result<Vec<JournalEntry>> {
+fn read_entries_recovering_tail(path: &Path, mut on_entry: impl FnMut(JournalEntry)) -> Result<()> {
     let mut reader = BufReader::new(File::open(path)?);
-    let mut entries = Vec::new();
     let mut offset: u64 = 0;
     // First bad record seen so far: (start offset). Fatal if any non-empty
     // record follows it; truncated if it is the last one.
@@ -865,7 +890,7 @@ fn read_entries_recovering_tail(path: &Path) -> Result<Vec<JournalEntry>> {
             None // unterminated tail: never fsynced as a whole record
         };
         match parsed {
-            Some(e) => entries.push(e),
+            Some(e) => on_entry(e),
             None => bad_at = Some(start),
         }
     }
@@ -876,7 +901,7 @@ fn read_entries_recovering_tail(path: &Path) -> Result<Vec<JournalEntry>> {
         f.seek(SeekFrom::End(0))?;
         f.sync_all()?;
     }
-    Ok(entries)
+    Ok(())
 }
 
 fn sync_dir(dir: &Path) -> Result<()> {
@@ -1070,6 +1095,17 @@ mod tests {
         assert!(matches!(j.enqueue_outbound("b", "123456", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
         j.enqueue_outbound("b", "1", "x", addr(), 0).unwrap().unwrap();
         assert!(matches!(j.enqueue_outbound("c", "1", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
+    }
+
+    #[test]
+    fn closed_journal_refuses_writes() {
+        let dir = tempdir().unwrap();
+        let mut j = Journal::open(dir.path()).unwrap();
+        j.accept_inbound("p", "m", "x").unwrap();
+        j.close();
+        assert!(j.accept_inbound("p", "m2", "y").is_err());
+        assert!(j.consume("p", "m").is_err());
+        assert!(j.enqueue_outbound("o", "z", "q", addr(), 0).is_err());
     }
 
     #[test]

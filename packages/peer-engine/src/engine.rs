@@ -17,12 +17,13 @@ use tracing::{debug, info, warn};
 use crate::identity::DeviceIdentity;
 use crate::journal::{
     ConsumeOutcome, EnqueueError, InboundOutcome, InboxItem, Journal, JournalLimits,
-    OutboundState, OutboundStatus,
+    OutboundState, OutboundStatus, MAX_MESSAGE_ID_BYTES,
 };
 use crate::protocol::{
     now_unix_ms, read_envelope, write_envelope, PeerMessage, PeerReceipt, PeerReject,
     WireEnvelope, ALPN, MAX_PAYLOAD_BYTES, REJECT_CONFLICT, REJECT_HASH_MISMATCH,
-    REJECT_PAYLOAD_TOO_LARGE, REJECT_QUOTA_EXCEEDED, REJECT_SENDER_MISMATCH,
+    REJECT_INVALID_MESSAGE_ID, REJECT_PAYLOAD_TOO_LARGE, REJECT_QUOTA_EXCEEDED,
+    REJECT_SENDER_MISMATCH,
 };
 use crate::ENGINE_VERSION;
 
@@ -356,8 +357,10 @@ impl PeerEngine {
     ) -> std::result::Result<PeerReceipt, DeliveryError> {
         let message_id = message_id.into();
         let payload = payload.into();
-        if message_id.is_empty() {
-            return Err(DeliveryError::Invalid("message_id must not be empty".into()));
+        if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
+            return Err(DeliveryError::Invalid(format!(
+                "message_id must be 1..={MAX_MESSAGE_ID_BYTES} bytes"
+            )));
         }
         let mut message = PeerMessage::new(message_id.clone(), payload.clone(), self.endpoint_id_hex())
             .map_err(|e| DeliveryError::Invalid(e.to_string()))?;
@@ -534,10 +537,14 @@ impl PeerEngine {
         }
     }
 
-    /// Gracefully close the endpoint (stops accept + retry loops) and release
-    /// the state-dir lock.
+    /// Gracefully close the endpoint (stops accept + retry loops), close the
+    /// journal for writes, then release the state-dir lock. Any clone that
+    /// survives shutdown (e.g. an IPC session) can no longer append, so a new
+    /// engine on the same state dir is the only writer.
     pub async fn shutdown(self) {
         self.inner.endpoint.close().await;
+        // Holding the journal mutex waits for any in-flight append to finish.
+        self.inner.journal.lock().await.close();
         if let Some(f) = self.inner.lock_file.lock().expect("lock mutex").take() {
             let _ = f.unlock();
         }
@@ -582,7 +589,9 @@ impl PeerEngine {
             _ => bail!("unexpected envelope on inbound stream"),
         };
 
-        let reply = if message.sender_endpoint_id != remote {
+        let reply = if message.message_id.is_empty() || message.message_id.len() > MAX_MESSAGE_ID_BYTES {
+            reject(&message, REJECT_INVALID_MESSAGE_ID, "message_id must be 1..=256 bytes")
+        } else if message.sender_endpoint_id != remote {
             reject(&message, REJECT_SENDER_MISMATCH, "sender_endpoint_id does not match connection identity")
         } else if message.payload.len() > MAX_PAYLOAD_BYTES {
             reject(&message, REJECT_PAYLOAD_TOO_LARGE, "payload exceeds MAX_PAYLOAD_BYTES")

@@ -45,7 +45,7 @@ pub struct PeerReject {
     pub message_id: String,
     /// `conflict` (same sender + message_id, different payload; terminal),
     /// `quota_exceeded` (retryable), `sender_mismatch` / `hash_mismatch` /
-    /// `payload_too_large` (terminal).
+    /// `payload_too_large` / `invalid_message_id` (terminal).
     pub code: String,
     pub reason: String,
 }
@@ -62,6 +62,7 @@ pub const REJECT_QUOTA_EXCEEDED: &str = "quota_exceeded";
 pub const REJECT_SENDER_MISMATCH: &str = "sender_mismatch";
 pub const REJECT_HASH_MISMATCH: &str = "hash_mismatch";
 pub const REJECT_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+pub const REJECT_INVALID_MESSAGE_ID: &str = "invalid_message_id";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

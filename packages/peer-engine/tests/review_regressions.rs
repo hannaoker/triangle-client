@@ -384,3 +384,68 @@ async fn p2_11_unsettled_message_expires_and_stays_terminal() {
     let a2 = PeerEngine::start(config(da.path(), &[ib])).await.unwrap();
     assert_eq!(outbound_state(&a2, "e1").await.as_deref(), Some("expired"));
 }
+
+// ---------------------------------------------------------------- Codex fix-round 2
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_r2_clone_surviving_shutdown_cannot_write_journal() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let (ia, ib) = (id_of(da.path()), id_of(db.path()));
+    let a = start(da.path(), &[ib]).await;
+    let b = start(db.path(), &[ia]).await;
+    a.send_message(b.endpoint_addr(), "m1", "hi").await.unwrap();
+    let survivor = b.clone();
+    b.shutdown().await;
+    let journal = db.path().join("journal/peer.jsonl");
+    let before = std::fs::read(&journal).unwrap();
+    assert!(survivor.consume(&ia.to_string(), "m1").await.is_err());
+    assert!(survivor.send_message(a.endpoint_addr(), "x", "y").await.is_err());
+    assert_eq!(std::fs::read(&journal).unwrap(), before, "closed engine wrote to the journal");
+    let b2 = start(db.path(), &[ia]).await;
+    assert_eq!(b2.inbox().await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_r2_ack_batch_is_validated_before_consuming() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let (ia, ib) = (id_of(da.path()), id_of(db.path()));
+    let a = start(da.path(), &[ib]).await;
+    let b = start(db.path(), &[ia]).await;
+    a.send_message(b.endpoint_addr(), "m1", "hi").await.unwrap();
+    let ipc = IpcServer::bind(b.clone()).await.unwrap();
+    let sock = ipc.socket_path().to_path_buf();
+    tokio::spawn(async move { let _ = ipc.serve().await; });
+    let mut cl = IpcClient::connect(&sock).await.unwrap();
+    cl.call("hello", serde_json::json!({})).await.unwrap();
+    let err = cl
+        .call("ack", serde_json::json!({"items": [
+            {"from_endpoint_id": ia.to_string(), "message_id": "m1"},
+            {"message_id": "broken"}
+        ]}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid_params"));
+    assert_eq!(b.inbox().await.len(), 1, "valid item was consumed despite batch error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_r2_oversized_message_id_rejected_both_sides() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let (ia, ib) = (id_of(da.path()), id_of(db.path()));
+    let a = start(da.path(), &[ib]).await;
+    let b = start(db.path(), &[ia]).await;
+    let long = "m".repeat(257);
+    assert!(matches!(a.send_message(b.endpoint_addr(), long.clone(), "x").await, Err(DeliveryError::Invalid(_))));
+    // Raw member bypassing the sender check is refused by the receiver.
+    let raw = raw_endpoint().await;
+    b.allow_peer(raw.id());
+    let conn = raw.connect(b.endpoint_addr(), ALPN).await.unwrap();
+    let (mut s, mut r) = conn.open_bi().await.unwrap();
+    let msg = PeerMessage::new(long, "x", raw.id().to_string()).unwrap();
+    write_envelope(&mut s, &WireEnvelope::Message(msg)).await.unwrap();
+    s.finish().unwrap();
+    match read_envelope(&mut r).await.unwrap() {
+        WireEnvelope::Reject(rj) => assert_eq!(rj.code, "invalid_message_id"),
+        other => panic!("expected reject, got {other:?}"),
+    }
+}

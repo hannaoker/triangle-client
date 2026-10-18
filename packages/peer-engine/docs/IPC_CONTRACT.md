@@ -25,6 +25,8 @@ There is **no** unauthenticated loopback TCP control endpoint.
 
 `PeerEngine::start` takes an exclusive lock on `$STATE_DIR/engine.lock`; a
 second engine on the same state dir fails to start (sole-writer guarantee).
+`shutdown` closes the journal for writes before releasing the lock, so a
+clone that outlives shutdown cannot append.
 `IpcServer::bind` only removes an existing socket path if it is a socket and
 nothing answers a connect; a live socket or a non-socket file is an error.
 
@@ -80,7 +82,7 @@ Inbox items are unconsumed received messages ordered by journal `seq`
 (`{ seq, message_id, from_endpoint_id, payload_hash, payload, ts_unix_ms }`).
 Pages are bounded by `limit` and a ~1 MiB byte budget (at least one item is
 always returned). Page with `after_seq = next_after_seq` while `has_more`.
-Messages stay in the inbox until `ack`ed; acked items leave the inbox but keep a
+An `ack` batch is validated as a whole before any item is consumed. Messages stay in the inbox until `ack`ed; acked items leave the inbox but keep a
 `(sender, message_id, hash)` tombstone so redelivery is still answered as a
 duplicate until the tombstone retention (default 7 days) elapses.
 
@@ -90,7 +92,7 @@ duplicate until the tombstone retention (default 7 days) elapses.
 { "message_id": "stable-logical-id", "payload": "utf-8 text", "peer_addr": { "id": "<endpoint-id-hex>", "addrs": [ … ] } }
 ```
 
-`message_id` is unique per sending device. Re-sending the same id with the same
+`message_id` (1–256 bytes) is unique per sending device. Re-sending the same id with the same
 payload to the same peer is idempotent; a different payload or peer is
 `conflict`. The message is journaled `queued_local` (fsync) **after** the
 encoded frame is validated, then one attempt is made.
