@@ -24,7 +24,13 @@ export const UNAVAILABLE = "unavailable";
 export const UNSUPPORTED = "unsupported";
 
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
-const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const PROFILE_MAX_UTF8_BYTES = 64;
+// Swift `CharacterSet.controlCharacters` is Unicode general categories Cc + Cf.
+const PROFILE_CONTROL_CHARACTER = /[\p{Cc}\p{Cf}]/u;
+/** Mirrors Swift `MailboxTransactionIdentifier.maximumFailureCountBeforeStuck`. */
+export const OPEN_TRANSACTION_MAX_FAILURES_BEFORE_STUCK = 5;
+/** Default open-transaction age budget; the doctor passes its `maxOpenTxnAgeMs`. */
+export const DEFAULT_MAX_OPEN_TXN_AGE_MS = 15 * 60_000;
 const MAX_JOURNAL_FILES = 5000;
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 
@@ -35,6 +41,26 @@ export function deriveClientInstanceId(profile) {
   hash.update(Buffer.from([0]));
   hash.update(Buffer.from(profile, "utf8"));
   return hash.digest("hex");
+}
+
+/**
+ * Persisted profile-name contract. Mirrors Swift `ProfileName.init(_:)`
+ * (TriangleMailboxCore/Models.swift), which decodes every registry row:
+ * non-empty, at most 64 UTF-8 bytes, no "/" or "\\", no control/format
+ * characters. Case, dots, and underscores are preserved; names are never
+ * normalized or renamed. The Node runtime validators (helper proxy: non-empty,
+ * no NUL/"/"; Cursor ACP drain and progress journal: `[A-Za-z0-9._-]{1,64}`)
+ * accept subsets of this contract, so every name they accept is accepted here.
+ * Lone surrogates are rejected because they cannot be valid UTF-8 from Swift.
+ */
+export function isValidProfileName(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.isWellFormed()
+    && Buffer.byteLength(value, "utf8") <= PROFILE_MAX_UTF8_BYTES
+    && !value.includes("/")
+    && !value.includes("\\")
+    && !PROFILE_CONTROL_CHARACTER.test(value);
 }
 
 function readJsonFile(filePath) {
@@ -87,7 +113,8 @@ function hexProfile(profile) {
 function decodeHexProfile(hex) {
   if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
   const text = Buffer.from(hex, "hex").toString("utf8");
-  return PROFILE_NAME.test(text) ? text : null;
+  // Round-trip check rejects invalid UTF-8 that Buffer would replace with U+FFFD.
+  return isValidProfileName(text) && Buffer.from(text, "utf8").toString("hex") === hex ? text : null;
 }
 
 /**
@@ -139,12 +166,12 @@ function readRegistry(clientRoot) {
       continue;
     }
     if (value.version !== 1) problems.push("unsupported_version");
-    if (typeof value.profile !== "string" || !PROFILE_NAME.test(value.profile)) problems.push("invalid_profile");
+    if (!isValidProfileName(value.profile)) problems.push("invalid_profile");
     if (typeof value.instanceId !== "string" || !INSTANCE_ID.test(value.instanceId)) problems.push("invalid_instance_id");
     if (typeof value.enabled !== "boolean") problems.push("invalid_enabled");
     if (typeof value.runtimeAdapter !== "string") problems.push("invalid_runtime_adapter");
     if (value.instanceId !== fileId) problems.push("file_name_instance_id_mismatch");
-    if (typeof value.profile === "string" && PROFILE_NAME.test(value.profile)
+    if (isValidProfileName(value.profile)
       && value.instanceId !== deriveClientInstanceId(value.profile)) {
       problems.push("instance_id_not_derived_from_profile");
     }
@@ -380,6 +407,47 @@ function readOpenTransaction(modelInstanceRoot, now) {
   };
 }
 
+/**
+ * Open-transaction health policy, applied identically to every lane that uses
+ * the helper mailbox-transaction journal (Codex headless, Cursor ACP, worker,
+ * event-driven). Only an *outstanding* transaction (a readable open.json) is
+ * judged; an idle profile whose journal holds no open transaction is never
+ * stalled, however old its last completed work is. Historical claim/reply/ack
+ * timestamps never excuse an outstanding transaction.
+ *
+ *   stuck            failureCount >= 5 (the helper's own `isStuck`)   hard
+ *   stalled_failing  age > maxOpenTxnAgeMs and failureCount >= 1      hard
+ *   stalled          age > maxOpenTxnAgeMs, no recorded failure        soft
+ *   failing          failureCount >= 1 within the age budget           soft
+ *   age_unavailable  open.json without a valid createdAt               soft
+ *   ok               within budget, no failures
+ *   none             no open transaction
+ */
+export function evaluateOpenTransaction(open, { maxOpenTxnAgeMs = DEFAULT_MAX_OPEN_TXN_AGE_MS } = {}) {
+  if (open == null) return { verdict: "none", fault: null };
+  if (open.readable === false) return { verdict: "unreadable", fault: null }; // reported as unreadable_custody
+  const failures = Number.isSafeInteger(open.failureCount) ? open.failureCount : 0;
+  const age = Number.isFinite(open.ageMs) ? open.ageMs : null;
+  const detail = `state=${open.state ?? "unknown"} ageMs=${age ?? UNAVAILABLE} failures=${failures}${open.lastFailureReason ? ` last=${open.lastFailureReason}` : ""} budgetMs=${maxOpenTxnAgeMs}`;
+  if (failures >= OPEN_TRANSACTION_MAX_FAILURES_BEFORE_STUCK) {
+    return { verdict: "stuck", fault: { code: "open_transaction_stuck", hard: true, reason: `open transaction stuck (${detail})` } };
+  }
+  const overAge = age != null && age > maxOpenTxnAgeMs;
+  if (overAge && failures > 0) {
+    return { verdict: "stalled_failing", fault: { code: "open_transaction_stalled", hard: true, reason: `open transaction stalled and failing (${detail})` } };
+  }
+  if (overAge) {
+    return { verdict: "stalled", fault: { code: "open_transaction_stalled", hard: false, reason: `open transaction older than budget (${detail})` } };
+  }
+  if (failures > 0) {
+    return { verdict: "failing", fault: { code: "open_transaction_failing", hard: false, reason: `open transaction has recorded failures (${detail})` } };
+  }
+  if (age == null) {
+    return { verdict: "age_unavailable", fault: { code: "open_transaction_age_unavailable", hard: false, reason: `open transaction age unknown (${detail})` } };
+  }
+  return { verdict: "ok", fault: null };
+}
+
 function laneBinding(entry, lanes, applicationRoot) {
   const { lane } = classifyLane(entry);
   if (lane === "codex-headless" || lane === "cursor-acp") {
@@ -435,12 +503,16 @@ export function readInstallationInventory({
   pidAlive,
   advisoryHeldAt,
   progress = null,
+  maxOpenTxnAgeMs = DEFAULT_MAX_OPEN_TXN_AGE_MS,
 } = {}) {
   if (typeof clientRoot !== "string" || !clientRoot.startsWith("/")) {
     throw new TypeError("clientRoot must be an absolute path");
   }
   if (typeof pidAlive !== "function" || typeof advisoryHeldAt !== "function") {
     throw new TypeError("pidAlive and advisoryHeldAt are required");
+  }
+  if (typeof maxOpenTxnAgeMs !== "number" || !Number.isFinite(maxOpenTxnAgeMs) || maxOpenTxnAgeMs <= 0) {
+    throw new TypeError("maxOpenTxnAgeMs must be a positive finite number");
   }
   const applicationRoot = path.resolve(clientRoot, "..");
   const registry = readRegistry(clientRoot);
@@ -493,6 +565,7 @@ export function readInstallationInventory({
     const binding = laneBinding(entry, lanes, applicationRoot);
     const modelInstanceRoot = path.join(applicationRoot, "model-state", "instances", entry.instanceId);
     const transactions = readOpenTransaction(modelInstanceRoot, now);
+    const openTxnHealth = evaluateOpenTransaction(transactions.open, { maxOpenTxnAgeMs });
     const credentialFile = path.join(applicationRoot, "credentials", "local", "mailbox", `${entry.profile}.json`);
     const credential = existsSync(credentialFile) ? "file_present" : `${UNAVAILABLE}:keychain_not_inspected`;
 
@@ -541,6 +614,9 @@ export function readInstallationInventory({
       pendingCount: Number.isSafeInteger(profileProgress?.pendingCount) ? profileProgress.pendingCount : UNAVAILABLE,
       oldestPendingAgeMs: ageMs(profileProgress?.oldestPendingAt, now) ?? UNAVAILABLE,
       openTransactionAgeMs: transactions.open?.ageMs ?? (transactions.open ? UNAVAILABLE : null),
+      openTransactionFailureCount: transactions.open?.failureCount ?? null,
+      openTransactionHealth: openTxnHealth.verdict,
+      maxOpenTransactionAgeMs: maxOpenTxnAgeMs,
       retryExpiry: UNAVAILABLE,
     };
     const hasProgressEvidence = [activity.lastClaimAt, activity.lastReplyAt, activity.lastAckAt]
@@ -566,6 +642,11 @@ export function readInstallationInventory({
       if (transactions.open?.readable === false) {
         faults.push({ code: "unreadable_custody", hard: true, reason: "open transaction unreadable" });
       }
+      // Outstanding-work policy for every lane (see evaluateOpenTransaction);
+      // independent of, and not excused by, historical progress timestamps.
+      if (openTxnHealth.fault != null && classification.support !== "unsupported") {
+        faults.push(openTxnHealth.fault);
+      }
       if ((classification.lane === "codex-headless" || classification.lane === "cursor-acp") && binding.status === "bound" && heldClaimer == null) {
         faults.push({ code: "claimer_not_held", hard: false, reason: "no advisory claimer lock currently held" });
       }
@@ -575,6 +656,7 @@ export function readInstallationInventory({
       if (classification.support === "experimental") notes.push(classification.reason);
     }
     if (drain?.ownership?.leaseExpired === true) notes.push("headless_ownership_lease_expired");
+    if (!entry.enabled && transactions.open != null) notes.push(`open_transaction_while_disabled:${openTxnHealth.verdict}`);
 
     const status = !entry.enabled
       ? "disabled"

@@ -13,6 +13,8 @@ import {
 import {
   classifyLane,
   deriveClientInstanceId,
+  evaluateOpenTransaction,
+  isValidProfileName,
   readInstallationInventory,
   UNAVAILABLE,
 } from "../src/installation-inventory.mjs";
@@ -359,4 +361,227 @@ test("lane classification mirrors Swift participation rules", () => {
 
 test("inventory requires injected liveness probes (no implicit side channels)", () => {
   assert.throws(() => readInstallationInventory({ clientRoot: "/tmp/x" }), TypeError);
+});
+
+// ---------------------------------------------------------------------------
+// F3: open-transaction age/failure policy across Codex, Cursor ACP, and worker.
+
+const TWO_HOURS_AGO = "2026-10-17T18:00:00.000Z";
+const openTxnPath = (app, profile) =>
+  path.join(app, "model-state", "instances", deriveClientInstanceId(profile), "mailbox-transactions", "open.json");
+
+function writeOpenTxn(app, profile, { createdAt = TWO_HOURS_AGO, failureCount = 3, state = "claimed" } = {}) {
+  writeJson(openTxnPath(app, profile), {
+    version: 1, protocol: "coordinator-delivery-v1", deliveryId: 9, state, replyRequired: true,
+    claimId: FAKE_TOKEN, replyIdempotencyKey: FAKE_TOKEN, failureCount, lastFailureReason: "runtime_failed", createdAt,
+  });
+}
+
+/** Restrict the mixed fixture to the named profiles (the review's reduction). */
+function onlyProfiles(fixture, keep) {
+  const wanted = new Set(keep.map((p) => `${deriveClientInstanceId(p)}.json`));
+  for (const name of readdirSync(path.join(fixture.client, "instances"))) {
+    if (!wanted.has(name)) rmSync(path.join(fixture.client, "instances", name));
+  }
+  if (!keep.includes("bob")) rmSync(path.join(fixture.client, "headless-runtime-binding.json"));
+}
+
+const runDoctor = (client, extra = {}) => runHeadlessEngagementDoctor({
+  clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true, ...extra,
+});
+
+test("ACP: an old unfinished claim with failures is a fault even with a historical lastClaimAt (review F3 repro)", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost"]);
+    writeOpenTxn(f.app, "ghost");
+    writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: TWO_HOURS_AGO } } });
+    const result = runDoctor(f.client);
+    const ghost = result.report.inventory.profiles.find((p) => p.profile === "ghost");
+    assert.equal(ghost.activity.openTransactionAgeMs, 2 * 60 * 60_000);
+    assert.equal(ghost.activity.openTransactionHealth, "stalled_failing");
+    assert.ok(ghost.faults.includes("open_transaction_stalled"));
+    assert.equal(ghost.status, "fault");
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.ok, false);
+    assert.ok(result.report.blockers.some((b) => b.code === "open_transaction_stalled" && b.profile === "ghost"));
+    assert.match(formatDoctorReport(result.report), /openHealth=stalled_failing/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("workers (supported hermes and experimental antigravity): an old unfinished claim with failures is a fault", () => {
+  const f = mixedFixture({ extraRegistry: [{ profile: "hermes-on", runtimeAdapter: "hermes", deliveryMode: "worker", enabled: true }] });
+  try {
+    onlyProfiles(f, ["gravity2", "hermes-on"]);
+    writeOpenTxn(f.app, "gravity2");
+    writeOpenTxn(f.app, "hermes-on");
+    writeJson(path.join(f.client, "headless-progress.json"), {
+      version: 1,
+      profiles: {
+        gravity2: { lane: "worker", lastClaimAt: TWO_HOURS_AGO, lastReplyAt: "2026-10-17T10:00:00.000Z", lastAckAt: "2026-10-17T10:00:01.000Z" },
+        "hermes-on": { lane: "worker", lastClaimAt: TWO_HOURS_AGO },
+      },
+    });
+    const result = runDoctor(f.client);
+    for (const name of ["gravity2", "hermes-on"]) {
+      const row = result.report.inventory.profiles.find((p) => p.profile === name);
+      assert.equal(row.lane, "worker");
+      assert.equal(row.status, "fault", name);
+      assert.ok(row.faults.includes("open_transaction_stalled"), name);
+      assert.ok(!row.faults.includes("progress_evidence_unavailable"), name);
+    }
+    assert.equal(result.exitCode, 2);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("Codex headless: the same open-transaction policy applies", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["bob"]);
+    writeOpenTxn(f.app, "bob");
+    const result = runDoctor(f.client);
+    const bob = result.report.inventory.profiles.find((p) => p.profile === "bob");
+    assert.equal(bob.activity.lastReplySource, "completion_journal");
+    assert.equal(bob.status, "fault");
+    assert.ok(bob.faults.includes("open_transaction_stalled"));
+    assert.equal(result.exitCode, 2);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("idle installation with only old completed work and no open transaction is not stalled", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost", "gravity2"]);
+    rmSync(openTxnPath(f.app, "ghost"));
+    const old = "2026-10-10T08:00:00.000Z"; // a week before NOW
+    writeJson(path.join(f.client, "headless-progress.json"), {
+      version: 1,
+      profiles: {
+        ghost: { lane: "cursor-acp", lastClaimAt: old, lastReplyAt: old, lastAckAt: old },
+        gravity2: { lane: "worker", lastClaimAt: old, lastReplyAt: old, lastAckAt: old },
+      },
+    });
+    const result = runDoctor(f.client);
+    for (const name of ["ghost", "gravity2"]) {
+      const row = result.report.inventory.profiles.find((p) => p.profile === name);
+      assert.equal(row.activity.openTransactionHealth, "none", name);
+      assert.equal(row.status, "ok", `${name}: ${row.faults}`);
+    }
+    assert.equal(result.exitCode, 0, JSON.stringify([result.report.blockers, result.report.warnings]));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("doctor maxOpenTxnAgeMs is passed through to the inventory for every lane", () => {
+  const f = mixedFixture();
+  try {
+    onlyProfiles(f, ["ghost"]);
+    writeOpenTxn(f.app, "ghost", { createdAt: "2026-10-17T19:30:00.000Z", failureCount: 0 }); // 30 min old
+    writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: "2026-10-17T19:30:00.000Z" } } });
+    let result = runDoctor(f.client); // default 15 min budget
+    let ghost = result.report.inventory.profiles.find((p) => p.profile === "ghost");
+    assert.equal(ghost.activity.openTransactionHealth, "stalled");
+    assert.equal(ghost.status, "degraded");
+    assert.equal(result.exitCode, 1);
+    result = runDoctor(f.client, { maxOpenTxnAgeMs: 60 * 60_000 });
+    ghost = result.report.inventory.profiles.find((p) => p.profile === "ghost");
+    assert.equal(ghost.activity.maxOpenTransactionAgeMs, 60 * 60_000);
+    assert.equal(ghost.activity.openTransactionHealth, "ok");
+    assert.equal(ghost.status, "ok");
+    assert.equal(result.exitCode, 0);
+    result = runDoctor(f.client, { maxOpenTxnAgeMs: 5 * 60_000 });
+    assert.equal(result.report.inventory.profiles.find((p) => p.profile === "ghost").activity.openTransactionHealth, "stalled");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("open-transaction policy verdicts", () => {
+  const budget = { maxOpenTxnAgeMs: 15 * 60_000 };
+  const open = (ageMs, failureCount) => ({ readable: true, state: "claimed", ageMs, failureCount });
+  assert.equal(evaluateOpenTransaction(null, budget).verdict, "none");
+  assert.equal(evaluateOpenTransaction(open(60_000, 0), budget).verdict, "ok");
+  assert.equal(evaluateOpenTransaction(open(60_000, 1), budget).fault.hard, false);
+  assert.equal(evaluateOpenTransaction(open(60_000, 5), budget).verdict, "stuck");
+  assert.equal(evaluateOpenTransaction(open(60_000, 5), budget).fault.hard, true);
+  assert.equal(evaluateOpenTransaction(open(16 * 60_000, 0), budget).fault.hard, false);
+  assert.equal(evaluateOpenTransaction(open(16 * 60_000, 3), budget).fault.hard, true);
+  assert.equal(evaluateOpenTransaction(open(null, 0), budget).verdict, "age_unavailable");
+  assert.throws(() => readInstallationInventory({ clientRoot: "/tmp/x", pidAlive: () => true, advisoryHeldAt: () => true, maxOpenTxnAgeMs: 0 }), TypeError);
+});
+
+// ---------------------------------------------------------------------------
+// F4: profile names follow the persisted Swift ProfileName contract.
+
+const SIXTY_FOUR_ASCII = `Agent_${"x".repeat(55)}.v1`; // exactly 64 bytes
+const SIXTY_FOUR_UTF8 = "é".repeat(32); // 64 UTF-8 bytes, 32 characters
+
+test("profile-name validator mirrors Swift ProfileName", () => {
+  assert.equal(Buffer.byteLength(SIXTY_FOUR_ASCII), 64);
+  for (const ok of ["bob", "Agent_One", "UPPER", "dot.name", "under_score", "a", SIXTY_FOUR_ASCII, SIXTY_FOUR_UTF8, "-leading", "has space"]) {
+    assert.equal(isValidProfileName(ok), true, ok);
+  }
+  for (const bad of ["", `${SIXTY_FOUR_ASCII}x`, `${SIXTY_FOUR_UTF8}e`, "a/b", "a\\b", "a\u0000b", "tab\tname", "zero\u200bwidth", "\ud800", 7, null]) {
+    assert.equal(isValidProfileName(bad), false, JSON.stringify(bad));
+  }
+});
+
+test("existing uppercase/underscore/dot/64-byte profiles, including disabled Agent_One, are accepted as-is", () => {
+  const f = mixedFixture({
+    extraRegistry: [
+      { profile: "Agent_One", runtimeAdapter: "hermes", deliveryMode: "worker", enabled: false },
+      { profile: "Worker.Two", runtimeAdapter: "hermes", deliveryMode: "worker", enabled: true },
+      { profile: "ACP_Three", runtimeAdapter: "cursor-acp", deliveryMode: "headless-cursor-acp", enabled: true },
+      { profile: SIXTY_FOUR_ASCII, runtimeAdapter: "hermes", deliveryMode: "worker", enabled: false },
+      { profile: SIXTY_FOUR_UTF8, runtimeAdapter: "hermes", deliveryMode: "worker", enabled: true },
+    ],
+    acpBindingProfiles: ["ghost", "ACP_Three"],
+  });
+  try {
+    const result = runDoctor(f.client);
+    const byName = Object.fromEntries(result.report.inventory.profiles.map((p) => [p.profile, p]));
+    assert.ok(!result.report.blockers.some((b) => b.code === "registry_entry_invalid"), JSON.stringify(result.report.blockers));
+    // Disabled profiles: shown, not started, not a fault.
+    for (const name of ["Agent_One", SIXTY_FOUR_ASCII]) {
+      assert.equal(byName[name].status, "disabled", name);
+      assert.deepEqual(byName[name].faults, [], name);
+      assert.ok(!result.report.blockers.some((b) => b.profile === name), name);
+    }
+    // Enabled ones: identity preserved, enrollment resolved by exact name, no hard fault.
+    for (const name of ["Worker.Two", "ACP_Three", SIXTY_FOUR_UTF8]) {
+      assert.equal(byName[name].profile, name);
+      assert.equal(byName[name].instanceId, deriveClientInstanceId(name));
+      assert.equal(byName[name].enrollment.state, "verified", name);
+      assert.notEqual(byName[name].status, "fault", `${name}: ${byName[name].faults}`);
+    }
+    assert.equal(byName.ACP_Three.binding.status, "bound");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("registry rows outside the Swift contract are still explicit faults", () => {
+  const f = mixedFixture({
+    extraRegistry: [
+      { profile: `${SIXTY_FOUR_ASCII}x`, runtimeAdapter: "hermes", deliveryMode: "worker", enabled: false },
+      { profile: "bad/name", runtimeAdapter: "hermes", deliveryMode: "worker", enabled: false },
+    ],
+  });
+  try {
+    const result = runDoctor(f.client);
+    const invalid = result.report.blockers.filter((b) => b.code === "registry_entry_invalid");
+    assert.equal(invalid.length, 2);
+    assert.ok(invalid.every((b) => /invalid_profile/.test(b.message)));
+    assert.equal(result.exitCode, 2);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
 });

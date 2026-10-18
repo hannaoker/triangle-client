@@ -77,6 +77,21 @@ invalid registry row exits 2. An enabled profile with no progress evidence exits
 Disabled profiles are listed and never started. Credential files are checked for
 existence only, and message bodies are never read into output.
 
+Outstanding work is judged separately from historical progress. For every lane
+(Codex headless, Cursor ACP, worker) doctor reads the profile's helper
+`mailbox-transactions/open.json` and applies one policy with the
+`maxOpenTxnAgeMs` budget (default 15 minutes): five or more recorded failures
+(the helper's own "stuck" threshold) or an over-budget transaction with any
+failure exits 2; an over-budget transaction without failures, a transaction
+with failures inside the budget, or one without a readable `createdAt` exits 1.
+An old `lastClaimAt`/`lastReplyAt`/`lastAckAt` never excuses an open
+transaction, and an idle profile with no open transaction is never reported
+stalled however old its last completed work is.
+
+Registry profile names follow the persisted Swift `ProfileName` contract: up to
+64 UTF-8 bytes, no `/`, `\`, or control/format characters, case, dots, and
+underscores preserved. Doctor never renames an identity.
+
 ## Defaults
 
 | Selected by default | Not default |

@@ -24,6 +24,8 @@ const HARD_BLOCKER_CODES = new Set([
   "dual_claimer_conflict",
   "unreadable_custody",
   "runtime_auth_missing",
+  "open_transaction_stuck",
+  "open_transaction_stalled",
 ]);
 
 function readJson(filePath) {
@@ -238,6 +240,8 @@ export function runHeadlessEngagementDoctor({
     pidAlive,
     advisoryHeldAt,
     progress: progress != null && !progress.__error ? progress : null,
+    // Same threshold the Codex-binding loop uses, applied to every lane.
+    maxOpenTxnAgeMs,
   });
   const seen = new Set([...blockers, ...warnings].map((row) => `${row.code}:${row.profile ?? ""}`));
   for (const row of inventory.blockers) {
@@ -356,6 +360,6 @@ function formatInventoryProfile(row) {
     `  binding=${row.binding.kind}:${row.binding.status} pollWatch=${row.pollWatch.mode} pollMs=${show(row.pollWatch.pollIntervalMs)} watchMember=${row.pollWatch.watchMember} watch=${show(row.pollWatch.watchConnection)} grant=${show(row.pollWatch.grantHealth)}`,
     `  owner: ${owner}${ownership} admission=${row.owner.supervisorAdmission}`,
     `  activity: claim=${show(a.lastClaimAt)} reply=${show(a.lastReplyAt)}${a.lastReplySource ? `(${a.lastReplySource})` : ""} ack=${show(a.lastAckAt)} conversationUpdate=${show(a.lastConversationUpdateAt)} pending=${show(a.pendingCount)} oldestPendingAgeMs=${show(a.oldestPendingAgeMs)} retryExpiry=${a.retryExpiry}`,
-    `  backlog: open=${open ? show(open.state) : "none"} openAgeMs=${show(a.openTransactionAgeMs)} quarantined=${row.journal.quarantinedCount}${row.faults.length ? ` faults=${row.faults.join(",")}` : ""}${row.notes.length ? ` notes=${row.notes.join(",")}` : ""}`,
+    `  backlog: open=${open ? show(open.state) : "none"} openAgeMs=${show(a.openTransactionAgeMs)} openFailures=${show(a.openTransactionFailureCount)} openHealth=${show(a.openTransactionHealth)} quarantined=${row.journal.quarantinedCount}${row.faults.length ? ` faults=${row.faults.join(",")}` : ""}${row.notes.length ? ` notes=${row.notes.join(",")}` : ""}`,
   ];
 }
