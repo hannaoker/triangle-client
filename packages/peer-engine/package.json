@@ -1,0 +1,9 @@
+{
+  "name": "@triangle/peer-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust peer connectivity engine (iroh). Build and test with cargo from this directory; not part of the Node test runner.",
+  "scripts": {
+    "test": "cargo test"
+  }
+}
