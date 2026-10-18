@@ -48,43 +48,15 @@ Settlement mirrors Codex: helper transaction proxy owns claim/reply/ack. Node ne
 - Cloud Agents / `@cursor/sdk` durable backend
 - Desktop IDE inject / merging this PR
 
-## Legacy ACP session migration (opt-in, #81)
+## Cursor state isolation (#81)
 
-`plan/apply/revertLegacyCursorAcpSessionCopy` copy referenced sessions from
-`~/.cursor/acp-sessions/<id>` into `<cursor home>/acp-sessions/<id>`. Nothing
-runs automatically; run only while the Cursor ACP drain is stopped.
+The ACP child gets `CURSOR_CONFIG_DIR` pinned to the Triangle-owned Cursor
+home, so `acp-sessions/` and `cli-config.json` never touch `~/.cursor`.
+HOME is preserved, so the existing Cursor login (macOS keychain) is reused.
+Parent `CURSOR_CONFIG_DIR` / `XDG_CONFIG_HOME` and `extra` cannot redirect it,
+and the home must not resolve to `~/.cursor` or `~/.codex`.
 
-- Apply copies regular files one by one (exclusive create, never overwrites,
-  never moves or deletes the source) and records each file's size, mtime and
-  sha256 plus every directory it created (manifest schema 2).
-- All target paths are checked physically (`owned-fs.mjs`): the Triangle home
-  is re-resolved with realpath and every component below it is lstat'ed; any
-  symlinked or non-directory ancestor is rejected before copying or removing.
-  Legacy sources are checked the same way below `realpath(HOME)`: a symlinked
-  `~/.cursor`, `~/.cursor/acp-sessions` or session directory is reported as
-  `unsafe_source` and not copied (move the real tree into place first).
-- A session whose copy fails midway is rolled back (only the files this apply
-  copied, identity-checked, and the empty directories it created) and returned
-  in `failed`; it is not recorded, so a later apply can retry it. If rollback
-  cannot finish, the record is kept with `incomplete: true` for revert. The
-  same rollback runs if the manifest cannot be written after a copy, and any
-  failure after a file's exclusive create removes that torn target. If both
-  the manifest write and the rollback fail, apply retries recording the
-  session as `incomplete`; if the manifest stays unwritable it returns the
-  leftover files (path + identity) in `failed[].untrackedFiles` and stops
-  migrating further sessions.
-- Revert is resumable: before unlinking a session it persists
-  `revertInProgress` (write-ahead), and an I/O error midway records the files
-  already removed. A later revert finishes the job instead of treating those
-  files as post-migration use (directories the migration created count as
-  expected even once emptied). Malformed manifest records are kept verbatim
-  and reported (`manifest_record_invalid`) without aborting other sessions.
-- **Undo after use:** revert is per session and all-or-nothing. A session is
-  removed only if every recorded file still matches its snapshot and no other
-  files exist in it; then exactly those files and the now-empty recorded
-  directories are removed (never a recursive delete). If the session was used
-  after migration (file changed, missing, added, replaced by another type, or a
-  new directory created) or any path or manifest entry is unsafe, the
-  whole session is left in place, returned in `kept` with the reason and file
-  lists, and stays in the manifest. The manifest is deleted only when every
-  entry has been undone.
+Existing sessions under `~/.cursor/acp-sessions` are **not** migrated: after
+deploy, the ghost profile starts fresh Cursor sessions. An opt-in, reversible
+copy of legacy sessions/transcripts is split out into a separate PR (branch
+`l1a3/cursor-legacy-migration`).
