@@ -8,7 +8,7 @@
 | Published | 2026-09-28 |
 | License | MIT OR Apache-2.0 |
 | Upstream | https://github.com/n0-computer/iroh |
-| MSRV (upstream) | 1.91 (this package declares `rust-version = "1.85"` floor; build with current stable ≥ 1.91) |
+| MSRV | 1.91 (upstream iroh 1.3.0; this package declares `rust-version = "1.91"`) |
 
 ## Why 1.3.0
 

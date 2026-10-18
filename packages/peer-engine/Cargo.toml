@@ -2,7 +2,7 @@
 name = "peer-engine"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "MIT"
 description = "Triangle peer connectivity engine (iroh): device identity, journaled message/receipt exchange, and versioned local Unix IPC."
 repository = "https://github.com/hannaoker/triangle-client"

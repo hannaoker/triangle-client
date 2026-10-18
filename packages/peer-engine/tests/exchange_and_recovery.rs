@@ -18,17 +18,17 @@ use peer_engine::ipc::IpcClient;
 use peer_engine::{EngineConfig, IpcServer, PeerEngine};
 use tempfile::tempdir;
 
+mod common;
+use common::{id_of, start};
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_engines_exchange_message_with_receipt() {
     let dir_a = tempdir().unwrap();
     let dir_b = tempdir().unwrap();
 
-    let engine_a = PeerEngine::start(EngineConfig::new(dir_a.path()).direct_only())
-        .await
-        .expect("start A");
-    let engine_b = PeerEngine::start(EngineConfig::new(dir_b.path()).direct_only())
-        .await
-        .expect("start B");
+    let (id_a, id_b) = (id_of(dir_a.path()), id_of(dir_b.path()));
+    let engine_a = start(dir_a.path(), &[id_b]).await;
+    let engine_b = start(dir_b.path(), &[id_a]).await;
 
     // Give accept loops a moment to arm.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -61,17 +61,14 @@ async fn restart_and_duplicate_redelivery_recovery() {
     let dir_a = tempdir().unwrap();
     let dir_b = tempdir().unwrap();
 
-    let engine_a = PeerEngine::start(EngineConfig::new(dir_a.path()).direct_only())
-        .await
-        .expect("start A");
-    let engine_b = PeerEngine::start(EngineConfig::new(dir_b.path()).direct_only())
-        .await
-        .expect("start B");
+    let (id_a, id_b) = (id_of(dir_a.path()), id_of(dir_b.path()));
+    let engine_a = start(dir_a.path(), &[id_b]).await;
+    let engine_b = start(dir_b.path(), &[id_a]).await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let message_id = "stable-msg-1".to_string();
-    let id_b = engine_b.endpoint_id_hex();
+    let id_b_hex = engine_b.endpoint_id_hex();
     let addr_b = engine_b.endpoint_addr();
 
     let receipt1 = engine_a
@@ -89,10 +86,8 @@ async fn restart_and_duplicate_redelivery_recovery() {
     engine_b.shutdown().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let engine_b2 = PeerEngine::start(EngineConfig::new(dir_b.path()).direct_only())
-        .await
-        .expect("restart B");
-    assert_eq!(engine_b2.endpoint_id_hex(), id_b);
+    let engine_b2 = start(dir_b.path(), &[id_a]).await;
+    assert_eq!(engine_b2.endpoint_id_hex(), id_b_hex);
     assert_eq!(engine_b2.inbox().await.len(), 1);
 
     tokio::time::sleep(Duration::from_millis(50)).await;

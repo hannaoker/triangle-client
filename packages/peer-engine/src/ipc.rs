@@ -25,6 +25,18 @@ pub const IPC_PROTOCOL_VERSION: u32 = 1;
 /// Maximum accepted request frame size (bytes), including JSON overhead.
 pub const MAX_IPC_REQUEST_BYTES: usize = 1024 * 1024;
 
+/// Maximum response frame size. Must exceed the worst-case JSON encoding of one
+/// max-size inbox item (256 KiB payload, up to 6x when escaped) plus overhead.
+pub const MAX_IPC_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Soft byte budget for one `inbox` page (at least one item is always returned).
+pub const INBOX_PAGE_BYTE_BUDGET: usize = 1024 * 1024;
+/// Default / maximum `limit` for one `inbox` page.
+pub const INBOX_DEFAULT_LIMIT: usize = 50;
+pub const INBOX_MAX_LIMIT: usize = 200;
+/// Maximum items in one `ack` request.
+pub const ACK_MAX_ITEMS: usize = 1000;
+
 const SOCKET_NAME: &str = "peer-engine.sock";
 
 /// Unix IPC server bound to `state_dir/ipc/peer-engine.sock`.
@@ -48,9 +60,7 @@ impl IpcServer {
         }
 
         let path = ipc_dir.join(SOCKET_NAME);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
+        remove_stale_socket(&path)?;
 
         let listener = UnixListener::bind(&path)
             .with_context(|| format!("bind unix socket {}", path.display()))?;
@@ -126,22 +136,50 @@ struct IpcErrorBody {
     message: String,
 }
 
+/// Only unlink an existing socket path if it is a socket and nothing answers.
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+    };
+    if !meta.file_type().is_socket() {
+        bail!("{} exists and is not a socket; refusing to remove it", path.display());
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!(
+            "a live peer-engine is already serving {}; refusing to replace it",
+            path.display()
+        ),
+        Err(_) => {
+            std::fs::remove_file(path)
+                .with_context(|| format!("remove stale socket {}", path.display()))?;
+            Ok(())
+        }
+    }
+}
+
+fn is_disconnect(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>().is_some_and(|e| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
+    })
+}
+
 async fn handle_client(mut stream: UnixStream, engine: PeerEngine) -> Result<()> {
     let mut hello_ok = false;
     loop {
-        let req_bytes = match read_frame(&mut stream).await {
+        let req_bytes = match read_frame(&mut stream, MAX_IPC_REQUEST_BYTES).await {
             Ok(r) => r,
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("early eof")
-                    || msg.contains("unexpected end")
-                    || msg.contains("Connection reset")
-                    || msg.contains("Broken pipe")
-                {
-                    return Ok(());
-                }
-                return Err(err);
-            }
+            Err(err) if is_disconnect(&err) => return Ok(()),
+            Err(err) => return Err(err),
         };
         let req: IpcRequest = match serde_json::from_slice(&req_bytes) {
             Ok(r) => r,
@@ -155,7 +193,7 @@ async fn handle_client(mut stream: UnixStream, engine: PeerEngine) -> Result<()>
                         message: err.to_string(),
                     }),
                 };
-                write_frame(&mut stream, &serde_json::to_vec(&resp)?).await?;
+                write_frame(&mut stream, &serde_json::to_vec(&resp)?, MAX_IPC_RESPONSE_BYTES).await?;
                 continue;
             }
         };
@@ -167,7 +205,7 @@ async fn handle_client(mut stream: UnixStream, engine: PeerEngine) -> Result<()>
             .and_then(|v| v.get("shutdown"))
             .and_then(|v| v.as_bool())
             == Some(true);
-        write_frame(&mut stream, &serde_json::to_vec(&resp)?).await?;
+        write_frame(&mut stream, &serde_json::to_vec(&resp)?, MAX_IPC_RESPONSE_BYTES).await?;
         if shutdown {
             break;
         }
@@ -218,23 +256,99 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
             "hello_required",
             format!("call hello before {method}"),
         ),
-        "status" => ok_resp(
-            req.id,
-            serde_json::json!({
-                "engine_version": ENGINE_VERSION,
-                "protocol_version": IPC_PROTOCOL_VERSION,
-                "endpoint_id": engine.endpoint_id_hex(),
-                "state_dir": engine.state_dir().display().to_string(),
-                "inbox_count": engine.inbox().await.len(),
-            }),
-        ),
+        "status" => {
+            let (inbox_count, outbox_queued, journal_records) = engine.journal_counts().await;
+            ok_resp(
+                req.id,
+                serde_json::json!({
+                    "engine_version": ENGINE_VERSION,
+                    "protocol_version": IPC_PROTOCOL_VERSION,
+                    "endpoint_id": engine.endpoint_id_hex(),
+                    "state_dir": engine.state_dir().display().to_string(),
+                    "inbox_count": inbox_count,
+                    "outbox_queued": outbox_queued,
+                    "journal_records": journal_records,
+                    "roster_size": engine.roster_size(),
+                    "relay_online": engine.relay_online(),
+                }),
+            )
+        }
         "endpoint_addr" => match engine.endpoint_addr_json() {
             Ok(addr) => ok_resp(req.id, addr),
             Err(err) => err_resp(req.id, "internal", err.to_string()),
         },
         "inbox" => {
-            let items = engine.inbox().await;
-            ok_resp(req.id, serde_json::json!({ "items": items }))
+            let after_seq = req.params.get("after_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|l| (l as usize).clamp(1, INBOX_MAX_LIMIT))
+                .unwrap_or(INBOX_DEFAULT_LIMIT);
+            let all: Vec<_> = engine
+                .inbox()
+                .await
+                .into_iter()
+                .filter(|i| i.seq > after_seq)
+                .collect();
+            let mut page = Vec::new();
+            let mut bytes = 0usize;
+            for item in &all {
+                let size = serde_json::to_vec(item).map(|v| v.len()).unwrap_or(0) + 1;
+                if !page.is_empty() && (page.len() >= limit || bytes + size > INBOX_PAGE_BYTE_BUDGET) {
+                    break;
+                }
+                bytes += size;
+                page.push(item.clone());
+            }
+            let has_more = page.len() < all.len();
+            let next_after_seq = page.last().map(|i| i.seq).unwrap_or(after_seq);
+            ok_resp(
+                req.id,
+                serde_json::json!({
+                    "items": page,
+                    "next_after_seq": next_after_seq,
+                    "has_more": has_more,
+                }),
+            )
+        }
+        "ack" => {
+            let Some(items) = req.params.get("items").and_then(|v| v.as_array()) else {
+                return err_resp(req.id, "invalid_params", "items array required");
+            };
+            if items.len() > ACK_MAX_ITEMS {
+                return err_resp(req.id, "invalid_params", format!("at most {ACK_MAX_ITEMS} items"));
+            }
+            let mut acked = 0u64;
+            let mut already = 0u64;
+            let mut unknown = Vec::new();
+            for it in items {
+                let (Some(from), Some(id)) = (
+                    it.get("from_endpoint_id").and_then(|v| v.as_str()),
+                    it.get("message_id").and_then(|v| v.as_str()),
+                ) else {
+                    return err_resp(req.id, "invalid_params", "each item needs from_endpoint_id and message_id");
+                };
+                match engine.consume(from, id).await {
+                    Ok(crate::journal::ConsumeOutcome::Acked) => acked += 1,
+                    Ok(crate::journal::ConsumeOutcome::AlreadyAcked) => already += 1,
+                    Ok(crate::journal::ConsumeOutcome::Unknown) => unknown.push(it.clone()),
+                    Err(err) => return err_resp(req.id, "internal", err.to_string()),
+                }
+            }
+            ok_resp(
+                req.id,
+                serde_json::json!({ "acked": acked, "already_acked": already, "unknown": unknown }),
+            )
+        }
+        "message_status" => {
+            let Some(id) = req.params.get("message_id").and_then(|v| v.as_str()) else {
+                return err_resp(req.id, "invalid_params", "message_id required");
+            };
+            match engine.outbound_status(id).await {
+                Some(st) => ok_resp(req.id, serde_json::to_value(st).unwrap_or_default()),
+                None => err_resp(req.id, "not_found", format!("no outbound message {id}")),
+            }
         }
         "send" => {
             let message_id = match req.params.get("message_id").and_then(|v| v.as_str()) {
@@ -258,7 +372,7 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
             };
             match engine.send_message(peer_addr, message_id, payload).await {
                 Ok(receipt) => ok_resp(req.id, serde_json::to_value(receipt).unwrap_or_default()),
-                Err(err) => err_resp(req.id, "send_failed", err.to_string()),
+                Err(err) => err_resp(req.id, err.code(), err.to_string()),
             }
         }
         "shutdown" => ok_resp(req.id, serde_json::json!({ "shutdown": true })),
@@ -287,15 +401,15 @@ fn err_resp(id: String, code: impl Into<String>, message: impl Into<String>) -> 
     }
 }
 
-async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
+async fn read_frame(stream: &mut UnixStream, max: usize) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
         .await
         .context("read ipc length")?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len == 0 || len > MAX_IPC_REQUEST_BYTES {
-        bail!("ipc frame length {len} out of bounds (max {MAX_IPC_REQUEST_BYTES})");
+    if len == 0 || len > max {
+        bail!("ipc frame length {len} out of bounds (max {max})");
     }
     let mut body = vec![0u8; len];
     stream
@@ -305,9 +419,9 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-async fn write_frame(stream: &mut UnixStream, body: &[u8]) -> Result<()> {
-    if body.len() > MAX_IPC_REQUEST_BYTES {
-        bail!("ipc response too large: {}", body.len());
+async fn write_frame(stream: &mut UnixStream, body: &[u8], max: usize) -> Result<()> {
+    if body.len() > max {
+        bail!("ipc frame too large: {} (max {max})", body.len());
     }
     let len = (body.len() as u32).to_be_bytes();
     stream.write_all(&len).await?;
@@ -341,8 +455,8 @@ impl IpcClient {
             "method": method,
             "params": params,
         });
-        write_frame(&mut self.stream, &serde_json::to_vec(&req)?).await?;
-        let body = read_frame(&mut self.stream).await?;
+        write_frame(&mut self.stream, &serde_json::to_vec(&req)?, MAX_IPC_REQUEST_BYTES).await?;
+        let body = read_frame(&mut self.stream, MAX_IPC_RESPONSE_BYTES).await?;
         let resp: IpcResponse = serde_json::from_slice(&body)?;
         if let Some(err) = resp.error {
             bail!("{}: {}", err.code, err.message);

@@ -39,11 +39,41 @@ pub struct PeerReceipt {
     pub received_at_unix_ms: u64,
 }
 
+/// Explicit refusal: the recipient did **not** accept the message. Never a receipt.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerReject {
+    pub message_id: String,
+    /// `conflict` (same sender + message_id, different payload; terminal),
+    /// `quota_exceeded` (retryable), `sender_mismatch` / `hash_mismatch` /
+    /// `payload_too_large` (terminal).
+    pub code: String,
+    pub reason: String,
+}
+
+impl PeerReject {
+    /// Whether the sender should keep the message queued and retry later.
+    pub fn is_retryable(&self) -> bool {
+        self.code == REJECT_QUOTA_EXCEEDED
+    }
+}
+
+pub const REJECT_CONFLICT: &str = "conflict";
+pub const REJECT_QUOTA_EXCEEDED: &str = "quota_exceeded";
+pub const REJECT_SENDER_MISMATCH: &str = "sender_mismatch";
+pub const REJECT_HASH_MISMATCH: &str = "hash_mismatch";
+pub const REJECT_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEnvelope {
     Message(PeerMessage),
     Receipt(PeerReceipt),
+    Reject(PeerReject),
+}
+
+/// Exact framed body length (JSON bytes) this envelope would occupy on the wire.
+pub fn encoded_frame_len(envelope: &WireEnvelope) -> Result<usize> {
+    Ok(serde_json::to_vec(envelope)?.len())
 }
 
 impl PeerMessage {
@@ -95,6 +125,21 @@ impl PeerReceipt {
     }
 }
 
+impl PeerMessage {
+    /// Validate that this message fits in one wire frame once JSON-encoded.
+    /// Call before journaling so an unsendable message is never queued.
+    pub fn check_frame_size(&self) -> Result<()> {
+        let len = encoded_frame_len(&WireEnvelope::Message(self.clone()))?;
+        if len > MAX_FRAME_BYTES {
+            bail!(
+                "encoded message frame is {len} bytes, exceeds MAX_FRAME_BYTES ({MAX_FRAME_BYTES}); \
+                 JSON escaping can expand control characters up to 6x"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub fn payload_hash_hex(payload: &[u8]) -> String {
     let digest = Sha256::digest(payload);
     hex::encode(digest)
@@ -131,7 +176,7 @@ pub async fn read_envelope(recv: &mut iroh::endpoint::RecvStream) -> Result<Wire
     Ok(envelope)
 }
 
-fn now_unix_ms() -> u64 {
+pub(crate) fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
