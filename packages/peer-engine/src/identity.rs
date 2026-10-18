@@ -91,6 +91,15 @@ fn store_key(path: &Path, secret: &SecretKey) -> Result<()> {
     let mut perms = file.metadata()?.permissions();
     perms.set_mode(0o600);
     fs::set_permissions(path, perms)?;
+    // Make the new directory entries durable (key file in identity/, and
+    // identity/ in the state dir) so a power loss cannot silently rotate the
+    // device id while the journal survives.
+    if let Some(dir) = path.parent() {
+        File::open(dir)?.sync_all()?;
+        if let Some(state) = dir.parent() {
+            File::open(state)?.sync_all()?;
+        }
+    }
     Ok(())
 }
 

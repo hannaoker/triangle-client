@@ -66,7 +66,7 @@ never exported over IPC.
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `{}` | `engine_version`, `protocol_version`, `endpoint_id`, `alpn` |
-| `status` | `{}` | `endpoint_id`, `state_dir`, `inbox_count` (unconsumed), `outbox_queued`, `journal_records`, `roster_size`, `relay_online` (`null` when relays disabled) |
+| `status` | `{}` | `endpoint_id`, `state_dir`, `inbox_count` (unconsumed), `outbox_queued`, `journal_records`, `roster_size`, `relay_online` (live home-relay status; `null` when relays disabled) |
 | `endpoint_addr` | `{}` | iroh `EndpointAddr` JSON (id + transport addrs) |
 | `inbox` | `after_seq?` (default 0), `limit?` (default 50, max 200) | `{ "items": [...], "next_after_seq": n, "has_more": bool }` |
 | `ack` | `items: [{ from_endpoint_id, message_id }]` (max 1000) | `{ "acked": n, "already_acked": n, "unknown": [...] }` |
@@ -131,6 +131,8 @@ Aligned with pivot plan §7 (peer subset):
 | `refused` | Recipient refused, or receipt failed verification (terminal) |
 | `expired` | Not settled within the retry window (default 7 days; terminal) |
 | `consumed` | Local consumer acked the inbox item |
+| `address_updated` | Refreshed dialable address for a queued outbound message |
+| `checkpoint` | Compaction marker preserving the `seq` high-water mark |
 
 ## Out of scope for v1
 

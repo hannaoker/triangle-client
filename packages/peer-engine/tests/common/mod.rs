@@ -19,6 +19,7 @@ pub fn fast_retry() -> RetryPolicy {
         expiry: Duration::from_secs(7 * 24 * 60 * 60),
         tick: Duration::from_millis(25),
         attempt_timeout: Duration::from_secs(5),
+        max_in_flight: 4,
     }
 }
 

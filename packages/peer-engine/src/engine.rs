@@ -5,14 +5,13 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, Watcher};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
 use crate::identity::DeviceIdentity;
@@ -55,6 +54,8 @@ pub struct RetryPolicy {
     pub tick: Duration,
     /// Upper bound for one connect/send/receipt attempt.
     pub attempt_timeout: Duration,
+    /// Max concurrent background retry attempts.
+    pub max_in_flight: usize,
 }
 
 impl Default for RetryPolicy {
@@ -65,6 +66,7 @@ impl Default for RetryPolicy {
             expiry: Duration::from_secs(7 * 24 * 60 * 60),
             tick: Duration::from_millis(500),
             attempt_timeout: Duration::from_secs(30),
+            max_in_flight: 16,
         }
     }
 }
@@ -165,7 +167,7 @@ struct EngineInner {
     inbox_notify: Notify,
     roster: RwLock<HashSet<EndpointId>>,
     retry: RetryPolicy,
-    relay_online: Arc<AtomicBool>,
+    retry_slots: Arc<Semaphore>,
     relay_enabled: bool,
     lock_file: std::sync::Mutex<Option<File>>,
 }
@@ -207,23 +209,12 @@ impl PeerEngine {
             .alpns(vec![ALPN.to_vec()]);
         let endpoint = builder.bind().await.context("bind iroh endpoint")?;
 
-        let relay_online = Arc::new(AtomicBool::new(false));
         if relay_enabled {
             // Never block startup indefinitely on WAN/relay reachability:
             // iroh's online() has no timeout and waits forever offline.
-            let ep = endpoint.clone();
-            let flag = relay_online.clone();
-            let online = tokio::spawn(async move {
-                ep.online().await;
-                flag.store(true, Ordering::SeqCst);
-            });
-            if tokio::time::timeout(config.online_timeout, async {
-                while !relay_online.load(Ordering::SeqCst) && !online.is_finished() {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-            .await
-            .is_err()
+            if tokio::time::timeout(config.online_timeout, endpoint.online())
+                .await
+                .is_err()
             {
                 warn!(
                     timeout_ms = config.online_timeout.as_millis() as u64,
@@ -242,8 +233,8 @@ impl PeerEngine {
                 journal: Mutex::new(journal),
                 inbox_notify: Notify::new(),
                 roster: RwLock::new(config.allowed_peers.iter().copied().collect()),
+                retry_slots: Arc::new(Semaphore::new(config.retry.max_in_flight.max(1))),
                 retry: config.retry,
-                relay_online,
                 relay_enabled,
                 lock_file: std::sync::Mutex::new(Some(lock_file)),
             }),
@@ -293,11 +284,12 @@ impl PeerEngine {
         Ok(serde_json::to_value(self.endpoint_addr())?)
     }
 
-    /// `None` when relays are disabled.
+    /// Live home-relay connection status; `None` when relays are disabled.
     pub fn relay_online(&self) -> Option<bool> {
-        self.inner
-            .relay_enabled
-            .then(|| self.inner.relay_online.load(Ordering::SeqCst))
+        self.inner.relay_enabled.then(|| {
+            let mut w = self.inner.endpoint.home_relay_status();
+            Watcher::get(&mut w).iter().any(|s| s.is_connected())
+        })
     }
 
     // ------------------------------------------------------------------ roster
@@ -499,9 +491,10 @@ impl PeerEngine {
             }
             let now = now_unix_ms();
             let lease = now + self.inner.retry.attempt_timeout.as_millis() as u64 * 2;
+            let slots = self.inner.retry_slots.available_permits();
             let (expired, due) = {
                 let mut j = self.inner.journal.lock().await;
-                j.take_due(now, self.inner.retry.expiry, lease)
+                j.take_due(now, self.inner.retry.expiry, lease, slots)
             };
             for id in expired {
                 let mut j = self.inner.journal.lock().await;
@@ -523,8 +516,15 @@ impl PeerEngine {
                     Err(_) => continue,
                 };
                 message.created_at_unix_ms = d.queued_at_unix_ms;
+                // Bounded concurrency: take_due returned at most `slots` items.
+                let Ok(permit) = self.inner.retry_slots.clone().try_acquire_owned() else {
+                    // Lost a race for a slot; release the lease so it is retried soon.
+                    self.inner.journal.lock().await.note_attempt_failed(&d.message_id, now);
+                    continue;
+                };
                 let engine = self.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     match engine.attempt(peer, message).await {
                         Ok(_) => debug!("retry settled"),
                         Err(err) => debug!(error = %err, "retry attempt failed"),

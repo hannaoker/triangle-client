@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -51,6 +51,11 @@ pub enum DeliveryState {
     Expired,
     /// Inbound: a local consumer acknowledged the item (removed from inbox).
     Consumed,
+    /// Outbound: refreshed dialable address for a still-queued message.
+    AddressUpdated,
+    /// Compaction marker preserving the `seq` high-water mark (inbox cursors
+    /// stay monotonic even when every older record has been compacted away).
+    Checkpoint,
 }
 
 /// One durable journal record.
@@ -81,6 +86,7 @@ pub struct JournalLimits {
     pub max_unconsumed_per_peer: usize,
     pub max_unconsumed_bytes_per_peer: u64,
     pub max_outbox: usize,
+    pub max_outbox_bytes: u64,
     pub tombstone_retention: Duration,
     pub compact_every_lines: u64,
 }
@@ -89,8 +95,9 @@ impl Default for JournalLimits {
     fn default() -> Self {
         Self {
             max_unconsumed_per_peer: 1000,
-            max_unconsumed_bytes_per_peer: 64 * 1024 * 1024,
-            max_outbox: 10_000,
+            max_unconsumed_bytes_per_peer: 16 * 1024 * 1024,
+            max_outbox: 1000,
+            max_outbox_bytes: 64 * 1024 * 1024,
             tombstone_retention: Duration::from_secs(7 * 24 * 60 * 60),
             compact_every_lines: 10_000,
         }
@@ -155,8 +162,8 @@ pub enum EnqueueError {
     Conflict(String),
     #[error("message_id {0} is terminal ({1:?}); use a new message_id")]
     Terminal(String, OutboundState),
-    #[error("outbox full ({0} queued messages)")]
-    OutboxFull(usize),
+    #[error("outbox full ({0})")]
+    OutboxFull(String),
 }
 
 /// Result of [`Journal::accept_inbound`].
@@ -374,7 +381,14 @@ impl Journal {
                 rec.payload = None;
                 rec.ts_unix_ms = e.ts_unix_ms;
             }
-            DeliveryState::DuplicateSuppressed => {}
+            DeliveryState::AddressUpdated => {
+                if let Some(rec) = self.outbound.get_mut(&e.message_id) {
+                    if rec.state == OutboundState::Queued && e.peer_addr.is_some() {
+                        rec.peer_addr = e.peer_addr.clone();
+                    }
+                }
+            }
+            DeliveryState::DuplicateSuppressed | DeliveryState::Checkpoint => {}
         }
     }
 
@@ -403,19 +417,32 @@ impl Journal {
                     )));
                 }
                 OutboundState::Queued => {
-                    rec.peer_addr = Some(peer_addr);
                     rec.next_attempt_unix_ms = lease_until_unix_ms;
                     if rec.payload.is_none() {
                         rec.payload = Some(payload.to_string());
                     }
+                    if rec.peer_addr.as_ref() != Some(&peer_addr) {
+                        // Persist the refreshed address so retries after a
+                        // restart dial the new one.
+                        let mut entry =
+                            self.make_entry(DeliveryState::AddressUpdated, message_id, &hash);
+                        entry.peer_endpoint_id = Some(peer_endpoint_id.to_string());
+                        entry.peer_addr = Some(peer_addr);
+                        let entry = self.append_durable(entry)?;
+                        self.apply(&entry);
+                    }
+                    return Ok(Ok(EnqueueOutcome::Existing(OutboundState::Queued)));
                 }
                 OutboundState::Settled => {}
             }
-            return Ok(Ok(EnqueueOutcome::Existing(rec.state.clone())));
+            return Ok(Ok(EnqueueOutcome::Existing(OutboundState::Settled)));
         }
-        let queued = self.queued_count();
+        let (queued, queued_bytes) = self.queued_totals();
         if queued >= self.limits.max_outbox {
-            return Ok(Err(EnqueueError::OutboxFull(queued)));
+            return Ok(Err(EnqueueError::OutboxFull(format!("{queued} queued messages"))));
+        }
+        if queued_bytes + payload.len() as u64 > self.limits.max_outbox_bytes {
+            return Ok(Err(EnqueueError::OutboxFull(format!("{queued_bytes} queued payload bytes"))));
         }
         let now = now_unix_ms();
         let mut entry = self.make_entry(DeliveryState::QueuedLocal, message_id, &hash);
@@ -456,10 +483,16 @@ impl Journal {
     }
 
     pub fn queued_count(&self) -> usize {
+        self.queued_totals().0
+    }
+
+    fn queued_totals(&self) -> (usize, u64) {
         self.outbound
             .values()
             .filter(|r| r.state == OutboundState::Queued)
-            .count()
+            .fold((0, 0), |(c, b), r| {
+                (c + 1, b + r.payload.as_ref().map(|p| p.len() as u64).unwrap_or(0))
+            })
     }
 
     fn finish_outbound(
@@ -522,6 +555,7 @@ impl Journal {
         now: u64,
         expiry: Duration,
         lease_until_unix_ms: u64,
+        max_due: usize,
     ) -> (Vec<String>, Vec<DueOutbound>) {
         let expiry_ms = expiry.as_millis() as u64;
         let mut expired = Vec::new();
@@ -534,7 +568,7 @@ impl Journal {
                 expired.push(id.clone());
                 continue;
             }
-            if rec.next_attempt_unix_ms > now {
+            if rec.next_attempt_unix_ms > now || due.len() >= max_due {
                 continue;
             }
             let (Some(payload), Some(addr)) = (rec.payload.clone(), rec.peer_addr.clone()) else {
@@ -697,27 +731,43 @@ impl Journal {
                 ts_unix_ms: r.ts_unix_ms,
             });
         }
+        snapshot.sort_by_key(|e| e.seq);
+        let high_water = self.next_seq.saturating_sub(1);
+        if high_water > 0 && snapshot.last().map(|e| e.seq) != Some(high_water) {
+            snapshot.push(JournalEntry {
+                seq: high_water,
+                state: DeliveryState::Checkpoint,
+                message_id: String::new(),
+                payload_hash: String::new(),
+                payload_hex: None,
+                peer_endpoint_id: None,
+                peer_addr: None,
+                queued_at_unix_ms: None,
+                reason: None,
+                ts_unix_ms: now,
+            });
+        }
         if snapshot.len() as u64 >= self.lines {
             self.lines_since_compact = 0;
             return Ok(());
         }
-        snapshot.sort_by_key(|e| e.seq);
 
         let tmp = self.path.with_extension("jsonl.compact");
         {
             let _ = std::fs::remove_file(&tmp);
-            let mut f = OpenOptions::new()
+            let f = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&tmp)
                 .with_context(|| format!("create {}", tmp.display()))?;
-            let mut buf = Vec::new();
+            // Stream records to disk; never buffer the whole journal.
+            let mut w = BufWriter::new(f);
             for e in &snapshot {
-                buf.extend_from_slice(serde_json::to_string(e)?.as_bytes());
-                buf.push(b'\n');
+                serde_json::to_writer(&mut w, e)?;
+                w.write_all(b"\n")?;
             }
-            f.write_all(&buf)?;
+            let f = w.into_inner().map_err(|e| e.into_error())?;
             f.sync_all()?;
         }
         std::fs::rename(&tmp, &self.path)
@@ -779,62 +829,52 @@ impl Journal {
     }
 }
 
-/// Parse JSONL entries. If the **last** record is unterminated or does not
+/// Stream JSONL entries. If the **last** record is unterminated or does not
 /// parse, truncate the file to the end of the previous good record (it was
-/// never fsynced/acknowledged). Any other bad record is fatal.
+/// never fsynced/acknowledged as a whole). Any other bad record is fatal.
 fn read_entries_recovering_tail(path: &Path) -> Result<Vec<JournalEntry>> {
-    let mut bytes = Vec::new();
-    File::open(path)?.read_to_end(&mut bytes)?;
-
+    let mut reader = BufReader::new(File::open(path)?);
     let mut entries = Vec::new();
-    let mut offset = 0usize;
-    // (start, end_exclusive_without_newline, terminated)
-    let mut records: Vec<(usize, usize, bool)> = Vec::new();
-    while offset < bytes.len() {
-        match bytes[offset..].iter().position(|b| *b == b'\n') {
-            Some(rel) => {
-                records.push((offset, offset + rel, true));
-                offset += rel + 1;
-            }
-            None => {
-                records.push((offset, bytes.len(), false));
-                offset = bytes.len();
-            }
+    let mut offset: u64 = 0;
+    // First bad record seen so far: (start offset). Fatal if any non-empty
+    // record follows it; truncated if it is the last one.
+    let mut bad_at: Option<u64> = None;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
         }
-    }
-    let last_nonempty = records
-        .iter()
-        .rposition(|(s, e, _)| !bytes[*s..*e].iter().all(u8::is_ascii_whitespace));
-
-    for (idx, (start, end, terminated)) in records.iter().enumerate() {
-        let raw = &bytes[*start..*end];
-        if raw.iter().all(u8::is_ascii_whitespace) {
+        let start = offset;
+        offset += n as u64;
+        let terminated = line.last() == Some(&b'\n');
+        let body = if terminated { &line[..line.len() - 1] } else { &line[..] };
+        if body.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let is_last = Some(idx) == last_nonempty;
-        let parsed = if *terminated || !is_last {
-            serde_json::from_slice::<JournalEntry>(raw).ok()
+        if let Some(bad) = bad_at {
+            bail!(
+                "corrupt journal record at byte {bad} in {} (not the final record; refusing to start)",
+                path.display()
+            );
+        }
+        let parsed = if terminated {
+            serde_json::from_slice::<JournalEntry>(body).ok()
         } else {
             None // unterminated tail: never fsynced as a whole record
         };
         match parsed {
             Some(e) => entries.push(e),
-            None if is_last => {
-                warn!(
-                    path = %path.display(),
-                    offset = start,
-                    "truncating torn final journal record"
-                );
-                let f = OpenOptions::new().write(true).open(path)?;
-                f.set_len(*start as u64)?;
-                f.sync_all()?;
-                break;
-            }
-            None => bail!(
-                "corrupt journal record at byte {start} in {} (not the final record; refusing to start)",
-                path.display()
-            ),
+            None => bad_at = Some(start),
         }
+    }
+    if let Some(bad) = bad_at {
+        warn!(path = %path.display(), offset = bad, "truncating torn final journal record");
+        let mut f = OpenOptions::new().write(true).open(path)?;
+        f.set_len(bad)?;
+        f.seek(SeekFrom::End(0))?;
+        f.sync_all()?;
     }
     Ok(entries)
 }
@@ -966,9 +1006,70 @@ mod tests {
         j.consume("p", "m").unwrap();
         drop(j);
         let mut j = Journal::open(dir2.path()).unwrap();
-        assert_eq!(j.line_count(), 1);
+        assert_eq!(j.line_count(), 2, "consumed tombstone + seq checkpoint");
         assert_eq!(j.accept_inbound("p", "m", "x").unwrap(), InboundOutcome::Duplicate);
         assert_eq!(j.inbox_items().len(), 0);
+    }
+
+    // Regression (Codex fix-round 1 P1): seq high-water survives compaction.
+    #[test]
+    fn inbox_seq_stays_monotonic_after_full_compaction() {
+        let dir = tempdir().unwrap();
+        let limits = JournalLimits { tombstone_retention: Duration::ZERO, ..Default::default() };
+        let mut j = Journal::open_with(dir.path(), limits.clone()).unwrap();
+        for i in 0..5 {
+            j.accept_inbound("p", &format!("m{i}"), "x").unwrap();
+            j.consume("p", &format!("m{i}")).unwrap();
+        }
+        let last_cursor = 10;
+        drop(j);
+        let j = Journal::open_with(dir.path(), limits.clone()).unwrap();
+        assert_eq!(j.line_count(), 1, "only the checkpoint should remain");
+        drop(j);
+        let mut j = Journal::open_with(dir.path(), limits).unwrap();
+        j.accept_inbound("p", "new", "y").unwrap();
+        assert!(j.inbox_items()[0].seq > last_cursor, "seq went backwards: {}", j.inbox_items()[0].seq);
+    }
+
+    // Regression (Codex fix-round 1 P2): refreshed peer address is durable.
+    #[test]
+    fn refreshed_peer_address_survives_restart() {
+        let dir = tempdir().unwrap();
+        let mut j = Journal::open(dir.path()).unwrap();
+        let old = serde_json::json!({"id": "x", "addrs": [{"Ip": "127.0.0.1:1"}]});
+        let new = serde_json::json!({"id": "x", "addrs": [{"Ip": "127.0.0.1:2"}]});
+        j.enqueue_outbound("m", "p", "x", old, 0).unwrap().unwrap();
+        j.enqueue_outbound("m", "p", "x", new.clone(), 0).unwrap().unwrap();
+        drop(j);
+        let mut j = Journal::open(dir.path()).unwrap();
+        let (_, due) = j.take_due(now_unix_ms(), Duration::from_secs(3600), 0, 10);
+        assert_eq!(due[0].peer_addr, new);
+    }
+
+    // Regression (Codex fix-round 1 P2): retry fan-out is bounded per tick.
+    #[test]
+    fn take_due_respects_max_due() {
+        let dir = tempdir().unwrap();
+        let mut j = Journal::open(dir.path()).unwrap();
+        for i in 0..10 {
+            j.enqueue_outbound(&format!("m{i}"), "p", "x", addr(), 0).unwrap().unwrap();
+        }
+        let now = now_unix_ms();
+        let (_, due) = j.take_due(now, Duration::from_secs(3600), now + 60_000, 3);
+        assert_eq!(due.len(), 3);
+        let (_, due) = j.take_due(now, Duration::from_secs(3600), now + 60_000, 100);
+        assert_eq!(due.len(), 7, "leased items must not be handed out twice");
+    }
+
+    #[test]
+    fn outbox_is_bounded_by_count_and_bytes() {
+        let dir = tempdir().unwrap();
+        let limits = JournalLimits { max_outbox: 2, max_outbox_bytes: 10, ..Default::default() };
+        let mut j = Journal::open_with(dir.path(), limits).unwrap();
+        j.enqueue_outbound("a", "12345", "x", addr(), 0).unwrap().unwrap();
+        assert!(matches!(j.enqueue_outbound("b", "123456", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
+        j.enqueue_outbound("b", "1", "x", addr(), 0).unwrap().unwrap();
+        assert!(matches!(j.enqueue_outbound("c", "1", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
     }
 
     #[test]

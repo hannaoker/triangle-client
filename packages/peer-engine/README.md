@@ -66,8 +66,13 @@ are journaled as `duplicate_suppressed` without a second inbox row.
 ## Journal size bound
 
 - Unconsumed inbound: ≤ `max_unconsumed_per_peer` (1000) items and
-  `max_unconsumed_bytes_per_peer` (64 MiB) per roster member.
-- Queued outbound: ≤ `max_outbox` (10 000) messages × 256 KiB.
+  `max_unconsumed_bytes_per_peer` (16 MiB) per roster member.
+- Queued outbound: ≤ `max_outbox` (1000) messages and `max_outbox_bytes`
+  (64 MiB) of payload.
+- A `checkpoint` record preserves the `seq` high-water mark across
+  compaction, so inbox cursors (`after_seq`) never go backwards.
+- Replay and compaction stream records (no whole-file buffering); background
+  retries are capped at `max_in_flight` (16) concurrent attempts.
 - Settled/refused/expired outbound and consumed inbound tombstones: dropped by
   compaction after `tombstone_retention` (7 days).
 - Payloads are stored hex-encoded (2×). Retry attempt counters are in memory
