@@ -204,3 +204,18 @@ test("canonical JSON refuses lone surrogates and sparse arrays", () => {
   assert.throws(() => canonicalJson([, 1]), /sparse/); // eslint-disable-line no-sparse-arrays
   assert.equal(canonicalJson({ e: "😀" }), '{"e":"😀"}');
 });
+
+test("DPoP htu is the full request URL including the query (what MESH compares)", async () => {
+  const { dpopProof } = await import("../src/workload.mjs");
+  const { generateEd25519 } = await import("../src/keys.mjs");
+  const key = generateEd25519();
+  const proof = dpopProof({ workloadKey: key, method: "get", url: "https://mesh.test/api/v1/mailbox?limit=5&after=0", accessToken: "t" });
+  const payload = JSON.parse(Buffer.from(proof.split(".")[1], "base64url").toString("utf8"));
+  assert.equal(payload.htu, "https://mesh.test/api/v1/mailbox?limit=5&after=0");
+  assert.equal(payload.htm, "GET");
+  assert.throws(() => dpopProof({ workloadKey: key, method: "GET", url: "https://mesh.test/x#frag", accessToken: "t" }), /Invalid DPoP URL/);
+  const fake = createFakeAuthority({ authority: AUTH });
+  const { home, agentId } = await joined(fake);
+  const wl = openSession({ home, env: {}, fetchImpl: fake.fetchImpl }).workloadSession(agentId);
+  assert.equal((await wl.request("GET", "/api/v1/agents/me?view=full")).status, 200);
+});
