@@ -34,24 +34,33 @@ checked. Prefer the fail-closed driver (prints no secrets):
 # Docs + boundary scans (safe on Linux CI)
 ./scripts/release/check-release-readiness.sh --mode docs
 
-# Public ship pretends: require Developer ID env on the build Mac (values not printed)
-./scripts/release/check-release-readiness.sh --mode public
+# Public ad-hoc release gate (macOS): validate every final executable after its
+# last modification (strict verify, Signature=adhoc, no authority/team, no
+# Keychain entitlements, arm64 slice, no com.apple.quarantine)
+./scripts/release/check-release-readiness.sh --mode public \
+  --artifact "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" \
+  --artifact "$HOME/Library/Application Support/The Triangle/bin/triangle-client"
 ```
+
+Developer ID signing and notarization are out of scope; `--mode public` fails if
+`TRIANGLE_DEVELOPER_ID` / `TRIANGLE_DEVELOPER_TEAM_ID` are set.
 
 | # | Gate | Pass criteria |
 | --- | --- | --- |
 | R1 | Docs package | `release-bundle.md`, `e2e-operator-runbook.md`, helper README, and this workflow agree on install paths, first-start, upgrade, uninstall, and signing |
-| R2 | Signing distinction | Public installs require `TRIANGLE_DEVELOPER_ID` + ten-character `TRIANGLE_DEVELOPER_TEAM_ID`; `--local-ad-hoc` is documented as non-public and does **not** provide a stable distributed Keychain identity |
+| R2 | Signing distinction | Public installs are ad-hoc signed (`signingMode: public_ad_hoc`, `credentialCustody: file`) and `--mode public --artifact …` passes for every final executable; `--local-ad-hoc` is documented as non-public (Keychain compatibility path) and neither mode provides a stable distributed Keychain identity |
 | R3 | Secret boundaries | `verify-secret-boundaries.sh` passes; LaunchAgent templates invoke only `triangle-mailbox run-supervisor`; no `mesh_` / `mesh_watch_` in Node production paths, plists, or operator logs |
 | R4 | Repository boundary | No MESH server tree, `.vercel`, populated env files, or committed credentials (release mode item 5) |
 | R5 | Runtime suite (code changes) | Applicable items 1–4 and 6 above; docs-only changes skip unrelated runtime suites |
-| R6 | Mac Keychain custody (public artifact) | Opt-in disposable Keychain lifecycle against the **signed** helper (`TRIANGLE_RUN_DISPOSABLE_KEYCHAIN_TEST=1`); see `KEYCHAIN_POLICY.md` |
+| R6 | File custody (public artifact) | On a fresh VM or clean machine, a public install enrolls and runs a profile with only `0600` files under `credentials/local/` and no Keychain item; the disposable Keychain lifecycle (`TRIANGLE_RUN_DISPOSABLE_KEYCHAIN_TEST=1`) applies only to `--local-ad-hoc` compatibility hosts; see `KEYCHAIN_POLICY.md` |
+| R6b | Quarantine diagnosis | On a fresh VM or clean machine, a browser-downloaded archive is rejected by `scripts/release/check-quarantine.sh` / the installer with remediation, and the `curl` path installs |
 | R7 | E2E operator path | A clean Mac can follow the E2E runbook through install → enroll → prepare runtime → `agent add` → `event-driven` → `watch-ensure` / `watch-status` |
 | R7b | Helper upgrade + wake canaries | When worker manifest or bundle composition changed: follow [2026-09-30-helper-upgrade-release-gate.md](2026-09-30-helper-upgrade-release-gate.md) — existing v4/v5 bundle upgrade, fresh v6 install, then repeated live headless / bound desktop / Bob / receipt-only / restart-recovery canaries with full evidence fields |
-| R8 | Explicit non-blockers recorded | Developer ID cert on build Mac, ChatGPT.app for durable App Server desktop canaries, and any live helper watch gaps are called out without claiming Linux completion |
+| R8 | Explicit non-blockers recorded | Authenticated update metadata (not provided by the ad-hoc signature), ChatGPT.app for durable App Server desktop canaries, and any live helper watch gaps are called out without claiming Linux completion |
 
 **Do not** mark public release ready from `--mode adhoc-dev`. Ad-hoc requires
-`TRIANGLE_ACK_ADHOC_NON_PUBLIC=1` and never satisfies R2 for distribution.
+`TRIANGLE_ACK_ADHOC_NON_PUBLIC=1` and covers `--local-ad-hoc` development
+installs only; it never satisfies R2 for distribution.
 
 Phase 2 durable wake/scheduling remains **Complete**. App Server / ChatGPT.app
 proofs are Mac-operator dependent and do not reopen Phase 2.

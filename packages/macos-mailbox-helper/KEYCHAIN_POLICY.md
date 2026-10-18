@@ -1,5 +1,15 @@
 # macOS Keychain policy
 
+**Scope (2026-10-17):** Developer ID signing and notarization are out of scope,
+so the public release does not use the Keychain. Public ad-hoc installs
+(`signingMode: public_ad_hoc`) are built with `TRIANGLE_FILE_CUSTODY_REQUIRED`
+and keep mailbox, workload, and watch-grant credentials in `0600` files under
+`~/Library/Application Support/The Triangle/credentials/local/` (selection:
+`CredentialCustodyPolicy.swift`). Requesting Keychain custody there
+(`TRIANGLE_CREDENTIAL_CUSTODY=keychain`) fails instead of falling back. This
+policy now governs the `--local-ad-hoc` compatibility path for existing
+Keychain-enrolled profiles.
+
 Mailbox credential items use the Data Protection Keychain and are explicitly
 non-synchronizable. The fixed generic-password service for mailbox credentials is
 `dev.thetriangle.mesh.mailbox`; the validated local profile name is the account.
@@ -20,15 +30,16 @@ Protection Keychain returns `errSecItemNotFound` or missing entitlements
 Keychain password dialog; foreground sessions may prompt once for migration.
 Creates never write to the legacy Keychain.
 
-Ad-hoc (`--local-ad-hoc`) builds cannot embed Keychain entitlements; macOS AMFI
-rejects restricted entitlements on ad-hoc signatures. Use Developer ID signing
-for LaunchAgent deployments that must use the Data Protection Keychain.
+Ad-hoc builds cannot embed Keychain entitlements; macOS AMFI rejects
+restricted entitlements on ad-hoc signatures. LaunchAgent deployments that need
+unattended custody use file custody (public install) instead.
 
 If credentials were enrolled under an unsigned or entitlement-less build, migrate
 them once from an interactive Terminal session:
 
 1. Stop Triangle Client: `launchctl bootout gui/$(id -u)/dev.thetriangle.client`
-2. Reinstall the helper with Developer ID signing (recommended for LaunchAgent).
+2. Reinstall the helper (`--local-ad-hoc` to stay on Keychain custody; a public
+   install moves new enrollments to file custody and requires re-enrollment).
 3. For each profile, read the binding in the foreground (this may prompt once):
    `"$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" status --profile PROFILE`
 4. If status reports `profile_state_inconsistent` or `local_authorization_required`
@@ -38,10 +49,11 @@ them once from an interactive Terminal session:
    `security delete-generic-password -s dev.thetriangle.mesh.workload-key -a PROFILE`
 5. Start Triangle Client again after a successful foreground `status`.
 
-The public release requires a stable Developer ID application identifier and
-matching Keychain entitlements. Release verification requires an explicitly
+Developer ID is out of scope: the public release requires file custody rather
+than a stable application identifier with Keychain entitlements. For
+`--local-ad-hoc` Keychain compatibility hosts, verification requires an explicitly
 opted-in, uniquely named disposable real-Keychain lifecycle test against the
-signed artifact; it creates, reads, replaces, and deletes only its own item.
+signed artifact as a release gate; it creates, reads, replaces, and deletes only its own item.
 Unit and host contract tests inspect pure query dictionaries and never access a
 live Keychain.
 

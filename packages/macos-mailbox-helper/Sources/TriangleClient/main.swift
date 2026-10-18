@@ -5,6 +5,7 @@ import TriangleMailboxCore
 @main
 enum TriangleClientCLI {
     static func main() async {
+        CredentialCustodyPolicy.enforceAtLaunch()
         do {
             let command = try TriangleClientCommandParser.parse(Array(CommandLine.arguments.dropFirst()))
             let transport = URLSessionMeshTransport()
