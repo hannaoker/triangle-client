@@ -126,7 +126,7 @@ test("macOS helper documentation and policy define the public custody release", 
   requirePatterns(readme, [/Triangle Client/, /--install-client/, /triangle-client.*agent add/is, /dev\.thetriangle\.client/, /legacy.*migration|migration.*legacy/is], "helper README");
 
   const policy = readFileSync(path.join(root, "packages/macos-mailbox-helper/KEYCHAIN_POLICY.md"), "utf8");
-  requirePatterns(policy, [/public release requires.*Developer ID/is, /application identifier/i, /Keychain entitlements/i, /disposable.*real-Keychain.*release gate/is], "Keychain policy");
+  requirePatterns(policy, [/Developer ID.*out of scope/is, /public release requires file custody/i, /TRIANGLE_FILE_CUSTODY_REQUIRED/, /application identifier/i, /Keychain entitlements/i, /disposable.*real-Keychain.*release gate/is], "Keychain policy");
   assert.doesNotMatch(policy, /Task [0-9]+/i);
 });
 
@@ -139,7 +139,12 @@ test("first-add launch control gates retirement and polling on readiness and act
 test("release bundle and E2E runbook define a coherent public install story", () => {
   const bundle = doc("release-bundle.md");
   requirePatterns(bundle, [
-    /Developer ID/i,
+    /Developer ID signing and notarization are out of\s+scope/i,
+    /public_ad_hoc/,
+    /credentialCustody/,
+    /com\.apple\.quarantine/,
+    /check-quarantine\.sh/,
+    /codesign --force --sign -/,
     /local-ad-hoc/i,
     /signingMode/,
     /does not|does \*\*not\*\*/i,
@@ -164,7 +169,8 @@ test("release bundle and E2E runbook define a coherent public install story", ()
     /watch-status/,
     /mcp-interactive/,
     /codex-desktop-wake-handoff/,
-    /developer_id/,
+    /public_ad_hoc/,
+    /check-quarantine\.sh/,
     /not claimed from Linux|must not claim.*Linux|not executable from\s+Linux/i,
   ], "e2e operator runbook");
 
@@ -180,23 +186,22 @@ test("release bundle and E2E runbook define a coherent public install story", ()
   assert.ok(existsSync(path.join(root, "scripts/release/verify-secret-boundaries.sh")));
 });
 
-test("release readiness docs mode passes and public mode fails closed without signing env", async () => {
+test("release readiness docs mode passes and public mode fails closed without ad-hoc artifacts", async () => {
   const { spawnSync } = await import("node:child_process");
   const script = path.join(root, "scripts/release/check-release-readiness.sh");
-  const docs = spawnSync("/bin/bash", [script, "--mode", "docs"], { encoding: "utf8", env: process.env });
+  const cleanEnv = { ...process.env, TRIANGLE_DEVELOPER_ID: "", TRIANGLE_DEVELOPER_TEAM_ID: "" };
+  const docs = spawnSync("/bin/bash", [script, "--mode", "docs"], { encoding: "utf8", env: cleanEnv });
   assert.equal(docs.status, 0, docs.stderr || docs.stdout);
   assert.match(docs.stdout, /Release readiness PASSED for mode=docs/);
 
-  const publicMode = spawnSync("/bin/bash", [script, "--mode", "public"], {
-    encoding: "utf8",
-    env: { ...process.env, TRIANGLE_DEVELOPER_ID: "", TRIANGLE_DEVELOPER_TEAM_ID: "" },
-  });
+  const publicMode = spawnSync("/bin/bash", [script, "--mode", "public"], { encoding: "utf8", env: cleanEnv });
   assert.notEqual(publicMode.status, 0);
-  assert.match(`${publicMode.stdout}${publicMode.stderr}`, /TRIANGLE_DEVELOPER_ID/);
+  assert.match(`${publicMode.stdout}${publicMode.stderr}`, /--artifact|must run on macOS/);
+  assert.doesNotMatch(`${publicMode.stdout}${publicMode.stderr}`, /requires TRIANGLE_DEVELOPER_ID/);
 
   const adhoc = spawnSync("/bin/bash", [script, "--mode", "adhoc-dev"], {
     encoding: "utf8",
-    env: { ...process.env, TRIANGLE_ACK_ADHOC_NON_PUBLIC: "" },
+    env: { ...cleanEnv, TRIANGLE_ACK_ADHOC_NON_PUBLIC: "" },
   });
   assert.notEqual(adhoc.status, 0);
 });

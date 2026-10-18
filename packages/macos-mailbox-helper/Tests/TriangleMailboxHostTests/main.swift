@@ -25,6 +25,10 @@ enum TriangleMailboxHostTests {
                 try contractCase.run()
                 print("PASS \(contractCase.name)")
             }
+            for contractCase in CredentialCustodyPolicyContractCases.all {
+                try contractCase.run()
+                print("PASS \(contractCase.name)")
+            }
             for contractCase in ClientInstanceContractCases.all {
                 try contractCase.run()
                 print("PASS \(contractCase.name)")
