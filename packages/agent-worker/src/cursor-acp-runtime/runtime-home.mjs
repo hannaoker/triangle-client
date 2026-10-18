@@ -250,6 +250,15 @@ export function resolveTriangleCursorDataDir({
   if (typeof candidate !== "string" || !candidate.startsWith("/") || candidate.includes("\0")) {
     throw createCodedError("cursor_data_dir_invalid", "TRIANGLE_CURSOR_DATA_DIR must be an absolute path");
   }
+  // `.`/`..` segments are rejected outright: lexical collapsing (`alias/..`)
+  // differs from filesystem traversal through a symlinked `alias`, which
+  // could otherwise slip a forbidden target past the containment check.
+  if (candidate.split("/").some((part) => part === "." || part === "..")) {
+    throw createCodedError(
+      "cursor_data_dir_invalid",
+      "TRIANGLE_CURSOR_DATA_DIR must be a normalized absolute path (no '.' or '..' segments)",
+    );
+  }
   if (MESH_SECRET.test(candidate)) {
     throw createCodedError("secret_leak_rejected", "Cursor data dir path must not contain mesh_ credentials");
   }
@@ -414,7 +423,7 @@ export function describeTriangleCursorDirs({
   workspacePaths = [],
   defaultWorkspaceToConfigDir = false,
 } = {}) {
-  const override = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR;
+  const override = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR ?? null;
   const dataDirSource =
     typeof override === "string" && override.length > 0 ? "override" : "default";
   const result = { configDir: null, dataDir: null, dataDirSource, socketPreflight: null };
@@ -462,7 +471,7 @@ export function buildSanitizedCursorChildEnv({
     allowCreate: false,
   });
   const dataDir = resolveTriangleCursorDataDir({
-    override: cursorDataDir ?? parentEnv.TRIANGLE_CURSOR_DATA_DIR,
+    override: cursorDataDir ?? parentEnv.TRIANGLE_CURSOR_DATA_DIR ?? null,
     home: parentEnv.HOME,
     allowCreate: false,
   });
@@ -1270,6 +1279,7 @@ export function applyLegacyCursorTranscriptCopy({
   if (projectsCreated) manifest.createdProjectsRoot = true;
   const copied = [];
   const skipped = [];
+  let failure = null;
   try {
     for (const workspace of plan.workspaces) {
       if (workspace.action !== "copy" && workspace.action !== "nothing_to_copy") {
@@ -1299,14 +1309,56 @@ export function applyLegacyCursorTranscriptCopy({
           skipped.push(Object.freeze({ slug: workspace.slug, relative: entry.relative, action: result.status }));
           continue;
         }
-        manifest.createdFiles.push({ path: relative, ...result.identity, copiedAt: now() });
+        const record = { path: relative, ...result.identity, copiedAt: now() };
+        manifest.createdFiles.push(record);
+        try {
+          writeTranscriptManifest(anchor, manifest);
+        } catch (error) {
+          // Never leave a copy no manifest knows about: roll this file (and
+          // the empty dirs its copy created) back, identity-checked.
+          manifest.createdFiles.pop();
+          let status;
+          try {
+            status = removeOwnedFileIfUnchanged({ anchor, relative, identity: record }).status;
+          } catch {
+            status = "error";
+          }
+          const rolledBack = status === "removed" || status === "missing";
+          if (rolledBack) {
+            for (const dir of [...result.createdDirs].reverse()) {
+              let dirStatus;
+              try {
+                dirStatus = removeOwnedEmptyDirectory({ anchor, relative: dir }).status;
+              } catch {
+                dirStatus = "error";
+              }
+              if (dirStatus === "removed" || dirStatus === "missing") {
+                const index = manifest.createdDirs.lastIndexOf(dir);
+                if (index >= 0) manifest.createdDirs.splice(index, 1);
+              }
+            }
+          } else {
+            manifest.createdFiles.push(record); // final write below may still record it
+          }
+          throw Object.assign(error, { rolledBack, transcript: relative, identity: record });
+        }
         copied.push(relative);
-        writeTranscriptManifest(anchor, manifest);
       }
     }
-  } finally {
-    writeTranscriptManifest(anchor, manifest);
+  } catch (error) {
+    failure = error;
   }
+  // Best-effort final persist (also records dirs created before a failure).
+  try {
+    writeTranscriptManifest(anchor, manifest);
+  } catch (error) {
+    if (failure == null) failure = error;
+    else if (failure.rolledBack === false) {
+      // Durable record impossible: surface the exact untracked file.
+      failure.untrackedFiles = [{ ...failure.identity }];
+    }
+  }
+  if (failure != null) throw failure;
   return Object.freeze({
     copied: Object.freeze(copied),
     skipped: Object.freeze(skipped),

@@ -447,7 +447,9 @@ export function createCursorAcpProcess({
     typeof dataDirOverride === "string" && dataDirOverride.length > 0 ? "override" : "default";
   // Default ~/.triangle/cursor-data is created 0700 on first use.
   const resolvedDataDir = resolveTriangleCursorDataDir({
-    override: dataDirOverride,
+    // `?? null`: an absent override must resolve from the injected env only,
+    // never from the host process.env default parameter.
+    override: dataDirOverride ?? null,
     home: env.HOME,
     allowCreate: true,
   });

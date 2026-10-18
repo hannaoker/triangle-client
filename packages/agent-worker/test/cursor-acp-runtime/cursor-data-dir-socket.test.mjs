@@ -11,6 +11,7 @@
  * real ~/.cursor or a live Triangle profile.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -1023,5 +1024,67 @@ test("codex r2: revert removes the projects dir that apply created once the mani
     } finally {
       cleanup();
     }
+  }
+});
+
+test("codex r3: data dir overrides with '..' segments are rejected (no lexical collapse past a symlink)", () => {
+  const { home, cleanup } = fixture();
+  try {
+    mkdirSync(path.join(home, ".cursor", "subdir"), { recursive: true });
+    symlinkSync(path.join(home, ".cursor", "subdir"), path.join(home, "alias"), "dir");
+    // Lexically `${home}/cursor-data`; physically `${home}/.cursor/cursor-data`.
+    const override = `${home}/alias/../cursor-data`;
+    assert.throws(
+      () => resolveTriangleCursorDataDir({ override, home, allowCreate: true }),
+      { code: "cursor_data_dir_invalid" },
+    );
+    assert.deepEqual(readdirSync(path.join(home, ".cursor")).sort(), ["subdir"]);
+    assert.equal(existsSync(path.join(home, "cursor-data")), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r3: a transcript manifest write failure rolls that copy back", { skip: process.platform !== "darwin" }, () => {
+  const { home, cleanup } = fixture();
+  const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
+  const manifestPath = path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
+  try {
+    const workspace = path.join(home, "ws7");
+    seedLegacyTranscripts(home, workspace);
+    mkdirSync(projectsRoot, { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 2, createdFiles: [], createdDirs: [] }));
+    execFileSync("chflags", ["uchg", manifestPath]); // rename onto it fails with EPERM
+    let thrown;
+    try {
+      applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown, "apply surfaces the manifest failure");
+    assert.equal(thrown.rolledBack, true);
+    const slugDir = path.join(projectsRoot, cursorWorkspaceSlug(workspace));
+    assert.equal(existsSync(slugDir), false, "no untracked copy or created dirs left");
+    assert.deepEqual(readdirSync(projectsRoot).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    try { execFileSync("chflags", ["nouchg", manifestPath]); } catch {}
+    cleanup();
+  }
+});
+
+test("codex r3: an injected env without TRIANGLE_CURSOR_DATA_DIR ignores the host process.env value", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const previous = process.env.TRIANGLE_CURSOR_DATA_DIR;
+  process.env.TRIANGLE_CURSOR_DATA_DIR = path.join(home, "host-ambient-data");
+  try {
+    const dirs = describeTriangleCursorDirs({ cursorHome, env: { HOME: home } });
+    assert.equal(dirs.dataDir, path.join(home, ".triangle", "cursor-data"));
+    assert.equal(dirs.dataDirSource, "default");
+    const child = buildSanitizedCursorChildEnv({ cursorHome, parentEnv: { HOME: home, PATH: "/usr/bin" } });
+    assert.equal(child.CURSOR_DATA_DIR, path.join(home, ".triangle", "cursor-data"));
+  } finally {
+    if (previous === undefined) delete process.env.TRIANGLE_CURSOR_DATA_DIR;
+    else process.env.TRIANGLE_CURSOR_DATA_DIR = previous;
+    cleanup();
   }
 });
