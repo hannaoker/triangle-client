@@ -596,7 +596,9 @@ export function createClientSupervisor({
       laneCursorStores,
       // Hobby Fluid memory: 2s reconnect after empty hold burns ~44 GB-hrs/day
       // per always-on watcher. Prefer SAFE idle (30s) so one watcher stays near
-      // ~12–22 GB-hrs/day depending on server poll timeout.
+      // ~12–22 GB-hrs/day depending on server poll timeout. This is the
+      // selected M0a operating cadence; INSTALL_WATCH_HELD_POLL_IDLE_MS (2s)
+      // stays a distinct opt-in and is not used by the supervisor.
       idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
       logger,
     });

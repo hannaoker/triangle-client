@@ -1119,7 +1119,8 @@ test("install dispatcher routes Bob, Codex, and ACP hints to one watch and one c
       };
     },
     createInstallDispatcher: (options) => {
-      assert.equal(options.idlePollIntervalMs, 2_000);
+      // Selected M0a cadence: safe idle (30s), not held-poll reconnect (2s).
+      assert.equal(options.idlePollIntervalMs, 30_000);
       assert.deepEqual(options.profiles.map((profile) => profile.agentId), [
         "agent_codex_desktop_001",
         "agent_headless_codex_001",
@@ -1430,7 +1431,7 @@ test("Cursor ACP install-watch membership requires a kick handler on the same in
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("install dispatcher uses held-poll short reconnect idle (2s)", () => {
+test("install dispatcher uses safe idle (30s), not held-poll reconnect idle (2s)", () => {
   const supervisor = createClientSupervisor({
     instances: [],
     appServerWake: appServerWakeFixture(3),
