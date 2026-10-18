@@ -401,7 +401,8 @@ test("supervisor starts Cursor ACP drain from cursorAcpWakes", async () => {
 });
 
 test("headless Cursor ACP drain runs fake ACP claim→prompt→reply settlement", async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-acp-runtime-home-"));
+  // Short root: macOS os.tmpdir() exceeds Cursor's 84-char socket base.
+  const home = fs.mkdtempSync(path.join(process.platform === "win32" ? os.tmpdir() : "/tmp", "tcr-"));
   const replies = [];
   const acks = [];
   const fake = createFakeAcpStdioProgram({ idPrefix: "drain" });

@@ -16,8 +16,14 @@ const PROFILE_INSTANCE_ID = "a".repeat(64);
 const ROOM_ID = `room_${"b".repeat(32)}`;
 const INBOUND_EVENT_ID = `event_${"c".repeat(32)}`;
 
+// macOS tmpdir() (/var/folders/...) is too long for Cursor's 84-char socket
+// base (see runtime-home.mjs); keep test homes under a short /tmp root.
+function shortTmpRoot() {
+  return process.platform === "win32" ? tmpdir() : "/tmp";
+}
+
 function tempHome() {
-  return mkdtempSync(path.join(tmpdir(), "triangle-cursor-acp-"));
+  return mkdtempSync(path.join(shortTmpRoot(), "tca-"));
 }
 
 function createProxyRecorder() {

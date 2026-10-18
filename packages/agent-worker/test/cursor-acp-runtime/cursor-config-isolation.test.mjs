@@ -36,7 +36,18 @@ function fixture() {
     home,
     allowCreate: true,
   });
-  return { home, cursorHome, cleanup: () => rmSync(home, { recursive: true, force: true }) };
+  // The production-shaped Cursor home is far longer than Cursor's 84-char
+  // socket base, so the data dir must be a short Triangle-owned directory.
+  const dataDir = realpathSync(mkdtempSync("/tmp/tcd-"));
+  return {
+    home,
+    cursorHome,
+    dataDir,
+    cleanup: () => {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dataDir, { recursive: true, force: true });
+    },
+  };
 }
 
 function seedLegacySession(home, sessionId, marker = sessionId) {
@@ -48,11 +59,11 @@ function seedLegacySession(home, sessionId, marker = sessionId) {
 }
 
 test("child env points CURSOR_CONFIG_DIR at the Triangle-owned Cursor home", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     const child = buildSanitizedCursorChildEnv({
       cursorHome,
-      parentEnv: { HOME: home, PATH: "/usr/bin" },
+      parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
     });
     assert.equal(child.CURSOR_CONFIG_DIR, cursorHome);
     assert.notEqual(child.CURSOR_CONFIG_DIR, path.join(home, ".cursor"));
@@ -63,11 +74,11 @@ test("child env points CURSOR_CONFIG_DIR at the Triangle-owned Cursor home", () 
 });
 
 test("child env keeps HOME so the Cursor login (macOS keychain) is reused, not replaced", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     const child = buildSanitizedCursorChildEnv({
       cursorHome,
-      parentEnv: { HOME: home, PATH: "/usr/bin" },
+      parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
     });
     assert.equal(child.HOME, home);
   } finally {
@@ -76,7 +87,7 @@ test("child env keeps HOME so the Cursor login (macOS keychain) is reused, not r
 });
 
 test("parent CURSOR_CONFIG_DIR / XDG_CONFIG_HOME pointing at user state never leak into the child", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     const child = buildSanitizedCursorChildEnv({
       cursorHome,
@@ -85,6 +96,7 @@ test("parent CURSOR_CONFIG_DIR / XDG_CONFIG_HOME pointing at user state never le
         PATH: "/usr/bin",
         CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
         XDG_CONFIG_HOME: path.join(home, ".config"),
+        TRIANGLE_CURSOR_DATA_DIR: dataDir,
       },
     });
     assert.equal(child.CURSOR_CONFIG_DIR, cursorHome);
@@ -95,20 +107,20 @@ test("parent CURSOR_CONFIG_DIR / XDG_CONFIG_HOME pointing at user state never le
 });
 
 test("extra cannot redirect CURSOR_CONFIG_DIR away from the Triangle home", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     assert.throws(
       () =>
         buildSanitizedCursorChildEnv({
           cursorHome,
-          parentEnv: { HOME: home, PATH: "/usr/bin" },
+          parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
           extra: { CURSOR_CONFIG_DIR: path.join(home, ".cursor") },
         }),
       { code: "cursor_config_dir_conflict" },
     );
     const same = buildSanitizedCursorChildEnv({
       cursorHome,
-      parentEnv: { HOME: home, PATH: "/usr/bin" },
+      parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
       extra: { CURSOR_CONFIG_DIR: cursorHome },
     });
     assert.equal(same.CURSOR_CONFIG_DIR, cursorHome);
@@ -133,14 +145,19 @@ function fakeChild() {
 }
 
 test("ACP process spawns cursor-agent with CURSOR_CONFIG_DIR set to the Triangle home", async () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   const spawned = [];
   try {
     const processHandle = createCursorAcpProcess({
       command: "agent",
       args: ["acp"],
       cursorHome,
-      env: { HOME: home, PATH: "/usr/bin", CURSOR_CONFIG_DIR: path.join(home, ".cursor") },
+      env: {
+        HOME: home,
+        PATH: "/usr/bin",
+        CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
+        TRIANGLE_CURSOR_DATA_DIR: dataDir,
+      },
       spawnImpl: (command, args, options) => {
         spawned.push({ command, args, env: options.env });
         return fakeChild();
@@ -157,7 +174,7 @@ test("ACP process spawns cursor-agent with CURSOR_CONFIG_DIR set to the Triangle
 });
 
 test("legacy session copy plan is read-only and classifies each referenced session", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     seedLegacySession(home, SESSION_A);
     seedLegacySession(home, SESSION_B);
@@ -183,7 +200,7 @@ test("legacy session copy plan is read-only and classifies each referenced sessi
 });
 
 test("legacy session copy rejects non-UUID ids and refuses to treat ~/.cursor as the target", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     assert.throws(
       () => planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: ["../../etc"] }),
@@ -204,7 +221,7 @@ test("legacy session copy rejects non-UUID ids and refuses to treat ~/.cursor as
 });
 
 test("legacy session copy leaves ~/.cursor untouched, never overwrites, and is reversible", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     const sourceA = seedLegacySession(home, SESSION_A, "legacy-a");
     seedLegacySession(home, SESSION_B, "legacy-b");
@@ -247,7 +264,7 @@ test("legacy session copy leaves ~/.cursor untouched, never overwrites, and is r
 });
 
 test("legacy session copy refuses symlinked source session directories", () => {
-  const { home, cursorHome, cleanup } = fixture();
+  const { home, cursorHome, dataDir, cleanup } = fixture();
   try {
     const real = seedLegacySession(home, SESSION_B);
     const link = path.join(home, ".cursor", "acp-sessions", SESSION_A);
