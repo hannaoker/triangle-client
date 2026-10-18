@@ -4,10 +4,13 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -256,6 +259,123 @@ test("legacy session copy refuses symlinked source session directories", () => {
     assert.equal(plan.entries[0].action, "unsafe_source");
     const applied = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
     assert.deepEqual(applied.copied, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("legacy session manifest records every copied file with size, mtime and sha256", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    const source = seedLegacySession(home, SESSION_A, "legacy-a");
+    mkdirSync(path.join(source, "blobs"));
+    writeFileSync(path.join(source, "blobs", "b1"), "blob-1");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const manifest = JSON.parse(
+      readFileSync(path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST), "utf8"),
+    );
+    assert.equal(manifest.schemaVersion, 2);
+    const [record] = manifest.copied;
+    assert.deepEqual(
+      record.files.map((file) => file.path).sort(),
+      [
+        `acp-sessions/${SESSION_A}/blobs/b1`,
+        `acp-sessions/${SESSION_A}/meta.json`,
+        `acp-sessions/${SESSION_A}/store.db`,
+      ],
+    );
+    for (const file of record.files) {
+      assert.equal(typeof file.size, "number");
+      assert.equal(typeof file.mtimeMs, "number");
+      assert.match(file.sha256, /^[0-9a-f]{64}$/);
+    }
+    assert.deepEqual(record.createdDirs.sort(), [`acp-sessions/${SESSION_A}`, `acp-sessions/${SESSION_A}/blobs`]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("undo after use keeps a session whose copy was modified or extended; unused sessions are removed", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    const sourceA = seedLegacySession(home, SESSION_A, "legacy-a");
+    seedLegacySession(home, SESSION_B, "legacy-b");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A, SESSION_B] });
+    const targetA = path.join(cursorHome, "acp-sessions", SESSION_A);
+    // Synthetic "post-migration work" in session A only.
+    writeFileSync(path.join(targetA, "store.db"), "db:legacy-a+new-turn");
+    writeFileSync(path.join(targetA, "new-after-resume.txt"), "new accepted work");
+
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, [SESSION_B]);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_B)), false);
+    assert.equal(reverted.kept.length, 1);
+    assert.equal(reverted.kept[0].sessionId, SESSION_A);
+    assert.equal(reverted.kept[0].reason, "used_after_migration");
+    assert.deepEqual(reverted.kept[0].newFiles, ["new-after-resume.txt"]);
+    assert.deepEqual(reverted.kept[0].modifiedFiles, ["store.db"]);
+    // All of session A survives, including the unchanged meta.json.
+    assert.equal(readFileSync(path.join(targetA, "store.db"), "utf8"), "db:legacy-a+new-turn");
+    assert.equal(readFileSync(path.join(targetA, "new-after-resume.txt"), "utf8"), "new accepted work");
+    assert.ok(existsSync(path.join(targetA, "meta.json")));
+    // Manifest is preserved for the kept session; source untouched.
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.deepEqual(manifest.copied.map((entry) => entry.sessionId), [SESSION_A]);
+    assert.equal(manifest.copied[0].lastRevert.reason, "used_after_migration");
+    assert.equal(readFileSync(path.join(sourceA, "store.db"), "utf8"), "db:legacy-a");
+
+    // A second undo is stable: still keeps A.
+    const again = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(again.removed, []);
+    assert.equal(again.kept[0].sessionId, SESSION_A);
+    assert.ok(existsSync(manifestPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test("undo never follows a symlinked session dir out of the Triangle home; manifest preserved", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const targetA = path.join(cursorHome, "acp-sessions", SESSION_A);
+    // Replace the copied session dir with a symlink to unrelated data that has
+    // byte-identical files (and the same mtimes) to defeat identity checks.
+    const outside = path.join(home, "unrelated");
+    mkdirSync(outside);
+    for (const name of ["meta.json", "store.db"]) {
+      writeFileSync(path.join(outside, name), readFileSync(path.join(targetA, name)));
+      const stat = statSync(path.join(targetA, name));
+      utimesSync(path.join(outside, name), stat.atime, stat.mtime);
+    }
+    rmSync(targetA, { recursive: true });
+    symlinkSync(outside, targetA, "dir");
+
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, []);
+    assert.equal(reverted.kept[0].reason, "unsafe_path");
+    assert.ok(existsSync(path.join(outside, "store.db")));
+    assert.ok(existsSync(path.join(outside, "meta.json")));
+    assert.ok(existsSync(path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST)));
+  } finally {
+    cleanup();
+  }
+});
+
+test("apply refuses to copy through a symlinked acp-sessions root", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    const outside = path.join(home, "elsewhere");
+    mkdirSync(outside);
+    symlinkSync(outside, path.join(cursorHome, "acp-sessions"), "dir");
+    assert.throws(
+      () => applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] }),
+      { code: "owned_path_symlink_rejected" },
+    );
+    assert.deepEqual(readdirSync(outside), []);
   } finally {
     cleanup();
   }
