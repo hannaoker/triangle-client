@@ -88,15 +88,22 @@ function renderJoin({ outcome, result }) {
   return lines.join("\n");
 }
 
-/** Write a line and settle when the stream has accepted it (rejects on e.g. EPIPE). */
-function writeLine(stream, text) {
+/** Streams that already have a standing error listener (see writeLine). */
+const GUARDED = new WeakSet();
+
+/**
+ * Write a line and settle when the stream has accepted it (rejects on e.g. EPIPE).
+ * On EPIPE Node calls the write callback first and emits `error` afterwards, so a
+ * standing no-op listener keeps that later event from crashing the process; the
+ * failure itself is reported through the callback.
+ */
+export function writeLine(stream, text) {
+  if (!GUARDED.has(stream)) {
+    stream.on("error", () => {});
+    GUARDED.add(stream);
+  }
   return new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    stream.once("error", onError);
-    stream.write(`${text}\n`, (error) => {
-      stream.off("error", onError);
-      if (error) reject(error); else resolve();
-    });
+    stream.write(`${text}\n`, (error) => (error ? reject(error) : resolve()));
   });
 }
 
