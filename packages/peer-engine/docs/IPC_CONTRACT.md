@@ -93,7 +93,8 @@ duplicate until the tombstone retention (default 7 days) elapses.
 ```
 
 `message_id` (1–256 bytes) is unique per sending device. Re-sending the same id with the same
-payload to the same peer is idempotent; a different payload or peer is
+payload to the same peer is idempotent (an already-settled id is answered from
+the local journal with `duplicate: true` and is not retransmitted); a different payload or peer is
 `conflict`. The message is journaled `queued_local` (fsync) **after** the
 encoded frame is validated, then one attempt is made.
 

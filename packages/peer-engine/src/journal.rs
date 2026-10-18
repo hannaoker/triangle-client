@@ -217,6 +217,8 @@ pub struct Journal {
     inbound: HashMap<(String, String), InboundRecord>,
     /// Set by [`Journal::close`]; every later write fails.
     closed: bool,
+    /// Live (unconsumed) inbound totals per sender: (count, payload bytes).
+    live_inbound: HashMap<String, (usize, u64)>,
 }
 
 /// Maximum `message_id` length (bytes) accepted on either side.
@@ -234,6 +236,8 @@ impl Journal {
         let journal_dir = state_dir.as_ref().join("journal");
         if !journal_dir.exists() {
             std::fs::create_dir_all(&journal_dir)?;
+            // Make the new journal/ entry durable in the state dir.
+            sync_dir(state_dir.as_ref())?;
         }
         let mut dir_perms = std::fs::metadata(&journal_dir)?.permissions();
         dir_perms.set_mode(0o700);
@@ -249,6 +253,7 @@ impl Journal {
             outbound: HashMap::new(),
             inbound: HashMap::new(),
             closed: false,
+            live_inbound: HashMap::new(),
         };
 
         if path.exists() {
@@ -374,19 +379,35 @@ impl Journal {
             }
             DeliveryState::ReceivedPeer => {
                 let Some(from) = e.peer_endpoint_id.clone() else { return };
-                self.inbound.insert(
-                    (from, e.message_id.clone()),
+                let body = payload();
+                let bytes = body.as_ref().map(|p| p.len() as u64).unwrap_or(0);
+                let prev = self.inbound.insert(
+                    (from.clone(), e.message_id.clone()),
                     InboundRecord {
                         seq: e.seq,
                         payload_hash: e.payload_hash.clone(),
-                        payload: payload(),
+                        payload: body,
                         ts_unix_ms: e.ts_unix_ms,
                         consumed: false,
                     },
                 );
+                if let Some(prev) = prev.filter(|p| !p.consumed) {
+                    self.live_sub(&from, prev.payload.as_ref().map(|p| p.len() as u64).unwrap_or(0));
+                }
+                let t = self.live_inbound.entry(from).or_default();
+                t.0 += 1;
+                t.1 += bytes;
             }
             DeliveryState::Consumed => {
                 let Some(from) = e.peer_endpoint_id.clone() else { return };
+                if let Some(prev) = self
+                    .inbound
+                    .get(&(from.clone(), e.message_id.clone()))
+                    .filter(|p| !p.consumed)
+                {
+                    let bytes = prev.payload.as_ref().map(|p| p.len() as u64).unwrap_or(0);
+                    self.live_sub(&from, bytes);
+                }
                 let rec = self
                     .inbound
                     .entry((from, e.message_id.clone()))
@@ -409,6 +430,16 @@ impl Journal {
                 }
             }
             DeliveryState::DuplicateSuppressed | DeliveryState::Checkpoint => {}
+        }
+    }
+
+    fn live_sub(&mut self, from: &str, bytes: u64) {
+        if let Some(t) = self.live_inbound.get_mut(from) {
+            t.0 = t.0.saturating_sub(1);
+            t.1 = t.1.saturating_sub(bytes);
+            if t.0 == 0 {
+                self.live_inbound.remove(from);
+            }
         }
     }
 
@@ -630,13 +661,8 @@ impl Journal {
             self.append_durable(entry)?;
             return Ok(InboundOutcome::Duplicate);
         }
-        let (count, bytes) = self
-            .inbound
-            .iter()
-            .filter(|((from, _), r)| from == from_endpoint_id && !r.consumed)
-            .fold((0usize, 0u64), |(c, b), (_, r)| {
-                (c + 1, b + r.payload.as_ref().map(|p| p.len() as u64).unwrap_or(0))
-            });
+        // O(1) live totals (tombstones are never scanned).
+        let (count, bytes) = self.live_inbound.get(from_endpoint_id).copied().unwrap_or((0, 0));
         if count + 1 > self.limits.max_unconsumed_per_peer
             || bytes + payload.len() as u64 > self.limits.max_unconsumed_bytes_per_peer
         {
@@ -678,7 +704,7 @@ impl Journal {
     }
 
     pub fn unconsumed_count(&self) -> usize {
-        self.inbound.values().filter(|r| !r.consumed).count()
+        self.live_inbound.values().map(|t| t.0).sum()
     }
 
     /// Acknowledge (consume) an inbox item; it leaves the inbox but its
@@ -1095,6 +1121,27 @@ mod tests {
         assert!(matches!(j.enqueue_outbound("b", "123456", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
         j.enqueue_outbound("b", "1", "x", addr(), 0).unwrap().unwrap();
         assert!(matches!(j.enqueue_outbound("c", "1", "x", addr(), 0).unwrap(), Err(EnqueueError::OutboxFull(_))));
+    }
+
+    // Regression (Codex fix-round 3 P2): live quota totals stay exact across
+    // accept/consume/replay/compaction without scanning tombstones.
+    #[test]
+    fn live_inbound_totals_track_accept_consume_and_replay() {
+        let dir = tempdir().unwrap();
+        let limits = JournalLimits { compact_every_lines: 3, ..Default::default() };
+        let mut j = Journal::open_with(dir.path(), limits.clone()).unwrap();
+        for i in 0..10 {
+            j.accept_inbound("p", &format!("m{i}"), "abc").unwrap();
+        }
+        for i in 0..4 {
+            j.consume("p", &format!("m{i}")).unwrap();
+        }
+        assert_eq!(j.unconsumed_count(), 6);
+        assert_eq!(j.live_inbound.get("p"), Some(&(6, 18)));
+        drop(j);
+        let j = Journal::open_with(dir.path(), limits).unwrap();
+        assert_eq!(j.live_inbound.get("p"), Some(&(6, 18)));
+        assert_eq!(j.inbox_items().len(), 6);
     }
 
     #[test]

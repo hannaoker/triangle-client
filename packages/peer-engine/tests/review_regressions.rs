@@ -167,8 +167,14 @@ async fn p1_4_inbox_is_paginated_and_ackable_over_1mib() {
     assert_eq!(again["already_acked"], 1);
     let empty = cl.call("inbox", serde_json::json!({})).await.unwrap();
     assert_eq!(empty["items"].as_array().unwrap().len(), 0);
-    // Acked items stay deduplicated.
-    let r = a.send_message(b.endpoint_addr(), "big0", big.clone()).await.unwrap();
+    // Acked items stay deduplicated (redelivery from a sender that lost its
+    // journal: same key, fresh state dir).
+    let da2 = tempdir().unwrap();
+    std::fs::create_dir_all(da2.path().join("identity")).unwrap();
+    std::fs::copy(da.path().join("identity/device.key"), da2.path().join("identity/device.key")).unwrap();
+    a.shutdown().await;
+    let a2 = start(da2.path(), &[ib]).await;
+    let r = a2.send_message(b.endpoint_addr(), "big0", big.clone()).await.unwrap();
     assert!(r.duplicate);
     assert_eq!(b.inbox().await.len(), 0);
 }
@@ -448,4 +454,45 @@ async fn fix_r2_oversized_message_id_rejected_both_sides() {
         WireEnvelope::Reject(rj) => assert_eq!(rj.code, "invalid_message_id"),
         other => panic!("expected reject, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------- Codex fix-round 3
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_r3_settled_message_is_not_retransmitted() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let (ia, ib) = (id_of(da.path()), id_of(db.path()));
+    let a = start(da.path(), &[ib]).await;
+    let b = start(db.path(), &[ia]).await;
+    let addr_b = b.endpoint_addr();
+    a.send_message(addr_b.clone(), "s1", "once").await.unwrap();
+    b.shutdown().await; // peer offline
+    let r = tokio::time::timeout(Duration::from_secs(2), a.send_message(addr_b, "s1", "once"))
+        .await
+        .expect("settled resend must not dial")
+        .expect("settled resend reports success");
+    assert!(r.duplicate);
+    assert_eq!(outbound_state(&a, "s1").await.as_deref(), Some("settled"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix_r3_per_peer_inbound_handlers_are_bounded() {
+    let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+    let (ia, ib) = (id_of(da.path()), id_of(db.path()));
+    let mut cb = config(db.path(), &[ia]);
+    cb.max_inbound_per_peer = 2;
+    let b = PeerEngine::start(cb).await.unwrap();
+    let raw = raw_endpoint().await;
+    b.allow_peer(raw.id());
+    // Two idle connections occupy the raw peer's slots (no stream opened).
+    let c1 = raw.connect(b.endpoint_addr(), ALPN).await.unwrap();
+    let c2 = raw.connect(b.endpoint_addr(), ALPN).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let c3 = raw.connect(b.endpoint_addr(), ALPN).await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(3), c3.closed()).await;
+    assert!(closed.is_ok(), "third connection from the same peer was not closed");
+    // Another member is unaffected.
+    let a = start(da.path(), &[ib]).await;
+    a.send_message(b.endpoint_addr(), "ok", "fine").await.expect("other peer still served");
+    drop((c1, c2));
 }

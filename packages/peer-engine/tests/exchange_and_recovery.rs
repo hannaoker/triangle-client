@@ -92,7 +92,19 @@ async fn restart_and_duplicate_redelivery_recovery() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // A redelivers the same logical message_id (lost-receipt / retry scenario).
+    // A redelivers the same logical message_id (lost-receipt / retry
+    // scenario). A settled message is never retransmitted by the same
+    // journal, so simulate a sender that lost its journal: same device key,
+    // fresh state dir.
+    let dir_a2 = tempdir().unwrap();
+    std::fs::create_dir_all(dir_a2.path().join("identity")).unwrap();
+    std::fs::copy(
+        dir_a.path().join("identity/device.key"),
+        dir_a2.path().join("identity/device.key"),
+    )
+    .unwrap();
+    engine_a.clone().shutdown().await;
+    let engine_a = start(dir_a2.path(), &[id_b]).await;
     let receipt2 = engine_a
         .send_message(engine_b2.endpoint_addr(), &message_id, "persist me")
         .await

@@ -72,7 +72,11 @@ are journaled as `duplicate_suppressed` without a second inbox row.
 - A `checkpoint` record preserves the `seq` high-water mark across
   compaction, so inbox cursors (`after_seq`) never go backwards.
 - Replay and compaction stream records (no whole-file buffering); background
-  retries are capped at `max_in_flight` (16) concurrent attempts.
+  retries are capped at `max_in_flight` (16) concurrent attempts; inbound
+  handlers are capped globally (`max_inbound_handlers`, 64) and per peer
+  (`max_inbound_per_peer`, 8).
+- A settled `message_id` is never retransmitted; re-sending it returns a
+  receipt with `duplicate: true` from the local journal.
 - Settled/refused/expired outbound and consumed inbound tombstones: dropped by
   compaction after `tombstone_retention` (7 days).
 - Payloads are stored hex-encoded (2×). Retry attempt counters are in memory

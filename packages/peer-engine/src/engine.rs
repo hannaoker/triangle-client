@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::identity::DeviceIdentity;
 use crate::journal::{
-    ConsumeOutcome, EnqueueError, InboundOutcome, InboxItem, Journal, JournalLimits,
+    ConsumeOutcome, EnqueueError, EnqueueOutcome, InboundOutcome, InboxItem, Journal, JournalLimits,
     OutboundState, OutboundStatus, MAX_MESSAGE_ID_BYTES,
 };
 use crate::protocol::{
@@ -29,6 +29,8 @@ use crate::ENGINE_VERSION;
 
 /// QUIC application close code sent to a peer that is not on the roster.
 pub const CLOSE_NOT_MEMBER: u32 = 403;
+/// QUIC application close code when a peer exceeds its inbound handler limit.
+pub const CLOSE_BUSY: u32 = 429;
 const LOCK_FILE: &str = "engine.lock";
 
 /// How the engine configures iroh relays.
@@ -93,6 +95,10 @@ pub struct EngineConfig {
     pub online_timeout: Duration,
     pub retry: RetryPolicy,
     pub limits: JournalLimits,
+    /// Max concurrent inbound connection handlers (all peers).
+    pub max_inbound_handlers: usize,
+    /// Max concurrent inbound connection handlers per admitted peer.
+    pub max_inbound_per_peer: usize,
 }
 
 impl EngineConfig {
@@ -104,6 +110,8 @@ impl EngineConfig {
             online_timeout: Duration::from_secs(10),
             retry: RetryPolicy::default(),
             limits: JournalLimits::default(),
+            max_inbound_handlers: 64,
+            max_inbound_per_peer: 8,
         }
     }
 
@@ -169,6 +177,9 @@ struct EngineInner {
     roster: RwLock<HashSet<EndpointId>>,
     retry: RetryPolicy,
     retry_slots: Arc<Semaphore>,
+    inbound_slots: Arc<Semaphore>,
+    inbound_per_peer: std::sync::Mutex<std::collections::HashMap<EndpointId, usize>>,
+    max_inbound_per_peer: usize,
     relay_enabled: bool,
     lock_file: std::sync::Mutex<Option<File>>,
 }
@@ -235,6 +246,9 @@ impl PeerEngine {
                 inbox_notify: Notify::new(),
                 roster: RwLock::new(config.allowed_peers.iter().copied().collect()),
                 retry_slots: Arc::new(Semaphore::new(config.retry.max_in_flight.max(1))),
+                inbound_slots: Arc::new(Semaphore::new(config.max_inbound_handlers.max(1))),
+                inbound_per_peer: std::sync::Mutex::new(std::collections::HashMap::new()),
+                max_inbound_per_peer: config.max_inbound_per_peer.max(1),
                 retry: config.retry,
                 relay_enabled,
                 lock_file: std::sync::Mutex::new(Some(lock_file)),
@@ -377,6 +391,18 @@ impl PeerEngine {
                 .enqueue_outbound(&message_id, &payload, &peer.id.to_string(), peer_addr_json, lease)
                 .map_err(internal)?
             {
+                Ok(EnqueueOutcome::Existing(OutboundState::Settled)) => {
+                    // Already settled: report it, never retransmit (the
+                    // receiver may have compacted its dedupe tombstone).
+                    return Ok(PeerReceipt {
+                        message_id: message_id.clone(),
+                        payload_hash: message.payload_hash.clone(),
+                        status: "received_peer".into(),
+                        receiver_endpoint_id: peer.id.to_string(),
+                        duplicate: true,
+                        received_at_unix_ms: now_unix_ms(),
+                    });
+                }
                 Ok(_) => {}
                 Err(EnqueueError::Conflict(m)) => return Err(DeliveryError::Conflict(m)),
                 Err(e @ EnqueueError::Terminal(..)) => return Err(DeliveryError::Terminal(e.to_string())),
@@ -555,8 +581,16 @@ impl PeerEngine {
     async fn accept_loop(self) -> Result<()> {
         let endpoint = self.inner.endpoint.clone();
         while let Some(incoming) = endpoint.accept().await {
+            // Global bound on concurrent handlers (incl. handshakes): refuse
+            // rather than queue unboundedly.
+            let Ok(permit) = self.inner.inbound_slots.clone().try_acquire_owned() else {
+                warn!("inbound handler limit reached; refusing connection");
+                incoming.refuse();
+                continue;
+            };
             let engine = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(err) = engine.handle_incoming(incoming).await {
                     debug!(error = %err, "incoming connection handler failed");
                 }
@@ -575,6 +609,15 @@ impl PeerEngine {
             conn.close(CLOSE_NOT_MEMBER.into(), b"not_member");
             return Ok(());
         }
+        // Per-peer bound so one member cannot occupy every handler slot.
+        let _peer_slot = match PeerSlot::acquire(self, remote_id) {
+            Some(slot) => slot,
+            None => {
+                warn!(remote = %remote_id, "per-peer inbound limit reached");
+                conn.close(CLOSE_BUSY.into(), b"busy");
+                return Ok(());
+            }
+        };
         let remote = remote_id.to_string();
         let timeout = self.inner.retry.attempt_timeout;
         let (mut send, mut recv) = tokio::time::timeout(timeout, conn.accept_bi())
@@ -627,6 +670,36 @@ impl PeerEngine {
         send.finish().context("finish reply stream")?;
         let _ = tokio::time::timeout(timeout, conn.closed()).await;
         Ok(())
+    }
+}
+
+/// RAII per-peer inbound handler slot.
+struct PeerSlot<'a> {
+    engine: &'a PeerEngine,
+    id: EndpointId,
+}
+
+impl<'a> PeerSlot<'a> {
+    fn acquire(engine: &'a PeerEngine, id: EndpointId) -> Option<Self> {
+        let mut map = engine.inner.inbound_per_peer.lock().expect("per-peer lock");
+        let n = map.entry(id).or_insert(0);
+        if *n >= engine.inner.max_inbound_per_peer {
+            return None;
+        }
+        *n += 1;
+        Some(Self { engine, id })
+    }
+}
+
+impl Drop for PeerSlot<'_> {
+    fn drop(&mut self) {
+        let mut map = self.engine.inner.inbound_per_peer.lock().expect("per-peer lock");
+        if let Some(n) = map.get_mut(&self.id) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.id);
+            }
+        }
     }
 }
 
