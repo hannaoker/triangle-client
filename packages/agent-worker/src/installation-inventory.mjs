@@ -44,6 +44,8 @@ const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const MAILBOX_HANDLE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const OPEN_TXN_MAX_BYTES = 4096;
+const ENROLLMENT_MAX_BYTES = 4096;
+const INSTALLATION_IDENTITY_MAX_BYTES = 512;
 const WORKER_MANIFEST_KEYS = ["version", "nodeSHA256", "projectRoot", "environment", "artifacts"];
 const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7]);
 const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
@@ -238,6 +240,28 @@ function registryFileProblem(filePath) {
   return meta.size > REGISTRY_MAX_BYTES ? "oversized" : null;
 }
 
+/**
+ * Custody of a Swift-managed record file: every managed directory a real 0700
+ * directory owned by the user, the file a no-follow regular 0600 file owned by
+ * the user (single link where the Swift store requires it) within its byte cap.
+ * @returns {null|"absent"|"unsafe_storage"|"oversized"|"unreadable"}
+ */
+function custodyProblem(filePath, { maxBytes, singleLink = false, directories = [] }) {
+  let meta;
+  try {
+    meta = lstatSync(filePath);
+  } catch (error) {
+    return error?.code === "ENOENT" ? "absent" : "unreadable";
+  }
+  if (directories.some((dir) => !isSafeManagedDirectory(dir))) return "unsafe_storage";
+  const uid = currentUid();
+  if (!meta.isFile() || (meta.mode & 0o777) !== 0o600 || (uid != null && meta.uid !== uid)
+    || (singleLink && meta.nlink !== 1)) {
+    return "unsafe_storage";
+  }
+  return meta.size > maxBytes ? "oversized" : null;
+}
+
 function readRegistry(clientRoot) {
   const dir = path.join(clientRoot, "instances");
   const listing = listDir(dir);
@@ -343,6 +367,16 @@ function readEnrollmentJournal(applicationRoot) {
     if (!match) continue; // backups (*.bak-*) are never authoritative
     const profile = decodeHexProfile(match[1]);
     if (profile == null) continue;
+    // FileEnrollmentJournal.read: 0700 application + journal directories,
+    // no-follow 0600 owned file, at most 4096 bytes; else the credential is unusable.
+    const custody = custodyProblem(path.join(dir, name), {
+      maxBytes: ENROLLMENT_MAX_BYTES,
+      directories: [applicationRoot, dir],
+    });
+    if (custody != null) {
+      byProfile.set(profile, { state: custody === "oversized" ? "invalid_record" : "unsafe_storage", reasonCode: null, agentId: null, handle: null });
+      continue;
+    }
     const { value, error } = readJsonFile(path.join(dir, name));
     if (error != null || value == null) {
       byProfile.set(profile, { state: "unreadable", reasonCode: null, agentId: null, handle: null });
@@ -386,7 +420,17 @@ function containsSymlinkComponent(absolute) {
 
 /** client/installation.json as read by Swift `FileClientInstallationIdentityStore`. */
 function readInstallationIdentity(clientRoot) {
-  const { present, value, error } = readJsonFile(path.join(clientRoot, "installation.json"));
+  const filePath = path.join(clientRoot, "installation.json");
+  // FileClientInstallationIdentityStore.resolve: 0700 application + client
+  // directories, no-follow single-link 0600 owned file of at most 512 bytes.
+  const custody = custodyProblem(filePath, {
+    maxBytes: INSTALLATION_IDENTITY_MAX_BYTES,
+    singleLink: true,
+    directories: [path.resolve(clientRoot, ".."), clientRoot],
+  });
+  if (custody === "absent") return { status: "absent", installationId: null };
+  if (custody != null) return { status: "unsafe", installationId: null };
+  const { present, value, error } = readJsonFile(filePath);
   if (!present) return { status: "absent", installationId: null };
   if (error != null || !isPlainObject(value) || value.version !== 1
     || typeof value.installationId !== "string" || !INSTALLATION_ID.test(value.installationId)) {
@@ -781,15 +825,18 @@ function readOpenTransaction(modelInstanceRoot, now, instanceId) {
   const openPath = path.join(dir, "open.json");
   const quarantine = listDir(path.join(dir, "quarantine"));
   const quarantinedCount = Array.isArray(quarantine) ? quarantine.length : 0;
-  if (!existsSync(openPath)) return { open: null, quarantinedCount, journalPresent: existsSync(dir) };
-  let oversized = false;
-  try {
-    oversized = statSync(openPath).size > OPEN_TXN_MAX_BYTES;
-  } catch {
-    oversized = false;
-  }
-  const row = oversized ? { value: null } : readJsonFile(openPath);
-  if (row.value == null) return { open: { readable: false, reason: oversized ? "oversized" : "unreadable" }, quarantinedCount, journalPresent: true };
+  // FileMailboxTransactionStore.readOpen: 0700 managed directories down to
+  // mailbox-transactions, no-follow single-link 0600 owned file <= 4096 bytes.
+  const applicationRoot = path.resolve(modelInstanceRoot, "..", "..", "..");
+  const custody = custodyProblem(openPath, {
+    maxBytes: OPEN_TXN_MAX_BYTES,
+    singleLink: true,
+    directories: [applicationRoot, path.join(applicationRoot, "model-state"), path.dirname(modelInstanceRoot), modelInstanceRoot, dir],
+  });
+  if (custody === "absent") return { open: null, quarantinedCount, journalPresent: existsSync(dir) };
+  if (custody != null) return { open: { readable: false, reason: custody }, quarantinedCount, journalPresent: true };
+  const row = readJsonFile(openPath);
+  if (row.value == null) return { open: { readable: false, reason: "unreadable" }, quarantinedCount, journalPresent: true };
   const raw = row.value;
   if (!isValidOpenTransactionRecord(raw, instanceId)) {
     // Swift readOpen throws invalidRecord: recovery cannot proceed.

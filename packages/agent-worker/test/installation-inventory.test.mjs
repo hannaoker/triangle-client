@@ -980,3 +980,78 @@ test("a bound runtime command must be an executable regular file (Codex review r
     }
   }
 });
+
+function symlinkInPlace(file) {
+  const target = `${file}.target`;
+  writeFileSync(target, readFileSync(file), { mode: 0o600 });
+  rmSync(file);
+  symlinkSync(target, file);
+}
+
+test("custody Swift refuses for enrollment, installation identity, and open transactions is never healthy (Codex review r4)", () => {
+  const read = (client) => readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+  const enrollmentFile = (client, profile) => path.join(path.dirname(client), "enrollment-journal", `profile-${Buffer.from(profile).toString("hex")}.json`);
+  const enrollmentCases = [
+    ["symlink", (client) => symlinkInPlace(enrollmentFile(client, "gravity2")), "unsafe_storage"],
+    ["group-readable", (client) => chmodSync(enrollmentFile(client, "gravity2"), 0o644), "unsafe_storage"],
+    ["oversized", (client) => writeFileSync(enrollmentFile(client, "gravity2"), `${readFileSync(enrollmentFile(client, "gravity2"), "utf8").trim()}${" ".repeat(4100)}\n`, { mode: 0o600 }), "invalid_record"],
+    ["journal dir 0755", (client) => chmodSync(path.dirname(enrollmentFile(client, "gravity2")), 0o755), "unsafe_storage"],
+  ];
+  for (const [name, mutate, state] of enrollmentCases) {
+    const { root, client } = mixedFixture();
+    try {
+      mutate(client);
+      const gravity = read(client).profiles.find((p) => p.profile === "gravity2");
+      assert.equal(gravity.enrollment.state, state, name);
+      assert.ok(gravity.faults.includes("enrollment_unverified"), name);
+      assert.equal(gravity.status, "fault", name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  const identityCases = [
+    ["symlink", (client) => symlinkInPlace(path.join(client, "installation.json"))],
+    ["group-readable", (client) => chmodSync(path.join(client, "installation.json"), 0o644)],
+    ["hard link", (client) => linkSync(path.join(client, "installation.json"), path.join(path.dirname(client), "installation-link.json"))],
+    ["oversized", (client) => writeFileSync(path.join(client, "installation.json"), `${JSON.stringify({ version: 1, installationId: FIXTURE_INSTALLATION_ID })}${" ".repeat(600)}\n`, { mode: 0o600 })],
+  ];
+  for (const [name, mutate] of identityCases) {
+    const { root, client } = mixedFixture();
+    try {
+      mutate(client);
+      const inventory = read(client);
+      assert.equal(inventory.installationIdentity, "unsafe", name);
+      for (const profile of ["bob", "ghost"]) {
+        const row = inventory.profiles.find((p) => p.profile === profile);
+        assert.notEqual(row.binding.status, "bound", `${name}: ${profile}`);
+        assert.equal(row.status, "fault", `${name}: ${profile}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  const openFile = (client) => path.join(path.dirname(client), "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json");
+  const openCases = [
+    ["symlink", (client) => symlinkInPlace(openFile(client))],
+    ["group-readable", (client) => chmodSync(openFile(client), 0o644)],
+    ["hard link", (client) => linkSync(openFile(client), path.join(path.dirname(client), "open-link.json"))],
+    ["transactions dir 0755", (client) => chmodSync(path.dirname(openFile(client)), 0o755)],
+  ];
+  for (const [name, mutate] of openCases) {
+    const { root, client } = mixedFixture();
+    try {
+      const before = read(client).profiles.find((p) => p.profile === "ghost");
+      assert.equal(before.journal.openTransaction.readable, true, `${name}: fixture starts valid`);
+      mutate(client);
+      const ghost = read(client).profiles.find((p) => p.profile === "ghost");
+      assert.equal(ghost.journal.openTransaction.readable, false, name);
+      assert.equal(ghost.journal.openTransaction.reason, "unsafe_storage", name);
+      assert.ok(ghost.faults.includes("unreadable_custody"), name);
+      assert.equal(ghost.status, "fault", name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});

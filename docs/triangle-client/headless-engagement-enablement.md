@@ -97,14 +97,17 @@ never reports healthy for a record the supervisor would reject: registry rows
 (0700 owned real application/client/instances directories; no-follow 0600
 single-link files of at most 2048 bytes; exact keys, known
 `runtimeAdapter`/`deliveryMode`, a row without `deliveryMode` decodes as
-`worker`, no stray files), enrollment records (exact
-keys, valid origin/agent/handle, same profile as the file), Codex/Cursor ACP
+`worker`, no stray files), enrollment records (0700 journal directory,
+no-follow 0600 file of at most 4096 bytes; exact keys, valid
+origin/agent/handle, same profile as the file), `client/installation.json`
+(no-follow single-link 0600 file of at most 512 bytes in 0700 directories), Codex/Cursor ACP
 bindings (exact keys, `installationId` equal to `client/installation.json`,
 standardized symlink-free state roots, every row an enabled lane member),
 worker manifests for worker and event-driven profiles (structure, release
 environment, content-addressed bundle;
 artifact hashes stay with the launcher and print `integrity=not_verified`), and
-open transactions (instance, claim/reply ids, state invariants), and the App
+open transactions (0700 directories, no-follow single-link 0600 file of
+at most 4096 bytes; instance, claim/reply ids, state invariants), and the App
 Server binding (readable `app-server-ws.token`, `adapterVersion` "1",
 `enabled`, ws/wss endpoint, non-empty room scope/server identity/thread, and
 installation and agent ids that match; the agent id is checked against the

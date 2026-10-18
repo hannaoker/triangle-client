@@ -2,14 +2,26 @@
 // exactly as the Swift helper persists them, so the inventory's strict
 // mirrors of the Swift decoders accept them.
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const FIXTURE_INSTALLATION_ID = "inst_fixture_installation_01";
 
+const TMP_ROOT = realpathSync(tmpdir());
+
+/**
+ * Swift stores refuse records unless every managed directory is 0700 and the
+ * file is 0600, so fixture writes under the temp root keep that custody.
+ */
 export function writeJson(filePath, value) {
-  mkdirSync(path.dirname(filePath), { recursive: true });
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   writeFileSync(filePath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  chmodSync(filePath, 0o600);
+  if (!filePath.startsWith(`${TMP_ROOT}${path.sep}`)) return;
+  for (let dir = path.dirname(filePath); dir.startsWith(`${TMP_ROOT}${path.sep}`); dir = path.dirname(dir)) {
+    chmodSync(dir, 0o700);
+  }
 }
 
 export function writeInstallationIdentity(client, installationId = FIXTURE_INSTALLATION_ID) {
