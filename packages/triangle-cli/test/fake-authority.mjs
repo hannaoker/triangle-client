@@ -132,12 +132,16 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
       if (receipt) return finish(json(200, { outcome: "replayed", result: receipt }));
       const challenge = state.challenges.get(body.challenge_id);
       const invite = state.invites.get(m[1]);
-      if (!challenge || challenge.used || !invite) return err(401, "invite_invalid");
+      if (!invite || invite.secret_hash !== sha256hex(body.invite_secret) || body.authority !== authority) return err(401, "invite_invalid");
+      // Like MESH: an earlier redemption is reported first, then a missing/expired/used challenge (410).
+      if (!challenge) return invite.redeemed_hash ? err(409, "invite_already_redeemed") : err(410, "challenge_invalid");
       const message = enc({ agent: body.agent, authority: body.authority, challenge_id: body.challenge_id, device_label: body.device_label, display_name: body.display_name, invite_id: body.invite_id, invite_secret_sha256: sha256hex(body.invite_secret), nonce_sha256: challenge.nonce_sha256, owner_public_jwk: body.owner_public_jwk, profile: body.profile });
       if (!verify(body.owner_public_jwk, message, body.owner_proof)) return err(401, "invite_invalid");
       if (body.agent && !verify(body.agent.workload_public_jwk, message, body.workload_proof)) return err(401, "invite_invalid");
       if (invite.secret_hash !== sha256hex(body.invite_secret) || body.authority !== authority) return err(401, "invite_invalid");
       if (invite.redeemed_hash) return err(409, "invite_already_redeemed");
+      if (challenge.used || challenge.expired) return err(410, "challenge_invalid");
+      if (invite.kind !== "device" && body.display_name === null) return json(400, { error: "invalid_request", message: "display_name is required for a new owner." });
       if (invite.kind === "device" && (body.agent !== null || body.display_name !== null)) return json(400, { error: "invalid_request", message: "A device invite adds a device only: agent and display_name must be null." });
       challenge.used = true;
       const ownerId = invite.kind === "device" ? invite.target_owner_id : `owner_${hex()}`;

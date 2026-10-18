@@ -95,6 +95,8 @@ test("join: request never arrived and challenge was consumed → resume re-signs
   assert.equal(sent.owner_public_jwk.x, journal.owner_key.x);
   assert.equal(sent.agent.workload_public_jwk.x, journal.workload_key.x);
   assert.notEqual(sent.challenge_id, journal.body.challenge_id);
+  assert.equal(fake.state.requests.filter((r) => r.path.endsWith("/redeem")).at(-2).body.challenge_id, journal.body.challenge_id, "the stale challenge got 410 challenge_invalid first");
+  assert.ok(typeof sent.display_name === "string" && sent.display_name.length > 0, "--name omitted → OS account name (the server requires one for a new owner)");
 });
 
 test("join: a device link adds this computer as pending (no agent); approval by fingerprint activates it", async () => {

@@ -127,7 +127,8 @@ export async function join({ home, link, via = null, deviceLabel = defaultDevice
       invite_id: parsed.inviteId,
       invite_secret: parsed.secret,
       device_label: deviceLabel,
-      display_name: device ? null : displayName,
+      // A new owner needs a name (1-128 chars); default to the OS account name.
+      display_name: device ? null : truncateText(displayName ?? defaultDisplayName(), 128),
       owner_key: ownerKey,
       workload_key: workloadKey,
       agent,
@@ -164,12 +165,21 @@ export async function resumeJoin({ home, env = process.env, fetchImpl = globalTh
     try {
       return await send(custody, transport, journal);
     } catch (error) {
-      if (error instanceof MeshApiError && error.code === "invite_invalid") {
+      // The server checks for an earlier redemption before the challenge, so an
+      // expired/used challenge (410 challenge_invalid) means nothing committed:
+      // fetch a fresh one and re-sign with the same journaled keys.
+      if (error instanceof MeshApiError && (error.code === "invite_invalid" || error.code === "challenge_invalid")) {
         return signAndSend(custody, transport, journal);
       }
       throw error;
     }
   });
+}
+
+function defaultDisplayName() {
+  let name = "";
+  try { name = os.userInfo().username; } catch {}
+  return name.trim() || "Owner";
 }
 
 export function deviceIdentity(ownerKey) {
