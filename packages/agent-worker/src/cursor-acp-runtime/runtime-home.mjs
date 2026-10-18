@@ -836,15 +836,38 @@ export function applyLegacyCursorAcpSessionCopy({
       writeLegacyCopyManifest(manifestPath, manifest);
     } catch (error) {
       // Never leave a copied session that no manifest knows about: roll it
-      // back (identity-checked). If rollback cannot finish, the session is
-      // reported with rolledBack:false and its record stays in memory only.
+      // back (identity-checked). If rollback cannot finish, retry persisting
+      // it as `incomplete` so revert can clean it; if the manifest is still
+      // unwritable, return the exact leftover files (path + identity) in
+      // `failed[].untrackedFiles` and stop migrating further sessions.
       manifest.copied.pop();
       const clean = rollbackIncompleteSession(anchor, record);
+      const code = typeof error?.code === "string" ? error.code : "cursor_legacy_manifest_write_failed";
+      if (clean) {
+        failed.push(Object.freeze({ sessionId: entry.sessionId, code, rolledBack: true }));
+        continue;
+      }
+      manifest.copied.push({ ...record, incomplete: true });
+      let recorded = true;
+      try {
+        writeLegacyCopyManifest(manifestPath, manifest);
+      } catch {
+        recorded = false;
+        manifest.copied.pop();
+      }
       failed.push(Object.freeze({
         sessionId: entry.sessionId,
-        code: typeof error?.code === "string" ? error.code : "cursor_legacy_manifest_write_failed",
-        rolledBack: clean,
+        code,
+        rolledBack: false,
+        recordedIncomplete: recorded,
+        ...(recorded
+          ? {}
+          : {
+              untrackedFiles: Object.freeze(record.files.map((file) => Object.freeze({ ...file }))),
+              untrackedDirs: Object.freeze([...record.createdDirs]),
+            }),
       }));
+      if (!recorded) break;
       continue;
     }
     copied.push(entry.sessionId);
@@ -870,8 +893,11 @@ function safeOwnedParts(relative) {
 }
 
 function revertOneSession(anchor, record, persistProgress = () => {}) {
+  if (record == null || typeof record !== "object" || typeof record.sessionId !== "string" ||
+    !CURSOR_SESSION_ID.test(record.sessionId)) {
+    return { status: "kept", reason: "unsafe_path", detail: "manifest_record_invalid" };
+  }
   const { sessionId } = record;
-  assertCursorSessionIds([sessionId]);
   if (!Array.isArray(record.files)) {
     return { status: "kept", reason: "no_snapshot" };
   }
@@ -893,7 +919,8 @@ function revertOneSession(anchor, record, persistProgress = () => {}) {
     }
     recorded.set(parts.slice(2).join("/"), file);
   }
-  const dirs = [...new Set(record.createdDirs ?? [])].sort((a, b) => b.length - a.length);
+  const dirs = [...new Set(Array.isArray(record.createdDirs) ? record.createdDirs : [])]
+    .sort((a, b) => String(b).length - String(a).length);
   for (const dir of dirs) {
     const parts = safeOwnedParts(dir);
     if (parts == null || parts[0] !== CURSOR_ACP_SESSIONS_DIRNAME || parts[1] !== sessionId) {
@@ -908,7 +935,13 @@ function revertOneSession(anchor, record, persistProgress = () => {}) {
   if (present.unsafe.length > 0) {
     return { status: "kept", reason: "unsafe_path", detail: "non_regular_entry", newFiles: present.unsafe };
   }
+  // Directories this migration created stay "expected" even once a resumed
+  // revert has emptied them (their files are no longer in `recorded`).
   const expectedDirs = ancestorDirs(recorded.keys());
+  for (const dir of dirs) {
+    const parts = safeOwnedParts(dir);
+    if (parts.length > 2) expectedDirs.add(parts.slice(2).join("/"));
+  }
   const newFiles = [
     ...present.files.filter((relative) => !recorded.has(relative)),
     ...present.dirs.filter((relative) => !expectedDirs.has(relative) && !recorded.has(relative)).map((dir) => `${dir}/`),
@@ -984,17 +1017,28 @@ export function revertLegacyCursorAcpSessionCopy({ home = process.env.HOME, curs
   const kept = [];
   const remaining = [];
   for (const record of manifest.copied) {
-    const outcome = revertOneSession(anchor, record, () => writeLegacyCopyManifest(manifestPath, manifest));
+    let outcome;
+    try {
+      outcome = revertOneSession(anchor, record, () => writeLegacyCopyManifest(manifestPath, manifest));
+    } catch (error) {
+      // One bad record never aborts the revert of the others.
+      outcome = { status: "kept", reason: "revert_error", detail: error?.code ?? null };
+    }
+    const sessionId = typeof record?.sessionId === "string" ? record.sessionId : null;
     if (outcome.status === "removed" || outcome.status === "gone") {
-      removed.push(record.sessionId);
+      removed.push(sessionId);
       continue;
     }
     const { status: _status, ...details } = outcome;
-    kept.push(Object.freeze({ sessionId: record.sessionId, ...details }));
+    kept.push(Object.freeze({ sessionId, ...details }));
+    if (record == null || typeof record !== "object") {
+      remaining.push(record); // preserved verbatim for manual inspection
+      continue;
+    }
     if (outcome.removedFiles?.length) {
       const removedSet = new Set(outcome.removedFiles);
       record.files = record.files.filter(
-        (file) => !removedSet.has(normalizeOwnedRelative(file.path).slice(2).join("/")),
+        (file) => !removedSet.has((safeOwnedParts(file?.path) ?? []).slice(2).join("/")),
       );
     }
     remaining.push({ ...record, lastRevert: { ...details } });
