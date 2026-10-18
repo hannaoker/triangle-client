@@ -178,7 +178,17 @@ export function classifyLane({ runtimeAdapter, deliveryMode }) {
     }
     return { lane: "worker", support: "unsupported", reason: "worker_runtime_adapter_unsupported" };
   }
-  if (deliveryMode === "event-driven") return { lane: "event-driven", support: "supported", reason: null };
+  if (deliveryMode === "event-driven") {
+    // prepareEventWake resolves a worker adapter (resolveAdapter): grok-bot and
+    // cursor-acp have no worker runner and are omitted as runtime_ineligible.
+    if (runtimeAdapter === "antigravity") {
+      return { lane: "event-driven", support: "experimental", reason: "antigravity_experimental_compatibility" };
+    }
+    if (runtimeAdapter === "hermes" || runtimeAdapter === "codex") {
+      return { lane: "event-driven", support: "supported", reason: null };
+    }
+    return { lane: "event-driven", support: "unsupported", reason: "event_driven_runtime_adapter_unsupported" };
+  }
   if (deliveryMode === "mcp-interactive") return { lane: "app-server", support: "supported", reason: null };
   if (deliveryMode === "grok-bot") {
     // Swift still prepares a grokBotWake bootstrap, but the Node supervisor
@@ -196,11 +206,49 @@ export function classifyLane({ runtimeAdapter, deliveryMode }) {
  * profiles. A row without deliveryMode decodes as `worker` regardless of
  * adapter. Any invalid row makes Swift's list() throw, so each is a fault.
  */
+const REGISTRY_MAX_BYTES = 2048;
+
+function currentUid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+
+/** Swift `FileClientInstanceStore.metadataIsSafe` for a managed directory. */
+function isSafeManagedDirectory(dirPath) {
+  try {
+    const meta = lstatSync(dirPath);
+    const uid = currentUid();
+    return meta.isDirectory() && (meta.mode & 0o777) === 0o700 && (uid == null || meta.uid === uid);
+  } catch {
+    return false;
+  }
+}
+
+/** Swift `validateFile` + read cap: no-follow regular file, 0600, owner, one link, <= 2048 bytes. */
+function registryFileProblem(filePath) {
+  let meta;
+  try {
+    meta = lstatSync(filePath);
+  } catch {
+    return "unreadable";
+  }
+  const uid = currentUid();
+  if (!meta.isFile() || (meta.mode & 0o777) !== 0o600 || meta.nlink !== 1 || (uid != null && meta.uid !== uid)) {
+    return "unsafe_file";
+  }
+  return meta.size > REGISTRY_MAX_BYTES ? "oversized" : null;
+}
+
 function readRegistry(clientRoot) {
   const dir = path.join(clientRoot, "instances");
   const listing = listDir(dir);
   if (listing == null) return { status: "absent", path: dir, entries: [], strayNames: [] };
   if (!Array.isArray(listing)) return { status: "unreadable", path: dir, entries: [], strayNames: [], error: listing.error };
+  // Swift opens the application, client, and instances directories only when
+  // each is a real 0700 directory owned by the user; otherwise list() throws.
+  const unsafeDirectories = [path.resolve(clientRoot, ".."), clientRoot, dir].filter((d) => !isSafeManagedDirectory(d));
+  if (unsafeDirectories.length > 0) {
+    return { status: "unsafe", path: dir, entries: [], strayNames: [], unsafeDirectoryCount: unsafeDirectories.length };
+  }
   const entries = [];
   const strayNames = [];
   for (const name of listing.sort()) {
@@ -211,6 +259,11 @@ function readRegistry(clientRoot) {
     }
     const filePath = path.join(dir, name);
     const fileId = name.slice(0, -".json".length);
+    const custody = registryFileProblem(filePath);
+    if (custody != null) {
+      entries.push({ file: name, fileId, profile: null, valid: false, problems: [custody] });
+      continue;
+    }
     const { value, error } = readJsonFile(filePath);
     const problems = [];
     if (error != null || !isPlainObject(value)) {
@@ -429,7 +482,7 @@ function readProfileBinding(filePath, spec, context) {
     common: {
       pollIntervalMs: Number.isSafeInteger(common.pollIntervalMs) ? common.pollIntervalMs : null,
       command: typeof common.command === "string" ? common.command : null,
-      commandPresent: typeof common.command === "string" && common.command.startsWith("/") && existsSync(common.command),
+      commandPresent: typeof common.command === "string" && common.command.startsWith("/") && isExecutableFile(common.command),
       installationId: typeof common.installationId === "string" ? common.installationId : null,
     },
     profiles,
@@ -467,6 +520,17 @@ function readAppServerBinding(filePath, tokenPath) {
     installationId: typeof value.installationId === "string" ? value.installationId : null,
     problems,
   };
+}
+
+/** A regular file the current user may execute (what the runtime spawn needs). */
+function isExecutableFile(filePath) {
+  try {
+    if (!statSync(filePath).isFile()) return false;
+    accessSync(filePath, 1); // X_OK
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isReadableFile(filePath) {
@@ -817,7 +881,7 @@ function laneBinding(entry, lanes, applicationRoot, { enrollment = null, install
       commandPresent: source.common.commandPresent,
     };
   }
-  if (lane === "worker") {
+  if (lane === "worker" || lane === "event-driven") {
     const manifest = readWorkerManifest(applicationRoot, entry.runtimeAdapter);
     return {
       kind: "worker-runtime-manifest",
@@ -851,7 +915,6 @@ function laneBinding(entry, lanes, applicationRoot, { enrollment = null, install
     const b = lanes.grokBot;
     return { kind: lane, status: b.status === "present" ? (b.enabled ? "bound" : "binding_disabled") : "missing", path: b.path };
   }
-  if (lane === "event-driven") return { kind: lane, status: UNAVAILABLE, path: null };
   return { kind: lane, status: UNSUPPORTED, path: null };
 }
 
@@ -902,6 +965,8 @@ export function readInstallationInventory({
     blockers.push({ code: "registry_absent", message: "installation registry client/instances is missing; inventory cannot be complete" });
   } else if (registry.status === "unreadable") {
     blockers.push({ code: "registry_unreadable", message: "installation registry client/instances is unreadable" });
+  } else if (registry.status === "unsafe") {
+    blockers.push({ code: "registry_unsafe", message: `installation registry storage is unsafe (${registry.unsafeDirectoryCount} directory(ies) not 0700/owned/real)` });
   } else if (registry.entries.length === 0) {
     blockers.push({ code: "registry_empty", message: "installation registry has no profiles" });
   }

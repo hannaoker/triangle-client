@@ -8,6 +8,7 @@ import { deriveClientInstanceId } from "../src/installation-inventory.mjs";
 import {
   FIXTURE_INSTALLATION_ID,
   openTransactionRecord,
+  secureRegistry,
   writeEnrollment,
   writeInstallationIdentity,
 } from "./inventory-fixture-helpers.mjs";
@@ -66,6 +67,7 @@ function fixture() {
   );
   writeEnrollment(root, "bob");
   writeInstallationIdentity(client);
+  secureRegistry(root);
   writeFileSync(
     path.join(client, "headless-claimer.bob.json"),
     `${JSON.stringify({ version: 1, profile: "bob", owner: "dev.thetriangle.client", pid: 4242, family: "codex" })}\n`,

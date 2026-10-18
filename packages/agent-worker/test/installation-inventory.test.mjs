@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ import {
   enrollmentRecord,
   FIXTURE_INSTALLATION_ID,
   openTransactionRecord,
+  secureRegistry,
   writeEnrollment,
   writeInstallationIdentity,
   writeJson,
@@ -83,6 +84,7 @@ function mixedFixture({
   // A verified enrollment with no registry row.
   writeEnrollment(app, "loner");
   writeInstallationIdentity(client);
+  secureRegistry(app);
 
   writeJson(path.join(client, "ready.json"), {
     version: 1, generation: "11111111-1111-4111-8111-111111111111", parentPid: 42, configDigest: "x", readyAtMilliseconds: NOW,
@@ -885,5 +887,96 @@ test("journal activity uses the newest rows when a journal exceeds the scan limi
     assert.equal(bob.activity.lastReplyAt, "2026-10-17T19:59:00.000Z");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("event-driven profiles need a runnable worker adapter and its manifest (Codex review r3)", () => {
+  const { root, client } = mixedFixture({
+    extraRegistry: [
+      { profile: "evt-hermes", runtimeAdapter: "hermes", deliveryMode: "event-driven", enabled: true },
+      { profile: "evt-codex", runtimeAdapter: "codex", deliveryMode: "event-driven", enabled: true },
+      { profile: "evt-acp", runtimeAdapter: "cursor-acp", deliveryMode: "event-driven", enabled: true },
+    ],
+  });
+  try {
+    const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+    const byName = Object.fromEntries(inventory.profiles.map((p) => [p.profile, p]));
+    assert.equal(byName["evt-hermes"].binding.kind, "worker-runtime-manifest");
+    assert.equal(byName["evt-hermes"].binding.status, "bound");
+    assert.ok(!byName["evt-hermes"].faults.some((f) => f.startsWith("binding_")));
+    assert.equal(byName["evt-codex"].binding.status, "missing", "no codex worker manifest installed");
+    assert.ok(byName["evt-codex"].faults.includes("binding_missing"));
+    assert.equal(byName["evt-codex"].status, "fault");
+    assert.equal(byName["evt-acp"].support, "unsupported");
+    assert.ok(byName["evt-acp"].faults.includes("lane_unsupported"));
+    assert.equal(classifyLane({ runtimeAdapter: "grok-bot", deliveryMode: "event-driven" }).support, "unsupported");
+    assert.equal(classifyLane({ runtimeAdapter: "antigravity", deliveryMode: "event-driven" }).support, "experimental");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registry storage Swift refuses to open is a fault, never a healthy profile (Codex review r3)", () => {
+  const read = (client) => runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+  {
+    const { root, client } = mixedFixture();
+    try {
+      chmodSync(path.join(client, "instances"), 0o755);
+      const result = read(client);
+      assert.ok(result.report.blockers.some((b) => b.code === "registry_unsafe"));
+      assert.equal(result.report.inventory.profiles.length, 0);
+      assert.equal(result.exitCode, 2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const bobFile = (client) => path.join(client, "instances", `${deriveClientInstanceId("bob")}.json`);
+  const cases = [
+    ["group-readable file", (client) => chmodSync(bobFile(client), 0o644), "unsafe_file"],
+    ["hard-linked file", (client) => linkSync(bobFile(client), path.join(path.dirname(client), "bob-link.json")), "unsafe_file"],
+    ["symlinked file", (client) => {
+      const target = path.join(path.dirname(client), "bob-target.json");
+      writeFileSync(target, readFileSync(bobFile(client)), { mode: 0o600 });
+      rmSync(bobFile(client));
+      symlinkSync(target, bobFile(client));
+    }, "unsafe_file"],
+    ["oversized valid JSON", (client) => {
+      const value = JSON.parse(readFileSync(bobFile(client), "utf8"));
+      writeFileSync(bobFile(client), `${JSON.stringify(value)}${" ".repeat(2100)}\n`, { mode: 0o600 });
+    }, "oversized"],
+  ];
+  for (const [name, mutate, problem] of cases) {
+    const { root, client } = mixedFixture();
+    try {
+      mutate(client);
+      const result = read(client);
+      const invalid = result.report.inventory.profiles.find((p) => p.registry?.valid === false);
+      assert.ok(invalid, name);
+      assert.deepEqual(invalid.registry.problems, [problem], name);
+      assert.ok(!result.report.inventory.profiles.some((p) => p.profile === "bob" && p.status === "ok"), name);
+      assert.ok(result.report.blockers.some((b) => b.code === "registry_entry_invalid"), name);
+      assert.equal(result.exitCode, 2, name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a bound runtime command must be an executable regular file (Codex review r3)", () => {
+  for (const [name, mutate] of [
+    ["not executable", (agent) => chmodSync(agent, 0o600)],
+    ["directory", (agent) => { rmSync(agent); mkdirSync(agent); }],
+  ]) {
+    const { root, client } = mixedFixture();
+    try {
+      mutate(path.join(root, "agent"));
+      const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
+      const ghost = inventory.profiles.find((p) => p.profile === "ghost");
+      assert.equal(ghost.binding.commandPresent, false, name);
+      assert.ok(ghost.faults.includes("runtime_command_missing"), name);
+      assert.equal(ghost.status, "fault", name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });

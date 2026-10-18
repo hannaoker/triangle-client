@@ -2,7 +2,7 @@
 // exactly as the Swift helper persists them, so the inventory's strict
 // mirrors of the Swift decoders accept them.
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const FIXTURE_INSTALLATION_ID = "inst_fixture_installation_01";
@@ -99,4 +99,18 @@ export function writeWorkerManifest(app, adapter) {
     artifacts: { "packages/agent-worker/src/a.mjs": "0".repeat(64) },
   });
   return projectRoot;
+}
+
+/**
+ * Give the registry the custody Swift `FileClientInstanceStore` requires:
+ * application, client, and instances directories 0700; registry files 0600.
+ */
+export function secureRegistry(app) {
+  const client = path.join(app, "client");
+  const instances = path.join(client, "instances");
+  for (const dir of [app, client, instances]) {
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o700);
+  }
+  for (const name of readdirSync(instances)) chmodSync(path.join(instances, name), 0o600);
 }

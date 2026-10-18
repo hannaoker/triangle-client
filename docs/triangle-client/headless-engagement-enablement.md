@@ -94,19 +94,23 @@ underscores preserved. Doctor never renames an identity.
 
 Doctor validates persisted records the way the Swift helper decodes them, so it
 never reports healthy for a record the supervisor would reject: registry rows
-(exact keys, known `runtimeAdapter`/`deliveryMode`, a row without
-`deliveryMode` decodes as `worker`, no stray files), enrollment records (exact
+(0700 owned real application/client/instances directories; no-follow 0600
+single-link files of at most 2048 bytes; exact keys, known
+`runtimeAdapter`/`deliveryMode`, a row without `deliveryMode` decodes as
+`worker`, no stray files), enrollment records (exact
 keys, valid origin/agent/handle, same profile as the file), Codex/Cursor ACP
 bindings (exact keys, `installationId` equal to `client/installation.json`,
 standardized symlink-free state roots, every row an enabled lane member),
-worker manifests (structure, release environment, content-addressed bundle;
+worker manifests for worker and event-driven profiles (structure, release
+environment, content-addressed bundle;
 artifact hashes stay with the launcher and print `integrity=not_verified`), and
 open transactions (instance, claim/reply ids, state invariants), and the App
 Server binding (readable `app-server-ws.token`, `adapterVersion` "1",
 `enabled`, ws/wss endpoint, non-empty room scope/server identity/thread, and
 installation and agent ids that match; the agent id is checked against the
-verified enrollment record because doctor does not read the keychain). A
-violation is a hard fault. App Server watch membership follows the binding's
+verified enrollment record because doctor does not read the keychain). Bound
+Codex/Cursor ACP commands must be executable regular files. A violation is a
+hard fault. App Server watch membership follows the binding's
 `instanceId`, as `WatchGrantService` does. Both claimer families holding
 advisory locks for one profile is a hard `dual_claimer_conflict` on every lane.
 Journals larger than the scan limit report their full count, and activity
