@@ -135,7 +135,7 @@ test("join: if saving local state fails after the server committed, the journal 
 async function holdLockInChild(home) {
   const { spawn } = await import("node:child_process");
   const custodyUrl = new URL("../src/custody.mjs", import.meta.url).href;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", `const { openCustody } = await import(${JSON.stringify(custodyUrl)}); openCustody(${JSON.stringify(home)}).withLock(() => new Promise(() => { console.log("held"); }));`], { stdio: ["ignore", "pipe", "inherit"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `const { openCustody } = await import(${JSON.stringify(custodyUrl)}); openCustody(${JSON.stringify(home)}).withLock(() => new Promise(() => { setInterval(() => {}, 60_000); console.log("held"); }));`], { stdio: ["ignore", "pipe", "inherit"] });
   await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("exit", reject); });
   return child;
 }
