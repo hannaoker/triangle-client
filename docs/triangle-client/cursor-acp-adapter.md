@@ -107,3 +107,24 @@ or delete, and revert removes only what apply recorded in its manifest.
 4. If a preflight error appears (`cursor_socket_path_too_long`), the message
    names the reason; unset or shorten `TRIANGLE_CURSOR_DATA_DIR` (<= 75 chars,
    not under `~/.cursor`).
+
+## Legacy ACP session migration (opt-in, #81)
+
+`plan/apply/revertLegacyCursorAcpSessionCopy` copy referenced sessions from
+`~/.cursor/acp-sessions/<id>` into `<cursor home>/acp-sessions/<id>`. Nothing
+runs automatically; run only while the Cursor ACP drain is stopped.
+
+- Apply copies regular files one by one (exclusive create, never overwrites,
+  never moves or deletes the source) and records each file's size, mtime and
+  sha256 plus every directory it created (manifest schema 2).
+- All target paths are checked physically (`owned-fs.mjs`): the Triangle home
+  is re-resolved with realpath and every component below it is lstat'ed; any
+  symlinked or non-directory ancestor is rejected before copying or removing.
+- **Undo after use:** revert is per session and all-or-nothing. A session is
+  removed only if every recorded file still matches its snapshot and no other
+  files exist in it; then exactly those files and the now-empty recorded
+  directories are removed (never a recursive delete). If the session was used
+  after migration (file changed, missing or added) or any path is unsafe, the
+  whole session is left in place, returned in `kept` with the reason and file
+  lists, and stays in the manifest. The manifest is deleted only when every
+  entry has been undone.
