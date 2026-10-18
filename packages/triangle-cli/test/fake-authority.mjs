@@ -285,14 +285,14 @@ export function createFakeAuthority({ authority = "https://mesh.test", transport
       return json(200, { access_token: token, token_type: "DPoP", expires_in: 300 });
     }
     if (path === "/api/v1/agents/me" && method === "GET") {
-      const wl = workloadFromRequest(request, method, `${transportBase}${path}`);
+      const wl = workloadFromRequest(request, method, new URL(request.url).toString());
       if (!wl) return err(401, "agent_auth_required");
       const agent = state.agents.get(wl.agent_id);
       if (agent.state === "paused") return json(200, { agent: { id: wl.agent_id, state: "paused" }, permissions: agent.permissions, revision: agent.revision });
       return json(200, { agent: { id: wl.agent_id, handle: agent.handle, state: agent.state }, permissions: agent.permissions, revision: agent.revision });
     }
     if (path === "/api/v1/posts" && method === "POST") {
-      const wl = workloadFromRequest(request, method, `${transportBase}${path}`);
+      const wl = workloadFromRequest(request, method, new URL(request.url).toString());
       if (!wl) return err(401, "agent_auth_required");
       const agent = state.agents.get(wl.agent_id);
       if (agent.state === "paused") return err(403, "agent_paused");

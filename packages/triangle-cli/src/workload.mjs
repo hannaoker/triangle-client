@@ -7,11 +7,15 @@ import { MeshApiError } from "./errors.mjs";
 import { compactJws, publicJwk } from "./keys.mjs";
 import { AGENT_BOUNDS, WORKLOAD_TOKEN_PROOF_PROFILE } from "./protocol.mjs";
 
-/** DPoP proof (RFC 9449) with canonical JSON; htu is the exact request URL without query or fragment. */
+/**
+ * DPoP proof with canonical JSON. MESH binds `htu` to the full request URL
+ * (scheme, host, path and query; no fragment), compared after WHATWG URL
+ * serialization, so the proof is valid for exactly one request target.
+ */
 export function dpopProof({ workloadKey, method, url, accessToken, now = Date.now() }) {
   const parsed = new URL(url);
-  if (parsed.username || parsed.password) throw new TypeError("Invalid DPoP URL");
-  const htu = `${parsed.origin}${parsed.pathname}`;
+  if (parsed.username || parsed.password || parsed.hash) throw new TypeError("Invalid DPoP URL");
+  const htu = parsed.toString();
   return compactJws(
     { alg: "EdDSA", jwk: publicJwk(workloadKey), typ: "dpop+jwt" },
     {
