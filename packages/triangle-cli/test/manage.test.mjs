@@ -91,6 +91,7 @@ test("permissions set: a concurrent change → 409 re-read; exit 4 with the late
   const agent = fake.state.agents.get(agent2);
   assert.equal(agent.permissions["dm.send"], false, "the other device's change survives");
   assert.equal(agent.permissions["tasks.claim"], false, "ours was not applied over it");
+  assert.equal(existsSync(path.join(fake2Home, "journal")) ? (await import("node:fs")).readdirSync(path.join(fake2Home, "journal")).length : 0, 0, "a refused update leaves no journal");
 });
 
 test("permissions: keys unknown to this client are shown read-only, preserved on write, and cannot be set", async () => {

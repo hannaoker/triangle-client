@@ -111,7 +111,7 @@ export async function setPermissions(session, agentId, changes) {
     const entry = { kind: "permissions-update", agent_id: agentId, path: `/api/v1/agents/${agentId}/permissions`, body, changes, created_at: new Date().toISOString() };
     session.custody.writeJournal(name, entry);
     try {
-      const response = await session.sendJournaled(name, entry);
+      const response = await session.sendJournaled(name, entry, { original: true });
       const { receipt, ...view } = response.body;
       return view;
     } catch (error) {
