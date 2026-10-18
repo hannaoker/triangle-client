@@ -14,11 +14,15 @@ Usage: check-release-readiness.sh [--mode docs|public|adhoc-dev] [--artifact <pa
   docs         Documentation + repository-boundary checks only (default).
                Safe on Linux CI / Cloud Agents.
   public       docs + validate every final release executable passed with
-               --artifact (after its last modification): strict codesign
+               --artifact (after its last modification; both triangle-mailbox
+               and triangle-client are required): strict codesign
                verification, an ad-hoc signature (Signature=adhoc, no
                certificate authority or team), no Keychain access-group
-               entitlements, an arm64 slice, and no com.apple.quarantine
-               attribute. Requires macOS. Notarization is not applicable.
+               entitlements, a slice for this Mac's architecture, no
+               com.apple.quarantine attribute, and a compiled public custody
+               policy (the binary refuses TRIANGLE_CREDENTIAL_CUSTODY=keychain
+               with exit 78 before reading any credential). Requires macOS.
+               Notarization is not applicable.
   adhoc-dev    docs + acknowledge local-only --local-ad-hoc development
                installs; exits 0 only with TRIANGLE_ACK_ADHOC_NON_PUBLIC=1.
 USAGE
@@ -53,7 +57,9 @@ cd "$project_root"
 codesign_command=/usr/bin/codesign
 lipo_command=/usr/bin/lipo
 host_os=$(/usr/bin/uname -s)
+host_arch=$(/usr/bin/uname -m)
 if [[ "${TRIANGLE_READINESS_TEST_MODE:-}" == "1" ]]; then
+  host_arch="${TRIANGLE_READINESS_HOST_ARCH:-$host_arch}"
   codesign_command="${TRIANGLE_READINESS_CODESIGN_COMMAND:-$codesign_command}"
   lipo_command="${TRIANGLE_READINESS_LIPO_COMMAND:-$lipo_command}"
   host_os="${TRIANGLE_READINESS_HOST_OS:-$host_os}"
@@ -171,8 +177,31 @@ validate_artifact() {
     note "artifact $label embeds no Keychain entitlements (file custody)"
   fi
   archs=$("$lipo_command" -archs "$artifact" 2>/dev/null || true)
-  if [[ " $archs " =~ \ arm64e?\  ]]; then note "artifact $label includes an arm64 slice"
-  else fail "artifact $label has no arm64 slice"
+  case "$host_arch" in
+    arm64) arch_pattern=' arm64e? ' ;;
+    *) arch_pattern=" ${host_arch} " ;;
+  esac
+  if [[ " $archs " =~ $arch_pattern ]]; then note "artifact $label includes a ${host_arch} slice"
+  else fail "artifact $label has no ${host_arch} slice for this Mac"
+  fi
+  probe_custody_policy "$artifact" "$label"
+}
+
+# Proves the compiled custody policy rather than inferring it from the
+# signature: a public build (TRIANGLE_FILE_CUSTODY_REQUIRED) exits 78 at launch
+# for a Keychain request, before parsing its command or reading credentials. A
+# --local-ad-hoc or Keychain build would reach the parser and exit 64 instead.
+probe_custody_policy() {
+  local artifact=$1 label=$2 probe_home probe_output probe_status
+  probe_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/triangle-custody-probe.XXXXXX")
+  probe_status=0
+  probe_output=$(/usr/bin/env -i HOME="$probe_home" PATH=/usr/bin:/bin \
+    TRIANGLE_CREDENTIAL_CUSTODY=keychain "$artifact" __triangle_release_custody_probe__ 2>&1 >/dev/null) || probe_status=$?
+  /bin/rm -rf "$probe_home"
+  if [[ $probe_status -eq 78 && "$probe_output" == *"public ad-hoc release build"* ]]; then
+    note "artifact $label enforces public file custody (refuses Keychain custody)"
+  else
+    fail "artifact $label is not a public file-custody build (custody probe exit ${probe_status}); reinstall without --local-ad-hoc"
   fi
 }
 
@@ -190,6 +219,13 @@ case "$mode" in
     elif [[ ${#artifacts[@]} -eq 0 ]]; then
       fail "public mode requires --artifact <path> for every final release executable"
     else
+      for required in triangle-mailbox triangle-client; do
+        found=0
+        for artifact in "${artifacts[@]}"; do
+          [[ "$(/usr/bin/basename "$artifact")" == "$required" ]] && found=1
+        done
+        [[ $found -eq 1 ]] || fail "public mode requires --artifact for the shipped ${required} executable"
+      done
       for artifact in "${artifacts[@]}"; do validate_artifact "$artifact"; done
     fi
     note "notarization: not applicable (ad-hoc release; Developer ID is out of scope)"

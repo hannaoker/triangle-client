@@ -53,7 +53,23 @@ exit 0
     TRIANGLE_READINESS_CODESIGN_COMMAND: codesign,
     TRIANGLE_READINESS_LIPO_COMMAND: lipo,
     TRIANGLE_READINESS_HOST_OS: "Darwin",
+    TRIANGLE_READINESS_HOST_ARCH: "arm64",
   };
+}
+
+// Stub executables emulate the compiled custody policy probe.
+function stubArtifact(dir, name, { publicCustody = true } = {}) {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, publicCustody
+    ? `#!/bin/bash
+if [[ "\${TRIANGLE_CREDENTIAL_CUSTODY:-}" == keychain ]]; then
+  echo "triangle: Keychain credential custody is unavailable in this public ad-hoc release build" >&2
+  exit 78
+fi
+exit 64
+`
+    : "#!/bin/bash\necho 'invalid command' >&2\nexit 64\n", { mode: 0o700 });
+  return file;
 }
 
 function runReadiness(args, env) {
@@ -64,12 +80,14 @@ function runReadiness(args, env) {
 test("public readiness accepts a valid ad-hoc artifact and rejects Developer ID, entitlements, and missing arm64", (t) => {
   const dir = tempDir(t);
   const env = stubTools(dir);
-  const artifact = path.join(dir, "triangle-mailbox");
-  fs.writeFileSync(artifact, "binary", { mode: 0o700 });
+  const artifact = stubArtifact(dir, "triangle-mailbox");
+  const client = stubArtifact(dir, "triangle-client");
+  const both = (extra = []) => ["--mode", "public", "--artifact", artifact, "--artifact", client, ...extra];
 
-  let result = runReadiness(["--mode", "public", "--artifact", artifact], env);
+  let result = runReadiness(both(), env);
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /artifact triangle-mailbox is ad-hoc signed/);
+  assert.match(result.output, /artifact triangle-client enforces public file custody/);
   assert.match(result.output, /no Keychain entitlements/);
   assert.match(result.output, /notarization: not applicable/);
   assert.match(result.output, /PASSED for mode=public/);
@@ -79,30 +97,54 @@ test("public readiness accepts a valid ad-hoc artifact and rejects Developer ID,
     ["keychain-entitlement", /embeds Keychain entitlements/],
     ["unsigned", /signature does not verify/],
   ]) {
-    result = runReadiness(["--mode", "public", "--artifact", artifact], { ...env, TRIANGLE_TEST_SIGNATURE_STATE: state });
+    result = runReadiness(both(), { ...env, TRIANGLE_TEST_SIGNATURE_STATE: state });
     assert.notEqual(result.status, 0, `${state} passed`);
     assert.match(result.output, pattern);
   }
-  result = runReadiness(["--mode", "public", "--artifact", artifact], { ...env, TRIANGLE_TEST_ARCHS: "x86_64" });
+  result = runReadiness(both(), { ...env, TRIANGLE_TEST_ARCHS: "x86_64" });
   assert.notEqual(result.status, 0);
   assert.match(result.output, /no arm64 slice/);
-  result = runReadiness(["--mode", "public", "--artifact", artifact], { ...env, TRIANGLE_TEST_ARCHS: "x86_64 arm64e" });
+  result = runReadiness(both(), { ...env, TRIANGLE_TEST_ARCHS: "x86_64 arm64e" });
   assert.equal(result.status, 0, result.output);
+  // Intel Macs need an x86_64 slice, not arm64.
+  result = runReadiness(both(), { ...env, TRIANGLE_TEST_ARCHS: "x86_64", TRIANGLE_READINESS_HOST_ARCH: "x86_64" });
+  assert.equal(result.status, 0, result.output);
+  result = runReadiness(both(), { ...env, TRIANGLE_TEST_ARCHS: "arm64", TRIANGLE_READINESS_HOST_ARCH: "x86_64" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /no x86_64 slice/);
 
-  result = runReadiness(["--mode", "public", "--artifact", path.join(dir, "missing")], env);
+  result = runReadiness(["--mode", "public", "--artifact", path.join(dir, "missing"), "--artifact", client], env);
   assert.notEqual(result.status, 0);
   assert.match(result.output, /missing or not a regular file/);
 });
 
-test("public readiness requires artifacts, macOS, and no Developer ID configuration", (t) => {
+test("public readiness rejects a local ad-hoc (Keychain-default) build despite a valid ad-hoc signature", (t) => {
   const dir = tempDir(t);
   const env = stubTools(dir);
-  const artifact = path.join(dir, "triangle-client");
-  fs.writeFileSync(artifact, "binary", { mode: 0o700 });
+  const helper = stubArtifact(dir, "triangle-mailbox", { publicCustody: false });
+  const client = stubArtifact(dir, "triangle-client");
+  const result = runReadiness(["--mode", "public", "--artifact", helper, "--artifact", client], env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /triangle-mailbox is not a public file-custody build \(custody probe exit 64\)/);
+  assert.match(result.output, /triangle-mailbox is ad-hoc signed/, "signature alone must not be treated as custody proof");
+});
+
+test("public readiness requires both shipped artifacts, macOS, and no Developer ID configuration", (t) => {
+  const dir = tempDir(t);
+  const env = stubTools(dir);
+  const artifact = stubArtifact(dir, "triangle-client");
+  const helper = stubArtifact(dir, "triangle-mailbox");
 
   let result = runReadiness(["--mode", "public"], env);
   assert.notEqual(result.status, 0);
   assert.match(result.output, /requires --artifact/);
+
+  result = runReadiness(["--mode", "public", "--artifact", artifact], env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /requires --artifact for the shipped triangle-mailbox executable/);
+  result = runReadiness(["--mode", "public", "--artifact", helper], env);
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /requires --artifact for the shipped triangle-client executable/);
 
   result = runReadiness(["--mode", "public", "--artifact", artifact], { ...env, TRIANGLE_READINESS_HOST_OS: "Linux" });
   assert.notEqual(result.status, 0);
@@ -117,35 +159,70 @@ test("public readiness requires artifacts, macOS, and no Developer ID configurat
   assert.equal(result.status, 64, "--artifact is only valid with --mode public");
 });
 
-test("public readiness validates a real ad-hoc codesign signature and quarantine on macOS", { skip: !isDarwin }, (t) => {
-  const dir = tempDir(t);
-  const artifact = path.join(dir, "triangle-mailbox");
-  fs.copyFileSync("/usr/bin/true", artifact);
-  fs.chmodSync(artifact, 0o700);
-  const sign = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", "dev.thetriangle.mailbox", artifact], { encoding: "utf8" });
-  assert.equal(sign.status, 0, sign.stderr);
+const hasCc = isDarwin && spawnSync("/usr/bin/xcrun", ["--find", "cc"], { encoding: "utf8" }).status === 0;
 
-  let result = runReadiness(["--mode", "public", "--artifact", artifact], cleanEnv);
+// A real Mach-O that implements the same launch-time custody refusal as a
+// TRIANGLE_FILE_CUSTODY_REQUIRED build.
+function compileProbe(dir, name, publicCustody = true) {
+  const source = path.join(dir, `${name}.c`);
+  fs.writeFileSync(source, `#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+  const char *c = getenv("TRIANGLE_CREDENTIAL_CUSTODY");
+  if (${publicCustody ? 1 : 0} && c && strcmp(c, "keychain") == 0) {
+    fputs("triangle: Keychain credential custody is unavailable in this public ad-hoc release build\\n", stderr);
+    return 78;
+  }
+  return 64;
+}
+`);
+  const out = path.join(dir, name);
+  const cc = spawnSync("/usr/bin/cc", ["-o", out, source], { encoding: "utf8" });
+  assert.equal(cc.status, 0, cc.stderr);
+  return out;
+}
+
+function adhocSign(file) {
+  const sign = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", "dev.thetriangle.mailbox", file], { encoding: "utf8" });
+  assert.equal(sign.status, 0, sign.stderr);
+}
+
+test("public readiness validates real ad-hoc signatures, custody probe, and quarantine on macOS", { skip: !hasCc }, (t) => {
+  const dir = tempDir(t);
+  const artifact = compileProbe(dir, "triangle-mailbox");
+  const client = compileProbe(dir, "triangle-client");
+  adhocSign(artifact);
+  adhocSign(client);
+  const args = () => ["--mode", "public", "--artifact", artifact, "--artifact", client];
+
+  let result = runReadiness(args(), cleanEnv);
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /signature verifies \(strict\)/);
   assert.match(result.output, /ad-hoc signed/);
-  assert.match(result.output, /arm64 slice/);
+  assert.match(result.output, /enforces public file custody/);
 
   // Modifying a signed binary after signing invalidates it (re-sign last).
   fs.appendFileSync(artifact, Buffer.from([0]));
-  result = runReadiness(["--mode", "public", "--artifact", artifact], cleanEnv);
+  result = runReadiness(args(), cleanEnv);
   assert.notEqual(result.status, 0);
   assert.match(result.output, /signature does not verify/);
 
   fs.rmSync(artifact);
-  fs.copyFileSync("/usr/bin/true", artifact);
-  fs.chmodSync(artifact, 0o700);
-  const resign = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", "dev.thetriangle.mailbox", artifact], { encoding: "utf8" });
-  assert.equal(resign.status, 0, resign.stderr);
+  compileProbe(dir, "triangle-mailbox");
+  adhocSign(artifact);
   quarantineFile(artifact);
-  result = runReadiness(["--mode", "public", "--artifact", artifact], cleanEnv);
+  result = runReadiness(args(), cleanEnv);
   assert.notEqual(result.status, 0);
   assert.match(result.output, /carries com\.apple\.quarantine/);
+
+  // A correctly ad-hoc signed Keychain-default build fails the custody probe.
+  fs.rmSync(artifact);
+  compileProbe(dir, "triangle-mailbox", false);
+  adhocSign(artifact);
+  result = runReadiness(args(), cleanEnv);
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /not a public file-custody build/);
 });
 
 test("quarantine check detects browser-style quarantine on archives and extracted trees", { skip: !isDarwin }, (t) => {

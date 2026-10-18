@@ -270,6 +270,20 @@ PY
     echo "Either keep this machine on --local-ad-hoc, or re-enroll after installing and set TRIANGLE_ACK_CUSTODY_SWITCH=1." >&2
     exit 78
   fi
+  # A switched helper has no file credentials until re-enrollment, so no
+  # Triangle service may start (or keep running) on it in this transaction.
+  if [[ $install_client -eq 1 || -n "$worker" ]]; then
+    echo "A custody switch cannot also install or restart a service: no profile is enrolled in file custody yet." >&2
+    echo "Install the binaries alone, re-enroll each profile, then run scripts/triangle-client-service.sh install." >&2
+    exit 64
+  fi
+  launch_agents_dir="${HOME}/Library/LaunchAgents"
+  if [[ -d "$launch_agents_dir" ]] && /usr/bin/find "$launch_agents_dir" -maxdepth 1 -name 'dev.thetriangle.*.plist' -print -quit | /usr/bin/grep -q .; then
+    echo "A custody switch requires every Triangle LaunchAgent (dev.thetriangle.*) to be uninstalled first, so no" >&2
+    echo "service restarts on a helper without file credentials. Run scripts/triangle-client-service.sh uninstall" >&2
+    echo "(and any legacy worker uninstall), switch, re-enroll, then reinstall the service." >&2
+    exit 78
+  fi
 fi
 
 temporary=$(/usr/bin/mktemp -d "${application_root}/.mailbox-helper-install.XXXXXX")
@@ -290,6 +304,7 @@ had_client_metadata=0
 client_target_replaced=0
 client_hash_replaced=0
 client_metadata_replaced=0
+marker_created=0
 
 rollback() {
   local result=$?
@@ -313,6 +328,9 @@ rollback() {
     if [[ $client_hash_replaced -eq 1 ]]; then
       /bin/rm -f "$client_hash_target"
       [[ $had_client_hash -eq 0 ]] || /bin/mv "$temporary/backup-client-sha256" "$client_hash_target"
+    fi
+    if [[ $marker_created -eq 1 ]]; then
+      /bin/rm -f "$file_custody_marker"
     fi
     if [[ $client_metadata_replaced -eq 1 ]]; then
       /bin/rm -f "$client_metadata_target"
@@ -432,7 +450,22 @@ if [[ "${TRIANGLE_INSTALL_TEST_MODE:-}" == "1" && "${TRIANGLE_INSTALL_FAIL_PHASE
 client_metadata_replaced=1
 /bin/mv "${temporary}/triangle-client-install.json" "$client_metadata_target"
 if [[ "${TRIANGLE_INSTALL_TEST_MODE:-}" == "1" && "${TRIANGLE_INSTALL_FAIL_PHASE:-}" == "after-client-metadata" ]]; then exit 75; fi
-/usr/bin/python3 - "$bin_dir" "$manifest_dir" <<'PY'
+if [[ "$credential_custody" == file && $file_custody_enabled -eq 0 ]]; then
+  # Enable portable file custody (0700 directories, 0600 marker) inside the
+  # install transaction so the manifest never claims file custody without it.
+  validate_directory "$credentials_dir"
+  validate_directory "$file_custody_dir"
+  marker_staged=$(/usr/bin/mktemp "${temporary}/ENABLED.XXXXXX")
+  /bin/chmod 600 "$marker_staged"
+  printf 'file-custody %s\n' "$signing_mode" > "$marker_staged"
+  marker_created=1
+  /bin/mv "$marker_staged" "$file_custody_marker"
+  validate_marker
+  if [[ "${TRIANGLE_INSTALL_TEST_MODE:-}" == "1" && "${TRIANGLE_INSTALL_FAIL_PHASE:-}" == "after-marker" ]]; then exit 75; fi
+fi
+fsync_directories=("$bin_dir" "$manifest_dir")
+[[ $marker_created -eq 0 ]] || fsync_directories+=("$file_custody_dir")
+/usr/bin/python3 - "${fsync_directories[@]}" <<'PY'
 import os, sys
 for directory in sys.argv[1:]:
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
@@ -482,18 +515,6 @@ verify_watch_cli_surface "$target"
 committed=1
 trap - EXIT HUP INT TERM
 /bin/rm -rf "$temporary"
-
-if [[ "$credential_custody" == file && $file_custody_enabled -eq 0 ]]; then
-  # Enable portable file custody (0700 directories, 0600 files) for the
-  # helper, supervisor, and watch-grant paths that read this marker.
-  validate_directory "$credentials_dir"
-  validate_directory "$file_custody_dir"
-  marker_staged=$(/usr/bin/mktemp "${file_custody_dir}/.ENABLED.XXXXXX")
-  /bin/chmod 600 "$marker_staged"
-  printf 'file-custody %s\n' "$signing_mode" > "$marker_staged"
-  /bin/mv "$marker_staged" "$file_custody_marker"
-  validate_marker
-fi
 
 mesh_cli_source="${project_root}/skills/triangle-mesh-a2a/scripts/mesh_client.py"
 if [[ -f "$mesh_cli_source" ]]; then

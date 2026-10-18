@@ -342,11 +342,47 @@ test("public install refuses to strand an existing Keychain-custody install", (t
   result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two" });
   assert.equal(result.status, 78);
 
+  // An acknowledged switch must not install or restart any service on a helper
+  // that has no file credentials yet.
+  for (const args of [["--install-client"], ["--install-worker", "codex", "--profile", "codex-mailbox-live"]]) {
+    result = run(args, { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_ACK_CUSTODY_SWITCH: "1" });
+    assert.equal(result.status, 64, result.stderr);
+    assert.match(result.stderr, /custody switch cannot also install or restart a service/);
+  }
+  const launchAgents = path.join(f.home, "Library", "LaunchAgents");
+  fs.mkdirSync(launchAgents, { recursive: true, mode: 0o700 });
+  const plist = path.join(launchAgents, "dev.thetriangle.client.plist");
+  fs.writeFileSync(plist, "<plist/>\n");
+  result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_ACK_CUSTODY_SWITCH: "1" });
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /every Triangle LaunchAgent/);
+  assert.deepEqual(fs.readFileSync(installedHelper(f)), before, "refused switch replaced the helper");
+  assert.doesNotMatch(commandLog(f), /client install|worker install/);
+  fs.rmSync(plist);
+
   result = run([], { ...f.env, TRIANGLE_TEST_BINARY_VERSION: "two", TRIANGLE_ACK_CUSTODY_SWITCH: "1" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(metadata(f).signingMode, "public_ad_hoc");
   assert.equal(metadata(f).credentialCustody, "file");
   assert.equal(mode(marker(f)), 0o600);
+});
+
+test("file custody marker is part of the install transaction and rolls back with it", (t) => {
+  const f = fixture(t);
+  for (const phase of ["after-marker", "after-client-metadata"]) {
+    const result = run([], { ...f.env, TRIANGLE_INSTALL_FAIL_PHASE: phase });
+    assert.notEqual(result.status, 0, `${phase} unexpectedly succeeded`);
+    assert.equal(fs.existsSync(marker(f)), false, `${phase} left a marker without a committed install`);
+    assert.equal(fs.existsSync(installedHelper(f)), false);
+  }
+  // A failed post-commit gate (watch CLI surface) also removes a new marker.
+  let result = run([], { ...f.env, TRIANGLE_TEST_SIGNATURE_STATE: "installed-target-fail" });
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(marker(f)), false);
+  result = run([], f.env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(mode(marker(f)), 0o600);
+  assert.equal(fs.readdirSync(path.join(appRoot(f), "credentials", "local")).some((name) => name.startsWith("ENABLED.")), false);
 });
 
 test("existing file custody marker lets a local ad-hoc host upgrade to public mode", (t) => {
