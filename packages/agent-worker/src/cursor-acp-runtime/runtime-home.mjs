@@ -16,6 +16,7 @@
  * never replaced.
  */
 
+import { randomBytes } from "node:crypto";
 import {
   lstatSync,
   mkdirSync,
@@ -411,9 +412,20 @@ function readLegacyCopyManifest(anchor) {
 }
 
 function writeLegacyCopyManifest(manifestPath, manifest) {
-  const temporary = `${manifestPath}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  renameSync(temporary, manifestPath);
+  // Unique temp name (a stale temp from a crashed run cannot block writes);
+  // the temp is removed if the write or rename fails.
+  const temporary = `${manifestPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(temporary, manifestPath);
+  } catch (error) {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // never created / already renamed
+    }
+    throw error;
+  }
 }
 
 /**
@@ -423,13 +435,28 @@ function writeLegacyCopyManifest(manifestPath, manifest) {
  */
 function rollbackIncompleteSession(anchor, record) {
   let clean = true;
+  const remainingFiles = [];
   for (const file of record.files) {
-    const result = removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity: file });
-    if (result.status !== "removed" && result.status !== "missing") clean = false;
+    let status;
+    try {
+      status = removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity: file }).status;
+    } catch {
+      status = "error";
+    }
+    if (status !== "removed" && status !== "missing") {
+      clean = false;
+      remainingFiles.push(file);
+    }
   }
+  record.files = remainingFiles;
   for (const dir of [...new Set(record.createdDirs)].sort((a, b) => b.length - a.length)) {
-    const result = removeOwnedEmptyDirectory({ anchor, relative: dir });
-    if (result.status !== "removed" && result.status !== "missing") clean = false;
+    let status;
+    try {
+      status = removeOwnedEmptyDirectory({ anchor, relative: dir }).status;
+    } catch {
+      status = "error";
+    }
+    if (status !== "removed" && status !== "missing") clean = false;
   }
   return clean;
 }
@@ -481,7 +508,11 @@ export function applyLegacyCursorAcpSessionCopy({
       const clean = rollbackIncompleteSession(anchor, record);
       if (!clean) {
         manifest.copied.push({ ...record, incomplete: true });
-        writeLegacyCopyManifest(manifestPath, manifest);
+        try {
+          writeLegacyCopyManifest(manifestPath, manifest);
+        } catch {
+          // Reported below via rolledBack:false.
+        }
       }
       failed.push(Object.freeze({
         sessionId: entry.sessionId,
@@ -491,7 +522,21 @@ export function applyLegacyCursorAcpSessionCopy({
       continue;
     }
     manifest.copied.push(record);
-    writeLegacyCopyManifest(manifestPath, manifest);
+    try {
+      writeLegacyCopyManifest(manifestPath, manifest);
+    } catch (error) {
+      // Never leave a copied session that no manifest knows about: roll it
+      // back (identity-checked). If rollback cannot finish, the session is
+      // reported with rolledBack:false and its record stays in memory only.
+      manifest.copied.pop();
+      const clean = rollbackIncompleteSession(anchor, record);
+      failed.push(Object.freeze({
+        sessionId: entry.sessionId,
+        code: typeof error?.code === "string" ? error.code : "cursor_legacy_manifest_write_failed",
+        rolledBack: clean,
+      }));
+      continue;
+    }
     copied.push(entry.sessionId);
   }
   return Object.freeze({
@@ -514,7 +559,7 @@ function safeOwnedParts(relative) {
   }
 }
 
-function revertOneSession(anchor, record) {
+function revertOneSession(anchor, record, persistProgress = () => {}) {
   const { sessionId } = record;
   assertCursorSessionIds([sessionId]);
   if (!Array.isArray(record.files)) {
@@ -568,7 +613,9 @@ function revertOneSession(anchor, record) {
       return { status: "kept", reason: "unsafe_path", detail: error?.code ?? null };
     }
     if (resolved.leaf == null) {
-      missingFiles.push(relative);
+      // A revert interrupted after it started unlinking (write-ahead flag
+      // persisted below) legitimately leaves recorded files missing.
+      if (record.revertInProgress !== true) missingFiles.push(relative);
     } else if (!resolved.leaf.isFile() || !identitiesEqual(ownedFileIdentity(resolved.absolute), file)) {
       modifiedFiles.push(relative);
     }
@@ -576,9 +623,29 @@ function revertOneSession(anchor, record) {
   if (newFiles.length > 0 || modifiedFiles.length > 0 || missingFiles.length > 0) {
     return { status: "kept", reason: "used_after_migration", newFiles, modifiedFiles, missingFiles };
   }
+  // From here on progress is reported file by file (`removedFiles`), so an
+  // I/O error midway (EACCES, EPERM, ...) leaves a manifest that a later
+  // revert can resume instead of treating already-removed files as missing.
+  // Write-ahead: persist that unlinking has started, so a crash or a failed
+  // manifest write after some unlinks can be resumed instead of looking like
+  // post-migration use (missing files).
+  if (record.revertInProgress !== true) {
+    record.revertInProgress = true;
+    try {
+      persistProgress();
+    } catch (error) {
+      delete record.revertInProgress;
+      return { status: "kept", reason: "remove_failed", detail: error?.code ?? "manifest_write_failed" };
+    }
+  }
   const removed = [];
   for (const [relative, file] of recorded) {
-    const result = removeOwnedFileIfUnchanged({ anchor, relative: `${sessionRelative}/${relative}`, identity: file });
+    let result;
+    try {
+      result = removeOwnedFileIfUnchanged({ anchor, relative: `${sessionRelative}/${relative}`, identity: file });
+    } catch (error) {
+      return { status: "kept", reason: "remove_failed", detail: error?.code ?? null, removedFiles: removed };
+    }
     if (result.status !== "removed" && result.status !== "missing") {
       return { status: "kept", reason: result.status, detail: result.reason ?? null, removedFiles: removed };
     }
@@ -586,8 +653,13 @@ function revertOneSession(anchor, record) {
   }
   const keptDirs = [];
   for (const dir of dirs) {
-    const result = removeOwnedEmptyDirectory({ anchor, relative: dir });
-    if (result.status === "not_empty" || result.status === "unsafe_path") keptDirs.push(dir);
+    let status;
+    try {
+      status = removeOwnedEmptyDirectory({ anchor, relative: dir }).status;
+    } catch {
+      status = "error";
+    }
+    if (status !== "removed" && status !== "missing") keptDirs.push(dir);
   }
   if (keptDirs.length > 0) {
     return { status: "kept", reason: "directory_not_empty", removedFiles: removed, keptDirs };
@@ -602,7 +674,7 @@ export function revertLegacyCursorAcpSessionCopy({ home = process.env.HOME, curs
   const kept = [];
   const remaining = [];
   for (const record of manifest.copied) {
-    const outcome = revertOneSession(anchor, record);
+    const outcome = revertOneSession(anchor, record, () => writeLegacyCopyManifest(manifestPath, manifest));
     if (outcome.status === "removed" || outcome.status === "gone") {
       removed.push(record.sessionId);
       continue;

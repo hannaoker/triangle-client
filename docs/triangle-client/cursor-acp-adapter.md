@@ -66,7 +66,13 @@ runs automatically; run only while the Cursor ACP drain is stopped.
 - A session whose copy fails midway is rolled back (only the files this apply
   copied, identity-checked, and the empty directories it created) and returned
   in `failed`; it is not recorded, so a later apply can retry it. If rollback
-  cannot finish, the record is kept with `incomplete: true` for revert.
+  cannot finish, the record is kept with `incomplete: true` for revert. The
+  same rollback runs if the manifest cannot be written after a copy, and any
+  failure after a file's exclusive create removes that torn target.
+- Revert is resumable: before unlinking a session it persists
+  `revertInProgress` (write-ahead), and an I/O error midway records the files
+  already removed. A later revert finishes the job instead of treating those
+  files as post-migration use.
 - **Undo after use:** revert is per session and all-or-nothing. A session is
   removed only if every recorded file still matches its snapshot and no other
   files exist in it; then exactly those files and the now-empty recorded
