@@ -92,6 +92,7 @@ export function resolveWorkerConfig(raw, configPath, env = process.env) {
       pageLimit,
       workloadId: credential.workloadId,
       workloadPrivateKey: credential.workloadPrivateKey,
+      workloadScopes: credential.workloadScopes,
     },
     runner: {
       command: process.execPath,

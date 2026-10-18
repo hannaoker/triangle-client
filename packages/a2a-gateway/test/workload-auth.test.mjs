@@ -181,3 +181,63 @@ test("token-exchange refusals keep an allowlisted cause (not an outage) and neve
   assert.equal(pausedError.code, "agent_paused");
   assert.equal(pausedError.status, 403);
 });
+
+// A read-only agent (`triangle agent add --read-only`) is registered with
+// bounds ["agent.read"]. MESH refuses any request beyond the bounds with
+// `workload_forbidden` and never narrows it, so the gateway must ask for
+// exactly its registered bounds (MESH_WORKLOAD_SCOPES).
+function readOnlyMesh() {
+  const calls = [];
+  const fetchImpl = async (request) => {
+    const url = new URL(request.url);
+    const body = request.method === "GET" ? null : await request.json();
+    calls.push({ url: request.url, body });
+    if (url.pathname === "/api/v1/identity/token-challenges") {
+      return Response.json({ challenge: { challenge_id: "c0", principal_id: AGENT, audience: MESH, nonce: "n0" } }, { status: 201 });
+    }
+    if (url.pathname === "/api/v1/identity/tokens") {
+      const signed = JSON.parse(Buffer.from(body.proof.split(".")[1], "base64url")).requested_scopes;
+      if ([...body.requested_scopes, ...signed].some((scope) => scope !== "agent.read")) {
+        return Response.json({ error: "workload_forbidden" }, { status: 403 });
+      }
+      return Response.json({ access_token: "tok_ro", token_type: "DPoP", expires_in: 300 });
+    }
+    return Response.json({ ok: true });
+  };
+  return { calls, fetchImpl };
+}
+
+test("workload auth: a read-only agent requests only its registered agent.read bound", async () => {
+  const key = generateEd25519();
+  const mesh = readOnlyMesh();
+  const auth = createWorkloadAuth({ meshOrigin: MESH, workloadId: WORKLOAD, workloadPrivateKey: JSON.stringify(key), scopes: "agent.read", fetchImpl: mesh.fetchImpl });
+  assert.equal((await workloadFetch(auth, mesh.fetchImpl, `${MESH}/api/v1/agents/me`)).status, 200);
+  const tokenCall = mesh.calls.find((c) => c.url.endsWith("/identity/tokens"));
+  assert.deepEqual(tokenCall.body.requested_scopes, ["agent.read"]);
+  assert.deepEqual(JSON.parse(Buffer.from(tokenCall.body.proof.split(".")[1], "base64url")).requested_scopes, ["agent.read"], "signed scopes match");
+
+  // Without the bound the old behavior (both scopes) is refused by MESH.
+  const unbounded = createWorkloadAuth({ meshOrigin: MESH, workloadId: WORKLOAD, workloadPrivateKey: JSON.stringify(key), fetchImpl: readOnlyMesh().fetchImpl });
+  await assert.rejects(() => unbounded.headers("GET", `${MESH}/api/v1/agents/me`), (error) => /workload_forbidden|403/.test(`${error.code ?? ""} ${error.status ?? ""} ${error.message}`));
+
+  // Invalid bounds fail closed at construction.
+  for (const scopes of ["", "agent.admin", "agent.read,agent.read", []]) {
+    assert.throws(() => createWorkloadAuth({ meshOrigin: MESH, workloadId: WORKLOAD, workloadPrivateKey: JSON.stringify(key), scopes, fetchImpl: mesh.fetchImpl }), /MESH_WORKLOAD_SCOPES/);
+  }
+});
+
+test("gateway entry points pass MESH_WORKLOAD_SCOPES through as the registered bounds", () => {
+  const seen = [];
+  const capture = (options) => { seen.push(options.scopes); return testMeshAuth(); };
+  createOutboundA2AHandler({
+    env: { ...TEST_WORKLOAD_ENV, GATEWAY_INTERNAL_TOKEN: "internal", MESH_ORIGIN: MESH, MESH_WORKLOAD_SCOPES: "agent.read" },
+    fetchImpl: async () => Response.json({}),
+    createWorkloadAuthImpl: capture,
+  });
+  createOutboundA2AHandler({
+    env: { ...TEST_WORKLOAD_ENV, GATEWAY_INTERNAL_TOKEN: "internal", MESH_ORIGIN: MESH },
+    fetchImpl: async () => Response.json({}),
+    createWorkloadAuthImpl: capture,
+  });
+  assert.deepEqual(seen, ["agent.read", undefined]);
+});

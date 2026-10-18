@@ -6,6 +6,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, constants } fr
 import path from "node:path";
 
 import { parseWorkloadPrivateKey } from "./mailbox-client.mjs";
+import { workloadScopes } from "../../triangle-cli/src/protocol.mjs";
 
 const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const WORKLOAD_ID = /^workload_[a-f0-9]{32}$/;
@@ -49,5 +50,13 @@ export function loadWorkloadCredential(keyFile, { expectedAgentId } = {}) {
   if (expectedAgentId !== undefined && expectedAgentId !== agent.agent_id) {
     throw new TypeError("workload key belongs to a different agent");
   }
-  return Object.freeze({ agentId: agent.agent_id, workloadId: agent.workload_id, workloadPrivateKey: keyText });
+  // Registered bounds (`agent.json` `bounds`, written by triangle): a
+  // read-only agent requests agent.read only, since MESH refuses more.
+  let scopes;
+  try {
+    if (agent.bounds !== undefined && !Array.isArray(agent.bounds)) throw new TypeError("bounds");
+    scopes = workloadScopes(agent.bounds, "agent.json bounds");
+  }
+  catch { throw new TypeError("agent.json bounds are invalid"); }
+  return Object.freeze({ agentId: agent.agent_id, workloadId: agent.workload_id, workloadPrivateKey: keyText, workloadScopes: Object.freeze(scopes) });
 }

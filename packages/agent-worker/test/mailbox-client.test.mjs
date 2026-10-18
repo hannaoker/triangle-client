@@ -2513,3 +2513,53 @@ test("permissions v1: a refused token refresh never echoes MESH free text or the
   assert.equal(error.status, 401);
   assert.doesNotMatch(`${error.message} ${String(error.stack)} ${JSON.stringify(error)}`, /wl_token_previous_secret|stale token/);
 });
+
+test("permissions v1: a read-only agent (bounds agent.read) requests only agent.read, which MESH accepts", async () => {
+  const { generateEd25519 } = await import("../../triangle-cli/src/keys.mjs");
+  const key = generateEd25519();
+  const workloadId = "workload_22222222222222222222222222222222";
+  const agentId = "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  // MESH refuses any request beyond the registered bounds (workload_forbidden) and never narrows it.
+  function readOnlyMesh() {
+    const calls = [];
+    const fetchImpl = async (request) => {
+      const url = new URL(request.url);
+      const body = request.method === "GET" ? null : await request.json();
+      calls.push({ url, body });
+      if (url.pathname === "/api/v1/identity/token-challenges") {
+        return json({ challenge: { challenge_id: "challenge_ro", workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: "nonce_ro" } }, 201);
+      }
+      if (url.pathname === "/api/v1/identity/tokens") {
+        const signed = JSON.parse(Buffer.from(body.proof.split(".")[1], "base64url")).requested_scopes;
+        if ([...body.requested_scopes, ...signed].some((scope) => scope !== "agent.read")) return json({ error: "workload_forbidden" }, 403);
+        return json({ access_token: "wl_ro", token_type: "DPoP", expires_in: 300 });
+      }
+      if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: agentId, handle: "ro-agent" }, state: "active" });
+      if (url.pathname === "/api/v1/mailbox") return json({ items: [] });
+      return json({ error: "not_found" }, 404);
+    };
+    return { calls, fetchImpl };
+  }
+  const mesh = readOnlyMesh();
+  const client = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key), workloadScopes: ["agent.read"] },
+    { fetchImpl: mesh.fetchImpl },
+  );
+  assert.deepEqual(await client.listUnread(), []);
+  const token = mesh.calls.find((c) => c.url.pathname === "/api/v1/identity/tokens");
+  assert.deepEqual(token.body.requested_scopes, ["agent.read"]);
+
+  // The previous behavior (always both bounds) is refused for this agent.
+  const unbounded = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key) },
+    { fetchImpl: readOnlyMesh().fetchImpl },
+  );
+  await assert.rejects(() => unbounded.listUnread(), (error) => error instanceof MailboxRequestError && (error.status === 403 || error.meshError === "workload_forbidden"));
+
+  for (const workloadScopes of [[], ["agent.admin"], ["agent.read", "agent.read"]]) {
+    assert.throws(
+      () => validateMailboxClientOptions({ meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key), workloadScopes }),
+      /workloadScopes must be a non-empty subset/,
+    );
+  }
+});

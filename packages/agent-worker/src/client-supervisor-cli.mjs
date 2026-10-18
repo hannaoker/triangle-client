@@ -202,6 +202,8 @@ function hasValidMailboxKeys(mailbox) {
     "workloadPrivateKey",
   ]);
   const required = [...allowed];
+  // Optional: the agent's registered bounds (absent → both, like agent.json).
+  allowed.add("workloadScopes");
   if (!required.every((k) => Object.hasOwn(mailbox, k))) return false;
   if (!actual.every((k) => allowed.has(k))) return false;
   return true;

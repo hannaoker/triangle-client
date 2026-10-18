@@ -120,3 +120,13 @@ test("custody: 0700 dirs, 0600 secrets, refuses overwrite of the owner key and g
   assert.equal(readdirSync(path.join(custody.root, "owner")).some((f) => f.includes(".tmp-")), false);
   assert.equal(readFileSync(file, "utf8").includes(key.d), true);
 });
+
+test("workloadScopes: registered bounds, canonical order, absent means both, invalid fails closed", async () => {
+  const { workloadScopes } = await import("../src/protocol.mjs");
+  assert.deepEqual(workloadScopes(undefined), ["agent.read", "agent.write"]);
+  assert.deepEqual(workloadScopes(["agent.read"]), ["agent.read"]);
+  assert.deepEqual(workloadScopes("agent.write, agent.read"), ["agent.read", "agent.write"]);
+  for (const bad of [[], "", ["agent.admin"], ["agent.read", "agent.read"], [1], {}]) {
+    assert.throws(() => workloadScopes(bad, "scopes"), /scopes must be a non-empty subset/);
+  }
+});

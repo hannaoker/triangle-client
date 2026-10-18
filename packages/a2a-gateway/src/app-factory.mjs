@@ -101,6 +101,8 @@ export function createConfiguredGatewayApp({
     meshOrigin,
     workloadId: required(env, "MESH_WORKLOAD_ID"),
     workloadPrivateKey: required(env, "MESH_WORKLOAD_PRIVATE_KEY"),
+    // Optional: the agent's registered bounds, e.g. "agent.read" for a read-only agent.
+    scopes: env.MESH_WORKLOAD_SCOPES?.trim() || undefined,
     fetchImpl,
   });
   const introspectPeerToken = createIntrospectorImpl({
