@@ -54,7 +54,12 @@ The ACP child gets `CURSOR_CONFIG_DIR` pinned to the Triangle-owned Cursor
 home, so `acp-sessions/` and `cli-config.json` never touch `~/.cursor`.
 HOME is preserved, so the existing Cursor login (macOS keychain) is reused.
 Parent `CURSOR_CONFIG_DIR` / `XDG_CONFIG_HOME` and `extra` cannot redirect it,
-and the home must not resolve to `~/.cursor` or `~/.codex`.
+and the home must not resolve to, or inside, `~/.cursor` or `~/.codex`.
+
+**Partial on its own:** this pins only the config dir. Cursor resolves its data
+dir (`CURSOR_DATA_DIR`, default `~/.cursor`) separately, and `~/.cursor/projects`
+(transcripts, worker socket, per-project MCP/approval state) stays shared until
+#86 pins it. Deploy #81 together with #86, not alone.
 
 Existing sessions under `~/.cursor/acp-sessions` are **not** migrated: after
 deploy, the ghost profile starts fresh Cursor sessions. An opt-in, reversible
