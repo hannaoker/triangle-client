@@ -646,3 +646,21 @@ test("codex r3: malformed manifest records are kept and do not abort undo of val
     cleanup();
   }
 });
+
+test("Triangle Cursor home may not be inside ~/.cursor or ~/.codex (incl. '..'-prefixed child names)", () => {
+  const { home, cleanup } = fixture();
+  try {
+    for (const [root, code] of [[".cursor", "cursor_home_user_fallback_forbidden"], [".codex", "cursor_home_codex_forbidden"]]) {
+      for (const child of ["triangle", "..triangle"]) {
+        const override = path.join(home, root, child);
+        assert.throws(() => resolveTriangleCursorHome({ override, home, allowCreate: true }), { code }, override);
+        assert.equal(existsSync(override), false, `nothing created at ${override}`);
+      }
+    }
+    // A sibling whose name merely starts with ".cursor" is fine.
+    const sibling = resolveTriangleCursorHome({ override: path.join(home, ".cursor-triangle"), home, allowCreate: true });
+    assert.equal(sibling, path.join(home, ".cursor-triangle"));
+  } finally {
+    cleanup();
+  }
+});

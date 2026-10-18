@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -97,7 +98,7 @@ test("TRIANGLE_CURSOR_DATA_DIR selects a separate Triangle-owned data dir", () =
   const { home, cursorHome, cleanup } = fixture();
   try {
     const dataDir = path.join(home, "cd");
-    mkdirSync(dataDir);
+    mkdirSync(dataDir, { mode: 0o700 });
     const viaEnv = buildSanitizedCursorChildEnv({
       cursorHome,
       parentEnv: { HOME: home, PATH: "/usr/bin", TRIANGLE_CURSOR_DATA_DIR: dataDir },
@@ -597,6 +598,38 @@ test("headless runtime status and describeTriangleCursorDirs report the chosen d
   }
 });
 
+test("an existing data dir with group/other access is rejected, not silently used", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const dataDir = path.join(home, "shared-data");
+    mkdirSync(dataDir, { mode: 0o755 });
+    // mkdir's mode is masked by umask; force the shared mode explicitly.
+    chmodSync(dataDir, 0o755);
+    assert.throws(
+      () => resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: true }),
+      { code: "cursor_data_dir_not_private" },
+    );
+    chmodSync(dataDir, 0o700);
+    assert.equal(resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: true }), dataDir);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a data dir path that is a regular file is rejected", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const dataDir = path.join(home, "a-file");
+    writeFileSync(dataDir, "not a directory");
+    assert.throws(
+      () => resolveTriangleCursorDataDir({ override: dataDir, home, allowCreate: false }),
+      { code: "cursor_data_dir_invalid" },
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 // ---- legacy transcript copy (temp HOME only) ----
 
 function seedLegacyTranscripts(home, workspace) {
@@ -635,6 +668,7 @@ test("legacy transcript copy: plan is read-only, apply copies, revert removes on
 
     // Pre-existing isolated transcript must win and survive revert.
     mkdirSync(targetTranscripts, { recursive: true });
+    chmodSync(dataDir, 0o700);
     writeFileSync(path.join(targetTranscripts, "b.txt"), "isolated-b\n");
 
     const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, other] });
@@ -701,7 +735,7 @@ test("legacy transcript copy into a fresh data dir: revert removes the dirs appl
     const workspace = path.join(home, "ws2");
     seedLegacyTranscripts(home, workspace);
     const dataDir = path.join(home, "cd");
-    mkdirSync(dataDir);
+    mkdirSync(dataDir, { mode: 0o700 });
     applyLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir, workspacePaths: [workspace] });
     assert.equal(listTree(path.join(dataDir, "projects")).filter((entry) => entry.endsWith(".jsonl") || entry.endsWith(".txt")).length, 3);
     const reverted = revertLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir });
@@ -738,6 +772,7 @@ test("legacy transcript copy rejects bad inputs and tampered manifests", () => {
 
     const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
     mkdirSync(projectsRoot, { recursive: true });
+    chmodSync(path.join(home, ".triangle", "cursor-data"), 0o700);
     writeFileSync(path.join(home, "victim.txt"), "keep");
     const victimStat = statSync(path.join(home, "victim.txt"));
     const victimIdentity = {
@@ -853,6 +888,7 @@ test("F1: apply never copies through a symlinked target parent or projects root"
     const outside = path.join(home, "outside");
     mkdirSync(outside);
     mkdirSync(path.join(projects, slug), { recursive: true });
+    chmodSync(path.join(home, ".triangle", "cursor-data"), 0o700);
     symlinkSync(outside, path.join(projects, slug, "agent-transcripts"), "dir");
 
     const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
@@ -880,6 +916,7 @@ test("codex r1: tampered transcript manifest cannot name non-transcript files or
     const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
     const slugDir = path.join(projectsRoot, "ws-y");
     mkdirSync(path.join(slugDir, "unrelated-empty"), { recursive: true });
+    chmodSync(path.join(home, ".triangle", "cursor-data"), 0o700);
     const log = path.join(slugDir, "worker.log");
     writeFileSync(log, "live worker log");
     const stat = statSync(log);
@@ -1053,6 +1090,7 @@ test("codex r3: a transcript manifest write failure rolls that copy back", { ski
     const workspace = path.join(home, "ws7");
     seedLegacyTranscripts(home, workspace);
     mkdirSync(projectsRoot, { recursive: true });
+    chmodSync(path.join(home, ".triangle", "cursor-data"), 0o700);
     writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 2, createdFiles: [], createdDirs: [] }));
     execFileSync("chflags", ["uchg", manifestPath]); // rename onto it fails with EPERM
     let thrown;
