@@ -11,7 +11,6 @@
  * real ~/.cursor or a live Triangle profile.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -23,7 +22,6 @@ import {
   rmSync,
   statSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -34,19 +32,15 @@ import { createCursorAcpProcess } from "../../src/cursor-acp-runtime/acp-process
 import { createDefaultCursorAcpShadowProfile } from "../../src/cursor-acp-runtime/config-guards.mjs";
 import { createHeadlessCursorAcpRuntime } from "../../src/cursor-acp-runtime/headless-runtime.mjs";
 import {
-  applyLegacyCursorTranscriptCopy,
   assertCursorSocketPathsFit,
-  CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST,
   buildSanitizedCursorChildEnv,
   CURSOR_DATA_DIR_MAX_CHARS,
   cursorWorkspaceSlug,
   defaultTriangleCursorDataDir,
   describeTriangleCursorDirs,
   planCursorSocketPaths,
-  planLegacyCursorTranscriptCopy,
   resolveTriangleCursorDataDir,
   resolveTriangleCursorHome,
-  revertLegacyCursorTranscriptCopy,
 } from "../../src/cursor-acp-runtime/runtime-home.mjs";
 
 function shortTmpRoot() {
@@ -597,351 +591,9 @@ test("headless runtime status and describeTriangleCursorDirs report the chosen d
   }
 });
 
-// ---- legacy transcript copy (temp HOME only) ----
+// ---- data dir hardening (Codex review rounds) ----
 
-function seedLegacyTranscripts(home, workspace) {
-  const projectDir = path.join(home, ".cursor", "projects", cursorWorkspaceSlug(workspace));
-  const transcripts = path.join(projectDir, "agent-transcripts");
-  mkdirSync(path.join(transcripts, "nested"), { recursive: true });
-  writeFileSync(path.join(transcripts, "a.jsonl"), "line-a\n");
-  writeFileSync(path.join(transcripts, "b.txt"), "line-b\n");
-  writeFileSync(path.join(transcripts, "nested", "c.jsonl"), "line-c\n");
-  // Non-transcript siblings that must never be copied.
-  writeFileSync(path.join(projectDir, "worker.log"), "log\n");
-  mkdirSync(path.join(projectDir, "terminals"), { recursive: true });
-  writeFileSync(path.join(projectDir, "terminals", "1.txt"), "term\n");
-  return { projectDir, transcripts };
-}
-
-function snapshotTree(root) {
-  return listTree(root).map((relative) => {
-    const absolute = path.join(root, relative);
-    const stat = statSync(absolute);
-    return [relative, stat.isFile() ? readFileSync(absolute, "utf8") : "<dir>", stat.mtimeMs];
-  });
-}
-
-test("legacy transcript copy: plan is read-only, apply copies, revert removes only what apply created", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws");
-    const other = path.join(home, "never-used");
-    const { transcripts } = seedLegacyTranscripts(home, workspace);
-    symlinkSync(path.join(transcripts, "a.jsonl"), path.join(transcripts, "link.jsonl"));
-    const userCursorBefore = snapshotTree(path.join(home, ".cursor"));
-    const dataDir = path.join(home, ".triangle", "cursor-data");
-    const slug = cursorWorkspaceSlug(workspace);
-    const targetTranscripts = path.join(dataDir, "projects", slug, "agent-transcripts");
-
-    // Pre-existing isolated transcript must win and survive revert.
-    mkdirSync(targetTranscripts, { recursive: true });
-    writeFileSync(path.join(targetTranscripts, "b.txt"), "isolated-b\n");
-
-    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, other] });
-    assert.equal(plan.dataDir, dataDir);
-    const ws = plan.workspaces.find((entry) => entry.slug === slug);
-    assert.equal(ws.action, "copy");
-    assert.deepEqual(
-      ws.files.map((entry) => [entry.relative, entry.action]),
-      [
-        ["a.jsonl", "copy"],
-        ["b.txt", "already_present"],
-        [path.join("nested", "c.jsonl"), "copy"],
-        ["link.jsonl", "unsafe_source"],
-      ],
-    );
-    assert.equal(plan.workspaces.find((entry) => entry.workspacePath === other).action, "missing_source");
-    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "plan is read-only (source)");
-    assert.deepEqual(listTree(targetTranscripts), ["b.txt"], "plan is read-only (target)");
-
-    const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, other] });
-    assert.deepEqual([...applied.copied].sort(), [
-      `projects/${slug}/agent-transcripts/a.jsonl`,
-      `projects/${slug}/agent-transcripts/nested/c.jsonl`,
-    ]);
-    assert.equal(readFileSync(path.join(targetTranscripts, "a.jsonl"), "utf8"), "line-a\n");
-    assert.equal(readFileSync(path.join(targetTranscripts, "nested", "c.jsonl"), "utf8"), "line-c\n");
-    assert.equal(readFileSync(path.join(targetTranscripts, "b.txt"), "utf8"), "isolated-b\n");
-    assert.equal(existsSync(path.join(targetTranscripts, "link.jsonl")), false);
-    assert.equal(existsSync(path.join(dataDir, "projects", slug, "worker.log")), false);
-    assert.equal(existsSync(path.join(dataDir, "projects", slug, "terminals")), false);
-    assert.ok(
-      Math.abs(
-        statSync(path.join(targetTranscripts, "a.jsonl")).mtimeMs - statSync(path.join(transcripts, "a.jsonl")).mtimeMs,
-      ) < 1,
-      "mtime preserved (sub-ms precision)",
-    );
-    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "apply never touches the source");
-    assert.ok(existsSync(path.join(dataDir, "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST)));
-
-    // Idempotent: a second apply copies nothing.
-    const again = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    assert.deepEqual([...again.copied], []);
-
-    // A file Cursor writes after apply must survive revert (and keep its dir).
-    writeFileSync(path.join(targetTranscripts, "nested", "new-after-apply.jsonl"), "new\n");
-
-    const reverted = revertLegacyCursorTranscriptCopy({ home });
-    assert.equal(reverted.removedFiles.length, 2);
-    assert.deepEqual([...reverted.keptDirs], [`projects/${slug}/agent-transcripts/nested`]);
-    assert.deepEqual([...reverted.keptFiles], []);
-    assert.deepEqual(listTree(targetTranscripts).sort(), ["b.txt", "nested", path.join("nested", "new-after-apply.jsonl")]);
-    assert.equal(readFileSync(path.join(targetTranscripts, "b.txt"), "utf8"), "isolated-b\n");
-    // The non-empty "nested" dir stays recorded, so the manifest is kept.
-    assert.equal(existsSync(path.join(dataDir, "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST)), true);
-    assert.deepEqual(snapshotTree(path.join(home, ".cursor")), userCursorBefore, "revert never touches the source");
-  } finally {
-    cleanup();
-  }
-});
-
-test("legacy transcript copy into a fresh data dir: revert removes the dirs apply created", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws2");
-    seedLegacyTranscripts(home, workspace);
-    const dataDir = path.join(home, "cd");
-    mkdirSync(dataDir);
-    applyLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir, workspacePaths: [workspace] });
-    assert.equal(listTree(path.join(dataDir, "projects")).filter((entry) => entry.endsWith(".jsonl") || entry.endsWith(".txt")).length, 3);
-    const reverted = revertLegacyCursorTranscriptCopy({ home, cursorDataDir: dataDir });
-    assert.equal(reverted.removedFiles.length, 3);
-    assert.deepEqual([...reverted.keptDirs], []);
-    assert.deepEqual(listTree(path.join(dataDir, "projects")), []);
-  } finally {
-    cleanup();
-  }
-});
-
-test("legacy transcript copy rejects bad inputs and tampered manifests", () => {
-  const { home, cleanup } = fixture();
-  try {
-    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: [] }), { code: "cursor_workspace_invalid" });
-    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: ["rel/ws"] }), {
-      code: "cursor_workspace_invalid",
-    });
-    assert.throws(() => planLegacyCursorTranscriptCopy({ home, workspacePaths: ["/"] }), {
-      code: "cursor_workspace_invalid",
-    });
-    assert.throws(
-      () => planLegacyCursorTranscriptCopy({ home, cursorDataDir: path.join(home, ".cursor"), workspacePaths: ["/w"] }),
-      { code: "cursor_data_dir_user_fallback_forbidden" },
-    );
-    // Source dir that is a symlink is refused.
-    const workspace = path.join(home, "ws3");
-    const projectDir = path.join(home, ".cursor", "projects", cursorWorkspaceSlug(workspace));
-    mkdirSync(projectDir, { recursive: true });
-    mkdirSync(path.join(home, "elsewhere"));
-    symlinkSync(path.join(home, "elsewhere"), path.join(projectDir, "agent-transcripts"));
-    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    assert.equal(plan.workspaces[0].action, "unsafe_source");
-
-    const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
-    mkdirSync(projectsRoot, { recursive: true });
-    writeFileSync(path.join(home, "victim.txt"), "keep");
-    const victimStat = statSync(path.join(home, "victim.txt"));
-    const victimIdentity = {
-      size: victimStat.size,
-      mtimeMs: victimStat.mtimeMs,
-      sha256: createHash("sha256").update("keep").digest("hex"),
-    };
-    const manifestPath = path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
-    writeFileSync(
-      manifestPath,
-      JSON.stringify({
-        schemaVersion: 2,
-        createdFiles: [
-          { path: "../../victim.txt", ...victimIdentity },
-          { path: path.join(home, "victim.txt"), ...victimIdentity },
-          { path: "projects/ws-x/agent-transcripts/no-snapshot.txt" },
-        ],
-        createdDirs: ["../.."],
-      }),
-    );
-    mkdirSync(path.join(projectsRoot, "ws-x", "agent-transcripts"), { recursive: true });
-    writeFileSync(path.join(projectsRoot, "ws-x", "agent-transcripts", "no-snapshot.txt"), "v1 entry");
-    const reverted = revertLegacyCursorTranscriptCopy({ home });
-    assert.deepEqual(reverted.removedFiles, []);
-    assert.deepEqual(
-      reverted.keptFiles.map((file) => file.reason),
-      ["unsafe_path", "unsafe_path", "no_snapshot"],
-    );
-    assert.equal(readFileSync(path.join(home, "victim.txt"), "utf8"), "keep");
-    assert.ok(existsSync(path.join(projectsRoot, "ws-x", "agent-transcripts", "no-snapshot.txt")));
-    assert.ok(existsSync(manifestPath), "manifest preserved on conflict");
-  } finally {
-    cleanup();
-  }
-});
-
-test("F2: undo keeps a copied transcript appended after migration and never touches new transcripts", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws-f2");
-    const { transcripts } = seedLegacyTranscripts(home, workspace);
-    applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    const slug = cursorWorkspaceSlug(workspace);
-    const target = path.join(home, ".triangle", "cursor-data", "projects", slug, "agent-transcripts");
-    // Synthetic post-migration work.
-    writeFileSync(path.join(target, "a.jsonl"), "line-a\nnew accepted reply\n");
-    writeFileSync(path.join(target, "fresh-session.jsonl"), "brand new\n");
-
-    const reverted = revertLegacyCursorTranscriptCopy({ home });
-    assert.deepEqual([...reverted.removedFiles].sort(), [
-      `projects/${slug}/agent-transcripts/b.txt`,
-      `projects/${slug}/agent-transcripts/nested/c.jsonl`,
-    ]);
-    assert.deepEqual(reverted.keptFiles.map((file) => [file.path, file.reason]), [
-      [`projects/${slug}/agent-transcripts/a.jsonl`, "modified_after_migration"],
-    ]);
-    assert.equal(readFileSync(path.join(target, "a.jsonl"), "utf8"), "line-a\nnew accepted reply\n");
-    assert.equal(readFileSync(path.join(target, "fresh-session.jsonl"), "utf8"), "brand new\n");
-    assert.equal(existsSync(path.join(target, "nested")), false, "emptied recorded dir removed");
-    const manifest = JSON.parse(
-      readFileSync(path.join(home, ".triangle", "cursor-data", "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST), "utf8"),
-    );
-    assert.deepEqual(manifest.createdFiles.map((file) => file.path), [`projects/${slug}/agent-transcripts/a.jsonl`]);
-    assert.equal(manifest.createdFiles[0].lastRevert.reason, "modified_after_migration");
-    // Legacy source untouched.
-    assert.equal(readFileSync(path.join(transcripts, "a.jsonl"), "utf8"), "line-a\n");
-  } finally {
-    cleanup();
-  }
-});
-
-test("F1: a parent replaced by a symlink cannot make undo delete outside the data dir", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws-f1");
-    seedLegacyTranscripts(home, workspace);
-    applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    const slug = cursorWorkspaceSlug(workspace);
-    const target = path.join(home, ".triangle", "cursor-data", "projects", slug, "agent-transcripts");
-    // Outside dir holding byte-identical files with identical mtimes, so only
-    // physical containment (not identity) can stop the deletion.
-    const outside = path.join(home, "unrelated");
-    mkdirSync(path.join(outside, "nested"), { recursive: true });
-    for (const name of ["a.jsonl", "b.txt", path.join("nested", "c.jsonl")]) {
-      writeFileSync(path.join(outside, name), readFileSync(path.join(target, name)));
-      const stat = statSync(path.join(target, name));
-      utimesSync(path.join(outside, name), stat.atime, stat.mtime);
-    }
-    rmSync(target, { recursive: true });
-    symlinkSync(outside, target, "dir");
-
-    const reverted = revertLegacyCursorTranscriptCopy({ home });
-    assert.deepEqual(reverted.removedFiles, []);
-    assert.equal(reverted.keptFiles.length, 3);
-    assert.ok(reverted.keptFiles.every((file) => file.reason === "unsafe_path"));
-    assert.ok(reverted.keptFiles.every((file) => file.detail === "owned_path_symlink_rejected"));
-    for (const name of ["a.jsonl", "b.txt", path.join("nested", "c.jsonl")]) {
-      assert.ok(existsSync(path.join(outside, name)), name);
-    }
-    assert.ok(existsSync(path.join(home, ".triangle", "cursor-data", "projects", CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST)));
-  } finally {
-    cleanup();
-  }
-});
-
-test("F1: apply never copies through a symlinked target parent or projects root", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws-f1b");
-    seedLegacyTranscripts(home, workspace);
-    const slug = cursorWorkspaceSlug(workspace);
-    const projects = path.join(home, ".triangle", "cursor-data", "projects");
-    const outside = path.join(home, "outside");
-    mkdirSync(outside);
-    mkdirSync(path.join(projects, slug), { recursive: true });
-    symlinkSync(outside, path.join(projects, slug, "agent-transcripts"), "dir");
-
-    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    assert.equal(plan.workspaces[0].action, "unsafe_target");
-    const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    assert.deepEqual([...applied.copied], []);
-    assert.deepEqual(readdirSync(outside), []);
-
-    // Whole projects root swapped for a symlink: refuse before reading/writing.
-    rmSync(projects, { recursive: true });
-    symlinkSync(outside, projects, "dir");
-    assert.throws(() => applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] }), {
-      code: "owned_path_symlink_rejected",
-    });
-    assert.throws(() => revertLegacyCursorTranscriptCopy({ home }), { code: "owned_path_symlink_rejected" });
-    assert.deepEqual(readdirSync(outside), []);
-  } finally {
-    cleanup();
-  }
-});
-
-test("codex r1: tampered transcript manifest cannot name non-transcript files or dirs, even with matching identity", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
-    const slugDir = path.join(projectsRoot, "ws-y");
-    mkdirSync(path.join(slugDir, "unrelated-empty"), { recursive: true });
-    const log = path.join(slugDir, "worker.log");
-    writeFileSync(log, "live worker log");
-    const stat = statSync(log);
-    const identity = {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      sha256: createHash("sha256").update("live worker log").digest("hex"),
-    };
-    const manifestPath = path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
-    writeFileSync(
-      manifestPath,
-      JSON.stringify({
-        schemaVersion: 2,
-        createdFiles: [{ path: "projects/ws-y/worker.log", ...identity }],
-        createdDirs: ["projects/ws-y/unrelated-empty", "projects"],
-      }),
-    );
-    const reverted = revertLegacyCursorTranscriptCopy({ home });
-    assert.deepEqual(reverted.removedFiles, []);
-    assert.deepEqual(reverted.removedDirs, []);
-    assert.equal(reverted.keptFiles[0].reason, "unsafe_path");
-    assert.equal(reverted.keptFiles[0].detail, "manifest_entry_outside_transcripts");
-    assert.deepEqual([...reverted.keptDirs].sort(), ["projects", "projects/ws-y/unrelated-empty"]);
-    assert.equal(readFileSync(log, "utf8"), "live worker log");
-    assert.ok(existsSync(path.join(slugDir, "unrelated-empty")));
-    assert.ok(existsSync(manifestPath));
-  } finally {
-    cleanup();
-  }
-});
-
-test("codex r1: transcript plan/apply refuse symlinked legacy source ancestors", () => {
-  for (const linked of ["projects", "slug"]) {
-    const { home, cleanup } = fixture();
-    try {
-      const workspace = path.join(home, "ws4");
-      const slug = cursorWorkspaceSlug(workspace);
-      const outside = path.join(home, "outside-legacy");
-      const outsideTranscripts = path.join(outside, ...(linked === "projects" ? [slug] : []), "agent-transcripts");
-      mkdirSync(outsideTranscripts, { recursive: true });
-      writeFileSync(path.join(outsideTranscripts, "t.jsonl"), "outside transcript");
-      mkdirSync(path.join(home, ".cursor", ...(linked === "slug" ? ["projects"] : [])), { recursive: true });
-      symlinkSync(
-        outside,
-        linked === "projects" ? path.join(home, ".cursor", "projects") : path.join(home, ".cursor", "projects", slug),
-        "dir",
-      );
-      const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-      assert.equal(plan.workspaces[0].action, "unsafe_source", linked);
-      const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-      assert.deepEqual(applied.copied, []);
-      assert.equal(
-        existsSync(path.join(home, ".triangle", "cursor-data", "projects", slug, "agent-transcripts", "t.jsonl")),
-        false,
-      );
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-test("codex r1: data dir below a symlink into ~/.cursor or ~/.codex is rejected before mkdir", () => {
+test("data dir below a symlink into ~/.cursor or ~/.codex is rejected before mkdir", () => {
   for (const forbidden of [".cursor", ".codex"]) {
     const { home, cleanup } = fixture();
     try {
@@ -959,25 +611,7 @@ test("codex r1: data dir below a symlink into ~/.cursor or ~/.codex is rejected 
   }
 });
 
-test("codex r2: transcript apply runs the socket preflight before creating or copying anything", () => {
-  const { home, cleanup } = fixture();
-  try {
-    const workspace = path.join(home, "ws5");
-    seedLegacyTranscripts(home, workspace);
-    const tooLong = path.join(home, "d".repeat(90));
-    const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: tooLong, workspacePaths: [workspace] });
-    assert.equal(plan.socketPreflight.ok, false);
-    assert.throws(
-      () => applyLegacyCursorTranscriptCopy({ home, cursorDataDir: tooLong, workspacePaths: [workspace] }),
-      { code: "cursor_socket_path_too_long" },
-    );
-    assert.equal(existsSync(tooLong), false, "data dir not created");
-  } finally {
-    cleanup();
-  }
-});
-
-test("codex r2: runtime status preflights the configured workspace, not just the data dir", () => {
+test("runtime status preflights the configured workspace, not just the data dir", () => {
   const { home, cursorHome, cleanup } = fixture();
   try {
     // One 2-byte char in the data dir + a long workspace slug: the truncated
@@ -1008,26 +642,7 @@ test("codex r2: runtime status preflights the configured workspace, not just the
   }
 });
 
-test("codex r2: revert removes the projects dir that apply created once the manifest is gone", () => {
-  for (const seeded of [true, false]) {
-    const { home, cleanup } = fixture();
-    try {
-      const workspace = path.join(home, "ws6");
-      if (seeded) seedLegacyTranscripts(home, workspace);
-      const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
-      assert.equal(existsSync(projectsRoot), false);
-      applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-      assert.ok(existsSync(projectsRoot));
-      const reverted = revertLegacyCursorTranscriptCopy({ home });
-      assert.ok(reverted.removedDirs.includes("projects"), `seeded=${seeded}`);
-      assert.equal(existsSync(projectsRoot), false);
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-test("codex r3: data dir overrides with '..' segments are rejected (no lexical collapse past a symlink)", () => {
+test("data dir overrides with '..' segments are rejected (no lexical collapse past a symlink)", () => {
   const { home, cleanup } = fixture();
   try {
     mkdirSync(path.join(home, ".cursor", "subdir"), { recursive: true });
@@ -1045,34 +660,7 @@ test("codex r3: data dir overrides with '..' segments are rejected (no lexical c
   }
 });
 
-test("codex r3: a transcript manifest write failure rolls that copy back", { skip: process.platform !== "darwin" }, () => {
-  const { home, cleanup } = fixture();
-  const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
-  const manifestPath = path.join(projectsRoot, CURSOR_LEGACY_TRANSCRIPT_COPY_MANIFEST);
-  try {
-    const workspace = path.join(home, "ws7");
-    seedLegacyTranscripts(home, workspace);
-    mkdirSync(projectsRoot, { recursive: true });
-    writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 2, createdFiles: [], createdDirs: [] }));
-    execFileSync("chflags", ["uchg", manifestPath]); // rename onto it fails with EPERM
-    let thrown;
-    try {
-      applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
-    } catch (error) {
-      thrown = error;
-    }
-    assert.ok(thrown, "apply surfaces the manifest failure");
-    assert.equal(thrown.rolledBack, true);
-    const slugDir = path.join(projectsRoot, cursorWorkspaceSlug(workspace));
-    assert.equal(existsSync(slugDir), false, "no untracked copy or created dirs left");
-    assert.deepEqual(readdirSync(projectsRoot).filter((name) => name.endsWith(".tmp")), []);
-  } finally {
-    try { execFileSync("chflags", ["nouchg", manifestPath]); } catch {}
-    cleanup();
-  }
-});
-
-test("codex r3: an injected env without TRIANGLE_CURSOR_DATA_DIR ignores the host process.env value", () => {
+test("an injected env without TRIANGLE_CURSOR_DATA_DIR ignores the host process.env value", () => {
   const { home, cursorHome, cleanup } = fixture();
   const previous = process.env.TRIANGLE_CURSOR_DATA_DIR;
   process.env.TRIANGLE_CURSOR_DATA_DIR = path.join(home, "host-ambient-data");
