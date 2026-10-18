@@ -195,6 +195,15 @@ export function resolveOwnedSourceFile(sourceAnchor, sourceRelative) {
   return { absolute: resolved.absolute, stat: resolved.leaf };
 }
 
+function removeTornTarget(anchor, parts) {
+  try {
+    const partial = resolveOwnedPath(anchor, parts.join("/"), { allowMissingLeaf: true });
+    if (partial.leaf?.isFile()) unlinkSync(partial.absolute);
+  } catch {
+    // Unsafe or vanished: leave it; callers report the failure.
+  }
+}
+
 /**
  * Copy a regular source file to `relative` below `anchor` with exclusive
  * create (never overwrites), preserving atime/mtime. Target ancestors are
@@ -227,19 +236,21 @@ export function copyFileIntoOwned({ anchor, relative, source, sourceAnchor, sour
     }
     // The exclusive create succeeded before the copy failed (e.g. EACCES on a
     // later read, ENOSPC): the partial target is ours, so remove it rather
-    // than leave an unrecorded torn file behind. Re-validate first.
-    try {
-      const partial = resolveOwnedPath(anchor, parts.join("/"), { allowMissingLeaf: true });
-      if (partial.leaf?.isFile()) unlinkSync(partial.absolute);
-    } catch {
-      // Unsafe or vanished: leave it; callers report the failure.
-    }
+    // than leave an unrecorded torn file behind.
+    removeTornTarget(anchor, parts);
     throw Object.assign(error, { createdDirs });
   }
   // Re-validate before touching metadata: the parent must still be physical.
-  const copied = resolveOwnedPath(anchor, parts.join("/"));
-  utimesSync(copied.absolute, sourceStat.atime, sourceStat.mtime);
-  return Object.freeze({ status: "copied", createdDirs, identity: ownedFileIdentity(copied.absolute) });
+  // Any failure after the exclusive create removes the new target (it is ours
+  // and unrecorded), so callers never strand an untracked file.
+  try {
+    const copied = resolveOwnedPath(anchor, parts.join("/"));
+    utimesSync(copied.absolute, sourceStat.atime, sourceStat.mtime);
+    return Object.freeze({ status: "copied", createdDirs, identity: ownedFileIdentity(copied.absolute) });
+  } catch (error) {
+    removeTornTarget(anchor, parts);
+    throw Object.assign(error, { createdDirs });
+  }
 }
 
 /**

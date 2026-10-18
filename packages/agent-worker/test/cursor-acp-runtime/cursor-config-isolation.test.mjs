@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
@@ -510,6 +511,92 @@ test("codex r1: tampered manifest createdDirs outside the session are never remo
     assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "store.db")));
     assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "meta.json")));
   } finally {
+    cleanup();
+  }
+});
+
+test("codex r2: an unlink error midway through undo records progress and a later undo resumes", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const source = seedLegacySession(home, SESSION_A, "legacy-a");
+  mkdirSync(path.join(source, "sub"));
+  writeFileSync(path.join(source, "sub", "x.bin"), "nested");
+  const nested = path.join(cursorHome, "acp-sessions", SESSION_A, "sub");
+  try {
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    chmodSync(nested, 0o500); // unlink of sub/x.bin fails with EACCES
+    const first = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(first.removed, []);
+    assert.equal(first.kept[0].reason, "remove_failed");
+    assert.deepEqual(first.kept[0].removedFiles, ["meta.json", "store.db"]);
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.deepEqual(manifest.copied[0].files.map((file) => file.path), [`acp-sessions/${SESSION_A}/sub/x.bin`]);
+    assert.equal(manifest.copied[0].revertInProgress, true);
+
+    chmodSync(nested, 0o700);
+    const second = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(second.removed, [SESSION_A]);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+    assert.equal(existsSync(manifestPath), false);
+  } finally {
+    try { chmodSync(nested, 0o700); } catch {}
+    cleanup();
+  }
+});
+
+test("codex r2: an undo that crashed after unlinking (write-ahead flag set) is resumable", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.copied[0].revertInProgress = true;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    rmSync(path.join(cursorHome, "acp-sessions", SESSION_A, "meta.json")); // simulated crash after one unlink
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, [SESSION_A]);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r2: without the write-ahead flag a missing copied file still counts as use", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    rmSync(path.join(cursorHome, "acp-sessions", SESSION_A, "meta.json"));
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.equal(reverted.kept[0].reason, "used_after_migration");
+    assert.deepEqual(reverted.kept[0].missingFiles, ["meta.json"]);
+    assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "store.db")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r2: a manifest write failure after copying rolls the session back", { skip: process.platform !== "darwin" }, () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    mkdirSync(path.join(cursorHome, "acp-sessions"));
+    writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 2, copied: [] }));
+    execFileSync("chflags", ["uchg", manifestPath]); // rename onto it fails with EPERM
+    const result = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(result.copied, []);
+    assert.equal(result.failed[0].sessionId, SESSION_A);
+    assert.equal(result.failed[0].rolledBack, true);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+    assert.deepEqual(
+      readdirSync(path.join(cursorHome, "acp-sessions")).filter((name) => name.endsWith(".tmp")),
+      [],
+      "no stale manifest temp left behind",
+    );
+  } finally {
+    try { execFileSync("chflags", ["nouchg", manifestPath]); } catch {}
     cleanup();
   }
 });
