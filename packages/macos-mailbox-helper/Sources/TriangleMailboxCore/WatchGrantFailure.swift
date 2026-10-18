@@ -105,8 +105,8 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
     }
 
     public static let keychainSigningNotes: [String] = [
-        "Ad-hoc (--local-ad-hoc) helpers cannot embed Developer ID Keychain access groups.",
-        "For LaunchAgent custody, reinstall with TRIANGLE_DEVELOPER_ID / TRIANGLE_DEVELOPER_TEAM_ID.",
+        "Ad-hoc helpers cannot embed Keychain access groups; Developer ID signing is out of scope for Triangle releases.",
+        "For LaunchAgent custody, use file custody: a public ad-hoc install enables credentials/local (0600 files), then re-enroll the profile.",
         "If the login Keychain is locked, unlock it once and retry.",
     ]
 

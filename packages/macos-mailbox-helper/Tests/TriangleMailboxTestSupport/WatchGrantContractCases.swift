@@ -168,6 +168,11 @@ public enum WatchGrantContractCases {
             keychain.operatorNotes.contains(where: { $0.contains("Developer ID") }),
             "keychain failure omitted Developer ID note"
         )
+        try expect(
+            keychain.operatorNotes.contains(where: { $0.contains("file custody") })
+                && !keychain.operatorNotes.contains(where: { $0.contains("TRIANGLE_DEVELOPER_ID") }),
+            "keychain failure must point at file custody, not a Developer ID reinstall"
+        )
 
         let profile = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.localAuthorizationRequired)
         try expect(profile.gate == .keychain, "credential gate lock should map to keychain")

@@ -1,23 +1,31 @@
 # Triangle mailbox helper and Triangle Client host for macOS
 
 `triangle-mailbox` is the local credential custodian for a durable MESH mailbox
-identity. Keychain is the authority for the origin, agent ID, handle, and
-permanent token binding. Chatbot transcripts, project files, LaunchAgent plists,
+identity. On a public ad-hoc install, `0600` files under
+`~/Library/Application Support/The Triangle/credentials/local/` are the
+authority for the origin, agent ID, handle, and permanent token binding; on a
+`--local-ad-hoc` compatibility install the Keychain is the authority. Chatbot transcripts, project files, LaunchAgent plists,
 and reasoning subprocesses are not credential stores.
 
 ## Install
 
-Public distribution requires a stable Developer ID Application identity, its
-ten-character team ID, the designated application identifier
-`dev.thetriangle.mailbox`, and the matching default Data Protection Keychain
-access-group entitlement. Configure the non-secret signing identity through the
-installer environment, then run:
+Developer ID signing and notarization are out of scope. Public installs are
+ad-hoc signed (`codesign --force --sign -`, identifier `dev.thetriangle.mailbox`,
+no entitlements) and use portable file credential custody, because ad-hoc
+signatures cannot carry Keychain access-group entitlements:
 
 ```sh
-export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
-export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
 ./scripts/install-macos-mailbox-helper.sh
 ```
+
+The public build sets `TRIANGLE_FILE_CUSTODY_REQUIRED`, writes the
+`credentials/local/ENABLED` marker, and records `signingMode: public_ad_hoc`
+and `credentialCustody: file`. `TRIANGLE_CREDENTIAL_CUSTODY=keychain` is
+refused (installer exit 64; helper exit 78), and a public install over an
+existing Keychain-custody install is refused (exit 78) unless
+`TRIANGLE_ACK_CUSTODY_SWITCH=1` acknowledges re-enrollment. A source tree that
+carries `com.apple.quarantine` (browser download) is refused with remediation;
+see `scripts/release/check-quarantine.sh`.
 
 The installer release-builds the helper and installs it at the canonical,
 application-owned path:
@@ -27,7 +35,9 @@ application-owned path:
 ```
 
 It rejects symlinks, unexpected file types, wrong ownership or permissions,
-and signature, identifier, designated-requirement, or entitlement mismatches.
+and signatures that fail strict verification, are not ad-hoc, have the wrong
+identifier, carry a certificate authority or team, or embed Keychain
+entitlements.
 Replacement uses same-filesystem staging, fsync, atomic rename, and rollback.
 An existing helper and its manifests are restored byte-for-byte if a later gate
 fails.
@@ -38,8 +48,11 @@ For development only, an explicit ad-hoc mode is available:
 ./scripts/install-macos-mailbox-helper.sh --local-ad-hoc
 ```
 
-`--local-ad-hoc` is non-public, local testing only. It does not provide the
-stable application identity required for a distributed Keychain credential.
+`--local-ad-hoc` is non-public, local testing only. It keeps the Keychain
+compatibility path (with the legacy login-Keychain fallback) for existing
+profiles and does not provide a stable application identity for a distributed
+Keychain credential. `TRIANGLE_CREDENTIAL_CUSTODY=file` opts it into file
+custody.
 
 ## Enroll once through standard input
 
@@ -93,12 +106,10 @@ Sep-2-era helpers reject `watch-ensure` as an unknown command
 Application Support binary includes the Phase 2 watch surface:
 
 ```sh
-# Public / LaunchAgent custody (Developer ID):
-export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
-export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
+# Public ad-hoc release (file custody):
 ./scripts/install-macos-mailbox-helper.sh
 
-# Local development only (no Developer ID Keychain access groups):
+# Local development / existing Keychain-custody hosts:
 ./scripts/install-macos-mailbox-helper.sh --local-ad-hoc
 ```
 
@@ -117,9 +128,9 @@ The installer refuses to commit if any of those probes fail. Install metadata at
 `~/Library/Application Support/The Triangle/install-manifest/triangle-mailbox-install.json`
 includes `cliSurface: ["watch-ensure","watch-poll","watch-status","watch-revoke"]`.
 
-Ad-hoc vs Developer ID: `--local-ad-hoc` is fine for parsing/help checks and
-local experiments, but it cannot embed Keychain access-group entitlements. Prefer
-Developer ID for LaunchAgent custody and durable `mailbox-watch` items.
+Ad-hoc custody: neither mode can embed Keychain access-group entitlements
+(Developer ID is out of scope). Use the public install's file custody for
+LaunchAgent custody and durable watch-grant items.
 
 ### Operator commands
 
@@ -172,7 +183,7 @@ opaque enrollment-era `operation_failed` blob. Fields:
 | `code` | Machine-readable failure (`workload_key_missing`, `interactive_delivery_excluded`, …) |
 | `gate` | Which gate failed: `validation`, `membership`, `workload_auth`, `keychain`, `network`, or `profile` |
 | `operatorAction` | Next step (`unlock_login_keychain`, `use_event_driven_profile`, `repair_workload_auth`, …) |
-| `operatorNotes` | Short secret-free hints (ad-hoc vs Developer ID, mcp-interactive exclusion, …) |
+| `operatorNotes` | Short secret-free hints (ad-hoc Keychain limits / file custody, mcp-interactive exclusion, …) |
 | `safeToRetry` / `mustNotReregister` | Retry / re-registration policy |
 
 Never expect `mesh_` or `mesh_watch_` material in this JSON. Common Mac checks
@@ -187,7 +198,8 @@ after a failure (operator-run on the Mac; not claimed from Linux CI):
 4. Keychain services `dev.thetriangle.mesh.mailbox` and
    `dev.thetriangle.mesh.workload-key` should exist for the profile;
    `dev.thetriangle.mesh.mailbox-watch` appears only after a successful ensure.
-5. If `gate` is `keychain` on an ad-hoc helper, reinstall with Developer ID.
+5. If `gate` is `keychain` on an ad-hoc helper, move the host to file custody
+   (public install, then re-enroll); Developer ID is out of scope.
 6. If `code` is `credential_busy` (or `operatorAction` is `retry_later`), another
    helper process holds the profile `enroll-*.lock` (often concurrent
    `watch-ensure` / `status` / `transaction-*`). Retry the same command; do

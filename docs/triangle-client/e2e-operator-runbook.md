@@ -20,20 +20,23 @@ Companion docs:
   Bob vs Codex host adapters; do not treat event-driven `codex exec` as Grok Bot
 
 
-## 0. Decide signing mode before you touch Keychain
+## 0. Decide signing mode before you enroll
+
+Developer ID signing and notarization are out of scope; every install is ad-hoc
+signed.
 
 | Intent | Command shape |
 | --- | --- |
-| Install for **another person’s Mac** / production Keychain custody | Developer ID env set; **omit** `--local-ad-hoc` |
-| Local source experiment only | `--local-ad-hoc` (non-public; **no** stable distributed Keychain identity) |
+| Install for **another person’s Mac** (public ad-hoc, file custody) | **omit** `--local-ad-hoc`; leave `TRIANGLE_DEVELOPER_ID` / `TRIANGLE_CREDENTIAL_CUSTODY` unset |
+| Local source experiment, or a host with existing Keychain-enrolled profiles | `--local-ad-hoc` (non-public; **no** stable distributed Keychain identity) |
+
+Get the source with `git clone` or `curl` (not a browser download). If it came
+from a browser, the installer stops with a `com.apple.quarantine` diagnostic;
+check an archive before extracting it:
 
 ```sh
-# Public (required for coherent release installs on other machines)
-export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
-export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
+/bin/bash scripts/release/check-quarantine.sh ~/Downloads/triangle-client-<version>.tar.gz
 ```
-
-Replace with your reviewed identity. **Do not invent or commit these values.**
 
 Confirm at least one runtime CLI and Node 22+:
 
@@ -83,7 +86,8 @@ Sanity:
 python3 -c 'import json,pathlib; p=pathlib.Path.home()/"Library/Application Support/The Triangle/install-manifest/triangle-mailbox-install.json"; print(json.load(p.open())["signingMode"])'
 ```
 
-`signingMode` must be `developer_id` for a public release install.
+`signingMode` must be `public_ad_hoc` (with `credentialCustody` `file`) for a
+public release install.
 
 ## 2. Enroll a mailbox identity (stdin admission)
 
@@ -273,18 +277,19 @@ Uninstall service only (identities remain in Keychain):
 
 - [ ] No `mesh_` / `mesh_watch_` in LaunchAgent plists, Node env, or logs
 - [ ] Enrollment used stdin (or a deleted protected file), never argv
-- [ ] Public install shows `signingMode: developer_id`
+- [ ] Public install shows `signingMode: public_ad_hoc` and `credentialCustody: file`
 - [ ] Watch actor profile is `event-driven`, not `mcp-interactive`
-- [ ] Helper remains the only Keychain custodian
+- [ ] Helper remains the only credential custodian (file custody, or Keychain on `--local-ad-hoc`)
 
 ## Stop conditions / known gaps
 
 | Gap | Effect |
 | --- | --- |
-| Missing Developer ID on build Mac | Cannot claim public install; ad-hoc is local-only |
+| Quarantined (browser-downloaded) source | Installer exits 78; re-download with `curl` or clear `com.apple.quarantine` after checksum verification |
+| Existing Keychain-custody install | Public install exits 78; stay on `--local-ad-hoc` or re-enroll with `TRIANGLE_ACK_CUSTODY_SWITCH=1` |
 | No ChatGPT.app | Cannot complete desktop Gate A / Bob canary |
 | Live helper watch gaps | Follow `operatorAction`; do not reopen Phase 2 Complete |
-| No routine credential-delete CLI | Uninstall leaves Keychain items; separate decommission review |
+| No routine credential-delete CLI | Uninstall leaves file-custody credentials or Keychain items; separate decommission review |
 
 ## Minimal success criteria for this runbook
 

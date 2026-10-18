@@ -10,34 +10,99 @@ gates, use [release-workflow.md](release-workflow.md).
 
 ## What “release bundle” means
 
-Triangle Client does **not** ship a separate `.pkg` or `.dmg` in this
-repository. The installable release bundle is:
+Triangle Client does **not** ship a separate `.pkg`, `.dmg`, or signed `.app`
+in this repository. **Apple Developer ID signing and notarization are out of
+scope** (owner decision, 2026-10-17). The installable release bundle is:
 
-1. A reviewed git checkout (or tagged release tree) of this repository.
-2. The installer `./scripts/install-macos-mailbox-helper.sh --install-client`.
-3. Non-secret Developer ID environment on the **build/install Mac** (public
-   distribution only).
-4. At least one supported reasoning CLI on `PATH` (Codex, Hermes, and/or
+1. A reviewed git checkout (or tagged release tree) of this repository,
+   obtained with `git clone` or a `curl`-downloaded archive.
+2. The installer `./scripts/install-macos-mailbox-helper.sh --install-client`,
+   which builds and **ad-hoc signs** (`codesign --force --sign -`) the
+   executables on the install Mac.
+3. At least one supported reasoning CLI on `PATH` (Codex, Hermes, and/or
    Antigravity/`agy`) plus Node 22+ with `node:fs` `globSync`.
 
-That installer release-builds, codesigns, atomically installs, and stages the
-single LaunchAgent. Operators do not hand-copy binaries into Application
-Support.
+That installer release-builds, ad-hoc signs, verifies, atomically installs, and
+stages the single LaunchAgent. Operators do not hand-copy binaries into
+Application Support.
 
 ## Signing modes (must not be confused)
 
-| Mode | How | Keychain / distribution | Use |
+| Mode | How | Credential custody | Use |
 | --- | --- | --- | --- |
-| **Developer ID (public)** | `TRIANGLE_DEVELOPER_ID` + `TRIANGLE_DEVELOPER_TEAM_ID` set; **no** `--local-ad-hoc` | Stable application identity `dev.thetriangle.mailbox` with Data Protection Keychain access-group entitlements | **Required** to install on another person’s Mac for production-grade custody |
-| **Local ad-hoc** | `--local-ad-hoc` | **Does not** provide a stable distributed Keychain identity; AMFI rejects restricted Keychain entitlements on ad-hoc signatures | Source development / local testing **only** |
+| **Public ad-hoc release** (`signingMode: public_ad_hoc`) | Default; **no** `--local-ad-hoc` | **File custody required**: `0600` files under `credentials/local/` (built with `TRIANGLE_FILE_CUSTODY_REQUIRED`). Keychain custody is refused | Installing on another person’s Mac |
+| **Local ad-hoc** (`signingMode: local_ad_hoc`) | `--local-ad-hoc` | Legacy Keychain compatibility path (with the legacy login-Keychain fallback); `TRIANGLE_CREDENTIAL_CUSTODY=file` or an existing `credentials/local/ENABLED` marker selects file custody | Source development / local testing **only**; keeps existing Keychain-enrolled profiles working |
 
-Public install fails closed if Developer ID env is missing. Ad-hoc always prints
-a non-public warning. Install manifests record `signingMode` as
-`developer_id` or `local_ad_hoc` under
-`~/Library/Application Support/The Triangle/install-manifest/`.
+Both modes produce an ad-hoc signature with identifier `dev.thetriangle.mailbox`
+and **no** entitlements. An ad-hoc signature satisfies the Apple-silicon
+requirement that every executable carry a valid signature, and the linker
+already ad-hoc signs at build time; but modifying a binary after signing
+invalidates it, so the installer signs last and verifies after installation
+([Apple release notes](https://developer.apple.com/documentation/macos-release-notes/macos-big-sur-11_0_1-universal-apps-release-notes)).
+An ad-hoc signature carries **no** publisher identity, notarization, or
+Gatekeeper distribution acceptance; release/update metadata must be
+authenticated independently (for example a published SHA-256 checked before
+extraction).
 
-**Never invent or commit Developer ID strings or team IDs.** Operators supply
-their own reviewed Apple credentials on the build machine.
+Ad-hoc signatures cannot carry the restricted `keychain-access-groups`
+entitlement, so a public install does **not** provide a
+stable distributed Keychain identity. That is why public installs use portable file custody:
+
+- `TRIANGLE_CREDENTIAL_CUSTODY=keychain` with a public install fails before
+  building (exit 64), and a public-release helper started with that variable
+  exits 78 with the same explanation. There is no silent backend fallback.
+- Protected files are `0600` under `0700` directories; they are **not**
+  encrypted at rest.
+- Selecting file custody (public mode, or `--local-ad-hoc` with
+  `TRIANGLE_CREDENTIAL_CUSTODY=file` / `TRIANGLE_FILE_CREDENTIALS=1`) over an
+  existing Keychain-custody install (no `ENABLED` marker, `credentialCustody`
+  absent or `keychain`) is refused (exit 78) because those Keychain profiles
+  would no longer be visible. Keep that Mac on `--local-ad-hoc` Keychain
+  custody, or switch deliberately with `TRIANGLE_ACK_CUSTODY_SWITCH=1`: the
+  switch refuses `--install-client` / `--install-worker` (exit 64) and
+  requires every `dev.thetriangle.*` LaunchAgent to be uninstalled first
+  (exit 78). Re-enroll each profile, then reinstall the service.
+- The `ENABLED` marker is created inside the install transaction and removed
+  if any later install gate fails.
+- `check-release-readiness.sh --mode public` requires both `triangle-mailbox`
+  and `triangle-client` artifacts and probes each one's compiled custody
+  policy (it must refuse `TRIANGLE_CREDENTIAL_CUSTODY=keychain` with exit 78),
+  so a `--local-ad-hoc` build cannot pass on its signature alone.
+
+Install manifests under
+`~/Library/Application Support/The Triangle/install-manifest/` record
+`signingMode` (`public_ad_hoc` or `local_ad_hoc`), `teamId: null`, and
+`credentialCustody` (`file` or `keychain`). Setting `TRIANGLE_DEVELOPER_ID` or
+`TRIANGLE_DEVELOPER_TEAM_ID` makes the installer fail: there is no Developer ID
+path. **Never invent or commit signing identities or team IDs.**
+
+## Quarantine check (bootstrap)
+
+`curl`/`scp` downloads are not quarantined, but browser downloads are, and
+Archive Utility propagates `com.apple.quarantine` to every extracted file
+([Apple DTS](https://developer.apple.com/forums/thread/706442)). Gatekeeper may
+then block the ad-hoc binaries at launch with no Triangle-level error, and a
+blocked doctor cannot diagnose itself. So:
+
+- The installer runs `scripts/release/check-quarantine.sh` on its own source
+  tree before building and fails with exit 78, the quarantined paths, and the
+  fix if any file (outside `.git`, `node_modules`, `.build`) carries
+  `com.apple.quarantine`. If any part of the tree cannot be scanned it fails
+  closed with exit 74.
+- Check a downloaded archive before extracting it, with `bash` (the check is a
+  script, so it is not itself subject to a Gatekeeper launch block):
+
+  ```sh
+  /bin/bash triangle-client/scripts/release/check-quarantine.sh ~/Downloads/triangle-client-<version>.tar.gz
+  ```
+
+- Fix: re-download with `curl -fLO <url>`, verify the published SHA-256, and
+  extract with `tar -xzf`; or, after verifying the checksum,
+  `xattr -dr com.apple.quarantine <archive-or-directory>`.
+
+An absent quarantine attribute is not a guarantee that Gatekeeper never
+assesses the binary; Gatekeeper/quarantine behavior must be proven on a fresh
+VM or clean machine.
 
 ## What gets installed where
 
@@ -46,7 +111,7 @@ After a successful `./scripts/install-macos-mailbox-helper.sh --install-client`:
 ```text
 ~/Library/Application Support/The Triangle/
   bin/
-    triangle-mailbox          # Keychain custodian + run-supervisor host (mode 0700)
+    triangle-mailbox          # credential custodian + run-supervisor host (mode 0700)
     triangle-client           # lifecycle CLI (mode 0700)
     mesh                      # optional copy of the mesh operator CLI
   install-manifest/
@@ -56,7 +121,9 @@ After a successful `./scripts/install-macos-mailbox-helper.sh --install-client`:
     triangle-client-install.json
   worker-runtime/             # content-addressed v4 runtime bundles (created as prepared)
   client/                     # registry, readiness/activation markers, installation.json
-  credentials/                # directory only — not a token store
+  credentials/                # 0700
+    local/                    # public file custody (0700): ENABLED marker (0600),
+                              # mailbox/, workload/, watch/ credential files (0600)
   model-state/                # per-instance mutable state roots
 
 ~/Library/LaunchAgents/
@@ -82,22 +149,26 @@ activation gates pass. See [docs/triangle-client/README.md](README.md).
 
 ## Prerequisites (public install Mac)
 
-- macOS 13 or newer
+- macOS 13 or newer (Apple silicon or Intel)
 - Xcode / Swift toolchain able to `swift build -c release`
-- `codesign` with a Developer ID Application identity present in the local
-  keychain of the **install machine**
+- `codesign` (ships with macOS; ad-hoc signing needs no certificate or
+  Keychain identity)
 - Node.js 22.0.0+ (release suite exercised on Node 22 and 24)
 - At least one of: `codex`, `hermes`, or `agy` / Antigravity CLI on `PATH`
   (or `CODEX_CLI` / `HERMES_CLI` / `ANTIGRAVITY_CLI` / `AGY_CLI`)
 - A MESH admission credential for enrollment (stdin only; never argv)
+- An install source without `com.apple.quarantine` (see
+  [Quarantine check](#quarantine-check-bootstrap))
 
 Optional for desktop App Server wake proofs: ChatGPT.app on that Mac. That path
 is documented separately and is **not** claimed from Linux.
 
 ## First-start sequence (summary)
 
-1. Export Developer ID env (public) **or** accept ad-hoc local-only.
-2. `./scripts/install-macos-mailbox-helper.sh --install-client`
+1. Obtain the source with `git clone` or `curl` (not a browser), or clear
+   quarantine after verifying the checksum.
+2. `./scripts/install-macos-mailbox-helper.sh --install-client` (public ad-hoc,
+   file custody)
 3. Enroll each profile via `triangle-mailbox enroll … < admission.json`
 4. `triangle-client agent add --profile … --runtime …`
 5. Operate with `agent list|status|enable|disable|remove|set-delivery-mode`
@@ -108,25 +179,32 @@ Exact commands and verification: [e2e-operator-runbook.md](e2e-operator-runbook.
 
 ## Upgrade
 
-Re-run the installer from the new checkout:
+Re-run the installer from the new checkout, in the same mode as the existing
+install:
 
 ```sh
-export TRIANGLE_DEVELOPER_ID='Developer ID Application: Example (TEAMID1234)'
-export TRIANGLE_DEVELOPER_TEAM_ID='TEAMID1234'
-./scripts/install-macos-mailbox-helper.sh --install-client
+./scripts/install-macos-mailbox-helper.sh --install-client             # public_ad_hoc / file custody
+./scripts/install-macos-mailbox-helper.sh --install-client --local-ad-hoc  # existing Keychain-custody hosts
 ```
 
 Effects:
 
 - Atomically replaces `triangle-mailbox` and `triangle-client` with verified
-  signatures and SHA-256 manifests; rolls back on failed gates.
+  ad-hoc signatures and SHA-256 manifests; rolls back on failed gates.
 - Re-prepares version-4 runtime bundles and reloads `dev.thetriangle.client`
   transactionally when profiles already exist.
-- **Does not** rewrite or export Keychain identities or profile records.
+- **Does not** rewrite, export, or migrate Keychain or file credentials or
+  profile records. Moving profiles between Keychain and file custody is an
+  explicit re-enrollment, never an automatic copy; see
+  [`packages/macos-mailbox-helper/KEYCHAIN_POLICY.md`](../../packages/macos-mailbox-helper/KEYCHAIN_POLICY.md).
 
-Do not mix ad-hoc and Developer ID on the same Keychain-backed profiles without
-following the migration notes in
-[`packages/macos-mailbox-helper/KEYCHAIN_POLICY.md`](../../packages/macos-mailbox-helper/KEYCHAIN_POLICY.md).
+Release gate for the final artifacts (macOS, after the last modification):
+
+```sh
+./scripts/release/check-release-readiness.sh --mode public \
+  --artifact "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" \
+  --artifact "$HOME/Library/Application Support/The Triangle/bin/triangle-client"
+```
 
 ## Uninstall
 
@@ -135,7 +213,7 @@ following the migration notes in
 ```
 
 Removes the LaunchAgent plist and stops the service. It does **not** delete
-Keychain credentials or require a show/export path. Removing binaries or
+file or Keychain credentials or require a show/export path. Removing binaries or
 identities is a separately reviewed local decommissioning procedure (there is
 intentionally no routine credential-delete CLI in this release).
 
@@ -149,12 +227,15 @@ See the helper README and Triangle Client guide.
 
 | Surface | Allowed | Forbidden |
 | --- | --- | --- |
-| Signed helper (`triangle-mailbox`) | Keychain read/write for mailbox + watch grants; stdin enrollment | Logging or printing permanent tokens / `mesh_watch_` secrets |
+| Ad-hoc signed helper (`triangle-mailbox`) | File-custody (public) or Keychain (`--local-ad-hoc`) read/write for mailbox + watch grants; stdin enrollment | Logging or printing permanent tokens / `mesh_watch_` secrets |
 | Node coordinator / adapters | Secret-free bootstrap fields and helper CLI invocations | Holding `mesh_` or `mesh_watch_` in process argv, env, or logs |
 | LaunchAgent plists | Helper path + `run-supervisor` | Any credential, admission token, or watch secret |
 | Operator shell / docs examples | Profile names, origins, installation ids (`inst_…`), handles | Real tokens in committed files or command history |
 
-Keychain services (non-secret names):
+File custody paths (public; non-secret names):
+`credentials/local/{mailbox,workload,watch}/<name>.json`.
+
+Keychain services (`--local-ad-hoc` compatibility; non-secret names):
 
 - Mailbox binding: `dev.thetriangle.mesh.mailbox`
 - Watch grant: `dev.thetriangle.mesh.mailbox-watch`
@@ -166,16 +247,22 @@ wake requires `deliveryMode: event-driven`.
 
 | Path | Role |
 | --- | --- |
-| `scripts/install-macos-mailbox-helper.sh` | Build, sign, install helper + client; optional `--install-client` |
+| `scripts/install-macos-mailbox-helper.sh` | Build, ad-hoc sign, install helper + client; optional `--install-client` |
+| `scripts/release/check-quarantine.sh` | Bootstrap `com.apple.quarantine` diagnostic for archives / source trees |
 | `scripts/triangle-client-service.sh` | prepare-runtime / install / start / stop / status / uninstall |
 | `scripts/triangle-worker-service.sh` | Legacy single-agent worker service (migration only) |
-| `scripts/release/check-release-readiness.sh` | Fail-closed preflight against [release-workflow.md](release-workflow.md) (no secrets) |
+| `scripts/release/check-release-readiness.sh` | Fail-closed preflight against [release-workflow.md](release-workflow.md); `--mode public --artifact …` validates ad-hoc signatures (no secrets) |
 | `scripts/release/verify-secret-boundaries.sh` | Scan templates/docs/scripts for forbidden credential patterns |
 
 ## Known operator / cert gaps (do not block this docs package)
 
-- **Developer ID on the build Mac** — required for public installs; not provided
-  by this repository.
+- **Clean-machine proofs** — Gatekeeper/quarantine behavior and the
+  file-custody clean install must be proven on a fresh VM or clean machine; a
+  new user account on an existing Mac does not reset policy caches. Not yet
+  run.
+- **Authenticated update metadata** — the ad-hoc signature does not
+  authenticate the publisher; a signed/hashed release manifest is still to be
+  designed.
 - **ChatGPT.app / Mac Gate A / Bob canary desktop admit** — App Server wake
   proofs require a human on macOS; see
   [codex-desktop-wake-handoff.md](codex-desktop-wake-handoff.md). Linux agents
