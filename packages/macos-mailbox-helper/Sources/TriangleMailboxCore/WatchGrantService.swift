@@ -46,6 +46,7 @@ public struct WatchGrantService: Sendable {
     private let auth: any WatchGrantAuthProviding
     private let credentialGate: VerifiedCredentialGate
     private let instanceStore: (any ClientInstanceStore)?
+    private let expiryStore: (any WatchGrantExpiryStore)?
     /// Test-only binding file. Production reads `cursor-acp-runtime-binding.json` under the home client root.
     private let cursorAcpBindingURL: URL?
 
@@ -54,7 +55,8 @@ public struct WatchGrantService: Sendable {
         transport: any MeshTransport,
         auth: any WatchGrantAuthProviding,
         credentialGate: VerifiedCredentialGate,
-        instanceStore: (any ClientInstanceStore)? = nil
+        instanceStore: (any ClientInstanceStore)? = nil,
+        expiryStore: (any WatchGrantExpiryStore)? = nil
     ) {
         self.init(
             store: store,
@@ -62,7 +64,8 @@ public struct WatchGrantService: Sendable {
             auth: auth,
             credentialGate: credentialGate,
             instanceStore: instanceStore,
-            cursorAcpBindingURL: nil
+            cursorAcpBindingURL: nil,
+            expiryStore: expiryStore
         )
     }
 
@@ -73,7 +76,8 @@ public struct WatchGrantService: Sendable {
         auth: any WatchGrantAuthProviding,
         credentialGate: VerifiedCredentialGate,
         instanceStore: (any ClientInstanceStore)? = nil,
-        cursorAcpBindingURL: URL?
+        cursorAcpBindingURL: URL?,
+        expiryStore: (any WatchGrantExpiryStore)? = nil
     ) {
         self.store = store
         self.client = MeshWatchClient(transport: transport)
@@ -81,6 +85,7 @@ public struct WatchGrantService: Sendable {
         self.credentialGate = credentialGate
         self.instanceStore = instanceStore
         self.cursorAcpBindingURL = cursorAcpBindingURL
+        self.expiryStore = expiryStore
     }
 
     /// Creates, joins, and finalizes a staged watch grant for event-driven members, then stores the opaque credential.
@@ -171,6 +176,18 @@ public struct WatchGrantService: Sendable {
             try? await client.revokeGrant(origin: origin, watchCredential: finalized.watchCredential)
             throw WatchGrantServiceError.keychainUnavailable
         }
+        // Best effort: without the sidecar the grant still works; callers just
+        // fall back to rejection-driven renewal. Keyed by grant id so a stale
+        // record can never be reported against a newer binding.
+        if WatchGrantExpiryRecord.isValidTimestamp(staged.expiresAt) {
+            try? expiryStore?.write(WatchGrantExpiryRecord(
+                installationID: installationID,
+                grantID: finalized.grantID,
+                expiresAt: staged.expiresAt
+            ))
+        } else {
+            expiryStore?.delete(for: installationID)
+        }
         return status(from: binding)
     }
 
@@ -210,6 +227,7 @@ public struct WatchGrantService: Sendable {
         } catch let error as MeshWatchClientError {
             throw mapClientError(error)
         }
+        expiryStore?.delete(for: installationID)
         do {
             try store.delete(for: installationID)
         } catch WatchGrantStoreError.itemNotFound {
@@ -351,14 +369,16 @@ public struct WatchGrantService: Sendable {
     }
 
     private func status(from binding: WatchGrantBinding) -> WatchGrantOperatorStatus {
-        WatchGrantOperatorStatus(
+        let expiry = expiryStore?.read(for: binding.installationID)
+        return WatchGrantOperatorStatus(
             installationID: binding.installationID.value,
             origin: binding.origin.value,
             grantID: binding.grantID.value,
             agentIDs: binding.agentIDs.map(\.value),
             state: "finalized",
             audience: binding.audience,
-            purpose: binding.purpose
+            purpose: binding.purpose,
+            expiresAt: expiry?.grantID == binding.grantID.value ? expiry?.expiresAt : nil
         )
     }
 
