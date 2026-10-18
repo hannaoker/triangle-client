@@ -21,7 +21,9 @@ Usage: check-release-readiness.sh [--mode docs|public|adhoc-dev] [--artifact <pa
                entitlements, a slice for this Mac's architecture, no
                com.apple.quarantine attribute, and a compiled public custody
                policy (the binary refuses TRIANGLE_CREDENTIAL_CUSTODY=keychain
-               with exit 78 before reading any credential). Requires macOS.
+               with exit 78 before reading any credential). A quarantined
+               artifact fails without being inspected further or launched
+               (launching it would show a Gatekeeper dialog). Requires macOS.
                Notarization is not applicable.
   adhoc-dev    docs + acknowledge local-only --local-ad-hoc development
                installs; exits 0 only with TRIANGLE_ACK_ADHOC_NON_PUBLIC=1.
@@ -56,6 +58,7 @@ cd "$project_root"
 
 codesign_command=/usr/bin/codesign
 lipo_command=/usr/bin/lipo
+quarantine_command=
 host_os=$(/usr/bin/uname -s)
 host_arch=$(/usr/bin/uname -m)
 if [[ "${TRIANGLE_READINESS_TEST_MODE:-}" == "1" ]]; then
@@ -63,6 +66,9 @@ if [[ "${TRIANGLE_READINESS_TEST_MODE:-}" == "1" ]]; then
   codesign_command="${TRIANGLE_READINESS_CODESIGN_COMMAND:-$codesign_command}"
   lipo_command="${TRIANGLE_READINESS_LIPO_COMMAND:-$lipo_command}"
   host_os="${TRIANGLE_READINESS_HOST_OS:-$host_os}"
+  # Test seam: simulates com.apple.quarantine (exit 0 = clean) so the
+  # never-launch-quarantined contract is testable on any platform.
+  quarantine_command="${TRIANGLE_READINESS_QUARANTINE_COMMAND:-}"
 fi
 
 failures=0
@@ -141,6 +147,18 @@ else
 fi
 
 # --- Ad-hoc release artifact validation --------------------------------------
+# True only when the artifact is known to be free of com.apple.quarantine. Any
+# scan error (missing path, unreadable, unknown) counts as quarantined so that
+# callers fail closed and never launch the artifact.
+artifact_not_quarantined() {
+  local artifact=$1
+  if [[ -n "$quarantine_command" ]]; then
+    "$quarantine_command" "$artifact" >/dev/null 2>&1
+  else
+    /bin/bash scripts/release/check-quarantine.sh "$artifact" >/dev/null 2>&1
+  fi
+}
+
 validate_artifact() {
   local artifact=$1 display team entitlements archs label
   label=$(/usr/bin/basename "$artifact")
@@ -148,10 +166,13 @@ validate_artifact() {
     fail "artifact $label is missing or not a regular file"
     return
   fi
-  if /bin/bash scripts/release/check-quarantine.sh "$artifact" >/dev/null 2>&1; then
+  if artifact_not_quarantined "$artifact"; then
     note "artifact $label is not quarantined"
   else
     fail "artifact $label carries com.apple.quarantine (run scripts/release/check-quarantine.sh for remediation)"
+    # Never inspect further or launch a quarantined artifact: executing it
+    # invokes Gatekeeper, which shows a blocking "Not Opened" dialog.
+    return
   fi
   if "$codesign_command" --verify --strict --verbose=2 "$artifact" >/dev/null 2>&1; then
     note "artifact $label signature verifies (strict)"
@@ -193,6 +214,13 @@ validate_artifact() {
 # --local-ad-hoc or Keychain build would reach the parser and exit 64 instead.
 probe_custody_policy() {
   local artifact=$1 label=$2 probe_home probe_output probe_status
+  # Defense in depth: re-check immediately before exec so no caller (or a
+  # quarantine attribute added after validation began) can launch a
+  # quarantined artifact and trigger a Gatekeeper prompt.
+  if ! artifact_not_quarantined "$artifact"; then
+    fail "artifact $label is quarantined; refusing to launch the custody probe"
+    return
+  fi
   probe_home=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/triangle-custody-probe.XXXXXX")
   probe_status=0
   probe_output=$(/usr/bin/env -i HOME="$probe_home" PATH=/usr/bin:/bin \

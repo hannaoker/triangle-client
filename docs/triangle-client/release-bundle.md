@@ -104,6 +104,25 @@ An absent quarantine attribute is not a guarantee that Gatekeeper never
 assesses the binary; Gatekeeper/quarantine behavior must be proven on a fresh
 VM or clean machine.
 
+`check-release-readiness.sh --mode public` never launches a quarantined
+artifact: a `--artifact` that carries `com.apple.quarantine` (or cannot be
+scanned) fails without further inspection, and the custody probe re-checks the
+attribute immediately before it executes anything. Launching a quarantined
+ad-hoc executable invokes Gatekeeper, which shows a blocking
+"Apple could not verify ... is free of malware" dialog; the readiness check
+must never be the thing that triggers it. The real-exec readiness test is
+opt-in (`TRIANGLE_RUN_MACOS_EXEC_TESTS=1 npm test` in `packages/agent-worker`)
+so the default test run never launches compiled binaries.
+
+Releases today ship source that is built locally, so installed binaries are
+not quarantined. If prebuilt ad-hoc binaries are ever shipped, the install docs
+must tell users either to download them with `curl -fLO <url>` and verify the
+published `shasum -a 256` before running anything, or, for a browser download
+on macOS 15 (Sequoia) and later where Control-click no longer overrides
+Gatekeeper, to approve the blocked binary in System Settings > Privacy &
+Security > **Open Anyway**
+([Apple Developer News, 2024-08-06](https://developer.apple.com/news/?id=saqachfa)).
+
 ## What gets installed where
 
 After a successful `./scripts/install-macos-mailbox-helper.sh --install-client`:
