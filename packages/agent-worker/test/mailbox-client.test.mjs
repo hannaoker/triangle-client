@@ -2310,3 +2310,178 @@ test("identity-v1 workload key exchanges token challenge and sends DPoP proof on
   await client.listUnread();
   assert.equal(calls.filter((c) => c.url.pathname === "/api/v1/identity/tokens").length, 1);
 });
+
+test("onProgress reports claim, reply, then ack for an owned delivery (no ids or bodies)", async () => {
+  const phases = [];
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: { items: [{
+      deliveryId: 41,
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      eventId: "event_00000000000000000000000000000002",
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }] },
+    roomHistoryByRoom: new Map([["room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [canonicalEvent({
+      id: "event_00000000000000000000000000000002",
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      text: "please reply",
+    })]]]),
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, {
+    fetchImpl,
+    onProgress(event) {
+      assert.deepEqual(Object.keys(event), ["phase"]);
+      phases.push(event.phase);
+    },
+  });
+  const [message] = await client.listUnread();
+  const result = await client.completeAndAcknowledge(message, () => ({ status: "completed", text: "reply text" }));
+  assert.deepEqual(result, { reconciled: false, acknowledged: true });
+  assert.deepEqual(phases, ["claim", "reply", "ack"]);
+  assert.equal(state.appendCount, 1);
+  assert.equal(state.acknowledgeCount, 1);
+});
+
+test("onProgress reports claim+ack for replyRequired=false and never throws into delivery", async () => {
+  const phases = [];
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: { items: [{
+      deliveryId: 42,
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      eventId: "event_00000000000000000000000000000002",
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }] },
+    roomHistoryByRoom: new Map([["room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [{
+      id: "event_00000000000000000000000000000002",
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      body: { text: "fyi", replyRequired: false },
+    }]]]),
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, {
+    fetchImpl,
+    onProgress(event) {
+      phases.push(event.phase);
+      throw new Error("journal unavailable");
+    },
+  });
+  const [message] = await client.listUnread();
+  const result = await client.completeAndAcknowledge(message, () => assert.fail("must not generate"));
+  assert.deepEqual(result, { reconciled: false, acknowledged: true });
+  assert.deepEqual(phases, ["claim", "ack"]);
+  assert.equal(state.acknowledgeCount, 1);
+});
+
+test("onProgress records no reply/ack when the reply append fails", async () => {
+  const phases = [];
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: { items: [{
+      deliveryId: 43,
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      eventId: "event_00000000000000000000000000000002",
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }] },
+    roomHistoryByRoom: new Map([["room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [canonicalEvent({
+      id: "event_00000000000000000000000000000002",
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      text: "please reply",
+    })]]]),
+    appendEvent: () => { throw new Error("append down"); },
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, { fetchImpl, onProgress: (event) => phases.push(event.phase) });
+  const [message] = await client.listUnread();
+  await assert.rejects(client.completeAndAcknowledge(message, () => ({ status: "completed", text: "reply text" })));
+  assert.deepEqual(phases, ["claim"]);
+  assert.equal(state.acknowledgeCount, 0);
+});
+
+test("onProgress must be a function when provided", () => {
+  assert.throws(() => createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+  }, { fetchImpl: async () => json({}), onProgress: "nope" }), /onProgress must be a function/);
+});
+
+test("onProgress records reply evidence when a retry verifies a reply whose append response was lost (Codex review r3)", async () => {
+  const phases = [];
+  let appendCall = 0;
+  const { fetchImpl, state } = createMailboxFetch({
+    mailboxResponse: { items: [{
+      deliveryId: 44,
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      eventId: "event_00000000000000000000000000000002",
+      roomSequence: 1,
+      state: "pending",
+      createdAt: "2026-08-07T00:00:00Z",
+    }] },
+    roomHistoryByRoom: new Map([["room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", [canonicalEvent({
+      id: "event_00000000000000000000000000000002",
+      roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      sequence: 1,
+      senderAgentId: "agent_22222222222222222222222222222222",
+      type: "message.created",
+      text: "please reply",
+    })]]]),
+    appendEvent: (roomId, body, stateObj) => {
+      stateObj.appendCount += 1;
+      const existing = stateObj.roomHistoryByRoom.get(roomId) ?? [];
+      const event = {
+        id: "event_00000000000000000000000000000016",
+        roomId,
+        sequence: existing.reduce((value, row) => Math.max(value, row.sequence), 0) + 1,
+        senderAgentId: "agent_11111111111111111111111111111111",
+        type: "message.created",
+        idempotencyKey: body.idempotency_key,
+        body: body.body,
+      };
+      existing.push(event);
+      stateObj.roomHistoryByRoom.set(roomId, existing);
+      appendCall += 1;
+      if (appendCall === 1) throw new Error("reply response dropped");
+      return { event };
+    },
+  });
+  const client = createMailboxClient({
+    meshUrl: "https://mesh.example",
+    meshToken: "mesh-secret",
+    recipientId: "agent_11111111111111111111111111111111",
+    pageLimit: 1,
+  }, { fetchImpl, onProgress: (event) => phases.push(event.phase) });
+  const [message] = await client.listUnread();
+  const generate = () => ({ status: "completed", text: "reply text" });
+  await assert.rejects(client.completeAndAcknowledge(message, generate), /response dropped/);
+  assert.deepEqual(phases, ["claim"], "an unconfirmed append is not evidence");
+  const result = await client.completeAndAcknowledge(message, generate);
+  assert.deepEqual(result, { reconciled: true, acknowledged: true });
+  assert.equal(state.appendCount, 1);
+  assert.deepEqual(phases, ["claim", "claim", "reply", "ack"]);
+});
