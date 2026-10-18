@@ -55,14 +55,17 @@ state is never stored in that shared bundle.
    receives only the key file path (`TRIANGLE_WORKLOAD_KEY_FILE`).
 4. The coordinator confines each key to its mailbox client, exchanges it for
    short-lived DPoP tokens, and sends a credential-free request to the
-   reasoning adapter.
+   reasoning adapter. A token is only ever attached to requests on the origin
+   it was minted for; watch grant members on another origin fail closed.
 
 Keys and tokens are forbidden from process argv, LaunchAgent plists, adapter
 environment, profile registry, model filesystem, temporary filesystem, logs,
 error descriptions, and result JSON. There is no show or export command. The
 adapter sandbox explicitly denies the credential root, the custody home
-(`TRIANGLE_IDENTITY_ROOT`, which must not overlap any model, runtime, project
-or temp root), and environment files.
+(`TRIANGLE_IDENTITY_ROOT`, set by the helper for both `run-worker` and
+supervisor-launched runners, required by the sandbox, and refused if it
+overlaps any model, runtime, project or temp root, compared case-insensitively),
+and environment files.
 
 ## Availability and lifecycle safety
 

@@ -105,6 +105,8 @@ public enum WorkerLauncherContractCases {
             ["CODEX_HOME": home.path],
             ["TRIANGLE_RUNTIME_ROOTS": "/usr/bin:" + home.appendingPathComponent("agents").path],
             ["TRIANGLE_INSTANCE_TEMP_ROOT": home.path + "/tmp"],
+            // Case-variant of an overlapping root (APFS is case-insensitive).
+            ["TRIANGLE_MODEL_ROOTS": home.path.uppercased()],
         ]
         for environment in overlapping {
             let blocked = RecordingWorkerExecutor()

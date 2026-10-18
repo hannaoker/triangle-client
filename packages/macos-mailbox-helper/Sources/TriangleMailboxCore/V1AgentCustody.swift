@@ -398,7 +398,8 @@ public enum V1AgentCredentialLoader {
     }
 }
 
-/// Read a small private file: regular (no symlink), owned by this user, no group/other bits.
+/// Read a small private file: regular (no symlink, single hard link), owned by this user, no group/other bits.
+/// A second hard link could sit inside a sandbox-readable root and bypass the path deny.
 enum V1PrivateFile {
     static func read(_ path: String) throws -> Data {
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -410,6 +411,7 @@ enum V1PrivateFile {
         var info = stat()
         guard fstat(fd, &info) == 0,
               (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_nlink == 1,
               info.st_uid == getuid(),
               (info.st_mode & 0o077) == 0,
               info.st_size <= off_t(V1AgentCredentialLoader.maximumFileBytes)

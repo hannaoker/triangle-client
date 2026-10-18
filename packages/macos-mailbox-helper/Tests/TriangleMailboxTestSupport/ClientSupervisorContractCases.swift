@@ -114,6 +114,7 @@ public enum ClientSupervisorContractCases {
             try expect(instance.mailbox.recipientId == specification.agentID.value, "agent ID crossed profiles")
             try expect(instance.mailbox.pageLimit == 1, "mailbox page limit changed")
             try expect(instance.runnerEnvironment["TRIANGLE_INSTANCE_ID"] == identifier, "runner instance binding changed")
+            try expect(instance.runnerEnvironment["TRIANGLE_IDENTITY_ROOT"]?.hasPrefix("/") == true, "runner custody home deny missing")
             let activeHome = specification.adapter == .codex ? "CODEX_HOME" : "HERMES_HOME"
             let inactiveHome = specification.adapter == .codex ? "HERMES_HOME" : "CODEX_HOME"
             try expect(instance.runnerEnvironment[activeHome]?.contains(identifier) == true, "active model home was not isolated")
@@ -299,6 +300,7 @@ public enum ClientSupervisorContractCases {
         try expect(eventWake.drains[0].instanceId == eventWake.profiles[0].instanceId, "drain instance crossed profiles")
         try expect(eventWake.drains[0].mailbox.recipientId == fixture.specifications[1].agentID.value, "drain recipient crossed profiles")
         try expect(eventWake.drains[0].mailbox.workloadPrivateKey == fixture.specifications[1].token, "drain mailbox token missing")
+        try expect(eventWake.drains[0].runnerEnvironment["TRIANGLE_IDENTITY_ROOT"]?.hasPrefix("/") == true, "drain custody home deny missing")
         try expect(eventWake.drains[0].runner.args[0].hasSuffix("/hermes-runner.mjs"), "drain runner adapter crossed profiles")
         try expect(!bootstrap.instances.contains { $0.mailbox.workloadPrivateKey == fixture.specifications[1].token }, "event-driven token leaked into worker instances")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")

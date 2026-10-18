@@ -8,6 +8,24 @@ public enum WorkloadTokenManagerError: Error, Equatable, Sendable {
     case challengeFailed(statusCode: Int)
     /// MESH refused the exchange with an allowlisted v1 code (never free text).
     case refused(code: String, statusCode: Int)
+    /// The request URL is not on the origin this token was minted for.
+    case originMismatch
+}
+
+extension MeshOrigin {
+    /// True when `url` has exactly this scheme, host and port.
+    public func matches(_ url: URL) -> Bool {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), let host = components.host?.lowercased(),
+              components.user == nil, components.password == nil
+        else { return false }
+        components.scheme = scheme
+        components.host = host
+        components.path = ""
+        components.percentEncodedQuery = nil
+        components.percentEncodedFragment = nil
+        return components.string == rawValue
+    }
 }
 
 /// v1 workload error codes the helper may surface; anything else is reported by status only.
@@ -81,6 +99,9 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     }
 
     public func authorizationHeaders(method: String, url: URL) async throws -> [String: String] {
+        // A token never leaves the origin it was minted for (e.g. a preview
+        // `via` member's token must not be sent to a production actor host).
+        guard origin.matches(url) else { throw WorkloadTokenManagerError.originMismatch }
         let token = try await fetchToken()
         let dpop = try createDpopProof(method: method, url: url, accessToken: token)
         return [

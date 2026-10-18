@@ -19,6 +19,7 @@ function readPrivateFile(file, name) {
   try {
     const stat = fstatSync(fd);
     if (stat.uid !== process.getuid?.()) throw new TypeError(`${name} is not owned by this user`);
+    if (stat.nlink !== 1) throw new TypeError(`${name} must not have additional hard links`);
     if ((stat.mode & 0o077) !== 0) throw new TypeError(`${name} must not be readable by group or others (chmod 600)`);
     if (stat.size > MAX_BYTES) throw new TypeError(`${name} is too large`);
     return readFileSync(fd, "utf8");

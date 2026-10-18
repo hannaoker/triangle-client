@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -81,6 +81,7 @@ test("worker configuration rejects missing selectors, secrets, URLs, identities,
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentId: "agent_22222222222222222222222222222222" }) }, /different agent/],
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentJson: { agent_id: AGENT } }) }, /agent\.json is invalid/],
     [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); const link = `${real}.link`; symlinkSync(real, link); return link; })() }, /regular file/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); linkSync(real, `${real}.second`); return real; })() }, /hard links/],
     [{ meshTokenEnv: "MESH_AGENT_TOKEN" }, env, /meshTokenEnv is not supported/],
     [{}, { ...env, MESH_URL: "http://public.example" }, /meshUrl must use HTTPS/],
     [{}, { ...env, MESH_URL: "https://mesh.example/path" }, /meshUrl must use HTTPS/],

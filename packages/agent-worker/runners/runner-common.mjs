@@ -21,6 +21,8 @@ function canonicalRoot(value, name) {
 }
 
 function overlaps(left, right) {
+  // APFS is case-insensitive by default; fold case so capitalization cannot hide an overlap.
+  if (process.platform === "darwin") { left = left.toLowerCase(); right = right.toLowerCase(); }
   return left === right || left.startsWith(`${right}${path.sep}`) || right.startsWith(`${left}${path.sep}`);
 }
 
@@ -174,10 +176,10 @@ export function sandboxCommand(command, args, env = process.env) {
   const project = canonicalRoot(env.TRIANGLE_PROJECT_ROOT, "TRIANGLE_PROJECT_ROOT");
   const credentials = canonicalRoot(env.TRIANGLE_CREDENTIAL_ROOT, "TRIANGLE_CREDENTIAL_ROOT");
   // Permissions v1: the `triangle` custody home (agents/<id>/workload-key.json,
-  // owner key). The helper always sets it; it is isolated and denied like the
-  // credential root so a reasoning child can never read a workload key.
-  const identity = env.TRIANGLE_IDENTITY_ROOT === undefined ? null : canonicalRoot(env.TRIANGLE_IDENTITY_ROOT, "TRIANGLE_IDENTITY_ROOT");
-  const secretRoots = identity ? [credentials, identity] : [credentials];
+  // owner key). Required: it is isolated and denied like the credential root
+  // so a reasoning child can never read a workload key.
+  const identity = canonicalRoot(env.TRIANGLE_IDENTITY_ROOT, "TRIANGLE_IDENTITY_ROOT");
+  const secretRoots = [credentials, identity];
   if (!env.HOME) throw new Error("HOME is required for application-owned sandbox state");
   const homeInput = path.resolve(env.HOME);
   const home = canonicalRoot(env.HOME, "HOME");

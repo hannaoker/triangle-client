@@ -59,6 +59,12 @@ public enum V1ProfileContractCases {
         try expectThrows("group-readable key accepted") { try V1AgentCredentialLoader.load(keyFile: agent.keyFile) }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: agent.keyFile.path)
         _ = try V1AgentCredentialLoader.load(keyFile: agent.keyFile)
+        // A second hard link (e.g. inside a model root) defeats the path deny.
+        let hardLink = home.appendingPathComponent("second-link.json")
+        try FileManager.default.linkItem(at: agent.keyFile, to: hardLink)
+        try expectThrows("hard-linked key accepted") { try V1AgentCredentialLoader.load(keyFile: agent.keyFile) }
+        try FileManager.default.removeItem(at: hardLink)
+        _ = try V1AgentCredentialLoader.load(keyFile: agent.keyFile)
 
         // Symlinked key.
         let other = try V1TestCustody.temporaryHome()
@@ -116,6 +122,15 @@ public enum V1ProfileContractCases {
         let tokenBody = try JSONSerialization.jsonObject(with: mesh.requests.first { $0.url.path == "/api/v1/identity/tokens" }!.body) as? [String: Any]
         try expect(tokenBody?["requested_scopes"] as? [String] == ["agent.read", "agent.write"], "scopes are not the bounds")
         try expect(mesh.requests.allSatisfy { !$0.url.path.contains("register") && !$0.url.path.contains("admission") }, "self-registration attempted")
+        // A token is bound to its origin: never sent to another host.
+        let auth = try credential.workloadAuth(transport: mesh)
+        let before = mesh.requests.count
+        do {
+            _ = try await auth.authorizationHeaders(method: "POST", url: URL(string: "https://other-origin.example/api/v1/mailbox/watch/grants")!)
+            throw ContractFailure("token minted for a foreign origin")
+        } catch WorkloadTokenManagerError.originMismatch {}
+        try expect(mesh.requests.count == before, "foreign-origin request reached the token exchange")
+        _ = try await auth.authorizationHeaders(method: "GET", url: URL(string: credential.origin.value + "/api/v1/agents/me")!)
 
         let reader = try V1TestCustody.memoryAgent(profile: "reader", handle: "reader-one", fill: "b", scopes: ["agent.read"])
         let readerMesh = FakeV1Mesh(agents: [reader])

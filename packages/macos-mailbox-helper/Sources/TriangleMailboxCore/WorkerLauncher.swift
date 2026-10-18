@@ -75,13 +75,7 @@ public struct WorkerLauncher: Sendable {
         // Permissions v1: the worker reads this agent's own key file (0600);
         // key material never travels through the environment.
         environment["TRIANGLE_WORKLOAD_KEY_FILE"] = credential.workloadKeyFile.path
-        // The `triangle` custody home (<home>/agents/<id>/workload-key.json)
-        // must stay outside every root a reasoning child can read or write,
-        // and the Node sandbox denies it explicitly.
-        let identityRoot = credential.workloadKeyFile
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        try Self.requireIsolatedIdentityRoot(identityRoot, from: command.environment)
-        environment["TRIANGLE_IDENTITY_ROOT"] = identityRoot.path
+        environment["TRIANGLE_IDENTITY_ROOT"] = try Self.isolatedIdentityRoot(for: credential, environment: command.environment)
         environment[worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")] = credential.agentID.value
         try executor.execute(WorkerExecutionRequest(
             executable: command.executable,
@@ -99,9 +93,28 @@ extension WorkerLauncher {
         "CODEX_HOME", "HERMES_HOME", "ANTIGRAVITY_HOME",
     ]
 
+    /// The `triangle` custody home (<home>/agents/<id>/workload-key.json) must
+    /// stay outside every root a reasoning child can read or write; the Node
+    /// sandbox (runner-common.mjs) requires it and denies it explicitly.
+    static func isolatedIdentityRoot(for credential: VerifiedCredential, environment: [String: String]) throws -> String {
+        let identityRoot = credential.workloadKeyFile
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        try requireIsolatedIdentityRoot(identityRoot, from: environment)
+        return identityRoot.path
+    }
+
+    /// A runner environment for the supervisor bootstrap with the custody home set.
+    static func isolatedRunnerEnvironment(_ environment: [String: String], credential: VerifiedCredential) throws -> [String: String] {
+        var result = environment
+        result["TRIANGLE_IDENTITY_ROOT"] = try isolatedIdentityRoot(for: credential, environment: environment)
+        return result
+    }
+
     static func requireIsolatedIdentityRoot(_ identityRoot: URL, from environment: [String: String]) throws {
+        // APFS is case-insensitive by default: compare case-folded paths so a
+        // differently capitalized model root cannot hide an overlap.
         func canonical(_ path: String) -> String {
-            URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+            URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
         }
         func overlaps(_ left: String, _ right: String) -> Bool {
             left == right || left.hasPrefix(right == "/" ? "/" : right + "/") || right.hasPrefix(left == "/" ? "/" : left + "/")

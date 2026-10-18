@@ -680,6 +680,7 @@ test("profile bindings are trusted only when the pointer, key custody, and agent
       ["key missing", () => rmSync(good.keyFile), "key_missing"],
       ["key group-readable", () => chmodSync(good.keyFile, 0o640), "key_unsafe"],
       ["key symlink", () => symlinkInPlace(good.keyFile), "key_unsafe"],
+      ["key hard-linked", () => linkSync(good.keyFile, path.join(agentDir, "..", "second-link.json")), "key_unsafe"],
       ["agent id mismatch", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), agent_id: boundAgentId("bob") }), "agent_mismatch"],
       ["agent record unsafe", () => chmodSync(path.join(agentDir, "agent.json"), 0o644), "agent_record_invalid"],
       ["agent record without authority", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), authority: "http://x.test" }), "agent_record_invalid"],

@@ -424,11 +424,11 @@ function readOneBinding(file) {
   // Swift `V1PrivateDirectory`: the custody home, agents/ and agents/<id>/
   // must be real directories owned by this user with no group/other bits.
   if ([home, path.dirname(agentDir), agentDir].some((dir) => !isPrivateDirectory(dir))) return fail("key_unsafe", { keyFile });
-  const keyCustody = custodyProblem(keyFile, { maxBytes: AGENT_RECORD_MAX_BYTES });
+  const keyCustody = custodyProblem(keyFile, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true });
   if (keyCustody === "absent") return fail("key_missing", { keyFile });
   if (keyCustody != null) return fail("key_unsafe", { keyFile });
   const recordFile = path.join(agentDir, "agent.json");
-  if (custodyProblem(recordFile, { maxBytes: AGENT_RECORD_MAX_BYTES }) != null) return fail("agent_record_invalid", { keyFile });
+  if (custodyProblem(recordFile, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true }) != null) return fail("agent_record_invalid", { keyFile });
   const record = readJsonFile(recordFile).value;
   if (!isPlainObject(record) || typeof record.agent_id !== "string" || !AGENT_ID.test(record.agent_id)
     || typeof record.workload_id !== "string" || !WORKLOAD_ID.test(record.workload_id)

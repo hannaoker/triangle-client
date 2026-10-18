@@ -561,6 +561,9 @@ public struct WorkloadWatchGrantAuthProvider: WatchGrantAuthProviding {
 
     public func authorizationHeaders(for profile: ProfileName, method: String, url: URL) async throws -> [String: String] {
         let credential = try await gate.credential(for: profile)
+        // Grant members must share the actor's origin; never send a member's
+        // workload token to another host.
+        guard credential.origin.matches(url) else { throw WatchGrantServiceError.workloadAuthUnavailable }
         let manager: WorkloadTokenManager
         do {
             manager = try credential.workloadAuth(transport: transport)

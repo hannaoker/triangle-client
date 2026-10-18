@@ -346,7 +346,7 @@ public struct ClientSupervisor: Sendable {
                     args: command.arguments,
                     timeoutMs: Self.maximumRunnerTimeoutMilliseconds
                 ),
-                runnerEnvironment: command.environment
+                runnerEnvironment: try WorkerLauncher.isolatedRunnerEnvironment(command.environment, credential: credential)
             ))
             publicInstances.append(.init(instanceID: instance.instanceID.value, runtimeAdapter: instance.runtimeAdapter))
         }
@@ -549,7 +549,7 @@ public struct ClientSupervisor: Sendable {
                     args: command.arguments,
                     timeoutMs: Self.maximumRunnerTimeoutMilliseconds
                 ),
-                runnerEnvironment: command.environment
+                runnerEnvironment: try WorkerLauncher.isolatedRunnerEnvironment(command.environment, credential: credential)
             ))
         }
         guard !profiles.isEmpty, profiles.count == drains.count else {
