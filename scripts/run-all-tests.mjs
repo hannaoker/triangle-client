@@ -18,6 +18,11 @@ const suites = [
     args: ["--prefix", "packages/agent-worker", "run", "test:triangle-client"],
   },
   {
+    name: "triangle-cli (permissions v1)",
+    command: "npm",
+    args: ["--prefix", "packages/triangle-cli", "test"],
+  },
+  {
     name: "client-console",
     command: "npm",
     args: ["--prefix", "packages/client-console", "test"],
