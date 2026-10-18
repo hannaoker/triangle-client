@@ -88,6 +88,12 @@ status, the headless runtime `status().cursorDirs`, and the exported
   before anything is created. Overrides with `.` or `..` segments are
   rejected (`cursor_data_dir_invalid`), and an absent override resolves only
   from the injected env (never the host `process.env`).
+- Containment is checked by exact path component, so a `..`-prefixed child
+  such as `~/.cursor/..triangle-data` counts as inside `~/.cursor`.
+- An existing data dir must be private: a directory owned by the current
+  user with no group/other permission bits. Otherwise it fails with
+  `cursor_data_dir_not_private` (or `cursor_data_dir_invalid`), so a shared
+  root such as `/tmp` is never used. A newly created dir is made 0700.
 - Runtime `status().cursorDirs.socketPreflight` checks the configured working
   directory (else the Cursor home, the default session cwd) and lists it in
   `workspacePaths`.
