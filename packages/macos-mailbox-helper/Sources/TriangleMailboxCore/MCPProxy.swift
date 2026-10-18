@@ -103,21 +103,18 @@ public enum MCPProxyRunResult: Equatable, Sendable {
 
 private struct MCPProxySession {
     let credential: VerifiedCredential
-    let workloadAuth: WorkloadTokenManager?
+    let workloadAuth: WorkloadTokenManager
     let transactionRewriter: MCPTransactionRewriter?
 
     func authorizationHeaders(method: String, url: URL) async throws -> [String: String] {
-        if let workloadAuth {
-            return try await workloadAuth.authorizationHeaders(method: method, url: url)
-        }
-        return ["Authorization": credential.authorizationValue]
+        try await workloadAuth.authorizationHeaders(method: method, url: url)
     }
 
+    /// The workload key seed and the live access token never cross the MCP channel.
     var protectedValues: [String] {
-        var values = [credential.binding.token.secretValue, credential.authorizationValue]
-        if let accessToken = workloadAuth?.activeAccessToken {
+        var values = [credential.material.workloadPrivateKeySeed]
+        if let accessToken = workloadAuth.activeAccessToken {
             values.append(accessToken)
-            values.append("Bearer \(accessToken)")
         }
         return values
     }
@@ -128,24 +125,17 @@ public struct MCPProxy: Sendable {
     public static let maximumResponseBytes = 64 * 1024
 
     private let gate: VerifiedCredentialGate
-    private let workloadKeyStore: any WorkloadKeyStore
     private let transport: any MeshTransport
     private let transactionRewriterFactory: (@Sendable (VerifiedCredential, ClientInstanceID) -> MCPTransactionRewriter?)?
 
     public init(
         gate: VerifiedCredentialGate,
         transport: any MeshTransport,
-        workloadKeyStore: (any WorkloadKeyStore)? = nil,
         transactionRewriterFactory: (@Sendable (VerifiedCredential, ClientInstanceID) -> MCPTransactionRewriter?)? = nil
     ) {
         self.gate = gate
         self.transport = transport
         self.transactionRewriterFactory = transactionRewriterFactory
-        #if canImport(Security)
-        self.workloadKeyStore = workloadKeyStore ?? KeychainWorkloadKeyStore()
-        #else
-        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
-        #endif
     }
 
     public func run(profile: ProfileName, input: Data, output: any MCPProxyOutput) async -> MCPProxyRunResult {
@@ -193,15 +183,12 @@ public struct MCPProxy: Sendable {
                     writeDiagnostic(gateReason(error), output: output)
                     return .failed
                 }
-                let workloadAuth: WorkloadTokenManager?
-                if let workloadRecord = try? workloadKeyStore.read(for: profile) {
-                    workloadAuth = try? WorkloadTokenManager(
-                        origin: credential.origin,
-                        workloadRecord: workloadRecord,
-                        transport: transport
-                    )
-                } else {
-                    workloadAuth = nil
+                let workloadAuth: WorkloadTokenManager
+                do {
+                    workloadAuth = try credential.workloadAuth(transport: transport)
+                } catch {
+                    writeDiagnostic("credential_invalid", output: output)
+                    return .failed
                 }
                 let instanceID = ClientInstanceID.derive(profile: profile)
                 let rewriter = transactionRewriterFactory?(credential, instanceID)
@@ -345,17 +332,14 @@ public struct MCPProxy: Sendable {
         credential: VerifiedCredential,
         instanceID: ClientInstanceID,
         transport: any MeshTransport,
-        workloadAuth: WorkloadTokenManager?
+        workloadAuth: WorkloadTokenManager
     ) -> MCPTransactionRewriter {
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
             transport: transport,
             actorID: credential.agentID
         ) { method, url in
-            if let workloadAuth {
-                return try await workloadAuth.authorizationHeaders(method: method, url: url)
-            }
-            return ["Authorization": credential.authorizationValue]
+            try await workloadAuth.authorizationHeaders(method: method, url: url)
         }
         return MCPTransactionRewriter(
             instanceID: instanceID,
@@ -433,12 +417,11 @@ public struct MCPProxy: Sendable {
     private func gateReason(_ error: Error) -> String {
         switch error as? VerifiedCredentialGateError {
         case .profileNotFound: "profile_not_found"
-        case .localAuthorizationRequired: "local_authorization_required"
+        case .credentialInvalid: "credential_invalid"
+        case .credentialRefused: "credential_refused"
+        case .agentPaused: "agent_paused"
         case .offline: "identity_verification_offline"
         case .identityMismatch: "identity_mismatch"
-        case .journalIneligible: "profile_ineligible"
-        case .credentialBusy: "credential_busy"
-        case .profileStateInconsistent: "profile_state_inconsistent"
         case .verificationFailed, .none: "identity_verification_failed"
         }
     }

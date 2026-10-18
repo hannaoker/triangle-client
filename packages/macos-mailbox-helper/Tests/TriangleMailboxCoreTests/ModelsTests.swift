@@ -18,7 +18,7 @@ struct ModelsTests {
         try ModelContractCases.loopbackHTTP()
     }
 
-    @Test("agent IDs and permanent tokens use their canonical formats")
+    @Test("agent IDs use their canonical format")
     func identifiers() throws {
         try ModelContractCases.identifiers()
     }
@@ -26,16 +26,6 @@ struct ModelsTests {
     @Test("mailbox handles match the public MESH policy")
     func mailboxHandles() throws {
         try ModelContractCases.mailboxHandles()
-    }
-
-    @Test("credential bindings decode only the exact version-one schema")
-    func strictCredentialBinding() throws {
-        try ModelContractCases.strictCredentialBinding()
-    }
-
-    @Test("credential diagnostics never reflect the permanent token")
-    func credentialDiagnostics() throws {
-        try ModelContractCases.credentialDiagnostics()
     }
 
     @Test("the public command surface is closed")

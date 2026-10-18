@@ -1,5 +1,5 @@
 import Foundation
-@_spi(EnrollmentTesting) import TriangleMailboxCore
+import TriangleMailboxCore
 @_spi(WatchGrantStoreTesting) import TriangleMailboxCore
 @_spi(WatchGrantTesting) import TriangleMailboxCore
 
@@ -174,16 +174,14 @@ public enum WatchGrantContractCases {
             "keychain failure must point at file custody, not a Developer ID reinstall"
         )
 
-        let profile = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.localAuthorizationRequired)
-        try expect(profile.gate == .keychain, "credential gate lock should map to keychain")
-        try expect(profile.operatorAction == .unlockLoginKeychain, "credential gate lock action mismatch")
-
-        let busy = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.credentialBusy)
-        try expect(busy.code == .credentialBusy, "credential busy code mismatch")
-        try expect(busy.safeToRetry, "credential busy must be retryable")
-        try expect(busy.mustNotReregister, "credential busy must not force reregister")
-        try expect(busy.operatorAction == .retryLater, "credential busy action mismatch")
-        try expect(busy.code != .journalIneligible, "lock contention must not map to journalIneligible")
+        let paused = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.agentPaused)
+        try expect(paused.code == .agentPaused && paused.operatorAction == .resumeAgent && !paused.safeToRetry, "paused agent diagnosis mismatch")
+        let refused = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.credentialRefused)
+        try expect(refused.code == .credentialRefused && refused.gate == .workloadAuth && refused.mustNotReregister, "refused workload diagnosis mismatch")
+        let invalid = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.credentialInvalid)
+        try expect(invalid.code == .credentialInvalid && invalid.operatorAction == .bindOrVerifyProfile, "invalid key file diagnosis mismatch")
+        let unbound = WatchGrantFailureDiagnosis.from(VerifiedCredentialGateError.profileNotFound)
+        try expect(unbound.code == .profileNotFound && unbound.operatorAction == .bindOrVerifyProfile, "unbound profile diagnosis mismatch")
 
         let poisoned = WatchGrantFailureDiagnosis.from(
             WatchGrantServiceError.rejected(statusCode: 401, code: "mesh_watch_leak_attempt")
@@ -693,69 +691,16 @@ public enum WatchGrantContractCases {
                 cursorAgentID: cursorAgentID,
                 installationID: installationID
             )
-            let credentials = InMemoryCredentialStore()
-            try credentials.create(
-                CredentialBinding(
-                    origin: MeshOrigin("https://thetriangle.dev"),
-                    agentID: actorAgentID,
-                    handle: MailboxHandle("codex-mailbox-live"),
-                    token: MeshToken("mesh_" + String(repeating: "a", count: 64))
-                ),
-                for: actorProfile
-            )
-            try credentials.create(
-                CredentialBinding(
-                    origin: MeshOrigin("https://thetriangle.dev"),
-                    agentID: memberAgentID,
-                    handle: MailboxHandle("hermes-mailbox-live"),
-                    token: MeshToken("mesh_" + String(repeating: "b", count: 64))
-                ),
-                for: memberProfile
-            )
-            try credentials.create(
-                CredentialBinding(
-                    origin: MeshOrigin("https://thetriangle.dev"),
-                    agentID: cursorAgentID,
-                    handle: MailboxHandle("cursor-acp-shadow"),
-                    token: MeshToken("mesh_" + String(repeating: "c", count: 64))
-                ),
-                for: cursorProfile
-            )
+            let agents = [
+                try V1TestCustody.memoryAgent(profile: actorProfile.value, handle: "codex-mailbox-live", fill: "a"),
+                try V1TestCustody.memoryAgent(profile: memberProfile.value, handle: "hermes-mailbox-live", fill: "b"),
+                try V1TestCustody.memoryAgent(profile: cursorProfile.value, handle: "cursor-acp-shadow", fill: "c"),
+            ]
             instances = InMemoryClientInstanceStore()
             try instances.create(ClientInstance(profile: actorProfile, runtimeAdapter: .codex, deliveryMode: .eventDriven))
             try instances.create(ClientInstance(profile: memberProfile, runtimeAdapter: .hermes, deliveryMode: .eventDriven))
             try instances.create(ClientInstance(profile: cursorProfile, runtimeAdapter: .cursorAcp))
-            let journal = InMemoryEnrollmentJournal()
-            try journal.write(.testing(
-                profile: actorProfile,
-                origin: MeshOrigin("https://thetriangle.dev"),
-                state: .verified,
-                agentID: actorAgentID,
-                handle: MailboxHandle("codex-mailbox-live"),
-                reasonCode: "identity_verified"
-            ))
-            try journal.write(.testing(
-                profile: memberProfile,
-                origin: MeshOrigin("https://thetriangle.dev"),
-                state: .verified,
-                agentID: memberAgentID,
-                handle: MailboxHandle("hermes-mailbox-live"),
-                reasonCode: "identity_verified"
-            ))
-            try journal.write(.testing(
-                profile: cursorProfile,
-                origin: MeshOrigin("https://thetriangle.dev"),
-                state: .verified,
-                agentID: cursorAgentID,
-                handle: MailboxHandle("cursor-acp-shadow"),
-                reasonCode: "identity_verified"
-            ))
-            let gate = VerifiedCredentialGate(
-                store: credentials,
-                transport: transport,
-                reservation: InMemoryEnrollmentReservation(),
-                journal: journal
-            )
+            let gate = VerifiedCredentialGate(resolver: V1TestCustody.resolver(agents), transport: FakeV1Mesh(agents: agents))
             service = WatchGrantService(
                 store: store,
                 transport: transport,

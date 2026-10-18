@@ -151,17 +151,7 @@ public struct ClientSupervisor: Sendable {
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
-        #if canImport(Security)
-        if let workloadKeyStore {
-            self.workloadKeyStore = workloadKeyStore
-        } else if LocalCredentialStores.fileCredentialsEnabled {
-            self.workloadKeyStore = FileWorkloadKeyStore()
-        } else {
-            self.workloadKeyStore = KeychainWorkloadKeyStore()
-        }
-        #else
-        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
-        #endif
+        self.workloadKeyStore = workloadKeyStore ?? LocalCredentialStores.workload()
         self.resolver = resolver
         self.processRunner = processRunner
         self.installationIdentity = installationIdentity ?? FileClientInstallationIdentityStore()
@@ -333,16 +323,14 @@ public struct ClientSupervisor: Sendable {
                 continue
             }
             try validateAdapterSecretConfinement(command, credential: credential)
-            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             prepared.append(PreparedBootstrapInstance(
                 instanceId: instance.instanceID.value,
                 mailbox: PreparedBootstrapMailbox(
                     meshUrl: credential.origin.value,
-                    meshToken: credential.binding.token.secretValue,
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
-                    workloadId: workloadRecord?.workloadID?.value,
-                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
+                    workloadId: credential.workloadID.value,
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
@@ -354,7 +342,7 @@ public struct ClientSupervisor: Sendable {
             publicInstances.append(.init(instanceID: instance.instanceID.value, runtimeAdapter: instance.runtimeAdapter))
         }
         if !prepared.isEmpty {
-            guard Set(prepared.map(\.mailbox.meshToken)).count == prepared.count else {
+            guard Set(prepared.map(\.mailbox.workloadId)).count == prepared.count else {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
@@ -462,9 +450,9 @@ public struct ClientSupervisor: Sendable {
             }
         }
 
-        var allMailboxTokens = prepared.map(\.mailbox.meshToken)
+        var allMailboxTokens = prepared.map(\.mailbox.workloadId)
         if let eventWake {
-            allMailboxTokens.append(contentsOf: eventWake.drains.map(\.mailbox.meshToken))
+            allMailboxTokens.append(contentsOf: eventWake.drains.map(\.mailbox.workloadId))
         }
         guard Set(allMailboxTokens).count == allMailboxTokens.count else {
             throw ClientSupervisorError.invalidBootstrap
@@ -534,7 +522,6 @@ public struct ClientSupervisor: Sendable {
                 continue
             }
             try validateAdapterSecretConfinement(command, credential: credential)
-            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             profiles.append(PreparedEventWakeProfile(
                 instanceId: instance.instanceID.value,
                 agentId: credential.agentID.value
@@ -543,11 +530,10 @@ public struct ClientSupervisor: Sendable {
                 instanceId: instance.instanceID.value,
                 mailbox: PreparedBootstrapMailbox(
                     meshUrl: credential.origin.value,
-                    meshToken: credential.binding.token.secretValue,
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
-                    workloadId: workloadRecord?.workloadID?.value,
-                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
+                    workloadId: credential.workloadID.value,
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
@@ -955,7 +941,7 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
-            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+            guard credentialTokens.insert(credential.workloadID.value).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
             prepared.append(PreparedHeadlessWakeBootstrap(
@@ -1146,7 +1132,7 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
-            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+            guard credentialTokens.insert(credential.workloadID.value).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
             // agentId + installationId are emitted only for this set: enabled,
@@ -1219,7 +1205,7 @@ public struct ClientSupervisor: Sendable {
     }
 
     private func validateAdapterSecretConfinement(_ command: WorkerCommand, credential: VerifiedCredential) throws {
-        let secret = credential.binding.token.secretValue
+        let secret = credential.material.workloadPrivateKeySeed
         let outsideValues = [command.executable.path] + command.arguments + command.environment.keys + command.environment.values
         guard !outsideValues.contains(where: { $0.contains(secret) }) else {
             throw ClientSupervisorError.invalidBootstrap
@@ -1261,11 +1247,11 @@ private struct PreparedBootstrapInstance: Encodable {
 }
 private struct PreparedBootstrapMailbox: Encodable {
     let meshUrl: String
-    let meshToken: String
     let recipientId: String
     let pageLimit: Int
-    let workloadId: String?
-    let workloadPrivateKey: String?
+    /// Permissions v1: the agent's workload id and its key as an unpadded base64url seed.
+    let workloadId: String
+    let workloadPrivateKey: String
 }
 private struct PreparedBootstrapRunner: Encodable {
     let command: String

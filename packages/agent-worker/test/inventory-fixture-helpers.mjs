@@ -30,26 +30,56 @@ export function writeInstallationIdentity(client, installationId = FIXTURE_INSTA
 
 const hex32 = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
 
-/** A Swift-shaped EnrollmentJournalRecord (exact keys, valid agentID/handle). */
-export function enrollmentRecord(profile, overrides = {}) {
-  const handle = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(profile) && profile.length >= 3 && profile.length <= 32 ? profile : null;
-  return {
-    version: 1,
-    profile,
-    origin: "https://example.test",
-    state: "verified",
-    agentID: `agent_${hex32(`agent:${profile}`)}`,
-    handle,
-    reasonCode: "identity_verified",
-    ...overrides,
-  };
+/** The agent id a fixture binding for `profile` resolves to. */
+export function boundAgentId(profile) {
+  return `agent_${hex32(`agent:${profile}`)}`;
 }
 
-export function writeEnrollment(app, profile, overrides = {}) {
-  writeJson(
-    path.join(app, "enrollment-journal", `profile-${Buffer.from(profile, "utf8").toString("hex")}.json`),
-    enrollmentRecord(profile, overrides),
-  );
+/** `triangle` custody root used by fixture bindings (a sibling of the app root). */
+export function fixtureTriangleHome(app) {
+  return path.join(path.dirname(app), "triangle-home");
+}
+
+export function bindingFile(app, profile) {
+  return path.join(app, "profiles-v1", `${profile}.json`);
+}
+
+/**
+ * A permissions v1 helper binding as Swift `FileV1ProfileBindingStore` and
+ * `triangle` custody persist them: `profiles-v1/<profile>.json` -> the agent's
+ * `workload-key.json` beside its `agent.json`. The key is a placeholder; the
+ * inventory never opens it.
+ * Overrides: `binding` (merged into the pointer record), `agent` (merged into
+ * agent.json), `omitKey`, `permissions` (`{ revision, permissions }` cache view).
+ */
+export function writeBinding(app, profile, { binding = {}, agent = {}, omitKey = false, permissions = null } = {}) {
+  const agentId = boundAgentId(profile);
+  const home = fixtureTriangleHome(app);
+  const agentDir = path.join(home, "agents", agentId);
+  const keyFile = path.join(agentDir, "workload-key.json");
+  const handle = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(profile) && profile.length >= 3 && profile.length <= 32 ? profile : `agent-${hex32(profile).slice(0, 8)}`;
+  writeJson(path.join(agentDir, "agent.json"), {
+    agent_id: agentId,
+    handle,
+    name: profile,
+    workload_id: `workload_${hex32(`workload:${profile}`)}`,
+    bounds: ["agent.read", "agent.write"],
+    authority: "https://example.test",
+    created_at: "2026-10-18T00:00:00.000Z",
+    ...agent,
+  });
+  if (!omitKey) writeJson(keyFile, { kty: "OKP", crv: "Ed25519", x: "fixture-not-a-key", d: "fixture-not-a-key" });
+  if (permissions) writePermissionsCache(app, profile, permissions);
+  writeJson(bindingFile(app, profile), { version: 1, keyFile, ...binding });
+  return { agentId, keyFile, home };
+}
+
+export function writePermissionsCache(app, profile, { revision = 1, permissions = {} } = {}) {
+  const agentId = boundAgentId(profile);
+  writeJson(path.join(fixtureTriangleHome(app), "cache", "permissions", `${agentId}.json`), {
+    etag: `W/"${revision}"`,
+    view: { agent_id: agentId, revision, permissions },
+  });
 }
 
 function txnDigest(prefix, domain, instanceId, deliveryId) {

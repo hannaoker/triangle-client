@@ -10,8 +10,10 @@ IFS=$'\n\t'
 #                   custody is refused because ad-hoc signatures cannot carry
 #                   keychain-access-groups entitlements.
 #   --local-ad-hoc  non-public local testing/development (signingMode
-#                   local_ad_hoc). Keeps the legacy Keychain compatibility path;
+#                   local_ad_hoc). Watch grants may stay in the Keychain;
 #                   TRIANGLE_CREDENTIAL_CUSTODY=file opts into file custody.
+# Agent identities are never helper custody: permissions v1 profiles are 0600
+# pointers (profiles-v1/<profile>.json) to `triangle` workload key files.
 # Both modes refuse a quarantined install source (scripts/release/check-quarantine.sh).
 
 usage() {
@@ -130,7 +132,7 @@ if [[ $local_ad_hoc -eq 0 ]]; then
     echo "Keychain credential custody is unavailable for public ad-hoc installs: ad-hoc signatures cannot carry" >&2
     echo "the keychain-access-groups entitlement Keychain custody requires. Public installs use 0600 file custody" >&2
     echo "under ~/Library/Application Support/The Triangle/credentials/local. Unset TRIANGLE_CREDENTIAL_CUSTODY" >&2
-    echo "(or set it to file); keep existing Keychain profiles on a --local-ad-hoc install until migrated." >&2
+    echo "(or set it to file); keep existing Keychain watch grants on a --local-ad-hoc install until switched." >&2
     exit 64
   fi
   credential_custody=file
@@ -248,15 +250,15 @@ if [[ $local_ad_hoc -eq 1 && $file_custody_enabled -eq 1 ]]; then
   # Local ad-hoc builds select file custody whenever the marker exists.
   if [[ "$requested_custody" == keychain ]]; then
     echo "TRIANGLE_CREDENTIAL_CUSTODY=keychain conflicts with the file custody marker at ${file_custody_marker}." >&2
-    echo "Profiles may already live in file custody; remove the marker deliberately before returning to Keychain custody." >&2
+    echo "Watch grants may already live in file custody; remove the marker deliberately before returning to Keychain custody." >&2
     exit 64
   fi
   credential_custody=file
 fi
 
 # Selecting file custody (public mode, or --local-ad-hoc with a file opt-in)
-# over an existing Keychain-custody install would strand its enrolled
-# profiles. Refuse unless acknowledged, and never restart services then.
+# over an existing Keychain-custody install would strand its stored watch
+# grants. Refuse unless acknowledged, and never restart services then.
 if [[ "$credential_custody" == file && $file_custody_enabled -eq 0 && -e "$metadata_target" ]]; then
   prior_custody=$(/usr/bin/python3 - "$metadata_target" <<'PY'
 import json, sys
@@ -271,22 +273,22 @@ PY
 )
   if [[ "$prior_custody" != file && "${TRIANGLE_ACK_CUSTODY_SWITCH:-}" != "1" ]]; then
     echo "The existing Triangle install uses ${prior_custody} credential custody. This ${signing_mode} install selects file custody," >&2
-    echo "so profiles enrolled in the Keychain would no longer be visible to the helper." >&2
-    echo "Either keep this machine on --local-ad-hoc Keychain custody, or re-enroll after installing and set TRIANGLE_ACK_CUSTODY_SWITCH=1." >&2
+    echo "so watch grants stored in the Keychain would no longer be visible to the helper." >&2
+    echo "Either keep this machine on --local-ad-hoc Keychain custody, or set TRIANGLE_ACK_CUSTODY_SWITCH=1 and re-run watch-ensure after installing." >&2
     exit 78
   fi
-  # A switched helper has no file credentials until re-enrollment, so no
+  # A switched helper has no file watch grants until watch-ensure runs, so no
   # Triangle service may start (or keep running) on it in this transaction.
   if [[ $install_client -eq 1 || -n "$worker" ]]; then
-    echo "A custody switch cannot also install or restart a service: no profile is enrolled in file custody yet." >&2
-    echo "Install the binaries alone, re-enroll each profile, then run scripts/triangle-client-service.sh install." >&2
+    echo "A custody switch cannot also install or restart a service: no watch grant is in file custody yet." >&2
+    echo "Install the binaries alone, re-run watch-ensure, then run scripts/triangle-client-service.sh install." >&2
     exit 64
   fi
   launch_agents_dir="${HOME}/Library/LaunchAgents"
   if [[ -d "$launch_agents_dir" ]] && /usr/bin/find "$launch_agents_dir" -maxdepth 1 -name 'dev.thetriangle.*.plist' -print -quit | /usr/bin/grep -q .; then
     echo "A custody switch requires every Triangle LaunchAgent (dev.thetriangle.*) to be uninstalled first, so no" >&2
     echo "service restarts on a helper without file credentials. Run scripts/triangle-client-service.sh uninstall" >&2
-    echo "(and any legacy worker uninstall), switch, re-enroll, then reinstall the service." >&2
+    echo "(and any legacy worker uninstall), switch, re-run watch-ensure, then reinstall the service." >&2
     exit 78
   fi
 fi

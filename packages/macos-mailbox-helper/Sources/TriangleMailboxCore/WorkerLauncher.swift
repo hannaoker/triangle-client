@@ -66,10 +66,13 @@ public struct WorkerLauncher: Sendable {
         let credential = try await gate.credential(for: profile)
         var environment = command.environment
         environment.keys.filter { key in
-            key.hasPrefix("MESH_") || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
+            key.hasPrefix("MESH_") || key.hasPrefix("TRIANGLE_WORKLOAD_")
+                || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
         }.forEach { environment.removeValue(forKey: $0) }
         environment["MESH_ORIGIN"] = credential.origin.value
-        environment["MESH_AGENT_TOKEN"] = credential.binding.token.secretValue
+        // Permissions v1: the worker reads this agent's own key file (0600);
+        // key material never travels through the environment.
+        environment["TRIANGLE_WORKLOAD_KEY_FILE"] = credential.workloadKeyFile.path
         environment[worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")] = credential.agentID.value
         try executor.execute(WorkerExecutionRequest(
             executable: command.executable,

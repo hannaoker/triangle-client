@@ -7,7 +7,7 @@ import Darwin
 public enum CredentialCustodyMode: String, Sendable, Equatable {
     /// Portable `0600` files under `credentials/local` (see `LocalCredentialStores`).
     case file
-    /// Data Protection Keychain (compatibility path for existing helper profiles).
+    /// Data Protection Keychain (watch grants on `--local-ad-hoc` development installs).
     case keychain
 }
 
@@ -22,9 +22,9 @@ public enum CredentialCustodyPolicyError: Error, Equatable, Sendable, CustomStri
         case .keychainUnavailableInAdHocRelease:
             return "Keychain credential custody is unavailable in this public ad-hoc release build: "
                 + "ad-hoc signatures cannot carry the keychain-access-groups entitlement, so the helper "
-                + "uses 0600 file custody under ~/Library/Application Support/The Triangle/credentials/local. "
-                + "Unset TRIANGLE_CREDENTIAL_CUSTODY (or set it to file). Existing Keychain profiles stay on a "
-                + "--local-ad-hoc compatibility install until they are migrated explicitly."
+                + "keeps watch grants in 0600 files under ~/Library/Application Support/The Triangle/credentials/local. "
+                + "Unset TRIANGLE_CREDENTIAL_CUSTODY (or set it to file). Agent identities are never Keychain "
+                + "custody: profiles point at triangle workload key files."
         case .unknownCustody:
             return "TRIANGLE_CREDENTIAL_CUSTODY must be unset, file, or keychain"
         }

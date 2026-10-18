@@ -34,7 +34,7 @@ export function formatDashboardHuman(dashboard) {
   }
   lines.push("");
 
-  lines.push("## Enrolled profile status (triangle-mailbox status)");
+  lines.push("## Bound profile status (triangle-mailbox status)");
   if (!dashboard.profiles?.length) {
     lines.push("(none queried)");
   } else {
@@ -83,7 +83,7 @@ export function formatDashboardHuman(dashboard) {
   lines.push("");
 
   lines.push("## Later actions (stubs / explicit)");
-  lines.push(`- enroll: ${dashboard.stubs?.enroll}`);
+  lines.push(`- bind: ${dashboard.stubs?.bind}`);
   lines.push(`- watch-ensure: ${dashboard.stubs?.watchEnsure}`);
   lines.push(`- service: ${dashboard.stubs?.serviceControl}`);
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { createMailboxClient, MailboxRequestError, validateMailboxClientOptions } from "../src/mailbox-client.mjs";
+import { createMailboxClient, MailboxRequestError, parseWorkloadPrivateKey, validateMailboxClientOptions } from "../src/mailbox-client.mjs";
 import { TEST_WORKLOAD, testTokens } from "./support/test-workload.mjs";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -2512,4 +2512,26 @@ test("permissions v1: a refused token refresh never echoes MESH free text or the
   assert.equal(error.name, "MailboxRequestError");
   assert.equal(error.status, 401);
   assert.doesNotMatch(`${error.message} ${String(error.stack)} ${JSON.stringify(error)}`, /wl_token_previous_secret|stale token/);
+});
+
+test("the Swift helper's bootstrap key handoff (raw seed, base64url unpadded) is accepted (permissions v1 PR D)", () => {
+  // Swift `V1AgentMaterial.workloadPrivateKeySeed` = Base64URL(Curve25519 rawRepresentation),
+  // i.e. the 32-byte seed without padding. RFC 8032 §7.1 test 1 pins the public key.
+  const seed = Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex").toString("base64url");
+  assert.equal(seed.length, 43);
+  const jwk = parseWorkloadPrivateKey(seed);
+  assert.equal(Buffer.from(jwk.x, "base64url").toString("hex"), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+  assert.equal(jwk.d, seed);
+  // Exactly the five keys the Swift supervisor bootstrap writes.
+  const mailbox = validateMailboxClientOptions({
+    meshUrl: "https://mesh.example.test",
+    recipientId: "agent_0123456789abcdef0123456789abcdef",
+    pageLimit: 20,
+    workloadId: "workload_0123456789abcdef0123456789abcdef",
+    workloadPrivateKey: seed,
+  });
+  assert.deepEqual(Object.keys(mailbox).sort(), ["meshUrl", "pageLimit", "recipientId", "workloadId", "workloadPrivateKey"]);
+  // Padded or truncated seeds are refused rather than reinterpreted.
+  assert.throws(() => parseWorkloadPrivateKey(`${seed}=`), /workloadPrivateKey/);
+  assert.throws(() => parseWorkloadPrivateKey(seed.slice(0, 42)), /workloadPrivateKey/);
 });

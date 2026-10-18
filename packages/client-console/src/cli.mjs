@@ -4,7 +4,7 @@
  *
  * Usage:
  *   triangle-client-console status [--human] [--installation inst_…] [--service-script PATH]
- *   triangle-client-console enroll --profile NAME --origin URL [--execute]   # stdin JSON if --execute
+ *   triangle-client-console bind --profile NAME --key-file PATH [--origin URL] [--execute]
  *   triangle-client-console watch-ensure --installation inst_… --actor-profile NAME [--execute]
  *   triangle-client-console service status|start|stop --script PATH [--execute]
  */
@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectDashboard, readTrianglePermissions } from "./status.mjs";
 import { formatDashboardHuman } from "./format.mjs";
-import { enrollAction, watchEnsureAction, serviceAction } from "./actions.mjs";
+import { bindAction, watchEnsureAction, serviceAction } from "./actions.mjs";
 import { assertSecretFree } from "./secrets.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,8 +26,8 @@ async function main(argv) {
     case "status":
     case "dashboard":
       return runStatus(rest);
-    case "enroll":
-      return runEnroll(rest);
+    case "bind":
+      return runBind(rest);
     case "watch-ensure":
       return runWatchEnsure(rest);
     case "service":
@@ -72,29 +72,25 @@ async function runStatus(args) {
   return dashboard.helper?.present ? 0 : 1;
 }
 
-async function runEnroll(args) {
+async function runBind(args) {
   const flags = parseFlags(args, {
     profile: "string",
+    "key-file": "string",
     origin: "string",
     execute: "boolean",
     home: "string",
   });
-  if (!flags.profile || !flags.origin) {
-    console.error("enroll requires --profile and --origin");
+  if (!flags.profile || !flags["key-file"]) {
+    console.error("bind requires --profile and --key-file");
     return 64;
   }
-  let admissionJson = null;
-  if (flags.execute) {
-    admissionJson = await readStdin();
-  }
-  const result = await enrollAction({
+  const result = await bindAction({
     profile: flags.profile,
-    origin: flags.origin,
+    keyFile: flags["key-file"],
+    origin: flags.origin ?? null,
     home: flags.home,
     execute: Boolean(flags.execute),
-    admissionJson,
   });
-  // Never print admissionJson
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   return result.stub ? 0 : result.exitCode === 0 ? 0 : 1;
 }
@@ -166,33 +162,18 @@ function parseFlags(args, schema) {
   return out;
 }
 
-function readStdin() {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-      if (data.length > 64 * 1024) {
-        reject(Object.assign(new Error("stdin exceeded limit"), { code: "stdin_limit" }));
-      }
-    });
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", reject);
-  });
-}
-
 function printHelp() {
   process.stdout.write(`triangle-client-console — Triangle Client local operator console (scaffold)
 
 Commands:
   status [--human] [--installation inst_…] [--service-script PATH] [--triangle-home DIR]
-  enroll --profile NAME --origin URL [--execute]   # with --execute, read enrollment JSON from stdin
+  bind --profile NAME --key-file <TRIANGLE_HOME>/agents/<agent_id>/workload-key.json [--origin URL] [--execute]
   watch-ensure --installation inst_… --actor-profile NAME [--execute]
   service status|start|stop [--script PATH] [--execute]
 
 Security:
   Never pass mesh_ / mesh_watch_ secrets on argv. Status paths fail closed if helper output leaks secrets.
-  enroll --execute is the only stdin credential handoff; material is not retained or logged.
+  bind passes only the key file path; the helper reads the 0600 key itself and verifies it with MESH.
 `);
 }
 

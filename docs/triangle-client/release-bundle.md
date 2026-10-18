@@ -4,7 +4,7 @@ This document is the **release-oriented install story** for putting Triangle
 Client on someone else’s Mac as one coherent bundle: what is installed, where
 it lives, how signing works, and how to upgrade or uninstall.
 
-For the clean-Mac operator sequence (enroll → runtime → watch → wake pointers),
+For the clean-Mac operator sequence (bind → runtime → watch → wake pointers),
 use the [E2E operator runbook](e2e-operator-runbook.md). For risk-based release
 gates, use [release-workflow.md](release-workflow.md).
 
@@ -30,8 +30,8 @@ Application Support.
 
 | Mode | How | Credential custody | Use |
 | --- | --- | --- | --- |
-| **Public ad-hoc release** (`signingMode: public_ad_hoc`) | Default; **no** `--local-ad-hoc` | **File custody required**: `0600` files under `credentials/local/` (built with `TRIANGLE_FILE_CUSTODY_REQUIRED`). Keychain custody is refused | Installing on another person’s Mac |
-| **Local ad-hoc** (`signingMode: local_ad_hoc`) | `--local-ad-hoc` | Legacy Keychain compatibility path (with the legacy login-Keychain fallback); `TRIANGLE_CREDENTIAL_CUSTODY=file` or an existing `credentials/local/ENABLED` marker selects file custody | Source development / local testing **only**; keeps existing Keychain-enrolled profiles working |
+| **Public ad-hoc release** (`signingMode: public_ad_hoc`) | Default; **no** `--local-ad-hoc` | **File custody required** for watch grants: `0600` files under `credentials/local/watch/` (built with `TRIANGLE_FILE_CUSTODY_REQUIRED`). Keychain custody is refused | Installing on another person’s Mac |
+| **Local ad-hoc** (`signingMode: local_ad_hoc`) | `--local-ad-hoc` | Watch grants may stay in the Keychain (with the legacy login-Keychain fallback); `TRIANGLE_CREDENTIAL_CUSTODY=file` or an existing `credentials/local/ENABLED` marker selects file custody | Source development / local testing **only** |
 
 Both modes produce an ad-hoc signature with identifier `dev.thetriangle.mailbox`
 and **no** entitlements. An ad-hoc signature satisfies the Apple-silicon
@@ -46,7 +46,12 @@ extraction).
 
 Ad-hoc signatures cannot carry the restricted `keychain-access-groups`
 entitlement, so a public install does **not** provide a
-stable distributed Keychain identity. That is why public installs use portable file custody:
+stable distributed Keychain identity. That is why public installs use portable file custody.
+Agent identities are never in the Keychain in either mode: permissions v1 keeps
+each agent's workload key in `triangle` custody
+(`<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json`, `0600`) and the helper
+keeps only a `0600` pointer per profile (`profiles-v1/<profile>.json`).
+Custody mode selection therefore governs watch grants only:
 
 - `TRIANGLE_CREDENTIAL_CUSTODY=keychain` with a public install fails before
   building (exit 64), and a public-release helper started with that variable
@@ -57,11 +62,11 @@ stable distributed Keychain identity. That is why public installs use portable f
   `TRIANGLE_CREDENTIAL_CUSTODY=file` / `TRIANGLE_FILE_CREDENTIALS=1`) over an
   existing Keychain-custody install (no `ENABLED` marker, `credentialCustody`
   absent or `keychain`) is refused (exit 78) because those Keychain profiles
-  would no longer be visible. Keep that Mac on `--local-ad-hoc` Keychain
+  watch grants would no longer be visible. Keep that Mac on `--local-ad-hoc` Keychain
   custody, or switch deliberately with `TRIANGLE_ACK_CUSTODY_SWITCH=1`: the
   switch refuses `--install-client` / `--install-worker` (exit 64) and
   requires every `dev.thetriangle.*` LaunchAgent to be uninstalled first
-  (exit 78). Re-enroll each profile, then reinstall the service.
+  (exit 78). Re-run `watch-ensure`, then reinstall the service.
 - The `ENABLED` marker is created inside the install transaction and removed
   if any later install gate fails.
 - `check-release-readiness.sh --mode public` requires both `triangle-mailbox`
@@ -175,7 +180,8 @@ activation gates pass. See [docs/triangle-client/README.md](README.md).
 - Node.js 22.0.0+ (release suite exercised on Node 22 and 24)
 - At least one of: `codex`, `hermes`, or `agy` / Antigravity CLI on `PATH`
   (or `CODEX_CLI` / `HERMES_CLI` / `ANTIGRAVITY_CLI` / `AGY_CLI`)
-- A MESH admission credential for enrollment (stdin only; never argv)
+- The `triangle` CLI with an owner device joined to the MESH (`triangle join`)
+  and one agent per profile (`triangle agent add`)
 - An install source without `com.apple.quarantine` (see
   [Quarantine check](#quarantine-check-bootstrap))
 
@@ -188,7 +194,7 @@ is documented separately and is **not** claimed from Linux.
    quarantine after verifying the checksum.
 2. `./scripts/install-macos-mailbox-helper.sh --install-client` (public ad-hoc,
    file custody)
-3. Enroll each profile via `triangle-mailbox enroll … < admission.json`
+3. Bind each profile via `triangle-mailbox bind --profile … --key-file <TRIANGLE_HOME>/agents/<agent_id>/workload-key.json`
 4. `triangle-client agent add --profile … --runtime …`
 5. Operate with `agent list|status|enable|disable|remove|set-delivery-mode`
 6. For event-driven wake: set `deliveryMode` to `event-driven`, then
@@ -203,18 +209,18 @@ install:
 
 ```sh
 ./scripts/install-macos-mailbox-helper.sh --install-client             # public_ad_hoc / file custody
-./scripts/install-macos-mailbox-helper.sh --install-client --local-ad-hoc  # existing Keychain-custody hosts
+./scripts/install-macos-mailbox-helper.sh --install-client --local-ad-hoc  # local development hosts
 ```
 
 Effects:
 
 - Atomically replaces `triangle-mailbox` and `triangle-client` with verified
   ad-hoc signatures and SHA-256 manifests; rolls back on failed gates.
-- Re-prepares version-4 runtime bundles and reloads `dev.thetriangle.client`
+- Re-prepares version-8 runtime bundles and reloads `dev.thetriangle.client`
   transactionally when profiles already exist.
-- **Does not** rewrite, export, or migrate Keychain or file credentials or
-  profile records. Moving profiles between Keychain and file custody is an
-  explicit re-enrollment, never an automatic copy; see
+- **Does not** rewrite, export, or migrate key files, bindings, watch grants,
+  or profile records. Permissions v1 has no migration from pre-v1 profiles:
+  wipe them and bind again; see
   [`packages/macos-mailbox-helper/KEYCHAIN_POLICY.md`](../../packages/macos-mailbox-helper/KEYCHAIN_POLICY.md).
 
 Release gate for the final artifacts (macOS, after the last modification):
@@ -232,7 +238,7 @@ Release gate for the final artifacts (macOS, after the last modification):
 ```
 
 Removes the LaunchAgent plist and stops the service. It does **not** delete
-file or Keychain credentials or require a show/export path. Removing binaries or
+key files, bindings, or watch grants, or require a show/export path. Removing binaries or
 identities is a separately reviewed local decommissioning procedure (there is
 intentionally no routine credential-delete CLI in this release).
 
@@ -246,18 +252,14 @@ See the helper README and Triangle Client guide.
 
 | Surface | Allowed | Forbidden |
 | --- | --- | --- |
-| Ad-hoc signed helper (`triangle-mailbox`) | File-custody (public) or Keychain (`--local-ad-hoc`) read/write for mailbox + watch grants; stdin enrollment | Logging or printing permanent tokens / `mesh_watch_` secrets |
-| Node coordinator / adapters | Secret-free bootstrap fields and helper CLI invocations | Holding `mesh_` or `mesh_watch_` in process argv, env, or logs |
+| Ad-hoc signed helper (`triangle-mailbox`) | Read the bound `triangle` workload key file; file-custody (public) or Keychain (`--local-ad-hoc`) read/write for watch grants | Registering agents; logging or printing keys, access tokens, or `mesh_watch_` secrets |
+| Node coordinator / adapters | Bootstrap `workloadId` + workload key seed on the private stdin channel; `TRIANGLE_WORKLOAD_KEY_FILE` path for workers; helper CLI invocations | Key material or `mesh_watch_` in argv, env, logs, or reasoning children |
 | LaunchAgent plists | Helper path + `run-supervisor` | Any credential, admission token, or watch secret |
 | Operator shell / docs examples | Profile names, origins, installation ids (`inst_…`), handles | Real tokens in committed files or command history |
 
-File custody paths (public; non-secret names):
-`credentials/local/{mailbox,workload,watch}/<name>.json`.
-
-Keychain services (`--local-ad-hoc` compatibility; non-secret names):
-
-- Mailbox binding: `dev.thetriangle.mesh.mailbox`
-- Watch grant: `dev.thetriangle.mesh.mailbox-watch`
+Custody paths (non-secret names): profile bindings `profiles-v1/<profile>.json`;
+watch grants `credentials/local/watch/<installation>.json` (public) or the
+Keychain service `dev.thetriangle.mesh.mailbox-watch` (`--local-ad-hoc`).
 
 `mcp-interactive` profiles are **rejected** from watch membership. Event-driven
 wake requires `deliveryMode: event-driven`.

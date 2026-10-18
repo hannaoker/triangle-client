@@ -6,10 +6,35 @@ public enum WorkloadTokenManagerError: Error, Equatable, Sendable {
     case invalidResponse
     case tokenExchangeFailed(statusCode: Int)
     case challengeFailed(statusCode: Int)
+    /// MESH refused the exchange with an allowlisted v1 code (never free text).
+    case refused(code: String, statusCode: Int)
+}
+
+/// v1 workload error codes the helper may surface; anything else is reported by status only.
+public enum MeshWorkloadErrorCode {
+    public static let allowlisted: Set<String> = [
+        "agent_auth_required", "agent_paused", "dpop_replay", "invalid_workload_proof",
+        "permission_denied", "rate_limited", "workload_forbidden",
+    ]
+
+    /// The allowlisted `error` of a MESH JSON error body, if any.
+    public static func code(in body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let code = object["error"] as? String, allowlisted.contains(code) else { return nil }
+        return code
+    }
+
+    /// The permission key of a `permission_denied` body (a catalog key, never free text).
+    public static func permission(in body: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              object["error"] as? String == "permission_denied",
+              let key = object["permission"] as? String,
+              key.utf8.count <= 64, key.wholeMatch(of: /^[a-z]+(?:\.[a-z_]+)+$/) != nil else { return nil }
+        return key
+    }
 }
 
 public final class WorkloadTokenManager: @unchecked Sendable {
-    private static let requestedScopes = ["mailbox.read", "mailbox.write"]
     private static let proofProfile = "mesh.workload-token-proof/1"
 
     private let origin: MeshOrigin
@@ -17,6 +42,8 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     private let privateKey: Curve25519.Signing.PrivateKey
     private let publicJWK: WorkloadPublicJWK
     private let transport: any MeshTransport
+    /// v1 scopes: the workload's bounds (`agent.read`, `agent.write`).
+    private let requestedScopes: [String]
     private let lock = NSLock()
     private var cachedToken: String?
     private var cachedTokenExpiresAt: TimeInterval = 0
@@ -35,6 +62,18 @@ public final class WorkloadTokenManager: @unchecked Sendable {
         self.privateKey = workloadRecord.privateKey
         self.publicJWK = WorkloadPublicJWK(publicKey: workloadRecord.privateKey.publicKey)
         self.transport = transport
+        self.requestedScopes = V1AgentMaterial.agentBounds.filter { workloadRecord.scopes.contains($0) }
+        guard !requestedScopes.isEmpty else { throw WorkloadTokenManagerError.invalidResponse }
+    }
+
+    /// Drop a cached token MESH refused (401) so the next call exchanges a fresh one.
+    public func invalidate(_ token: String) {
+        lock.withLock {
+            if cachedToken == token {
+                cachedToken = nil
+                cachedTokenExpiresAt = 0
+            }
+        }
     }
 
     public var activeAccessToken: String? {
@@ -89,7 +128,7 @@ public final class WorkloadTokenManager: @unchecked Sendable {
             ("nonce", RFC8785CanonicalJSON.escapeString(challenge.nonce)),
             ("principal_id", RFC8785CanonicalJSON.escapeString(challenge.principalID)),
             ("profile", RFC8785CanonicalJSON.escapeString(Self.proofProfile)),
-            ("requested_scopes", scopesJSON(Self.requestedScopes)),
+            ("requested_scopes", scopesJSON(requestedScopes)),
             ("workload_id", RFC8785CanonicalJSON.escapeString(workloadID.value)),
         ])
         let proofHeader = compactJSONObject([
@@ -104,7 +143,7 @@ public final class WorkloadTokenManager: @unchecked Sendable {
         }
         let body = try JSONSerialization.data(withJSONObject: [
             "challenge_id": challenge.challengeID,
-            "requested_scopes": Self.requestedScopes,
+            "requested_scopes": requestedScopes,
             "proof": proof,
         ] as [String: Any], options: [.sortedKeys])
         guard body.count <= MeshClient.maximumRequestBytes else {
@@ -124,6 +163,9 @@ public final class WorkloadTokenManager: @unchecked Sendable {
               response.body.count <= MeshClient.maximumResponseBytes,
               response.finalURL.absoluteString == tokenURL.absoluteString
         else {
+            if let code = MeshWorkloadErrorCode.code(in: response.body) {
+                throw WorkloadTokenManagerError.refused(code: code, statusCode: response.statusCode)
+            }
             throw WorkloadTokenManagerError.tokenExchangeFailed(statusCode: response.statusCode)
         }
 
@@ -156,6 +198,9 @@ public final class WorkloadTokenManager: @unchecked Sendable {
               response.body.count <= MeshClient.maximumResponseBytes,
               response.finalURL.absoluteString == challengeURL.absoluteString
         else {
+            if let code = MeshWorkloadErrorCode.code(in: response.body) {
+                throw WorkloadTokenManagerError.refused(code: code, statusCode: response.statusCode)
+            }
             throw WorkloadTokenManagerError.challengeFailed(statusCode: response.statusCode)
         }
         return try decodeChallengeResponse(response.body)
@@ -179,7 +224,7 @@ public final class WorkloadTokenManager: @unchecked Sendable {
             ("htm", RFC8785CanonicalJSON.escapeString(method.uppercased())),
             ("htu", RFC8785CanonicalJSON.escapeString(htu)),
             ("iat", String(Int(Date().timeIntervalSince1970))),
-            ("jti", RFC8785CanonicalJSON.escapeString(UUID().uuidString)),
+            ("jti", RFC8785CanonicalJSON.escapeString("proof_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())),
         ])
         return try signJWS(headerJSON: headerJSON, payloadJSON: payloadJSON)
     }
@@ -236,7 +281,8 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     private func decodeTokenResponse(_ data: Data) throws -> WorkloadTokenResponsePayload {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accessToken = object["access_token"] as? String,
-              !accessToken.isEmpty
+              !accessToken.isEmpty,
+              object["token_type"] as? String == "DPoP"
         else {
             throw WorkloadTokenManagerError.invalidResponse
         }

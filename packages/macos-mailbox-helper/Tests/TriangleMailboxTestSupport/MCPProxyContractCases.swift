@@ -1,6 +1,6 @@
 import CryptoKit
 import Foundation
-@_spi(EnrollmentTesting) import TriangleMailboxCore
+import TriangleMailboxCore
 
 public enum MCPProxyContractCases {
     public struct ContractCase: Sendable {
@@ -8,8 +8,10 @@ public enum MCPProxyContractCases {
         public let run: @Sendable () async throws -> Void
     }
 
-    private static let token = "mesh_" + String(repeating: "d", count: 64)
-    private static let agentID = "agent_" + String(repeating: "b", count: 32)
+    static let agent = try! V1TestCustody.memoryAgent(profile: "codex-mailbox-live", handle: "codex-mailbox-live", fill: "b")
+    /// The secret canary: this agent's workload key seed (never crosses the MCP channel).
+    private static var token: String { agent.seed }
+    private static var agentID: String { agent.agentID.value }
 
     public static let all: [ContractCase] = [
         .init(name: "valid MCP methods forward sequentially", run: validMethodsAndSequentialTurns),
@@ -22,7 +24,8 @@ public enum MCPProxyContractCases {
         .init(name: "durable profile resumes in a fresh proxy", run: freshProxyResume),
         .init(name: "ineligible gates never forward MCP", run: gateFailuresNeverForward),
         .init(name: "URLSession transport is valid for MCP forwarding", run: urlSessionMCPContract),
-        .init(name: "workload JWT and DPoP when key present", run: workloadJWTAndDPoP),
+        .init(name: "workload access token and DPoP on every MCP request", run: workloadJWTAndDPoP),
+        .init(name: "reflected workload access token terminates", run: reflectedAccessToken),
     ]
 
     public static func validMethodsAndSequentialTurns() async throws {
@@ -47,12 +50,19 @@ public enum MCPProxyContractCases {
         try expect(result == .completed, "valid sequential session did not complete")
         try expect(output.stdout == Data((responses.joined(separator: "\n") + "\n").utf8), "responses were not forwarded unchanged")
         try expect(output.stderr.isEmpty, "valid session wrote diagnostics")
-        try expect(transport.requests.first?.url.absoluteString == "https://thetriangle.dev/api/v1/agents/me", "proxy skipped the fresh exact identity check")
+        try expect(
+            transport.requests.prefix(3).map(\.url.absoluteString) == [
+                "https://thetriangle.dev/api/v1/identity/token-challenges",
+                "https://thetriangle.dev/api/v1/identity/tokens",
+                "https://thetriangle.dev/api/v1/agents/me",
+            ],
+            "proxy skipped the fresh workload identity check"
+        )
         let forwarded = transport.requests.filter { $0.url.path == "/api/mcp" }
         try expect(forwarded.count == 3, "sequential MCP requests were not all forwarded")
         for (index, request) in forwarded.enumerated() {
             try expect(request.url.absoluteString == "https://thetriangle.dev/api/mcp", "proxy changed the bound MCP endpoint")
-            try expect(request.headers["Authorization"] == "Bearer \(token)", "proxy did not attach the Keychain bearer")
+            try expect(transport.mesh.workload(forAuthorization: request.headers) == agent.workloadID.value, "proxy did not attach the workload access token and DPoP")
             try expect(request.body == Data(requests[index].utf8), "proxy changed a valid request")
         }
     }
@@ -125,7 +135,8 @@ public enum MCPProxyContractCases {
     }
 
     public static func invalidInput() async throws {
-        let tokenAsIdLine = "{\"jsonrpc\":\"2.0\",\"id\":\"\(token)\",\"method\":\"tools/list\"}\n"
+        // A legacy bearer-shaped id is refused before any credential is touched.
+        let tokenAsIdLine = "{\"jsonrpc\":\"2.0\",\"id\":\"mesh_\(String(repeating: "d", count: 64))\",\"method\":\"tools/list\"}\n"
         let oversized = Data(repeating: 0x61, count: MCPProxy.maximumMessageBytes + 1) + Data("\n".utf8)
         let cases: [Data] = [
             Data("not-json\n".utf8),
@@ -305,14 +316,12 @@ public enum MCPProxyContractCases {
     }
 
     public static func freshProxyResume() async throws {
-        let store = InMemoryCredentialStore()
-        let journal = try installedJournal()
-        try store.create(try binding(), for: ProfileName("codex-mailbox-live"))
+        let store = installedResolver()
         for id in [1, 2] {
             let response = #"{"jsonrpc":"2.0","id":\#(id),"result":{"tools":[]}}"#
             let transport = RecordingProxyTransport(identityAndMCP: [jsonResponse(response)])
             let output = BufferProxyOutput()
-            let fresh = MCPProxy(gate: VerifiedCredentialGate(store: store, transport: transport, reservation: InMemoryEnrollmentReservation(), journal: journal), transport: transport)
+            let fresh = MCPProxy(gate: VerifiedCredentialGate(resolver: store, transport: transport), transport: transport)
             let result = await fresh.run(profile: try ProfileName("codex-mailbox-live"), input: Data((#"{"jsonrpc":"2.0","id":\#(id),"method":"tools/list","params":{}}"# + "\n").utf8), output: output)
             try expect(result == .completed && output.stdout == Data("\(response)\n".utf8), "fresh proxy failed to resume durable profile")
         }
@@ -320,92 +329,99 @@ public enum MCPProxyContractCases {
 
     public static func gateFailuresNeverForward() async throws {
         let profile = try ProfileName("codex-mailbox-live")
-        let scenarios: [(any CredentialStore, any EnrollmentJournal, any MeshTransport)] = [
-            (InMemoryCredentialStore(), InMemoryEnrollmentJournal(), RecordingProxyTransport(identityAndMCP: [])),
-            (LockedStore(), try installedJournal(), RecordingProxyTransport(identityAndMCP: [])),
-            (try installedStore(), try installedJournal(state: .quarantined), RecordingProxyTransport(identityAndMCP: [])),
-            (try installedStore(), try installedJournal(), OfflineProxyTransport()),
+        let paused = RecordingProxyTransport(identityAndMCP: [])
+        paused.mesh.update(agent.workloadID) { $0.state = "paused" }
+        let refused = RecordingProxyTransport(identityAndMCP: [])
+        refused.mesh.mode = .refuseTokens(code: "workload_forbidden", status: 403)
+        let mismatch = RecordingProxyTransport(identityAndMCP: [])
+        mismatch.mesh.update(agent.workloadID) { $0.reportedAgentID = "agent_" + String(repeating: "f", count: 32) }
+        let scenarios: [(any V1AgentResolver, any MeshTransport, String)] = [
+            (InMemoryV1AgentResolver(), RecordingProxyTransport(identityAndMCP: []), "profile_not_found"),
+            (BrokenResolver(), RecordingProxyTransport(identityAndMCP: []), "credential_invalid"),
+            (installedResolver(), paused, "agent_paused"),
+            (installedResolver(), refused, "credential_refused"),
+            (installedResolver(), mismatch, "identity_mismatch"),
+            (installedResolver(), OfflineProxyTransport(), "identity_verification_offline"),
         ]
-        for (store, journal, transport) in scenarios {
+        for (store, transport, reason) in scenarios {
             let recording = transport as? RecordingProxyTransport
             let output = BufferProxyOutput()
-            let instance = MCPProxy(gate: VerifiedCredentialGate(store: store, transport: transport, reservation: InMemoryEnrollmentReservation(), journal: journal), transport: transport)
-            _ = await instance.run(profile: profile, input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8), output: output)
+            let instance = MCPProxy(gate: VerifiedCredentialGate(resolver: store, transport: transport), transport: transport)
+            let result = await instance.run(profile: profile, input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8), output: output)
+            try expect(result == .failed, "ineligible gate did not fail the session (\(reason))")
             try expect(recording?.mcpRequests.isEmpty ?? true, "ineligible gate forwarded MCP")
+            try expect(output.stderr == Data("{\"error\":\"\(reason)\"}\n".utf8), "gate diagnostic was not \(reason): \(String(decoding: output.stderr, as: UTF8.self))")
             try assertSecretFree(output)
         }
     }
 
     public static func workloadJWTAndDPoP() async throws {
-        let workloadID = try WorkloadID("workload_" + String(repeating: "a", count: 32))
-        let privateKey = Curve25519.Signing.PrivateKey()
-        let workloadStore = InMemoryWorkloadKeyStore()
-        try workloadStore.create(privateKey, workloadID: workloadID, for: ProfileName("codex-mailbox-live"))
-        let fakeToken = "kms_signed_jwt_access_token_test"
-        let challengeResponse = MeshHTTPResponse(
-            statusCode: 201,
-            headers: ["Content-Type": "application/json"],
-            body: Data(#"{"challenge":{"challenge_id":"challenge_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workload_id":"\#(workloadID.value)","principal_id":"\#(agentID)","origin":"https://thetriangle.dev","audience":"https://thetriangle.dev","nonce":"test_nonce_value","expires_at":"2099-01-01T00:00:00.000Z"}}"#.utf8),
-            finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/token-challenges")!
-        )
-        let tokenResponse = MeshHTTPResponse(
-            statusCode: 200,
-            headers: ["Content-Type": "application/json"],
-            body: Data(#"{"access_token":"\#(fakeToken)","token_type":"DPoP","expires_in":300}"#.utf8),
-            finalURL: URL(string: "https://thetriangle.dev/api/v1/identity/tokens")!
-        )
         let mcpResponse = jsonResponse(#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#)
-        let transport = RecordingProxyTransport(identityAndMCP: [challengeResponse, tokenResponse, mcpResponse])
+        let transport = RecordingProxyTransport(identityAndMCP: [mcpResponse])
         let output = BufferProxyOutput()
-        let instance = MCPProxy(
-            gate: VerifiedCredentialGate(store: try installedStore(), transport: transport, reservation: InMemoryEnrollmentReservation(), journal: try installedJournal()),
-            transport: transport,
-            workloadKeyStore: workloadStore
-        )
-        let result = await instance.run(
+        let result = await proxy(transport: transport).run(
             profile: try ProfileName("codex-mailbox-live"),
             input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8),
             output: output
         )
         try expect(result == .completed, "workload-auth MCP session did not complete")
-        let mcpRequest = transport.mcpRequests.first
-        try expect(mcpRequest?.headers["Authorization"] == "Bearer \(fakeToken)", "workload auth did not attach JWT bearer")
-        try expect(mcpRequest?.headers["DPoP"]?.split(separator: ".").count == 3, "workload auth did not attach DPoP proof")
-        try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(fakeToken), "workload token leaked to output")
-        try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(token), "compatibility bearer leaked to output")
+        let mcpRequest = try requireValue(transport.mcpRequests.first, "MCP not forwarded")
+        try expect(transport.mesh.workload(forAuthorization: mcpRequest.headers) == agent.workloadID.value, "MCP lacked the workload access token")
+        let dpop = try requireValue(mcpRequest.headers["DPoP"], "MCP lacked DPoP")
+        let parts = dpop.split(separator: ".").map(String.init)
+        try expect(parts.count == 3, "DPoP is not a compact JWS")
+        let payload = try JSONSerialization.jsonObject(with: Base64URL.decode(parts[1]) ?? Data()) as? [String: Any]
+        try expect(payload?["htm"] as? String == "POST" && payload?["htu"] as? String == "https://thetriangle.dev/api/mcp", "DPoP not bound to the MCP request")
+        try expect(payload?["ath"] is String, "DPoP not bound to the access token")
+        let rendered = String(decoding: output.stdout + output.stderr, as: UTF8.self)
+        for issued in transport.mesh.issuedTokens {
+            try expect(!rendered.contains(issued), "workload token leaked to output")
+        }
+        try expect(!rendered.contains(token), "workload key leaked to output")
+    }
+
+    public static func reflectedAccessToken() async throws {
+        let transport = RecordingProxyTransport(identityAndMCP: [jsonResponse(#"{"jsonrpc":"2.0","id":1,"result":{"message":"{{ACCESS_TOKEN}}"}}"#)])
+        let output = BufferProxyOutput()
+        let result = await proxy(transport: transport).run(
+            profile: try ProfileName("codex-mailbox-live"),
+            input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8),
+            output: output
+        )
+        try expect(result == .terminatedForSecretInvariant, "reflected access token did not terminate")
+        try expect(output.stdout.isEmpty, "reflected access token was emitted")
+        for issued in transport.mesh.issuedTokens {
+            try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(issued), "access token leaked")
+        }
     }
 
     public static func urlSessionMCPContract() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MCPFixtureURLProtocol.self]
         MCPFixtureURLProtocol.reset([
+            .init(status: 201, url: URL(string: "https://thetriangle.dev/api/v1/identity/token-challenges")!, headers: ["Content-Type": "application/json"], body: Data(#"{"challenge":{"challenge_id":"chal_1","principal_id":"\#(agentID)","audience":"https://thetriangle.dev","nonce":"n1"}}"#.utf8)),
+            .init(status: 200, url: URL(string: "https://thetriangle.dev/api/v1/identity/tokens")!, headers: ["Content-Type": "application/json"], body: Data(#"{"access_token":"at_urlsession_fixture","token_type":"DPoP","expires_in":300}"#.utf8)),
             .init(status: 200, url: URL(string: "https://thetriangle.dev/api/v1/agents/me")!, headers: ["Content-Type": "application/json"], body: identityBody()),
             .init(status: 200, url: URL(string: "https://thetriangle.dev/api/mcp")!, headers: ["Content-Type": "application/json"], body: Data(#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#.utf8)),
         ])
         let transport = URLSessionMeshTransport(configuration: configuration)
         let output = BufferProxyOutput()
-        let instance = MCPProxy(gate: VerifiedCredentialGate(store: try installedStore(), transport: transport, reservation: InMemoryEnrollmentReservation(), journal: try installedJournal()), transport: transport)
+        let instance = MCPProxy(gate: VerifiedCredentialGate(resolver: installedResolver(), transport: transport), transport: transport)
         _ = await instance.run(profile: try ProfileName("codex-mailbox-live"), input: Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"# + "\n").utf8), output: output)
         let requests = MCPFixtureURLProtocol.requests
-        try expect(requests.count == 2 && requests[1].url?.absoluteString == "https://thetriangle.dev/api/mcp", "URLSession did not use exact MCP URL")
-        try expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer \(token)", "URLSession omitted internal bearer")
+        try expect(requests.count == 4 && requests[3].url?.absoluteString == "https://thetriangle.dev/api/mcp", "URLSession did not use exact MCP URL")
+        try expect(requests[3].value(forHTTPHeaderField: "Authorization") == "Bearer at_urlsession_fixture", "URLSession omitted the workload access token")
+        try expect(requests[3].value(forHTTPHeaderField: "DPoP") != nil, "URLSession omitted DPoP")
         try assertSecretFree(output)
     }
 
     private static func proxy(transport: RecordingProxyTransport) -> MCPProxy {
-        MCPProxy(gate: VerifiedCredentialGate(store: try! installedStore(), transport: transport, reservation: InMemoryEnrollmentReservation(), journal: try! installedJournal()), transport: transport)
+        MCPProxy(gate: VerifiedCredentialGate(resolver: installedResolver(), transport: transport), transport: transport)
     }
 
-    private static func binding() throws -> CredentialBinding {
-        try CredentialBinding(origin: MeshOrigin("https://thetriangle.dev"), agentID: AgentID(agentID), handle: MailboxHandle("codex-mailbox-live"), token: MeshToken(token))
-    }
-    private static func installedStore() throws -> InMemoryCredentialStore { let store = InMemoryCredentialStore(); try store.create(binding(), for: ProfileName("codex-mailbox-live")); return store }
-    private static func installedJournal(state: EnrollmentJournalState = .verified) throws -> InMemoryEnrollmentJournal {
-        let journal = InMemoryEnrollmentJournal()
-        try journal.write(.testing(profile: ProfileName("codex-mailbox-live"), origin: MeshOrigin("https://thetriangle.dev"), state: state, agentID: AgentID(agentID), handle: MailboxHandle("codex-mailbox-live"), reasonCode: state == .quarantined ? "identity_mismatch" : "identity_verified"))
-        return journal
-    }
-    private static func identityBody() -> Data { Data(#"{"agent":{"id":"\#(agentID)","name":"Codex Mailbox Live","handle":"codex-mailbox-live","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}"#.utf8) }
+    private static func installedResolver() -> InMemoryV1AgentResolver { V1TestCustody.resolver([agent]) }
+    private static func requireValue<T>(_ value: T?, _ message: String) throws -> T { guard let value else { throw MCPContractFailure(message) }; return value }
+    private static func identityBody() -> Data { Data(#"{"agent":{"id":"\#(agentID)","handle":"codex-mailbox-live"},"state":"active","permissions":{"dm_owner":true},"revision":1}"#.utf8) }
     private static func jsonResponse(_ body: String) -> MeshHTTPResponse { MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: Data(body.utf8), finalURL: URL(string: "https://thetriangle.dev/api/mcp")!) }
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { guard condition() else { throw MCPContractFailure(message) } }
     private static func assertSecretFree(_ output: BufferProxyOutput) throws { try expect(!String(decoding: output.stdout + output.stderr, as: UTF8.self).contains(token), "proxy output exposed bearer") }
@@ -413,30 +429,33 @@ public enum MCPProxyContractCases {
 
 private struct MCPContractFailure: Error, CustomStringConvertible { let message: String; init(_ message: String) { self.message = message }; var description: String { message } }
 
+/// Identity exchange goes to a fake v1 MESH; MCP requests pop scripted responses.
+/// `{{ACCESS_TOKEN}}` in a scripted body is replaced with the live access token.
 private final class RecordingProxyTransport: MeshTransport, @unchecked Sendable {
+    let mesh = FakeV1Mesh(agents: [MCPProxyContractCases.agent])
     private let lock = NSLock(); private var responses: [MeshHTTPResponse]; private var captured: [MeshHTTPRequest] = []
-    init(identityAndMCP responses: [MeshHTTPResponse]) { self.responses = [MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: MCPProxyContractCases.identityBodyForFixture, finalURL: URL(string: "https://thetriangle.dev/api/v1/agents/me")!)] + responses }
+    init(identityAndMCP responses: [MeshHTTPResponse]) { self.responses = responses }
     var requests: [MeshHTTPRequest] { lock.withLock { captured } }
     var mcpRequests: [MeshHTTPRequest] { requests.filter { $0.url.path == "/api/mcp" } }
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        try record(request)
-    }
-
-    private func record(_ request: MeshHTTPRequest) throws -> MeshHTTPResponse {
-        try lock.withLock {
-            captured.append(request)
+        lock.withLock { captured.append(request) }
+        if request.url.path.hasPrefix("/api/v1/identity/") || request.url.path == "/api/v1/agents/me" {
+            return try await mesh.send(request)
+        }
+        let next: MeshHTTPResponse = try lock.withLock {
             guard !responses.isEmpty else { throw MeshClientError.transportUnavailable }
             return responses.removeFirst()
         }
+        let live = request.headers["Authorization"].map { String($0.dropFirst("Bearer ".count)) } ?? ""
+        let body = String(decoding: next.body, as: UTF8.self)
+        guard body.contains("{{ACCESS_TOKEN}}") else { return next }
+        return MeshHTTPResponse(statusCode: next.statusCode, headers: next.headers, body: Data(body.replacingOccurrences(of: "{{ACCESS_TOKEN}}", with: live).utf8), finalURL: next.finalURL)
     }
 }
 
 private struct OfflineProxyTransport: MeshTransport { func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse { throw MeshClientError.transportUnavailable } }
-private final class LockedStore: CredentialStore, @unchecked Sendable {
-    func create(_ binding: CredentialBinding, for profile: ProfileName) throws { throw CredentialStoreError.interactionNotAllowed }
-    func read(for profile: ProfileName) throws -> CredentialBinding { throw CredentialStoreError.interactionNotAllowed }
-    func replace(_ binding: CredentialBinding, for profile: ProfileName, confirmation: CredentialReplacementConfirmation) throws { throw CredentialStoreError.interactionNotAllowed }
-    func delete(for profile: ProfileName) throws { throw CredentialStoreError.interactionNotAllowed }
+private struct BrokenResolver: V1AgentResolver {
+    func material(for profile: ProfileName) throws -> V1AgentMaterial { throw V1CustodyError.keyFileUnsafe }
 }
 
 public final class BufferProxyOutput: MCPProxyOutput, @unchecked Sendable {
@@ -459,6 +478,3 @@ private final class MCPFixtureURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-private extension MCPProxyContractCases {
-    static var identityBodyForFixture: Data { identityBody() }
-}

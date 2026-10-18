@@ -9,7 +9,7 @@ import {
   FIXTURE_INSTALLATION_ID,
   openTransactionRecord,
   secureRegistry,
-  writeEnrollment,
+  writeBinding,
   writeInstallationIdentity,
 } from "./inventory-fixture-helpers.mjs";
 import {
@@ -58,14 +58,14 @@ function fixture() {
       ],
     })}\n`,
   );
-  // Complete inventory: the registry row and enrollment journal for bob.
+  // Complete inventory: the registry row and helper binding for bob.
   const bobId = deriveClientInstanceId("bob");
   mkdirSync(path.join(client, "instances"), { recursive: true });
   writeFileSync(
     path.join(client, "instances", `${bobId}.json`),
     `${JSON.stringify({ version: 1, instanceId: bobId, profile: "bob", runtimeAdapter: "codex", enabled: true, deliveryMode: "headless-app-server" })}\n`,
   );
-  writeEnrollment(root, "bob");
+  writeBinding(root, "bob");
   writeInstallationIdentity(client);
   secureRegistry(root);
   writeFileSync(

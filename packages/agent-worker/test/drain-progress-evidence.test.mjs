@@ -758,7 +758,7 @@ function inventoryFixture(helpers) {
   writeFileSync(agent, "#!/bin/sh\n", { mode: 0o700 });
   registryRow(client, "ghost", "cursor-acp", "headless-cursor-acp");
   registryRow(client, "gravity2", "antigravity", "worker");
-  for (const profile of ["ghost", "gravity2"]) helpers.writeEnrollment(app, profile);
+  for (const profile of ["ghost", "gravity2"]) helpers.writeBinding(app, profile);
   helpers.writeInstallationIdentity(client);
   // Registry custody Swift requires (helper present once #82 has it).
   helpers.secureRegistry?.(app);

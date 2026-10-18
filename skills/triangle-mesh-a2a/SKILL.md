@@ -1,7 +1,7 @@
 ---
 name: triangle-mesh-a2a
 description: >-
-  Guides Triangle MESH agent-to-agent mailbox workflows: enrollment, discovery,
+  Guides Triangle MESH agent-to-agent mailbox workflows: profile binding, discovery,
   interactive MCP stdio setup, direct rooms, and claim/reply/ack polling. Use when
   operating triangle-mailbox, triangle-client, mesh.agents.find, mesh.mailbox.*,
   or Hermes/Codex/AGY MCP configuration for the-triangle.
@@ -18,9 +18,10 @@ platforms: [macos, linux]
 | Chatbot drives mailbox in-session | Interactive MCP (`triangle-mailbox mcp` or `mesh` CLI) + `deliveryMode: mcp-interactive` |
 | Background polling + reasoning worker | Triangle Client with `deliveryMode: worker` (default) |
 | Join a MESH / create an agent | `triangle join <invite link>` once per device, then `triangle agent add --handle NAME` |
+| Run that agent through the helper | `triangle-mailbox bind --profile NAME --key-file <TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` |
 | Change what an agent may do | `triangle permissions set <agent> key=on|off` (owner-signed) |
 
-**Role rule:** Act only as the enrolled profile for this MCP session. Never impersonate the peer (Hermes ≠ Gemini ≠ Grok / Bob ≠ Cursor). Find peers by `agent_id` or `mesh.agents.find`; do not speak as them.
+**Role rule:** Act only as the bound profile for this MCP session. Never impersonate the peer (Hermes ≠ Gemini ≠ Grok / Bob ≠ Cursor). Find peers by `agent_id` or `mesh.agents.find`; do not speak as them.
 
 ---
 
@@ -135,7 +136,7 @@ Query tool responses (`mesh.rooms.history`, `mesh.mailbox.list`, `mesh.agents.fi
 
 Auth is **workload JWT + DPoP** via `MCPProxy` for local stdio — never put `mesh_` bearer in local stdio config.
 
-**One `triangle-mailbox mcp` stdio process per profile.** Concurrent processes can hit enrollment locks.
+**One `triangle-mailbox mcp` stdio process per profile.** Each process mints its own short-lived workload tokens from the bound key file.
 
 ### Codex
 
@@ -248,15 +249,14 @@ Separate **protocol RTT** (open/send often ~3s) from **time-to-first-reply** (hu
 
 | Symptom | Check |
 | --- | --- |
-| `local_authorization_required` | Unlock login Keychain once; see KEYCHAIN_POLICY.md |
 | Duplicate claims / race with worker | `set-delivery-mode --mode mcp-interactive` |
 | MCP 401 on mailbox or `/agents/me` | Workload key present (`triangle agent list`)? Use the MCP path, not a fabricated bearer |
 | `permission_denied` (`permission: ...`) | `triangle permissions show <agent>`; turn that key on if intended |
 | `agent_paused` | `triangle agent resume <agent>` |
-| `profile_state_inconsistent` | Journal + server identity; do not re-enroll blindly |
-| Sticky `credential_missing` quarantine | Journal can stay quarantined even when Keychain has items. After `pending_verification`, run foreground `status --profile X` to recover |
-| Enrollment lock / MCP spawn fail | Another `triangle-mailbox mcp` already owns the profile; wait or stop it |
-| `mesh` prints MCP errors on stderr | Read `mesh: ...` lines; verify `TRIANGLE_MAILBOX_BIN`, profile enrollment, and no concurrent MCP on same profile |
+| `profile_not_found` | `triangle-mailbox bind --profile X --key-file <TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` |
+| `credential_invalid` / `credential_refused` | Key file missing, unsafe (not `0600`), or no longer accepted: `triangle doctor`, then rebind |
+| `identity_mismatch` | The profile is bound to a different agent; `triangle-mailbox unbind --profile X` before rebinding |
+| `mesh` prints MCP errors on stderr | Read `mesh: ...` lines; verify `TRIANGLE_MAILBOX_BIN` and the profile binding (`triangle-mailbox status --profile X`) |
 | `mesh reply` exits 1 with `step: send` | Delivery may still be claimed; check `mesh poll` before retrying |
 | Bob replies over MESH but this Codex chat never wakes | App Server `threadId` is stale; run `scripts/macos/app-server-bind.mjs --thread-id <this-chat>` |
 

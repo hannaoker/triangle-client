@@ -98,7 +98,7 @@ public struct WatchGrantService: Sendable {
         let actorCredential = try await credentialGate.credential(for: actorProfile)
         let origin = actorCredential.origin
         let agentIDs = members.map(\.agentID)
-        guard agentIDs.contains(actorCredential.binding.agentID) else {
+        guard agentIDs.contains(actorCredential.agentID) else {
             throw WatchGrantServiceError.actorNotDeclared
         }
 
@@ -363,7 +363,7 @@ public struct WatchGrantService: Sendable {
                 }
             }
             let credential = try await credentialGate.credential(for: profile)
-            members.append(MemberBinding(profile: profile, agentID: credential.binding.agentID))
+            members.append(MemberBinding(profile: profile, agentID: credential.agentID))
         }
         return members
     }
@@ -563,44 +563,21 @@ public struct WatchGrantService: Sendable {
     }
 }
 
-/// Production auth provider that mints DPoP-bound workload headers from Keychain-backed workload keys.
+/// Production auth provider that mints DPoP-bound workload headers from the bound `triangle` workload key file.
 public struct WorkloadWatchGrantAuthProvider: WatchGrantAuthProviding {
     private let gate: VerifiedCredentialGate
-    private let workloadKeyStore: any WorkloadKeyStore
     private let transport: any MeshTransport
 
-    public init(
-        gate: VerifiedCredentialGate,
-        workloadKeyStore: any WorkloadKeyStore,
-        transport: any MeshTransport
-    ) {
+    public init(gate: VerifiedCredentialGate, transport: any MeshTransport) {
         self.gate = gate
-        self.workloadKeyStore = workloadKeyStore
         self.transport = transport
     }
 
     public func authorizationHeaders(for profile: ProfileName, method: String, url: URL) async throws -> [String: String] {
         let credential = try await gate.credential(for: profile)
-        let record: WorkloadKeyRecord
-        do {
-            record = try workloadKeyStore.read(for: profile)
-        } catch WorkloadKeyStoreError.itemNotFound {
-            throw WatchGrantServiceError.workloadKeyMissing
-        } catch WorkloadKeyStoreError.interactionNotAllowed, WorkloadKeyStoreError.keychainFailure {
-            throw WatchGrantServiceError.keychainUnavailable
-        } catch {
-            throw WatchGrantServiceError.workloadAuthUnavailable
-        }
-        guard record.workloadID != nil else {
-            throw WatchGrantServiceError.workloadKeyMissing
-        }
         let manager: WorkloadTokenManager
         do {
-            manager = try WorkloadTokenManager(
-                origin: credential.origin,
-                workloadRecord: record,
-                transport: transport
-            )
+            manager = try credential.workloadAuth(transport: transport)
         } catch {
             throw WatchGrantServiceError.workloadAuthUnavailable
         }

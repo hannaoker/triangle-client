@@ -20,9 +20,9 @@ test("Triangle Client public guide defines the supported product and lifecycle",
     /macOS (?:13|only)/i,
     /one (?:trusted )?host.*many.*profiles/is,
     /Keychain/i,
-    /never (?:shows|exports).*token/is,
+    /never (?:shows|exports).*(?:token|key material)/is,
     /--install-client/,
-    /triangle-mailbox.*enroll/is,
+    /triangle-mailbox.*bind --profile/is,
     /agent add.*--profile.*--runtime/is,
     /agent (?:list|status|enable|disable|remove)/,
     /dev\.thetriangle\.client/,
@@ -126,7 +126,7 @@ test("macOS helper documentation and policy define the public custody release", 
   requirePatterns(readme, [/Triangle Client/, /--install-client/, /triangle-client.*agent add/is, /dev\.thetriangle\.client/, /legacy.*migration|migration.*legacy/is], "helper README");
 
   const policy = readFileSync(path.join(root, "packages/macos-mailbox-helper/KEYCHAIN_POLICY.md"), "utf8");
-  requirePatterns(policy, [/Developer ID.*out of scope/is, /public release requires file custody/i, /TRIANGLE_FILE_CUSTODY_REQUIRED/, /application identifier/i, /Keychain entitlements/i, /disposable.*real-Keychain.*release gate/is], "Keychain policy");
+  requirePatterns(policy, [/Developer ID.*out of scope/is, /TRIANGLE_FILE_CUSTODY_REQUIRED/, /Keychain entitlements/i, /never live in the\s+Keychain/, /workload-key\.json/, /profiles-v1/], "Keychain policy");
   assert.doesNotMatch(policy, /Task [0-9]+/i);
 });
 
@@ -160,8 +160,8 @@ test("release bundle and E2E runbook define a coherent public install story", ()
   const runbook = doc("e2e-operator-runbook.md");
   requirePatterns(runbook, [
     /install-macos-mailbox-helper\.sh --install-client/,
-    /enroll/i,
-    /stdin/i,
+    /bind --profile/,
+    /--key-file/,
     /prepare-runtime/,
     /agent add/,
     /event-driven/,

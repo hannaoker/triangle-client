@@ -74,6 +74,13 @@ function inspectClaimer(lockPath, { pidAlive = isPidAlive, advisoryHeldAt = isAd
 /**
  * @returns {{ ok: boolean, exitCode: number, report: object }}
  */
+/** `granted,list (rN)` from the cached view, or why it is unavailable. */
+function formatPermissions(permissions) {
+  if (permissions?.source !== "triangle_cache") return `${UNAVAILABLE}${permissions?.reason ? `:${permissions.reason}` : ""}`;
+  const granted = Object.entries(permissions.values).filter(([, on]) => on).map(([name]) => name);
+  return `${granted.length ? granted.join(",") : "none"} (r${permissions.revision})`;
+}
+
 export function runHeadlessEngagementDoctor({
   clientRoot,
   now = Date.now(),
@@ -278,14 +285,14 @@ export function runHeadlessEngagementDoctor({
       bindings: inventory.bindings,
       profiles: inventory.profiles,
       orphanBindings: inventory.orphanBindings,
-      enrolledUnregistered: inventory.enrolledUnregistered,
+      boundUnregistered: inventory.boundUnregistered,
     }),
     blockers: Object.freeze(blockers),
     warnings: Object.freeze(warnings),
   });
 
   // Every blocker is hard: inventory faults (missing binding, unverified
-  // enrollment, invalid registry) must never yield a healthy exit.
+  // binding, invalid registry) must never yield a healthy exit.
   const hard = blockers.length > 0 || blockers.some((row) => HARD_BLOCKER_CODES.has(row.code));
   const degraded = warnings.some((row) => row.code === "kick_ok_drain_stale");
   const exitCode = hard ? 2 : degraded || warnings.length > 0 ? 1 : 0;
@@ -314,8 +321,8 @@ export function formatDoctorReport(report) {
     );
     for (const row of inv.profiles) lines.push(...formatInventoryProfile(row));
     for (const row of inv.orphanBindings) lines.push(`orphan binding ${row.kind}:${row.profile} (not in registry)`);
-    if (inv.enrolledUnregistered.length > 0) {
-      lines.push(`enrolled but not registered (not started): ${inv.enrolledUnregistered.join(", ")}`);
+    if (inv.boundUnregistered.length > 0) {
+      lines.push(`bound but not registered (not started): ${inv.boundUnregistered.join(", ")}`);
     }
   }
   for (const profile of report.profiles) {
@@ -357,7 +364,7 @@ function formatInventoryProfile(row) {
   const open = row.journal.openTransaction;
   return [
     `profile ${row.profile} [${row.status}] runtime=${row.runtimeAdapter} delivery=${row.deliveryMode} enabled=${row.enabled} lane=${row.lane} support=${row.support}`,
-    `  enrollment=${show(row.enrollment.state)} agent=${show(row.enrollment.agentId)} credential=${row.credential} capabilities=${row.capabilities}`,
+    `  identity=${show(row.identity.state)} agent=${show(row.identity.agentId)} credential=${row.credential} permissions=${formatPermissions(row.permissions)}`,
     `  binding=${row.binding.kind}:${row.binding.status} pollWatch=${row.pollWatch.mode} pollMs=${show(row.pollWatch.pollIntervalMs)} watchMember=${row.pollWatch.watchMember} watch=${show(row.pollWatch.watchConnection)} grant=${show(row.pollWatch.grantHealth)}`,
     `  owner: ${owner}${ownership} admission=${row.owner.supervisorAdmission}`,
     `  activity: claim=${show(a.lastClaimAt)} reply=${show(a.lastReplyAt)}${a.lastReplySource ? `(${a.lastReplySource})` : ""} ack=${show(a.lastAckAt)} conversationUpdate=${show(a.lastConversationUpdateAt)} pending=${show(a.pendingCount)} oldestPendingAgeMs=${show(a.oldestPendingAgeMs)} retryExpiry=${a.retryExpiry}`,

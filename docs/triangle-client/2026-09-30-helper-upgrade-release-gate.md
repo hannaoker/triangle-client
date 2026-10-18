@@ -3,6 +3,12 @@
 Status: operator checklist for cuts that change worker install manifests, extracted
 App Server host helpers, or supervisor bundle composition.
 
+> **Superseded in part (2026-10-18, permissions v1):** enrollment and Keychain
+> identity custody are gone. Profiles are bound with `triangle-mailbox bind`
+> to `triangle` workload key files, the disposable Keychain integration test
+> (`scripts/test-keychain-integration.sh`) was removed, and runtime manifests
+> are v8. Read "enrolled profiles" below as "bound profiles".
+
 Companion automation (Darwin, no live MESH):
 
 - `packages/agent-worker/test/keychain-launch-contract.test.mjs`

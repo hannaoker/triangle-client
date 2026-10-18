@@ -57,16 +57,17 @@ switch (role) {
         command === "watch-ensure" ? 0 : 1,
       );
     }
-    if (command === "enroll") {
+    if (command === "bind") {
       write(
         {
           profile: flag("--profile"),
-          origin: flag("--origin"),
+          origin: flag("--origin") ?? "https://thetriangle.dev",
           agentId: "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           handle: flag("--profile"),
-          lifecycle: "verified",
-          verificationTimestamp: "2026-09-12T00:00:00.000Z",
+          status: "verified",
           operatorAction: "none",
+          permissions: { send_messages: true },
+          permissionsRevision: 1,
         },
         0,
       );

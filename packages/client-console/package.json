@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Local operator console for Triangle Client: secret-free install/enroll/watch/worker status via the signed helper.",
+  "description": "Local operator console for Triangle Client: secret-free install/bind/watch/worker status via the signed helper.",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
