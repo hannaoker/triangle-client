@@ -583,3 +583,49 @@ test("codex r2: a manifest write failure after copying rolls the session back", 
     cleanup();
   }
 });
+
+test("codex r3: a resumed undo treats migration-created dirs it already emptied as expected", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const source = seedLegacySession(home, SESSION_A, "legacy-a");
+  for (const dir of ["aa", "zz"]) {
+    mkdirSync(path.join(source, dir));
+    writeFileSync(path.join(source, dir, `${dir}.bin`), dir);
+  }
+  const locked = path.join(cursorHome, "acp-sessions", SESSION_A, "zz");
+  try {
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    chmodSync(locked, 0o500);
+    const first = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.equal(first.kept[0].reason, "remove_failed");
+    assert.ok(first.kept[0].removedFiles.includes("aa/aa.bin"));
+    assert.ok(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A, "aa")), "aa left empty");
+    chmodSync(locked, 0o700);
+    const second = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(second.removed, [SESSION_A]);
+    assert.equal(existsSync(path.join(cursorHome, "acp-sessions", SESSION_A)), false);
+  } finally {
+    try { chmodSync(locked, 0o700); } catch {}
+    cleanup();
+  }
+});
+
+test("codex r3: malformed manifest records are kept and do not abort undo of valid sessions", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    const manifestPath = path.join(cursorHome, "acp-sessions", CURSOR_ACP_LEGACY_COPY_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.copied.unshift(null, { sessionId: "../../etc", files: [] });
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const reverted = revertLegacyCursorAcpSessionCopy({ home, cursorHome });
+    assert.deepEqual(reverted.removed, [SESSION_A]);
+    assert.equal(reverted.kept.length, 2);
+    assert.ok(reverted.kept.every((entry) => entry.detail === "manifest_record_invalid"));
+    const after = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(after.copied.length, 2);
+    assert.equal(after.copied[0], null);
+  } finally {
+    cleanup();
+  }
+});

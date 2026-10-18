@@ -68,11 +68,17 @@ runs automatically; run only while the Cursor ACP drain is stopped.
   in `failed`; it is not recorded, so a later apply can retry it. If rollback
   cannot finish, the record is kept with `incomplete: true` for revert. The
   same rollback runs if the manifest cannot be written after a copy, and any
-  failure after a file's exclusive create removes that torn target.
+  failure after a file's exclusive create removes that torn target. If both
+  the manifest write and the rollback fail, apply retries recording the
+  session as `incomplete`; if the manifest stays unwritable it returns the
+  leftover files (path + identity) in `failed[].untrackedFiles` and stops
+  migrating further sessions.
 - Revert is resumable: before unlinking a session it persists
   `revertInProgress` (write-ahead), and an I/O error midway records the files
   already removed. A later revert finishes the job instead of treating those
-  files as post-migration use.
+  files as post-migration use (directories the migration created count as
+  expected even once emptied). Malformed manifest records are kept verbatim
+  and reported (`manifest_record_invalid`) without aborting other sessions.
 - **Undo after use:** revert is per session and all-or-nothing. A session is
   removed only if every recorded file still matches its snapshot and no other
   files exist in it; then exactly those files and the now-empty recorded
