@@ -42,6 +42,8 @@ function createCodedError(code, message, extra = {}) {
   return error;
 }
 
+const OWNED_PATH_SEPARATORS = path.sep === "\\" ? /[\\/]+/ : /\/+/;
+
 /** Normalise a manifest-relative path; rejects absolute, empty and `..`. */
 export function normalizeOwnedRelative(relative) {
   if (typeof relative !== "string" || relative.length === 0 || relative.includes("\0")) {
@@ -50,7 +52,10 @@ export function normalizeOwnedRelative(relative) {
   if (path.isAbsolute(relative)) {
     throw createCodedError("owned_path_invalid", "owned path must be relative to the owned anchor");
   }
-  const parts = relative.split(/[\\/]+/).filter((part) => part.length > 0 && part !== ".");
+  // Split only on the platform separator(s): on POSIX a backslash is an
+  // ordinary filename character (`foo\bar` is ONE legal name), so it stays
+  // a single, still-contained component.
+  const parts = relative.split(OWNED_PATH_SEPARATORS).filter((part) => part.length > 0 && part !== ".");
   if (parts.length === 0 || parts.some((part) => part === "..")) {
     throw createCodedError("owned_path_invalid", "owned path must not contain '..'");
   }

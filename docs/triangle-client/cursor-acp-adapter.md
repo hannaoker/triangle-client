@@ -126,7 +126,9 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
 - **Socket preflight first:** transcript apply runs the
   `cursor_socket_path_too_long` preflight for the target data dir and the
   migrated workspaces before creating or copying anything (plan reports it
-  as `socketPreflight`). Runtime `status().cursorDirs.socketPreflight`
+  as `socketPreflight`). The check uses the data dir's physical location (a
+  missing dir below a short symlink is checked at the symlink target) and is
+  repeated on the created realpath before the first copy. Runtime `status().cursorDirs.socketPreflight`
   checks the configured working directory (else the Cursor home, the
   default session cwd) and lists it in `workspacePaths`.
 - **Resumable undo:** session revert persists `revertInProgress`
@@ -157,6 +159,13 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
     can retry; the manifest is deleted only when nothing remains. Undo is
     therefore a partial rollback once the new location has been used: it
     removes only pristine copies and leaves all post-migration work in place.
+- **Fresh install:** session plan works before the Triangle Cursor home
+  exists (targets reported as missing, nothing created); session apply
+  creates it 0700 after the same forbidden-root checks the runtime uses.
+- **Filenames:** manifest/relative paths split only on the platform
+  separator, so a POSIX name containing a literal backslash is one (still
+  contained) component. Identity hashes are streamed in 1 MiB chunks, so
+  large `store.db`/transcripts (> 2 GiB) are supported.
 - Transcript copy takes regular files only (existing targets win;
   symlinks/sockets skipped; worker socket/logs/terminals are not copied).
   Manifests: `<cursor home>/acp-sessions/.triangle-legacy-session-copy.json`,

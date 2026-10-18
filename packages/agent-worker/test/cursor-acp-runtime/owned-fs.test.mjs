@@ -42,6 +42,11 @@ test("relative paths: absolute, empty and '..' are rejected", () => {
     assert.throws(() => normalizeOwnedRelative(bad), { code: "owned_path_invalid" }, bad);
   }
   assert.deepEqual(normalizeOwnedRelative("a//b/./c"), ["a", "b", "c"]);
+  if (path.sep === "/") {
+    // codex #88 r2: on POSIX a backslash is an ordinary filename character.
+    assert.deepEqual(normalizeOwnedRelative("a/foo\\bar"), ["a", "foo\\bar"]);
+    assert.deepEqual(normalizeOwnedRelative("..\\x"), ["..\\x"]);
+  }
 });
 
 test("resolveOwnedPath rejects any symlinked ancestor or leaf, and a symlinked anchor", () => {

@@ -1040,6 +1040,26 @@ test("codex #88 r1: transcript preflight checks the PHYSICAL data dir below a sh
   }
 });
 
+test("codex #88 r2: a transcript with a literal backslash in its name is copied, not split", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const workspace = path.join(home, "ws7");
+    const { transcripts } = seedLegacyTranscripts(home, workspace);
+    writeFileSync(path.join(transcripts, "x\\y.jsonl"), "literal\n");
+    const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+    const target = path.join(
+      home, ".triangle", "cursor-data", "projects", cursorWorkspaceSlug(workspace), "agent-transcripts",
+    );
+    assert.equal(readFileSync(path.join(target, "x\\y.jsonl"), "utf8"), "literal\n");
+    assert.equal(existsSync(path.join(target, "x")), false);
+    assert.ok(applied.copied.some((relative) => relative.endsWith("x\\y.jsonl")));
+    const reverted = revertLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+    assert.equal(existsSync(path.join(target, "x\\y.jsonl")), false, JSON.stringify(reverted));
+  } finally {
+    cleanup();
+  }
+});
+
 test("runtime status preflights the configured workspace, not just the data dir", () => {
   const { home, cursorHome, cleanup } = fixture();
   try {

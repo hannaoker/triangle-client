@@ -647,6 +647,43 @@ test("codex r3: malformed manifest records are kept and do not abort undo of val
   }
 });
 
+test("codex #88 r2: session migration runs before the Cursor home exists (plan read-only, apply creates it 0700)", () => {
+  const { home, cleanup } = fixture();
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    const freshHome = path.join(home, "fresh", "cursor-acp-runtime-home");
+    const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome: freshHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(plan.entries.map(({ action }) => action), ["copy"]);
+    assert.equal(existsSync(path.join(home, "fresh")), false, "plan created nothing");
+    const applied = applyLegacyCursorAcpSessionCopy({ home, cursorHome: freshHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(applied.copied, [SESSION_A]);
+    assert.deepEqual(applied.failed, []);
+    assert.equal(statSync(freshHome).mode & 0o777, 0o700);
+    assert.equal(readFileSync(path.join(freshHome, "acp-sessions", SESSION_A, "store.db"), "utf8"), "db:legacy-a");
+    assert.deepEqual(revertLegacyCursorAcpSessionCopy({ home, cursorHome: freshHome }).removed, [SESSION_A]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex #88 r2: a legacy session file with a literal backslash in its name is copied and reverted", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    const source = seedLegacySession(home, SESSION_A, "legacy-a");
+    writeFileSync(path.join(source, "foo\\bar"), "literal");
+    const applied = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A] });
+    assert.deepEqual(applied.failed, []);
+    assert.deepEqual(applied.copied, [SESSION_A]);
+    const target = path.join(cursorHome, "acp-sessions", SESSION_A);
+    assert.equal(readFileSync(path.join(target, "foo\\bar"), "utf8"), "literal");
+    assert.equal(existsSync(path.join(target, "foo")), false, "no foo/ directory invented");
+    assert.deepEqual(revertLegacyCursorAcpSessionCopy({ home, cursorHome }).removed, [SESSION_A]);
+    assert.equal(existsSync(target), false);
+  } finally {
+    cleanup();
+  }
+});
+
 test("Triangle Cursor home may not be inside ~/.cursor or ~/.codex (incl. '..'-prefixed child names)", () => {
   const { home, cleanup } = fixture();
   try {

@@ -641,11 +641,21 @@ function assertCursorSessionIds(sessionIds) {
   return [...new Set(sessionIds)];
 }
 
-function legacyCopyRoots({ home, cursorHome }) {
+function legacyCopyRoots({ home, cursorHome, allowCreate = false, allowMissing = false }) {
   if (typeof home !== "string" || !home.startsWith("/")) {
     throw createCodedError("cursor_home_invalid", "HOME must be an absolute path");
   }
-  const anchor = resolveTriangleCursorHome({ override: cursorHome, home, allowCreate: false });
+  // The migration runs with the drain stopped, possibly before the first
+  // runtime start created the Cursor home: apply creates it (0700, after the
+  // forbidden-root checks, like the runtime does); plan stays read-only and
+  // reports targets below a missing home as missing.
+  let anchor;
+  try {
+    anchor = resolveTriangleCursorHome({ override: cursorHome, home, allowCreate });
+  } catch (error) {
+    if (!allowMissing || error?.code !== "cursor_home_missing") throw error;
+    anchor = physicalProjection(error.path);
+  }
   // Legacy sources are resolved physically below realpath(HOME): `.cursor`,
   // `acp-sessions` and every session component must be real directories (a
   // symlinked ancestor would import files from outside the legacy tree).
@@ -698,18 +708,25 @@ function ancestorDirs(relativeFiles) {
 
 export function planLegacyCursorAcpSessionCopy({ home = process.env.HOME, cursorHome, sessionIds } = {}) {
   const ids = assertCursorSessionIds(sessionIds);
-  const { anchor, sourceAnchor, sourceRootRelative, sourceRoot, targetRoot } = legacyCopyRoots({ home, cursorHome });
+  const { anchor, sourceAnchor, sourceRootRelative, sourceRoot, targetRoot } = legacyCopyRoots({
+    home,
+    cursorHome,
+    allowMissing: true,
+  });
+  const homeExists = anchorExists(anchor);
   const entries = ids.map((sessionId) => {
     const source = path.join(sourceRoot, sessionId);
     const target = path.join(targetRoot, sessionId);
-    let targetState;
-    try {
-      targetState = resolveOwnedPath(anchor, `${CURSOR_ACP_SESSIONS_DIRNAME}/${sessionId}`, {
-        allowMissingLeaf: true,
-        allowMissingAncestors: true,
-      });
-    } catch {
-      return Object.freeze({ sessionId, action: "unsafe_target", source, target });
+    let targetState = { leaf: null };
+    if (homeExists) {
+      try {
+        targetState = resolveOwnedPath(anchor, `${CURSOR_ACP_SESSIONS_DIRNAME}/${sessionId}`, {
+          allowMissingLeaf: true,
+          allowMissingAncestors: true,
+        });
+      } catch {
+        return Object.freeze({ sessionId, action: "unsafe_target", source, target });
+      }
     }
     if (targetState.leaf != null) return Object.freeze({ sessionId, action: "already_present", source, target });
     if (sourceAnchor == null) return Object.freeze({ sessionId, action: "missing_source", source, target });
@@ -811,7 +828,7 @@ export function applyLegacyCursorAcpSessionCopy({
   now = () => new Date().toISOString(),
 } = {}) {
   const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds });
-  const { anchor, sourceAnchor, sourceRootRelative } = legacyCopyRoots({ home, cursorHome });
+  const { anchor, sourceAnchor, sourceRootRelative } = legacyCopyRoots({ home, cursorHome, allowCreate: true });
   const rootCreated = ensureOwnedDirectory(anchor, CURSOR_ACP_SESSIONS_DIRNAME);
   const { manifestPath, manifest } = readLegacyCopyManifest(anchor);
   manifest.schemaVersion = LEGACY_SESSION_MANIFEST_SCHEMA;
