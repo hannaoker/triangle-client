@@ -333,11 +333,13 @@ export function createWatchGrantRenewalRegistry({
  *   carries a per-write owner token. If the lock cannot be taken within
  *   `lockWaitMs` the write is skipped (no unlocked read-modify-write) and
  *   `record()` returns false with the sanitized code
- *   `progress_journal_lock_unavailable`. A lock older than `staleLockMs` is
- *   broken by renaming it aside and confirming it is the same stale file; a
- *   writer re-checks its token immediately before its rename and abandons the
- *   write if its lock was broken, and only ever releases its own lock. So a
- *   successful write (true) is never erased by another writer's stale snapshot.
+ *   `progress_journal_lock_unavailable`. A lock is only broken when its owner
+ *   pid is dead (or, for a lock with no parseable owner, after `staleLockMs`),
+ *   so a live-but-paused writer keeps its lock through its commit. Breaking
+ *   renames the lock aside and confirms it is the same stale file; a writer
+ *   re-checks its token right before its rename and abandons the write if its
+ *   lock was broken, and only ever releases its own lock. So a successful write
+ *   (true) is never erased by another writer's stale snapshot.
  * - Monotonic per field: an older stamp never overwrites a newer one.
  * - Best-effort: recording never throws into the drain; failures are logged
  *   with a sanitized code only.
@@ -349,7 +351,33 @@ export const HEADLESS_PROGRESS_FIELDS = Object.freeze({
   reply: "lastReplyAt",
   ack: "lastAckAt",
 });
-const PROGRESS_PROFILE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+// Swift `CharacterSet.controlCharacters` is Unicode general categories Cc + Cf.
+const PROGRESS_PROFILE_CONTROL = /[\p{Cc}\p{Cf}]/u;
+
+/**
+ * Persisted profile-name contract (Swift `ProfileName`): non-empty, at most 64
+ * UTF-8 bytes, no "/" or "\\", no control/format characters. Kept identical to
+ * `isValidProfileName` in installation-inventory.mjs (duplicated so the signed
+ * worker bundle artifact set is unchanged).
+ */
+function isValidProgressProfileName(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.isWellFormed()
+    && Buffer.byteLength(value, "utf8") <= 64
+    && !value.includes("/")
+    && !value.includes("\\")
+    && !PROGRESS_PROFILE_CONTROL.test(value);
+}
+
+function defaultProgressPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
 const PROGRESS_LANES = new Set(["cursor-acp", "worker", "event-driven", "codex-headless"]);
 const PROGRESS_LOCK_WAIT_MS = 250;
 const PROGRESS_LOCK_STALE_MS = 10_000;
@@ -385,6 +413,7 @@ export function createHeadlessProgressJournal({
   pid = process.pid,
   lockWaitMs = PROGRESS_LOCK_WAIT_MS,
   staleLockMs = PROGRESS_LOCK_STALE_MS,
+  pidAlive = defaultProgressPidAlive,
 } = {}) {
   if (typeof clientRoot !== "string" || !path.isAbsolute(clientRoot) || clientRoot.includes("\0")) {
     throw new TypeError("clientRoot must be an absolute path");
@@ -399,6 +428,27 @@ export function createHeadlessProgressJournal({
     } catch {
       return null;
     }
+  }
+
+  /**
+   * A lock whose owner process is alive is never stale, however old: taking it
+   * over could let the paused owner later rename a stale snapshot over a newer
+   * successful write. A lock naming a dead owner is stale immediately; a lock
+   * without a parseable owner (mid-creation or foreign) only after staleLockMs.
+   */
+  function isLockStale(lockStat) {
+    const owner = /^(\d+):[0-9a-f]+$/.exec(readLockToken() ?? "");
+    if (owner) {
+      const ownerPid = Number(owner[1]);
+      let alive = true;
+      try {
+        alive = pidAlive(ownerPid) !== false;
+      } catch {
+        alive = true;
+      }
+      return !alive;
+    }
+    return Date.now() - lockStat.mtimeMs > staleLockMs;
   }
 
   /** Break a stale lock only if the file moved aside is the one judged stale. */
@@ -437,7 +487,7 @@ export function createHeadlessProgressJournal({
         if (error?.code !== "EEXIST") return null;
         try {
           const lockStat = statSync(lockPath);
-          if (Date.now() - lockStat.mtimeMs > staleLockMs) {
+          if (isLockStale(lockStat)) {
             breakStaleLock(lockStat);
             continue;
           }
@@ -503,7 +553,7 @@ export function createHeadlessProgressJournal({
   /** @returns {boolean} true when the evidence was durably written. */
   function record({ profile, lane, phase } = {}) {
     try {
-      if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) {
+      if (!isValidProgressProfileName(profile)) {
         throw Object.assign(new TypeError("profile is invalid"), { code: "progress_profile_invalid" });
       }
       if (!PROGRESS_LANES.has(lane)) {
@@ -556,7 +606,7 @@ export function createHeadlessProgressJournal({
   }
 
   function forProfile(profile, lane) {
-    if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) {
+    if (!isValidProgressProfileName(profile)) {
       throw new TypeError("profile is invalid");
     }
     if (!PROGRESS_LANES.has(lane)) throw new TypeError("lane is invalid");
@@ -579,7 +629,7 @@ export function createHeadlessProgressJournal({
     try {
       const row = JSON.parse(readFileSync(path.join(clientRoot, "instances", `${instanceId}.json`), "utf8"));
       const profile = row?.profile;
-      if (typeof profile !== "string" || !PROGRESS_PROFILE.test(profile)) return null;
+      if (!isValidProgressProfileName(profile)) return null;
       if (deriveRegistryInstanceId(profile) !== instanceId) return null;
       return forProfile(profile, lane);
     } catch {

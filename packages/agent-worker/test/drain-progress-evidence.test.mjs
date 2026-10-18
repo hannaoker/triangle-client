@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { realpathSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
@@ -36,7 +36,7 @@ function writeJson(filePath, value) {
 }
 
 function tempClientRoot() {
-  const root = mkdtempSync(path.join(tmpdir(), "l1f-progress-"));
+  const root = mkdtempSync(path.join(realpathSync(tmpdir()), "l1f-progress-"));
   const app = path.join(root, "The Triangle");
   const client = path.join(app, "client");
   mkdirSync(client, { recursive: true, mode: 0o700 });
@@ -299,6 +299,90 @@ test("a stale-broken writer abandons its write and never deletes the new owner's
   }
 });
 
+test("a live lock owner is never treated as stale, however old its lock (Codex review r1)", () => {
+  const { client, cleanup } = tempClientRoot();
+  try {
+    const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
+    const lockPath = `${filePath}.lock`;
+    writeFileSync(lockPath, `${process.pid}:abcdef0123`);
+    const old = new Date(Date.now() - 60 * 60_000);
+    utimesSync(lockPath, old, old);
+    const journal = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20, staleLockMs: 10 });
+    assert.equal(journal.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), false);
+    assert.equal(readFileSync(lockPath, "utf8"), `${process.pid}:abcdef0123`, "live owner's lock kept");
+    assert.equal(existsSync(filePath), false);
+
+    // A lock naming a dead owner is broken at once, without waiting for staleLockMs.
+    writeFileSync(lockPath, "999999:abcdef0123");
+    const recovering = createHeadlessProgressJournal({ clientRoot: client, lockWaitMs: 20, pidAlive: (pid) => pid !== 999999 });
+    assert.equal(recovering.record({ profile: "ghost", lane: "cursor-acp", phase: "claim" }), true);
+    assert.equal(existsSync(lockPath), false);
+    assert.deepEqual(readdirSync(client).filter((n) => n.endsWith(".stale")), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("two processes: a writer paused past staleLockMs keeps its lock, so no successful write is overwritten (Codex review r1)", () => {
+  const { client, cleanup } = tempClientRoot();
+  const filePath = path.join(client, HEADLESS_PROGRESS_FILE);
+  const realRename = fs.renameSync;
+  let child = null;
+  try {
+    // A (this live process) pauses at its rename well past B's staleLockMs.
+    fs.renameSync = (src, dst) => {
+      if (dst === filePath && child == null) {
+        const source = `import {createHeadlessProgressJournal} from ${JSON.stringify(SUPERVISOR_URL)};
+const j = createHeadlessProgressJournal({clientRoot: ${JSON.stringify(client)}, staleLockMs: 20, lockWaitMs: 300});
+console.log(JSON.stringify([j.record({profile: "bob", lane: "worker", phase: "claim"})]));`;
+        child = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8" });
+      }
+      return realRename(src, dst);
+    };
+    syncBuiltinESMExports();
+    const journal = createHeadlessProgressJournal({ clientRoot: client, staleLockMs: 20 });
+    const aResult = journal.record({ profile: "alice", lane: "worker", phase: "claim" });
+    fs.renameSync = realRename;
+    syncBuiltinESMExports();
+    assert.equal(child.status, 0, child.stderr);
+    const [bResult] = JSON.parse(child.stdout.trim());
+    const final = JSON.parse(readFileSync(filePath, "utf8"));
+    assert.equal(aResult, true);
+    assert.equal(bResult, false, "B must not take over a live writer's lock");
+    for (const [profile, ok] of [["alice", aResult], ["bob", bResult]]) {
+      if (ok) assert.ok(Object.hasOwn(final.profiles, profile), `${profile} succeeded but was erased`);
+    }
+  } finally {
+    fs.renameSync = realRename;
+    syncBuiltinESMExports();
+    cleanup();
+  }
+});
+
+test("progress accepts every Swift ProfileName (spaces, non-ASCII, dots, 64 bytes) via forInstance and forProfile (Codex review r1)", () => {
+  const { client, cleanup } = tempClientRoot();
+  try {
+    const names = ["Agent One", "café", "Agent_One.v2", `w${"é".repeat(31)}x`.slice(0, 33), "x".repeat(64)];
+    const journal = createHeadlessProgressJournal({ clientRoot: client });
+    for (const name of names) {
+      assert.ok(Buffer.byteLength(name) <= 64, name);
+      const id = registryRow(client, name, "hermes", "worker");
+      const recorder = journal.forInstance(id, "worker");
+      assert.ok(recorder, `forInstance(${name})`);
+      assert.equal(recorder.profile, name);
+      assert.equal(recorder.record("claim"), true);
+    }
+    const doc = JSON.parse(readFileSync(path.join(client, HEADLESS_PROGRESS_FILE), "utf8"));
+    assert.deepEqual(Object.keys(doc.profiles).sort(), [...names].sort());
+    for (const bad of ["", "a/b", "a\\b", "x".repeat(65), "tab\tname", "zero\u200bwidth"]) {
+      assert.equal(journal.record({ profile: bad, lane: "worker", phase: "claim" }), false, JSON.stringify(bad));
+      assert.throws(() => journal.forProfile(bad, "worker"), TypeError);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 test("forInstance resolves profiles from the installation registry and rejects mismatches", () => {
   const { client, cleanup } = tempClientRoot();
   try {
@@ -547,36 +631,37 @@ test("supervisor without a journal leaves delivery contexts and drain options un
 });
 
 /** Doctor inventory classification. The module lands with PR #82 (l1c/doctor-inventory). */
+/**
+ * The #82 inventory plus its Swift-shaped fixture helpers. Null when #82 (or a
+ * #82 head that predates its strict decoders and helpers) is not in this tree.
+ */
 async function loadInventory() {
   try {
-    return await import("../src/installation-inventory.mjs");
+    const inventory = await import("../src/installation-inventory.mjs");
+    const helpers = await import("./inventory-fixture-helpers.mjs");
+    return Object.assign(Object.create(null), inventory, { helpers });
   } catch (error) {
     if (error?.code === "ERR_MODULE_NOT_FOUND") return null;
     throw error;
   }
 }
 
-function inventoryFixture() {
+function inventoryFixture(helpers) {
   const fixture = tempClientRoot();
   const { root, app, client } = fixture;
   const agent = path.join(root, "agent");
   writeFileSync(agent, "#!/bin/sh\n", { mode: 0o700 });
   registryRow(client, "ghost", "cursor-acp", "headless-cursor-acp");
   registryRow(client, "gravity2", "antigravity", "worker");
-  for (const profile of ["ghost", "gravity2"]) {
-    writeJson(path.join(app, "enrollment-journal", `profile-${Buffer.from(profile).toString("hex")}.json`), {
-      version: 1, profile, handle: profile, state: "verified", reasonCode: "identity_verified", agentID: `agent_${profile}`,
-    });
-  }
+  for (const profile of ["ghost", "gravity2"]) helpers.writeEnrollment(app, profile);
+  helpers.writeInstallationIdentity(client);
   writeJson(path.join(client, "cursor-acp-runtime-binding.json"), {
     version: 1,
-    common: { adapterVersion: "1", installationId: "inst_x", workingDirectory: root, cursorHome: path.join(app, "cursor-home"), command: agent, pollIntervalMs: 30000 },
+    common: { adapterVersion: "1", installationId: helpers.FIXTURE_INSTALLATION_ID, workingDirectory: root, cursorHome: path.join(app, "cursor-home"), command: agent, pollIntervalMs: 30000 },
     profiles: [{ profile: "ghost", instanceId: instanceIdFor("ghost"), stateRoot: path.join(app, "model-state", "cursor-acp-drain", "ghost") }],
   });
   mkdirSync(path.join(app, "model-state", "cursor-acp-drain", "ghost"), { recursive: true });
-  writeJson(path.join(app, "worker-runtime", "antigravity.manifest.json"), {
-    version: 1, artifacts: { "a.mjs": "0".repeat(64) }, environment: { PATH: "/usr/bin" }, nodeSHA256: "0".repeat(64), projectRoot: "/x",
-  });
+  helpers.writeWorkerManifest(app, "antigravity");
   writeJson(path.join(client, "cursor-acp-claimer.ghost.json"), {
     version: 1, profile: "ghost", owner: "dev.thetriangle.client", pid: 609, family: "cursor-acp", acquiredAt: "2026-10-17T04:31:02.793Z",
   });
@@ -589,7 +674,7 @@ test("doctor inventory: ghost and gravity2 are degraded without evidence and ok 
     t.skip("installation-inventory.mjs (PR #82) not on this branch");
     return;
   }
-  const fixture = inventoryFixture();
+  const fixture = inventoryFixture(inventory.helpers);
   try {
     const NOW = Date.parse("2026-10-17T20:00:00.000Z");
     const read = (progress) => inventory.readInstallationInventory({
@@ -636,7 +721,7 @@ test("doctor inventory: a drain's first claim stamp never masks a stalled open t
     t.skip("installation-inventory.mjs with the open-transaction policy (PR #82) not on this branch");
     return;
   }
-  const fixture = inventoryFixture();
+  const fixture = inventoryFixture(inventory.helpers);
   try {
     const NOW = Date.parse("2026-10-17T20:00:00.000Z");
     const TWO_HOURS_AGO = NOW - 2 * 60 * 60_000;
@@ -645,10 +730,12 @@ test("doctor inventory: a drain's first claim stamp never masks a stalled open t
     assert.equal(journal.forProfile("ghost", "cursor-acp").record("claim"), true);
     assert.equal(journal.forInstance(instanceIdFor("gravity2"), "worker").record("claim"), true);
     for (const profile of ["ghost", "gravity2"]) {
-      writeJson(path.join(fixture.app, "model-state", "instances", instanceIdFor(profile), "mailbox-transactions", "open.json"), {
-        version: 1, protocol: "coordinator-delivery-v1", deliveryId: 7, state: "claimed", replyRequired: true,
-        failureCount: 3, lastFailureReason: "runtime_failed", createdAt: new Date(TWO_HOURS_AGO).toISOString(),
-      });
+      writeJson(
+        path.join(fixture.app, "model-state", "instances", instanceIdFor(profile), "mailbox-transactions", "open.json"),
+        inventory.helpers.openTransactionRecord(instanceIdFor(profile), {
+          failureCount: 3, lastFailureReason: "runtime_failed", createdAt: new Date(TWO_HOURS_AGO).toISOString(),
+        }),
+      );
     }
     const result = inventory.readInstallationInventory({
       clientRoot: fixture.client,
