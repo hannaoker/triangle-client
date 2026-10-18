@@ -1,6 +1,6 @@
 {
   "meshUrlEnv": "MESH_ORIGIN",
-  "meshTokenEnv": "MESH_AGENT_TOKEN",
+  "workloadKeyFileEnv": "TRIANGLE_WORKLOAD_KEY_FILE",
   "agentIdEnv": "ANTIGRAVITY_AGENT_ID",
   "pollIntervalMs": 15000,
   "maxBackoffMs": 300000,

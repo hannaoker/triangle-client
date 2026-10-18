@@ -53,7 +53,7 @@ const SELECTOR_FLAGS = new Map([
   ["--gateway-url-env", "gatewayUrlEnv"],
   ["--internal-token-env", "internalTokenEnv"],
 ]);
-const MAILBOX_ENV_NAMES = new Set(["MESH_ORIGIN", "MESH_AGENT_TOKEN"]);
+const MAILBOX_ENV_NAMES = new Set(["MESH_ORIGIN", "TRIANGLE_WORKLOAD_KEY_FILE"]);
 
 function parseSelectors(argv) {
   const values = {};

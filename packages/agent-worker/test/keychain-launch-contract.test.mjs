@@ -13,6 +13,14 @@ const service = fs.readFileSync(path.join(root, "scripts/triangle-worker-service
 const servicePath = path.join(root, "scripts/triangle-worker-service.sh");
 const darwinOnly = process.platform !== "darwin" ? "LaunchAgent install integration requires macOS" : false;
 
+const WORKLOAD_CORE_RELATIVES = [
+  "packages/agent-worker/src/workload-credential.mjs",
+  "packages/triangle-cli/src/canonical.mjs",
+  "packages/triangle-cli/src/errors.mjs",
+  "packages/triangle-cli/src/keys.mjs",
+  "packages/triangle-cli/src/protocol.mjs",
+  "packages/triangle-cli/src/workload.mjs",
+];
 function mode(file) { return fs.statSync(file).mode & 0o777; }
 
 function makeInstallFixture(t) {
@@ -113,7 +121,8 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 7);
+  assert.equal(manifest.version, 8);
+  for (const relative of WORKLOAD_CORE_RELATIVES) assert.ok(manifest.artifacts[relative], relative);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
   assert.deepEqual(Object.keys(manifest).sort(), ["artifacts", "environment", "nodeSHA256", "projectRoot", "version"].sort());
@@ -144,6 +153,12 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/runtime.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/wake-client.mjs",
+    "packages/agent-worker/src/workload-credential.mjs",
+    "packages/triangle-cli/src/canonical.mjs",
+    "packages/triangle-cli/src/errors.mjs",
+    "packages/triangle-cli/src/keys.mjs",
+    "packages/triangle-cli/src/protocol.mjs",
+    "packages/triangle-cli/src/workload.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/acp-protocol.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/config-guards.mjs",
@@ -218,6 +233,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/wake-client.mjs",
+    ...WORKLOAD_CORE_RELATIVES,
   ];
   for (const relative of removed) {
     delete manifest.artifacts[relative];
@@ -297,7 +313,7 @@ test("LaunchAgent install rejects an existing symlink target without touching it
   assert.equal(fs.readFileSync(destination, "utf8"), "outside\n");
 });
 
-test("prepare-runtime upgrades to manifest v7 while v6 without ownership modules stays valid", { skip: darwinOnly }, (t) => {
+test("prepare-runtime upgrades to manifest v8 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const installer = path.join(root, "scripts/triangle-worker-install.py");
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
@@ -307,7 +323,7 @@ test("prepare-runtime upgrades to manifest v7 while v6 without ownership modules
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v7.version, 7);
+  assert.equal(v7.version, 8);
   assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
@@ -315,6 +331,7 @@ test("prepare-runtime upgrades to manifest v7 while v6 without ownership modules
   const ownershipRelatives = [
     "packages/agent-worker/src/claimer-advisory-lock.mjs",
     "packages/agent-worker/src/open-transaction-recovery.mjs",
+    ...WORKLOAD_CORE_RELATIVES,
   ];
   const projectRoot = v7.projectRoot;
   const v6 = structuredClone(v7);
@@ -363,7 +380,7 @@ test("prepare-runtime upgrades to manifest v7 while v6 without ownership modules
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 7);
+  assert.equal(after.version, 8);
   for (const relative of ownershipRelatives) {
     assert.ok(after.artifacts[relative]);
   }

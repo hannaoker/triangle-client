@@ -13,6 +13,7 @@ import {
 import {
   deriveProfileInstanceId,
 } from "../src/codex-runtime/headless-drain-service.mjs";
+import { TEST_WORKLOAD, testKey } from "./support/test-workload.mjs";
 
 const instanceId = (digit) => digit.repeat(64);
 
@@ -22,7 +23,7 @@ function instance(digit = "a") {
     instanceId: id,
     mailbox: {
       meshUrl: "https://mesh.example",
-      meshToken: `mesh_${digit.repeat(64)}`,
+      workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`mesh_${digit.repeat(64)}`),
       recipientId: `agent_${digit.repeat(32)}`,
       pageLimit: 10,
     },
@@ -76,7 +77,7 @@ function eventWake(overrides = {}) {
       instanceId: wakeId,
       mailbox: {
         meshUrl: "https://mesh.example",
-        meshToken: `mesh_${"e".repeat(64)}`,
+        workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`mesh_${"e".repeat(64)}`),
         recipientId: agentId,
         pageLimit: 1,
       },
@@ -224,7 +225,7 @@ test("bootstrap applies canonical mailbox semantics and bounded Node timer value
     { ...instance().mailbox, meshUrl: "http://mesh.example" },
     { ...instance().mailbox, meshUrl: "https://mesh.example/path" },
     { ...instance().mailbox, recipientId: "agent_not-canonical" },
-    { ...instance().mailbox, meshToken: " " },
+    { ...instance().mailbox, workloadPrivateKey: " " },
     { ...instance().mailbox, pageLimit: 0 },
     { ...instance().mailbox, pageLimit: 101 },
   ];
@@ -275,13 +276,13 @@ test("bootstrap rejects duplicate JSON keys at every level and duplicate instanc
 test("bootstrap rejects every mailbox token reflected outside its exact mailbox field", () => {
   const first = instance("a");
   const second = instance("b");
-  const secret = first.mailbox.meshToken;
+  const secret = first.mailbox.workloadPrivateKey;
   const candidates = [
     [{ ...first, runner: { ...first.runner, command: `/trusted/${secret}/node` } }],
     [{ ...first, runner: { ...first.runner, args: [`prefix-${secret}-suffix`] } }],
     [{ ...first, runnerEnvironment: { ...first.runnerEnvironment, CODEX_HOME: `/private/${secret}/home` } }],
-    [first, { ...second, runner: { ...second.runner, args: [first.mailbox.meshToken] } }],
-    [first, { ...second, mailbox: { ...second.mailbox, meshToken: first.mailbox.meshToken } }],
+    [first, { ...second, runner: { ...second.runner, args: [first.mailbox.workloadPrivateKey] } }],
+    [first, { ...second, mailbox: { ...second.mailbox, workloadPrivateKey: first.mailbox.workloadPrivateKey } }],
   ];
   for (const instances of candidates) {
     let error;
@@ -297,7 +298,7 @@ test("bootstrap rejects every mailbox token reflected outside its exact mailbox 
   const raw = JSON.stringify(reflected);
   const secondOccurrence = raw.indexOf(secret, raw.indexOf(secret) + secret.length);
   assert.notEqual(secondOccurrence, -1);
-  const escapedSecret = `\\u006desh_${"a".repeat(64)}`;
+  const escapedSecret = `\\u${secret.charCodeAt(0).toString(16).padStart(4, "0")}${secret.slice(1)}`;
   const escaped = raw.slice(0, secondOccurrence) + escapedSecret + raw.slice(secondOccurrence + secret.length);
   assert.throws(
     () => parseClientSupervisorBootstrap(escaped),
@@ -306,7 +307,7 @@ test("bootstrap rejects every mailbox token reflected outside its exact mailbox 
 });
 
 test("bootstrap is read only from bounded stdin and never echoed or sourced from argv or environment", async () => {
-  const secret = instance().mailbox.meshToken;
+  const secret = instance().mailbox.workloadPrivateKey;
   const stderr = capture();
   let received;
   const result = await runClientSupervisorCLI({
@@ -322,7 +323,7 @@ test("bootstrap is read only from bounded stdin and never echoed or sourced from
   });
   assert.equal(result, 0);
   assert.equal(received.version, undefined);
-  assert.equal(received.instances[0].mailbox.meshToken, secret);
+  assert.equal(received.instances[0].mailbox.workloadPrivateKey, secret);
   assert.equal(stderr.value(), "");
 
   for (const argv of [["--profile", "research"], [secret], ["--config", "/tmp/bootstrap.json"]]) {
@@ -350,7 +351,7 @@ test("bootstrap is read only from bounded stdin and never echoed or sourced from
   assert.equal(oversized.value(), "triangle-client: invalid bootstrap\n");
 
   const malformedDocument = Buffer.from(JSON.stringify(bootstrap()));
-  malformedDocument[malformedDocument.indexOf(Buffer.from(instance().mailbox.meshToken)) + 8] = 0xff;
+  malformedDocument[malformedDocument.indexOf(Buffer.from(instance().mailbox.workloadPrivateKey)) + 8] = 0xff;
   const malformed = capture();
   let created = false;
   assert.equal(await runClientSupervisorCLI({
@@ -365,7 +366,7 @@ test("bootstrap is read only from bounded stdin and never echoed or sourced from
 });
 
 test("runtime errors are sanitized and SIGINT or SIGTERM aborts with deterministic success", async () => {
-  const secret = instance().mailbox.meshToken;
+  const secret = instance().mailbox.workloadPrivateKey;
   const failed = capture();
   assert.equal(await runClientSupervisorCLI({
     argv: [],
@@ -438,7 +439,7 @@ test("parent monitor aborts an orphaned coordinator and releases its timer", () 
 });
 
 test("sanitized logger may include a short secret-free error code", async () => {
-  const secret = instance().mailbox.meshToken;
+  const secret = instance().mailbox.workloadPrivateKey;
   const logged = capture();
   let logger;
   assert.equal(await runClientSupervisorCLI({

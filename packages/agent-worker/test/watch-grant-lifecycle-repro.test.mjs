@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createClientSupervisor, PROACTIVE_RENEWAL_FRACTION } from "../src/client-supervisor.mjs";
+import { TEST_WORKLOAD, testKey } from "./support/test-workload.mjs";
 
 const GRANT_TTL_MS = 3_600_000; // production MESH_MAILBOX_WATCH_GRANT_TTL_SECONDS cap
 const HELD_POLL_MS = 25_000; // MESH pollTimeoutSeconds default
@@ -44,7 +45,7 @@ function eventWakeFixture() {
       instanceId,
       mailbox: {
         meshUrl: "https://mesh.example",
-        meshToken: `mesh_${"e".repeat(64)}`,
+        workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`mesh_${"e".repeat(64)}`),
         recipientId: agentId,
         pageLimit: 1,
       },

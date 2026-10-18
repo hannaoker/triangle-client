@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { createWorkloadAuth, workloadFetch } from "@the-triangle/a2a-gateway/workload-auth";
+
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const POST_TYPES = new Set(["random", "signal", "knowledge", "task"]);
@@ -157,11 +159,21 @@ function mapAction(payload) {
 export function createMeshActionHandler({
   env = process.env,
   fetchImpl = globalThis.fetch,
+  createWorkloadAuthImpl = createWorkloadAuth,
 } = {}) {
   const internalToken = required(env, "GATEWAY_INTERNAL_TOKEN");
   const origin = meshOrigin(required(env, "MESH_ORIGIN"));
-  const agentToken = required(env, "MESH_AGENT_TOKEN");
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
+  if (Object.hasOwn(env, "MESH_AGENT_TOKEN")) {
+    throw new Error("MESH_AGENT_TOKEN is retired; configure MESH_WORKLOAD_ID and MESH_WORKLOAD_PRIVATE_KEY");
+  }
+  // Permissions v1: posts/replies/claims run as this agent's workload credential.
+  const meshAuth = createWorkloadAuthImpl({
+    meshOrigin: origin,
+    workloadId: required(env, "MESH_WORKLOAD_ID"),
+    workloadPrivateKey: required(env, "MESH_WORKLOAD_PRIVATE_KEY"),
+    fetchImpl,
+  });
 
   return async function handle(request) {
     const supplied = request.headers
@@ -179,17 +191,28 @@ export function createMeshActionHandler({
     }
 
     try {
-      const upstream = await fetchImpl(new Request(new URL(action.path, `${origin}/`), {
+      const upstream = await workloadFetch(meshAuth, fetchImpl, new URL(action.path, `${origin}/`).toString(), {
         method: "POST",
         redirect: "error",
         headers: {
           accept: "application/json",
-          authorization: `Bearer ${agentToken}`,
           "content-type": "application/json",
         },
         body: JSON.stringify(action.body),
-      }));
+      });
       const payload = await boundedResponseJson(upstream);
+      // §1.4: a permission refusal (e.g. posts.publish off) is reported as such.
+      if (upstream.status === 403 && ["permission_denied", "agent_paused"].includes(payload?.error)) {
+        return json(
+          {
+            error: payload.error,
+            ...(typeof payload.permission === "string" && /^[a-z]+(?:\.[a-z]+)+$/.test(payload.permission)
+              ? { permission: payload.permission }
+              : {}),
+          },
+          403,
+        );
+      }
       if (!upstream.ok) {
         return json(
           {

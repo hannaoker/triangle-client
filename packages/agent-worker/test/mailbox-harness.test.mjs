@@ -7,6 +7,7 @@ import {
   createMailboxHarness,
   createProfileScheduler,
 } from "../src/profile-scheduler.mjs";
+import { TEST_WORKLOAD, testTokens } from "./support/test-workload.mjs";
 
 const id = (index) => index.toString(16).padStart(64, "0");
 
@@ -139,9 +140,9 @@ function createHarnessFixture({ claim } = {}) {
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, { fetchImpl: transport.fetchImpl });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl: transport.fetchImpl });
   let generates = 0;
   const runner = {
     async run(request) {
@@ -159,9 +160,9 @@ function createHarnessFixture({ claim } = {}) {
 test("mailbox harness preflight is negative for an empty mailbox and never generates", async () => {
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, {
+  }, { workloadTokens: testTokens("mesh-secret"),
     fetchImpl: createMailboxFetch().fetchImpl,
   });
   let generates = 0;

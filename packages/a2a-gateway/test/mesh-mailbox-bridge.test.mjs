@@ -7,6 +7,7 @@ import {
   MeshMailboxBridgeError,
   createMeshMailboxBridge,
 } from "../src/mesh-mailbox-bridge.mjs";
+import { testMeshAuth } from "./support/mesh-auth.mjs";
 
 const PEER_TOKEN = "mesh_peer_sender_to_codex_secret";
 const AGENT_TOKEN = "mesh_gateway_agent_secret";
@@ -104,7 +105,7 @@ function fixture({
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example",
     recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl,
     ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
   });
@@ -118,7 +119,7 @@ test("exports only the frozen stateless bridge API", () => {
   assert.doesNotThrow(() => createMeshMailboxBridge({
     meshOrigin: "https://mesh.example",
     recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async () => response({}),
   }));
 });
@@ -355,7 +356,7 @@ test("central task responses fail closed when malformed or over the continuation
     const bridge = createMeshMailboxBridge({
       meshOrigin: "https://mesh.example",
       recipientAgentId: RECIPIENT,
-      meshAgentToken: AGENT_TOKEN,
+      meshAuth: testMeshAuth(AGENT_TOKEN),
       fetchImpl: async () => {
         calls += 1;
         return response({ items: [correlation()], extra: true });
@@ -399,14 +400,14 @@ test("strict constructor and operation validation reject caller-controlled routi
   assert.throws(() => createMeshMailboxBridge({
     meshOrigin: "https://mesh.example/path",
     recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async () => response({}),
   }), /meshOrigin/);
   assert.throws(() => createMeshMailboxBridge({
     meshOrigin: "https://mesh.example",
     recipientAgentId: RECIPIENT,
     fetchImpl: async () => response({}),
-  }), /meshAgentToken/);
+  }), /meshAuth/);
   const { bridge, calls } = fixture();
   await assert.rejects(
     bridge.sendMessage({ peerToken: "not-a-ticket", senderAgentId: SENDER, message: MESSAGE }),
@@ -436,7 +437,7 @@ test("history projection paginates from the correlated sequence to a later reply
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example",
     recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       const url = new URL(request.url);
       calls.push(url);
@@ -470,7 +471,7 @@ test("history projection rejects non-progressing or malformed pagination", async
   let calls = 0;
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       calls += 1;
       const url = new URL(request.url);
@@ -496,7 +497,7 @@ test("task projection orders continuations by MESH sequence and keeps linked rep
   ];
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/v1/a2a/tasks/")) return response({ items: rows });
@@ -524,7 +525,7 @@ test("an older reply does not complete a task whose newest continuation is unans
   ];
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/v1/a2a/tasks/")) return response({ items: rows });
@@ -569,7 +570,7 @@ test("request deadlines reject unsafe configuration bounds", () => {
   for (const requestTimeoutMs of [1, 30_001, 1.5]) {
     assert.throws(() => createMeshMailboxBridge({
       meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-      meshAgentToken: AGENT_TOKEN, fetchImpl: async () => response({}), requestTimeoutMs,
+      meshAuth: testMeshAuth(AGENT_TOKEN), fetchImpl: async () => response({}), requestTimeoutMs,
     }), /requestTimeoutMs/);
   }
 });
@@ -636,7 +637,7 @@ test("projection admits 64 continuations and rejects the 65-row sentinel before 
       let historyRequests = 0;
       const bridge = createMeshMailboxBridge({
         meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-        meshAgentToken: AGENT_TOKEN,
+        meshAuth: testMeshAuth(AGENT_TOKEN),
         fetchImpl: async (request) => {
           const url = new URL(request.url);
           if (url.pathname.startsWith("/api/v1/a2a/tasks/")) return response({ items: rows });
@@ -671,7 +672,7 @@ test("projection rejects a 130th request across list, task, and history reads", 
   let requests = 0;
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       requests += 1;
       const url = new URL(request.url);
@@ -711,7 +712,7 @@ test("listTasks admits 64 central tasks within the aggregate budget and rejects 
   let requests = 0;
   const bridge = createMeshMailboxBridge({
     meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-    meshAgentToken: AGENT_TOKEN,
+    meshAuth: testMeshAuth(AGENT_TOKEN),
     fetchImpl: async (request) => {
       requests += 1;
       const url = new URL(request.url);
@@ -773,7 +774,7 @@ test("task projection rejects incompatible lineage and duplicate sequence before
       let requests = 0;
       const bridge = createMeshMailboxBridge({
         meshOrigin: "https://mesh.example", recipientAgentId: RECIPIENT,
-        meshAgentToken: AGENT_TOKEN,
+        meshAuth: testMeshAuth(AGENT_TOKEN),
         fetchImpl: async () => {
           requests += 1;
           return response({ items: [base, mutate(base)] });

@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import { createMeshMailboxBridge } from "./mesh-mailbox-bridge.mjs";
+import { createWorkloadAuth } from "./workload-auth.mjs";
 import { createVercelGatewayHandler } from "./vercel-handler.mjs";
 
 const require = createRequire(import.meta.url);
@@ -8,7 +9,9 @@ const { createMeshPeerIntrospector } = require("./protocol.cjs");
 
 const REQUIRED_ENV = [
   "MESH_ORIGIN",
-  "MESH_AGENT_TOKEN",
+  // Permissions v1: the gateway's agent workload credential (deployment secrets).
+  "MESH_WORKLOAD_ID",
+  "MESH_WORKLOAD_PRIVATE_KEY",
   "MESH_REGISTRATION_NONCE",
 ];
 const MESH_AGENT_ID_PATTERN = /^agent_[a-f0-9]{32}$/;
@@ -80,6 +83,7 @@ export function createConfiguredGatewayApp({
   env = process.env,
   createBridgeImpl = createMeshMailboxBridge,
   createIntrospectorImpl = createMeshPeerIntrospector,
+  createWorkloadAuthImpl = createWorkloadAuth,
   fetchImpl = globalThis.fetch,
 }) {
   if (typeof gatewayKey !== "string" || gatewayKey.length === 0) {
@@ -90,9 +94,18 @@ export function createConfiguredGatewayApp({
   const origin = agentOrigin(env);
   const meshOrigin = httpsOrigin(required(env, "MESH_ORIGIN"), "MESH_ORIGIN");
   const recipientAgentId = recipientIdentity(env, gatewayKey);
+  if (Object.hasOwn(env, "MESH_AGENT_TOKEN")) {
+    throw new Error("MESH_AGENT_TOKEN is retired; configure MESH_WORKLOAD_ID and MESH_WORKLOAD_PRIVATE_KEY");
+  }
+  const meshAuth = createWorkloadAuthImpl({
+    meshOrigin,
+    workloadId: required(env, "MESH_WORKLOAD_ID"),
+    workloadPrivateKey: required(env, "MESH_WORKLOAD_PRIVATE_KEY"),
+    fetchImpl,
+  });
   const introspectPeerToken = createIntrospectorImpl({
     meshOrigin,
-    agentToken: required(env, "MESH_AGENT_TOKEN"),
+    meshAuth,
     fetchImpl,
   });
   let bridgePromise;
@@ -101,7 +114,7 @@ export function createConfiguredGatewayApp({
       .then(() => createBridgeImpl({
         meshOrigin,
         recipientAgentId,
-        meshAgentToken: required(env, "MESH_AGENT_TOKEN"),
+        meshAuth,
         fetchImpl,
       }))
       .catch((error) => {

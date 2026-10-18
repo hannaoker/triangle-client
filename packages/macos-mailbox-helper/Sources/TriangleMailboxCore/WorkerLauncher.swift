@@ -114,7 +114,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if (5...8).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -142,17 +142,29 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
             ])
             // v6 schema extraction; v5 bundles omit it.
-            if manifestVersion == 6 || manifestVersion == 7 {
+            if manifestVersion >= 6 {
                 artifacts.insert("packages/agent-worker/src/client-supervisor-schema.mjs")
             }
             // v7 headless ownership recovery; v5/v6 helpers keep exact-set match.
-            if manifestVersion == 7 {
+            if manifestVersion >= 7 {
                 artifacts.insert("packages/agent-worker/src/claimer-advisory-lock.mjs")
                 artifacts.insert("packages/agent-worker/src/open-transaction-recovery.mjs")
             }
+            // v8 (permissions v1): the workload-key credential loader and the
+            // shared triangle-cli protocol core the mailbox client imports.
+            if manifestVersion == 8 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/workload-credential.mjs",
+                    "packages/triangle-cli/src/canonical.mjs",
+                    "packages/triangle-cli/src/errors.mjs",
+                    "packages/triangle-cli/src/keys.mjs",
+                    "packages/triangle-cli/src/protocol.mjs",
+                    "packages/triangle-cli/src/workload.mjs",
+                ])
+            }
             // The coordinator can run from any worker bundle and imports
             // codex-runtime, so v7 requires it everywhere (v5/v6: codex only).
-            if worker == .codex || manifestVersion == 7 {
+            if worker == .codex || manifestVersion >= 7 {
                 artifacts.formUnion([
                     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
                     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",

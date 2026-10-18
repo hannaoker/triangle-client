@@ -26,6 +26,7 @@ import {
   createWakeRuntime,
 } from "../src/profile-scheduler.mjs";
 import { createAtomicFileCursorStore } from "../src/wake-client.mjs";
+import { TEST_WORKLOAD, testTokens } from "./support/test-workload.mjs";
 
 const id = (n) => n.toString(16).padStart(64, "0");
 
@@ -249,9 +250,9 @@ test("crash after claim before ack leaves work unacked for same-claim reclaim", 
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, { fetchImpl });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
   const [message] = await client.listUnread();
   let generations = 0;
   const generate = () => {
@@ -305,9 +306,9 @@ test("crash after generation before ack does not regenerate when reply is durabl
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, { fetchImpl });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
   const generate = () => {
     generateCount += 1;
     return { status: "completed", text: "durable-reply" };

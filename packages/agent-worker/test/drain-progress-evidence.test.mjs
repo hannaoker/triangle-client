@@ -21,8 +21,10 @@ import { progressClientRootFromModule, resolveProgressClientRoot } from "../src/
 import { instrumentCursorAcpProgress } from "../src/cursor-acp-runtime/headless-drain-service.mjs";
 import { createHeadlessCursorAcpDrain } from "../src/cursor-acp-runtime/headless-drain.mjs";
 import { createHelperDurableDeliveryResolver } from "../src/helper-transaction-proxy.mjs";
+import { TEST_WORKLOAD, testKey } from "./support/test-workload.mjs";
 
-const SENTINEL_TOKEN = "mesh_SENTINEL_TOKEN_must_never_be_journaled_0123456789";
+// The workload key must never be journaled.
+const SENTINEL_TOKEN = testKey("SENTINEL_TOKEN_must_never_be_journaled");
 const SENTINEL_BODY = "SENTINEL BODY must never be journaled";
 
 // The progress journal's lock is Darwin O_EXLOCK and fails closed elsewhere
@@ -649,7 +651,8 @@ function workerInstance(profile) {
     instanceId,
     mailbox: {
       meshUrl: "https://mesh.example",
-      meshToken: SENTINEL_TOKEN,
+      workloadId: TEST_WORKLOAD.workloadId,
+      workloadPrivateKey: SENTINEL_TOKEN,
       recipientId: `agent_${"e".repeat(32)}`,
       pageLimit: 1,
     },

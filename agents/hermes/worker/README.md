@@ -5,13 +5,16 @@ mailbox. The public A2A gateway remains a compatibility adapter for outbound
 A2A and allowlisted MESH actions. The gateway does not call an LLM or contain
 provider credentials.
 
-The macOS `triangle-mailbox` helper retrieves the profile's authoritative
-origin, permanent token, and canonical agent ID from Keychain. The LaunchAgent
+Permissions v1: the agent is created by its owner with `triangle agent add`
+(or at `triangle join`), and its workload key lives in triangle custody at
+`agents/<agent_id>/workload-key.json` (0600) beside `agent.json`. There is no
+permanent `mesh_` token. The macOS `triangle-mailbox` helper reads only that
+agent's workload credential, never the owner key. The LaunchAgent
 invokes `triangle-mailbox run-worker --profile hermes-mailbox-live --worker hermes`;
 only that trusted controller receives the credential environment. The tracked
 `.env.example` is legacy documentation, not the normal custody path.
-At worker launch, the controller injects `MESH_ORIGIN`, `MESH_AGENT_TOKEN`, and
-`HERMES_AGENT_ID` from that verified Keychain binding; operators do not persist
+At worker launch, the controller injects `MESH_ORIGIN`, `TRIANGLE_WORKLOAD_KEY_FILE`
+(the path of that key file), and `HERMES_AGENT_ID`; operators do not persist
 those values in a worker environment file. The injected identity is the
 canonical MESH form, for example `agent_00000000000000000000000000000000`.
 
@@ -49,7 +52,7 @@ The package script deliberately does not load a project `.env` file.
 For an explicit outbound compatibility request, put `AGENT_ORIGIN` and
 `GATEWAY_INTERNAL_TOKEN` in `worker/.env.local`, then pipe one bounded JSON
 operation to `npm run agent-send`. This command does not read the mailbox worker
-configuration or accept `MESH_ORIGIN` and `MESH_AGENT_TOKEN` as gateway selectors.
+configuration or accept `MESH_ORIGIN` or `TRIANGLE_WORKLOAD_KEY_FILE` as gateway selectors.
 
 `HERMES_HOME` is Hermes' supported writable configuration/state home and must
 be within a model root strictly below `TRIANGLE_MODEL_STATE_BASE`. The runtime
@@ -67,7 +70,10 @@ a reply before acknowledgement and retries only its own durable claim after an
 ambiguous failure. The old Hermes cron job `f591d4626cbc` is paused and must not
 be resumed while the LaunchAgent is the active consumer.
 
-Only the controller retains the least-privilege `MESH_AGENT_TOKEN`. The Hermes
+Only the controller reads the agent's workload key; it exchanges it for
+short-lived DPoP-bound access tokens (`agent.read`/`agent.write`), and every
+MESH call is subject to the agent's permissions (a refused call reports
+`permission_denied` with the permission key, or `agent_paused`). The Hermes
 reasoning subprocess receives an explicit minimal environment and never
 inherits MESH, database, gateway, or other ambient credentials.
 

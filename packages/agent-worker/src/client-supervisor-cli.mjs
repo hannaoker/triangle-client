@@ -193,20 +193,15 @@ function assertNoDuplicateJSONKeys(text) {
 function hasValidMailboxKeys(mailbox) {
   if (!isObject(mailbox)) return false;
   const actual = Object.keys(mailbox);
+  // Permissions v1: workload credential only (no mesh_ bearer).
   const allowed = new Set([
-    "meshToken",
     "meshUrl",
     "pageLimit",
     "recipientId",
     "workloadId",
     "workloadPrivateKey",
   ]);
-  const required = [
-    "meshToken",
-    "meshUrl",
-    "pageLimit",
-    "recipientId",
-  ];
+  const required = [...allowed];
   if (!required.every((k) => Object.hasOwn(mailbox, k))) return false;
   if (!actual.every((k) => allowed.has(k))) return false;
   return true;
@@ -260,10 +255,7 @@ function mailboxOwnerOutsideValues(owner, includeSecrets) {
     ...Object.values(owner.runnerEnvironment),
   ].filter(Boolean);
   if (includeSecrets) {
-    values.push(owner.mailbox.meshToken);
-    if (owner.mailbox.workloadPrivateKey) {
-      values.push(owner.mailbox.workloadPrivateKey);
-    }
+    values.push(owner.mailbox.workloadPrivateKey);
   }
   return values;
 }
@@ -344,10 +336,7 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
     ...(eventWake?.drains ?? []),
   ];
   for (const [ownerIndex, owner] of owners.entries()) {
-    const secrets = [owner.mailbox.meshToken];
-    if (owner.mailbox.workloadPrivateKey) {
-      secrets.push(owner.mailbox.workloadPrivateKey);
-    }
+    const secrets = [owner.mailbox.workloadPrivateKey];
     for (const secret of secrets) {
       for (const [instanceIndex, instance] of owners.entries()) {
         const outsideValues = mailboxOwnerOutsideValues(instance, ownerIndex !== instanceIndex);

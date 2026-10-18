@@ -65,7 +65,7 @@ done < <(/usr/bin/find "${scan_paths[@]}" -type f -print0 2>/dev/null)
 # the production pool/handoff opt-in (values 1 or 2). No probe-file override.
 for plist in deploy/launchd/*.plist.template; do
   [[ -f "$plist" ]] || continue
-  if /usr/bin/grep -E -qi 'MESH_AGENT_TOKEN|mesh_watch_|admissionToken|TRIANGLE_CODEX_LIVE_PROBE|OPENAI_API_KEY' "$plist"; then
+  if /usr/bin/grep -E -qi 'MESH_AGENT_TOKEN|MESH_WORKLOAD_PRIVATE_KEY|mesh_watch_|admissionToken|TRIANGLE_CODEX_LIVE_PROBE|OPENAI_API_KEY' "$plist"; then
     fail "LaunchAgent template must stay credential-free: $plist"
   elif /usr/bin/grep -F 'EnvironmentVariables' "$plist" >/dev/null; then
     if /usr/bin/grep -F 'TRIANGLE_CODEX_POOL_ENABLE' "$plist" >/dev/null \

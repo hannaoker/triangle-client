@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
 
+// One JWS/DPoP implementation for the whole client (permissions v1): the
+// triangle-cli protocol core. Bundled into every worker (installer manifest v8).
+import { compactJws, assertPrivateJwk } from "../../triangle-cli/src/keys.mjs";
+import { AGENT_BOUNDS, WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE } from "../../triangle-cli/src/protocol.mjs";
+import { dpopProof } from "../../triangle-cli/src/workload.mjs";
+
 const DEFAULT_LIMIT = 1;
 const MAX_LIMIT = 100;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -27,16 +33,43 @@ const ALLOWED_ERROR_CODES = new Set([
   "mailbox_service_unavailable",
   "rate_limited",
 ]);
+// Structured permissions-v1 refusals (§1.4) the worker surfaces as-is.
+const MESH_ERROR_CODES = new Set([
+  "agent_auth_required",
+  "agent_paused",
+  "dpop_replay",
+  "invalid_workload_proof",
+  "permission_denied",
+  "workload_forbidden",
+]);
+const PERMISSION_KEY = /^[a-z]+(?:\.[a-z]+)+$/;
 
 export class MailboxRequestError extends Error {
-  constructor(message, { status, mailboxError } = {}) {
+  constructor(message, { status, mailboxError, meshError, permission } = {}) {
     super(message);
     this.name = "MailboxRequestError";
     this.status = status;
     this.mailboxError = ALLOWED_ERROR_CODES.has(mailboxError)
       ? mailboxError
       : undefined;
+    const code = meshError ?? mailboxError;
+    this.meshError = MESH_ERROR_CODES.has(code) ? code : undefined;
+    this.permission =
+      this.meshError === "permission_denied" && typeof permission === "string" && PERMISSION_KEY.test(permission)
+        ? permission
+        : undefined;
   }
+}
+
+function describeRefusal(status, payload) {
+  const code = typeof payload?.error === "string" ? payload.error : undefined;
+  if (code === "permission_denied") {
+    const key = typeof payload?.permission === "string" && PERMISSION_KEY.test(payload.permission) ? payload.permission : null;
+    return `Not allowed by this agent's permissions${key ? `: ${key} is off (its owner can turn it on with \`triangle permissions set <agent> ${key}=on\`)` : ""}`;
+  }
+  if (code === "agent_paused") return "This agent is paused by its owner (`triangle agent resume` turns it back on)";
+  if (code === "agent_auth_required") return "This agent's workload credential was refused (check `triangle doctor`)";
+  return `Mailbox request failed with status ${status}`;
 }
 
 export class MailboxOwnershipError extends MailboxRequestError {
@@ -165,11 +198,12 @@ function normalizedRequest(message) {
 function assertResponse(response, payload) {
   if (!response.ok) {
     throw new MailboxRequestError(
-      `Mailbox request failed with status ${response.status}`,
+      describeRefusal(response.status, payload),
       {
         status: response.status,
         mailboxError:
           typeof payload?.error === "string" ? payload.error : undefined,
+        permission: payload?.permission,
       },
     );
   }
@@ -327,199 +361,162 @@ function isSkipEventError(error) {
 export function validateMailboxClientOptions(
   {
     meshUrl,
-    meshToken,
     recipientId,
     pageLimit = DEFAULT_LIMIT,
     workloadId,
     workloadPrivateKey,
+    ...rest
   } = {},
 ) {
+  // Permissions v1: the worker authenticates only with its agent's workload
+  // key (WL + DPoP). There is no bearer-token fallback.
+  if (Object.hasOwn(rest, "meshToken")) {
+    throw new TypeError("meshToken is no longer supported; configure workloadId and workloadPrivateKey");
+  }
   const origin = meshOrigin(meshUrl);
-  const token = required(meshToken, "meshToken");
   const workerId = boundedId(recipientId, "recipientId", AGENT_ID);
   if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_LIMIT) {
     throw new TypeError(`pageLimit must be between 1 and ${MAX_LIMIT}`);
   }
-  const result = {
+  const id = required(workloadId, "workloadId");
+  if (!WORKLOAD_ID.test(id)) throw new TypeError("workloadId is invalid");
+  const key = required(workloadPrivateKey, "workloadPrivateKey");
+  parseWorkloadPrivateKey(key);
+  return Object.freeze({
     meshUrl: origin,
-    meshToken: token,
     recipientId: workerId,
     pageLimit,
-  };
-  if (typeof workloadId === "string" && workloadId.trim()) {
-    result.workloadId = workloadId.trim();
-  }
-  if (typeof workloadPrivateKey === "string" && workloadPrivateKey.trim()) {
-    result.workloadPrivateKey = workloadPrivateKey.trim();
-  }
-  return Object.freeze(result);
+    workloadId: id,
+    workloadPrivateKey: key,
+  });
 }
 
+/**
+ * The workload private key as the custody stores it: a private Ed25519 JWK
+ * (JSON text, as in `agents/<id>/workload-key.json`) or its 43-character
+ * base64url `d` seed. Returns the private JWK.
+ */
+export function parseWorkloadPrivateKey(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  let jwk;
+  if (/^[A-Za-z0-9_-]{43}$/.test(text)) {
+    const seed = Buffer.from(text, "base64url");
+    if (seed.length !== 32) throw new TypeError("workloadPrivateKey is invalid");
+    const privateKey = crypto.createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]),
+      format: "der",
+      type: "pkcs8",
+    });
+    const { x } = crypto.createPublicKey(privateKey).export({ format: "jwk" });
+    jwk = { crv: "Ed25519", d: text, kty: "OKP", x };
+  } else if (text.startsWith("{")) {
+    try { jwk = JSON.parse(text); } catch { throw new TypeError("workloadPrivateKey is invalid"); }
+  } else {
+    throw new TypeError("workloadPrivateKey must be a private Ed25519 JWK or its base64url seed");
+  }
+  try {
+    return assertPrivateJwk(jwk);
+  } catch {
+    throw new TypeError("workloadPrivateKey is invalid");
+  }
+}
+
+/**
+ * Workload tokens (§4.2) via the shared triangle-cli core: the challenge is
+ * signed with canonical JSON (RFC 8785) under the v1 scopes, and each request
+ * carries a DPoP proof whose `htu` is the full request URL.
+ */
 export function createWorkloadTokenManager({
   origin,
   workloadId,
   workloadPrivateKey,
   fetchImpl,
-  requestTimeoutMs,
+  now = () => Date.now(),
 }) {
-  let rawKeyBytes;
-  if (typeof workloadPrivateKey === "string") {
-    if (workloadPrivateKey.length === 64 && /^[0-9a-fA-F]+$/.test(workloadPrivateKey)) {
-      rawKeyBytes = Buffer.from(workloadPrivateKey, "hex");
-    } else {
-      rawKeyBytes = Buffer.from(workloadPrivateKey, "base64");
-    }
-  } else if (Buffer.isBuffer(workloadPrivateKey)) {
-    rawKeyBytes = workloadPrivateKey;
-  }
-  if (!rawKeyBytes || rawKeyBytes.length !== 32) {
-    throw new TypeError("workloadPrivateKey must be 32 bytes");
-  }
-
-  const pkcs8Der = Buffer.concat([
-    Buffer.from("302e020100300506032b657004220420", "hex"),
-    rawKeyBytes,
-  ]);
-  const privateKey = crypto.createPrivateKey({
-    key: pkcs8Der,
-    format: "der",
-    type: "pkcs8",
-  });
-  const publicKey = crypto.createPublicKey(privateKey);
-  const publicJwk = publicKey.export({ format: "jwk" });
-
+  const workloadKey = parseWorkloadPrivateKey(workloadPrivateKey);
+  const requestedScopes = [...AGENT_BOUNDS];
   let cachedToken = null;
   let cachedTokenExpiresAt = 0;
   let refreshPromise = null;
 
-  function base64url(input) {
-    return Buffer.isBuffer(input)
-      ? input.toString("base64url")
-      : Buffer.from(input).toString("base64url");
-  }
-
-  function signJws(header, payload) {
-    const encHeader = base64url(JSON.stringify(header));
-    const encPayload = base64url(JSON.stringify(payload));
-    const signingInput = `${encHeader}.${encPayload}`;
-    const sig = crypto.sign(null, Buffer.from(signingInput, "ascii"), privateKey).toString("base64url");
-    return `${signingInput}.${sig}`;
-  }
-
-  function createDpopProof(method, fullUrl, accessToken) {
-    const parsed = new URL(fullUrl);
-    if (parsed.username || parsed.password || parsed.hash) {
-      throw new TypeError("Invalid DPoP URL");
+  async function postJson(path, body, signal) {
+    const response = await fetchImpl(
+      new Request(new URL(path, `${origin}/`), {
+        method: "POST",
+        cache: "no-store",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      }),
+    );
+    const payload = await readBoundedJson(response, response.status);
+    if (!response.ok) {
+      throw new MailboxRequestError(
+        `Workload token request failed with status ${response.status}${typeof payload?.error === "string" ? ` (${payload.error})` : ""}`,
+        { status: response.status, meshError: payload?.error, permission: payload?.permission },
+      );
     }
-    const htu = parsed.toString();
-    const ath = crypto.createHash("sha256").update(accessToken, "utf8").digest("base64url");
-    const dpopHeader = {
-      alg: "EdDSA",
-      typ: "dpop+jwt",
-      jwk: { crv: "Ed25519", kty: "OKP", x: publicJwk.x },
-    };
-    const dpopPayload = {
-      htm: method.toUpperCase(),
-      htu,
-      iat: Math.floor(Date.now() / 1000),
-      jti: crypto.randomUUID(),
-      ath,
-    };
-    return signJws(dpopHeader, dpopPayload);
+    return payload;
   }
 
-  async function fetchToken(signal) {
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (cachedToken && cachedTokenExpiresAt - 30 > nowSec) {
+  async function fetchToken(signal, { refresh = false } = {}) {
+    if (!refresh && cachedToken && cachedTokenExpiresAt - 30_000 > now()) {
       return cachedToken;
     }
-    if (refreshPromise) {
-      return refreshPromise;
-    }
+    if (refreshPromise) return refreshPromise;
     refreshPromise = (async () => {
       try {
-        const challengeUrl = new URL("/api/v1/identity/token-challenges", `${origin}/`);
-        const challengeRes = await fetchImpl(
-          new Request(challengeUrl, {
-            method: "POST",
-            cache: "no-store",
-            headers: {
-              accept: "application/json",
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({ workload_id: workloadId }),
-            signal,
-          }),
-        );
-        const challengePayload = await readBoundedJson(challengeRes, challengeRes.status);
-        if (!challengeRes.ok || !challengePayload?.challenge?.challenge_id) {
-          throw new MailboxRequestError(
-            `Failed to obtain workload token challenge (status ${challengeRes.status})`,
-            { status: challengeRes.status },
-          );
+        const challengePayload = await postJson("/api/v1/identity/token-challenges", { workload_id: workloadId }, signal);
+        const ch = challengePayload?.challenge;
+        if (!ch?.challenge_id || !ch.nonce || !ch.principal_id || !ch.audience) {
+          throw new MailboxRequestError("Workload token challenge is invalid");
         }
-        const ch = challengePayload.challenge;
-
-        const proofHeader = {
-          alg: "EdDSA",
-          typ: "mesh-workload-proof+jwt",
-          kid: workloadId,
-        };
-        const requestedScopes = ["mailbox.read", "mailbox.write"];
-        const proofPayload = {
-          profile: "mesh.workload-token-proof/1",
-          challenge_id: ch.challenge_id,
-          workload_id: workloadId,
-          principal_id: ch.principal_id,
-          audience: ch.audience ?? ch.origin,
-          nonce: ch.nonce,
-          requested_scopes: requestedScopes,
-        };
-        const proofJws = signJws(proofHeader, proofPayload);
-
-        const tokenUrl = new URL("/api/v1/identity/tokens", `${origin}/`);
-        const tokenRes = await fetchImpl(
-          new Request(tokenUrl, {
-            method: "POST",
-            cache: "no-store",
-            headers: {
-              accept: "application/json",
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              challenge_id: ch.challenge_id,
-              requested_scopes: requestedScopes,
-              proof: proofJws,
-            }),
-            signal,
-          }),
+        const proof = compactJws(
+          { alg: "EdDSA", kid: workloadId, typ: "mesh-workload-proof+jwt" },
+          {
+            audience: ch.audience,
+            challenge_id: ch.challenge_id,
+            nonce: ch.nonce,
+            principal_id: ch.principal_id,
+            profile: WORKLOAD_TOKEN_PROOF_PROFILE,
+            requested_scopes: requestedScopes,
+            workload_id: workloadId,
+          },
+          workloadKey,
         );
-        const tokenPayload = await readBoundedJson(tokenRes, tokenRes.status);
-        if (!tokenRes.ok || !tokenPayload?.access_token) {
-          throw new MailboxRequestError(
-            `Failed to exchange workload token (status ${tokenRes.status})`,
-            { status: tokenRes.status },
-          );
+        const tokenPayload = await postJson(
+          "/api/v1/identity/tokens",
+          { challenge_id: ch.challenge_id, proof, requested_scopes: requestedScopes },
+          signal,
+        );
+        if (typeof tokenPayload?.access_token !== "string" || tokenPayload.token_type !== "DPoP") {
+          throw new MailboxRequestError("Workload token response is invalid");
         }
-
-        const lifetime = Number.isSafeInteger(tokenPayload.expires_in)
+        const lifetime = Number.isSafeInteger(tokenPayload.expires_in) && tokenPayload.expires_in > 0
           ? tokenPayload.expires_in
           : 300;
         cachedToken = tokenPayload.access_token;
-        cachedTokenExpiresAt = Math.floor(Date.now() / 1000) + lifetime;
+        cachedTokenExpiresAt = now() + lifetime * 1000;
         return cachedToken;
       } finally {
         refreshPromise = null;
       }
     })();
-
     return refreshPromise;
   }
 
-  return {
-    fetchToken,
-    createDpopProof,
-  };
+  function createDpopProof(method, fullUrl, accessToken) {
+    return dpopProof({ workloadKey, method, url: fullUrl, accessToken, now: now() });
+  }
+
+  function invalidate(token) {
+    if (token === undefined || token === cachedToken) {
+      cachedToken = null;
+      cachedTokenExpiresAt = 0;
+    }
+  }
+
+  return Object.freeze({ fetchToken, createDpopProof, invalidate });
 }
 
 export function createMailboxClient(
@@ -537,11 +534,11 @@ export function createMailboxClient(
     // after a won claim, a persisted reply, and an owned ack. Never carries ids,
     // bodies, or credentials; listener failures never affect delivery.
     onProgress = null,
+    workloadTokens = null,
   } = {},
 ) {
   const {
     meshUrl: origin,
-    meshToken: token,
     recipientId: workerId,
     pageLimit,
     workloadId,
@@ -574,16 +571,14 @@ export function createMailboxClient(
     }
   }
 
-  let workloadTokenManager = null;
-  if (workloadId && workloadPrivateKey) {
-    workloadTokenManager = createWorkloadTokenManager({
-      origin,
-      workloadId,
-      workloadPrivateKey,
-      fetchImpl,
-      requestTimeoutMs,
-    });
-  }
+  // Tests may inject a token source; production always derives it from the key.
+  const workloadTokenManager = workloadTokens ?? createWorkloadTokenManager({
+    origin,
+    workloadId,
+    workloadPrivateKey,
+    fetchImpl,
+    now,
+  });
 
   let identityPromise;
   const activeDeliveries = new Map();
@@ -622,40 +617,44 @@ export function createMailboxClient(
     // Attach a rejection sink for the whole request so deadline rejections during
     // token acquisition / body read never become unhandled rejections (C3).
     const deadlineGuard = deadline.catch(() => {});
+    let accessToken;
     try {
-      let authHeader = `Bearer ${token}`;
-      let dpopHeader;
       const fullUrl = new URL(path, `${origin}/`).toString();
-      if (workloadTokenManager) {
-        const accessToken = await Promise.race([
-          Promise.resolve(workloadTokenManager.fetchToken(controller.signal)),
+      for (let attempt = 0; ; attempt += 1) {
+        accessToken = await Promise.race([
+          Promise.resolve(workloadTokenManager.fetchToken(controller.signal, { refresh: attempt > 0 })),
           deadline,
         ]);
-        authHeader = `Bearer ${accessToken}`;
-        dpopHeader = workloadTokenManager.createDpopProof(method, fullUrl, accessToken);
+        // A fresh DPoP proof (new jti) per request, bound to the full URL.
+        const dpopHeader = workloadTokenManager.createDpopProof(method, fullUrl, accessToken);
+        const fetchPromise = Promise.resolve(fetchImpl(
+          new Request(fullUrl, {
+            method,
+            cache: "no-store",
+            headers: {
+              accept: "application/json",
+              authorization: `Bearer ${accessToken}`,
+              dpop: dpopHeader,
+              ...(body === undefined ? {} : { "content-type": "application/json" }),
+            },
+            signal: controller.signal,
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ));
+        const response = await Promise.race([fetchPromise, deadline]);
+        const bodyPromise = readBoundedJson(response, response.status, (value) => {
+          reader = value;
+        });
+        const payload = await Promise.race([bodyPromise, deadline]);
+        // A 401 means the request was not authenticated (so not applied): an
+        // expired or revoked access token gets exactly one fresh exchange.
+        if (response.status === 401 && attempt === 0) {
+          workloadTokenManager.invalidate?.(accessToken);
+          continue;
+        }
+        assertResponse(response, payload);
+        return payload;
       }
-
-      const fetchPromise = Promise.resolve(fetchImpl(
-        new Request(fullUrl, {
-          method,
-          cache: "no-store",
-          headers: {
-            accept: "application/json",
-            authorization: authHeader,
-            ...(dpopHeader === undefined ? {} : { dpop: dpopHeader }),
-            ...(body === undefined ? {} : { "content-type": "application/json" }),
-          },
-          signal: controller.signal,
-          body: body === undefined ? undefined : JSON.stringify(body),
-        }),
-      ));
-      const response = await Promise.race([fetchPromise, deadline]);
-      const bodyPromise = readBoundedJson(response, response.status, (value) => {
-        reader = value;
-      });
-      const payload = await Promise.race([bodyPromise, deadline]);
-      assertResponse(response, payload);
-      return payload;
     } catch (error) {
       // Keep a rejection sink so a late deadline reject cannot become unhandled,
       // but do not await the full timeout window on ordinary request failures.
@@ -667,7 +666,8 @@ export function createMailboxClient(
         throw new MailboxRequestError("Mailbox request aborted");
       }
       if (error instanceof MailboxRequestError) throw error;
-      if (String(error?.message ?? error).includes(token)) {
+      const text = String(error?.message ?? error);
+      if ((accessToken && text.includes(accessToken)) || text.includes(workloadPrivateKey)) {
         throw new MailboxRequestError("Mailbox request failed");
       }
       throw error;
@@ -681,9 +681,7 @@ export function createMailboxClient(
     if (identityPromise !== undefined) return identityPromise;
     identityPromise = (async () => {
       const actorId = boundedId(workerId, "recipientId", AGENT_ID);
-      if (workloadTokenManager) {
-        return actorId;
-      }
+      // Always confirm the workload key belongs to the configured agent.
       const response = await request("/api/v1/agents/me", { signal });
       if (!response?.agent || typeof response.agent.id !== "string") {
         throw new MailboxRequestError("Mailbox actor identity is invalid");

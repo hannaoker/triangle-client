@@ -3,10 +3,21 @@ import test from "node:test";
 
 import { createMeshActionHandler } from "../lib/mesh-actions.mjs";
 
+// Permissions v1: a test workload credential that skips the token exchange.
+function testWorkloadAuth(token) {
+  return () => ({
+    async headers(method) { return { authorization: `Bearer ${token}`, dpop: `test-dpop.${method}` }; },
+    async agentId() { return null; },
+    secrets: [],
+  });
+}
+
+const WL_TOKEN = "wl_production_hermes_token";
 const env = {
   GATEWAY_INTERNAL_TOKEN: "worker-secret-with-enough-entropy",
   MESH_ORIGIN: "https://mesh.example",
-  MESH_AGENT_TOKEN: "mesh_production_hermes_token",
+  MESH_WORKLOAD_ID: "workload_77777777777777777777777777777777",
+  MESH_WORKLOAD_PRIVATE_KEY: "tp3KvIi_3AfW8VesrbbsiqcV3hE9Gu1UMd8DZ5Ma3QY",
 };
 
 function request(body, token = env.GATEWAY_INTERNAL_TOKEN) {
@@ -28,6 +39,7 @@ test("private MESH bridge rejects missing and incorrect worker credentials befor
   let calls = 0;
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async () => {
       calls += 1;
       throw new Error("must not fetch");
@@ -51,6 +63,7 @@ test("posts.publish maps only validated fields to MESH with Hermes server creden
   const calls = [];
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (upstream) => {
       calls.push(upstream);
       return Response.json(
@@ -78,7 +91,7 @@ test("posts.publish maps only validated fields to MESH with Hermes server creden
   assert.equal(calls[0].method, "POST");
   assert.equal(
     calls[0].headers.get("authorization"),
-    `Bearer ${env.MESH_AGENT_TOKEN}`,
+    `Bearer ${WL_TOKEN}`,
   );
   assert.deepEqual(await calls[0].json(), {
     type: "knowledge",
@@ -92,6 +105,7 @@ test("posts.reply maps the post identifier into the REST path", async () => {
   const calls = [];
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (upstream) => {
       calls.push(upstream);
       return Response.json({ reply: { id: "reply_1" } }, { status: 201 });
@@ -119,6 +133,7 @@ test("tasks.claim maps task metadata without accepting arbitrary paths", async (
   const calls = [];
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (upstream) => {
       calls.push(upstream);
       return Response.json({ task: { id: "task_1" } });
@@ -150,6 +165,7 @@ test("bridge rejects unknown operations and malformed bounded inputs without fet
   let calls = 0;
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async () => {
       calls += 1;
       throw new Error("must not fetch");
@@ -180,9 +196,10 @@ test("bridge rejects unknown operations and malformed bounded inputs without fet
 test("bridge normalizes upstream failures without leaking credentials", async () => {
   const handler = createMeshActionHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async () =>
       Response.json(
-        { error: "agent_auth_required", secret: env.MESH_AGENT_TOKEN },
+        { error: "agent_auth_required", secret: WL_TOKEN },
         { status: 401 },
       ),
   });
@@ -201,5 +218,5 @@ test("bridge normalizes upstream failures without leaking credentials", async ()
     upstream_status: 401,
     upstream_error: "agent_auth_required",
   });
-  assert.doesNotMatch(JSON.stringify(result.body), /mesh_production/);
+  assert.doesNotMatch(JSON.stringify(result.body), /wl_production/);
 });

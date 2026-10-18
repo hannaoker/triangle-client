@@ -30,7 +30,8 @@ const OBSOLETE_PRIVATE_ROUTES = [
 const REQUIRED_ENV = [
   "CODEX_AGENT_ID",
   "MESH_ORIGIN",
-  "MESH_AGENT_TOKEN",
+  "MESH_WORKLOAD_ID",
+  "MESH_WORKLOAD_PRIVATE_KEY",
   "MESH_REGISTRATION_NONCE",
 ];
 
@@ -38,7 +39,8 @@ function validEnv(overrides = {}) {
   return {
     CODEX_AGENT_ID: "agent_11111111111111111111111111111111",
     MESH_ORIGIN: "https://mesh.example",
-    MESH_AGENT_TOKEN: "mesh_test_agent_token",
+    MESH_WORKLOAD_ID: "workload_77777777777777777777777777777777",
+    MESH_WORKLOAD_PRIVATE_KEY: "tp3KvIi_3AfW8VesrbbsiqcV3hE9Gu1UMd8DZ5Ma3QY",
     MESH_REGISTRATION_NONCE: "test-registration-nonce",
     AGENT_ORIGIN: "https://codex.example",
     GATEWAY_INTERNAL_TOKEN: "codex-worker-secret-with-enough-entropy",
@@ -107,7 +109,9 @@ test("Codex app constructs its stateless MESH projection and introspection from 
   const app = createGatewayApp({ env: validEnv(), ...deps });
 
   assert.equal(deps.calls.introspector.meshOrigin, "https://mesh.example");
-  assert.equal(deps.calls.introspector.agentToken, "mesh_test_agent_token");
+  assert.equal(typeof deps.calls.introspector.meshAuth?.headers, "function", "introspection runs as the workload credential");
+  assert.equal(deps.calls.introspector.agentToken, undefined);
+  assert.strictEqual(deps.calls.bridge?.meshAuth ?? deps.calls.introspector.meshAuth, deps.calls.introspector.meshAuth);
   assert.equal(deps.calls.introspector.fetchImpl, fetchImpl);
 
   const health = await app.fetch(new Request("https://codex.example/health"));
@@ -181,7 +185,7 @@ test("Codex inbound worker uses only canonical MESH mailbox configuration", asyn
   ));
   assert.deepEqual(config, {
     meshUrlEnv: "MESH_ORIGIN",
-    meshTokenEnv: "MESH_AGENT_TOKEN",
+    workloadKeyFileEnv: "TRIANGLE_WORKLOAD_KEY_FILE",
     agentIdEnv: "CODEX_AGENT_ID",
     pollIntervalMs: 15000,
     maxBackoffMs: 300000,
@@ -191,7 +195,7 @@ test("Codex inbound worker uses only canonical MESH mailbox configuration", asyn
   });
   assert.doesNotMatch(JSON.stringify(config), /gateway|transport/i);
   const documentation = await readFile(new URL("../worker/README.md", import.meta.url), "utf8");
-  for (const variable of ["MESH_ORIGIN", "MESH_AGENT_TOKEN", "CODEX_AGENT_ID"]) {
+  for (const variable of ["MESH_ORIGIN", "TRIANGLE_WORKLOAD_KEY_FILE", "CODEX_AGENT_ID"]) {
     assert.match(documentation, new RegExp(variable));
   }
   assert.match(documentation, /polls (?:its )?MESH mailbox/i);
@@ -205,7 +209,7 @@ test("Codex outbound CLI selects compatibility credentials without coupling to m
     packageJson.scripts["agent-send"],
     "node --env-file-if-exists=worker/.env.local ../../packages/agent-worker/src/outbound-cli.mjs --gateway-url-env AGENT_ORIGIN --internal-token-env GATEWAY_INTERNAL_TOKEN",
   );
-  assert.doesNotMatch(packageJson.scripts["agent-send"], /--config|MESH_ORIGIN|MESH_AGENT_TOKEN/);
+  assert.doesNotMatch(packageJson.scripts["agent-send"], /--config|MESH_ORIGIN|TRIANGLE_WORKLOAD_KEY_FILE|MESH_WORKLOAD/);
 });
 
 test("Codex Vercel config uses Next.js without forbidden well-known rewrites", async () => {
@@ -235,7 +239,7 @@ test("Codex environment template contains server-only gateway variables and no c
   assert.equal(entries.GATEWAY_INTERNAL_TOKEN, "");
   assert.doesNotThrow(() => createGatewayApp({ env: validEnv(), ...dependencies() }));
   assert.doesNotThrow(() => createOutboundA2AHandler({ env: validEnv(), fetchImpl: async () => assert.fail("constructor must not fetch") }));
-  for (const name of ["MESH_ORIGIN", "MESH_AGENT_TOKEN", "MESH_REGISTRATION_NONCE", "AGENT_ORIGIN"]) {
+  for (const name of ["MESH_ORIGIN", "MESH_WORKLOAD_ID", "MESH_WORKLOAD_PRIVATE_KEY", "MESH_REGISTRATION_NONCE", "AGENT_ORIGIN"]) {
     assert.match(template, new RegExp(`^${name}=$`, "m"));
   }
   assert.doesNotMatch(template, /^TURSO_(?:DATABASE_URL|AUTH_TOKEN)=/m);

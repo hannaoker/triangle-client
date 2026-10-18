@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 
 import { createCommandRunner } from "./command-runner.mjs";
 import { createMailboxClient } from "./mailbox-client.mjs";
+import { loadWorkloadCredential } from "./workload-credential.mjs";
 import { createAgentWorker } from "./runtime.mjs";
 
 function requiredEnv(env, name) {
@@ -53,7 +54,7 @@ export function resolveWorkerConfig(raw, configPath, env = process.env) {
   }
   const allowed = new Set([
     "meshUrlEnv",
-    "meshTokenEnv",
+    "workloadKeyFileEnv",
     "agentIdEnv",
     "runner",
     "pollIntervalMs",
@@ -64,7 +65,7 @@ export function resolveWorkerConfig(raw, configPath, env = process.env) {
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) throw new TypeError(`${key} is not supported`);
   }
-  for (const key of ["meshUrlEnv", "meshTokenEnv", "agentIdEnv"]) {
+  for (const key of ["meshUrlEnv", "workloadKeyFileEnv", "agentIdEnv"]) {
     if (typeof raw[key] !== "string" || !raw[key].trim()) {
       throw new TypeError(`${key} is required`);
     }
@@ -81,12 +82,16 @@ export function resolveWorkerConfig(raw, configPath, env = process.env) {
   if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > 100) {
     throw new TypeError("pageLimit must be between 1 and 100");
   }
+  const recipientId = agentId(requiredEnv(env, raw.agentIdEnv));
+  // Permissions v1: the agent's workload key from triangle custody (no bearer token).
+  const credential = loadWorkloadCredential(requiredEnv(env, raw.workloadKeyFileEnv), { expectedAgentId: recipientId });
   return {
     mailbox: {
       meshUrl: meshUrl(requiredEnv(env, raw.meshUrlEnv)),
-      meshToken: requiredEnv(env, raw.meshTokenEnv),
-      recipientId: agentId(requiredEnv(env, raw.agentIdEnv)),
+      recipientId,
       pageLimit,
+      workloadId: credential.workloadId,
+      workloadPrivateKey: credential.workloadPrivateKey,
     },
     runner: {
       command: process.execPath,

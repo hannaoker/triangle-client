@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { createWorkloadAuth, workloadFetch } from "./workload-auth.mjs";
+
 import {
   buildOutboundRpc,
   normalizeOutboundPayload,
@@ -11,6 +13,7 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const PROFILE_PATH = "/extensions/mesh-a2a-profile/v1";
 const AGENT_ID = /^agent_[A-Za-z0-9_-]{1,160}$/;
 const VALUE_ID = /^[A-Za-z][A-Za-z0-9_-]{1,180}$/;
+const CANONICAL_AGENT_ID = /^agent_[a-f0-9]{32}$/;
 
 function required(env, name) {
   const value = env[name]?.trim();
@@ -157,11 +160,21 @@ async function upstreamJson(fetchImpl, request) {
 export function createOutboundA2AHandler({
   env = process.env,
   fetchImpl = globalThis.fetch,
+  createWorkloadAuthImpl = createWorkloadAuth,
 } = {}) {
   const internalToken = required(env, "GATEWAY_INTERNAL_TOKEN");
   const meshOrigin = origin(required(env, "MESH_ORIGIN"), "MESH_ORIGIN");
-  const agentToken = required(env, "MESH_AGENT_TOKEN");
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
+  if (Object.hasOwn(env, "MESH_AGENT_TOKEN")) {
+    throw new Error("MESH_AGENT_TOKEN is retired; configure MESH_WORKLOAD_ID and MESH_WORKLOAD_PRIVATE_KEY");
+  }
+  // Permissions v1: peer tickets are issued to the sending agent's workload credential.
+  const meshAuth = createWorkloadAuthImpl({
+    meshOrigin,
+    workloadId: required(env, "MESH_WORKLOAD_ID"),
+    workloadPrivateKey: required(env, "MESH_WORKLOAD_PRIVATE_KEY"),
+    fetchImpl,
+  });
 
   return async function handle(request) {
     const supplied = request.headers
@@ -185,13 +198,20 @@ export function createOutboundA2AHandler({
     }
 
     try {
+      // Exact-id card lookup (§5.1); the directory listing is not an address book.
+      if (!CANONICAL_AGENT_ID.test(action.recipientAgentId)) {
+        return responseJson({ error: "recipient_not_found" }, 404);
+      }
       const registry = await upstreamJson(
         fetchImpl,
-        new Request(`${meshOrigin}/api/v1/agents?limit=100`, {
+        new Request(`${meshOrigin}/api/v1/agents/${action.recipientAgentId}`, {
           headers: { accept: "application/json" },
           redirect: "error",
         }),
       );
+      if (registry.response.status === 404) {
+        return responseJson({ error: "recipient_not_found" }, 404);
+      }
       if (!registry.response.ok) {
         return responseJson(
           {
@@ -204,9 +224,7 @@ export function createOutboundA2AHandler({
           502,
         );
       }
-      const peer = registry.payload?.agents?.find(
-        (candidate) => candidate?.id === action.recipientAgentId,
-      );
+      const peer = registry.payload?.agent?.id === action.recipientAgentId ? registry.payload.agent : null;
       if (!peer) {
         return responseJson({ error: "recipient_not_found" }, 404);
       }
@@ -226,22 +244,31 @@ export function createOutboundA2AHandler({
         );
       }
 
-      const ticket = await upstreamJson(
-        fetchImpl,
-        new Request(`${meshOrigin}/api/v1/peer-tokens`, {
-          method: "POST",
-          redirect: "error",
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${agentToken}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            recipient_agent_id: peer.id,
-            lifetime_seconds: 300,
-          }),
+      const ticketResponse = await workloadFetch(meshAuth, fetchImpl, `${meshOrigin}/api/v1/peer-tokens`, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          recipient_agent_id: peer.id,
+          lifetime_seconds: 300,
         }),
-      );
+      });
+      const ticket = { response: ticketResponse, payload: await boundedResponseJson(ticketResponse) };
+      // §1.4: the sender's own permissions (e.g. dm.send off) refuse the ticket.
+      if (ticket.response.status === 403 && ["permission_denied", "agent_paused"].includes(ticket.payload?.error)) {
+        return responseJson(
+          {
+            error: ticket.payload.error,
+            ...(typeof ticket.payload.permission === "string" && /^[a-z]+(?:\.[a-z]+)+$/.test(ticket.payload.permission)
+              ? { permission: ticket.payload.permission }
+              : {}),
+          },
+          403,
+        );
+      }
       if (!ticket.response.ok || typeof ticket.payload?.token !== "string") {
         return responseJson(
           {
