@@ -62,14 +62,16 @@ export async function readPermissions(session, agentId, { fresh = false } = {}) 
 }
 
 export class RevisionConflictError extends MeshApiError {
-  constructor(latest, changes) {
+  /** `latest` is null when the re-read itself failed (`refreshError` says why). */
+  constructor(latest, changes, { refreshError = null } = {}) {
     super({ status: 409, code: "revision_conflict" });
     this.latest = latest;
     this.changes = changes;
+    this.refreshError = refreshError;
   }
 
   toJSON() {
-    return { ...super.toJSON(), latest: this.latest, requested: this.changes };
+    return { ...super.toJSON(), latest: this.latest, requested: this.changes, ...(this.refreshError ? { refresh_error: this.refreshError } : {}) };
   }
 }
 
@@ -116,10 +118,20 @@ export async function setPermissions(session, agentId, changes) {
       return view;
     } catch (error) {
       if (!(error instanceof MeshApiError) || error.code !== "revision_conflict") throw error;
-      const latest = await readPermissions(session, agentId, { fresh: true });
-      throw new RevisionConflictError(stripLocal(latest), changes);
+      // The conflict is confirmed; a failed re-read must not turn it into a generic failure.
+      const { latest, refreshError } = await rereadAfterConflict(session, agentId);
+      throw new RevisionConflictError(latest, changes, { refreshError });
     }
   });
+}
+
+/** Re-read after a confirmed conflict; reports a read failure instead of throwing it. */
+export async function rereadAfterConflict(session, agentId) {
+  try {
+    return { latest: stripLocal(await readPermissions(session, agentId, { fresh: true })), refreshError: null };
+  } catch (error) {
+    return { latest: null, refreshError: error?.message ?? String(error) };
+  }
 }
 
 function stripLocal(view) {

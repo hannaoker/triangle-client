@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
 import { approveDevice, listDevices, renderDevices, revokeDevice } from "./devices.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
-import { parseChanges, permissionHistory, readPermissions, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
+import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
 import { defaultHome } from "./custody.mjs";
 import { doctor, renderDoctor, TRUST_COPY } from "./doctor.mjs";
 import { LocalStateError, MeshApiError, OutcomeUnknownError } from "./errors.mjs";
@@ -67,8 +67,9 @@ function allowOnly(flags, allowed) {
   for (const name of Object.keys(flags)) if (!allowed.includes(name) && !["home", "json"].includes(name)) throw new UsageError(`unknown option --${name}`);
 }
 
+/** Resolves once the text is written (an invite secret's journal is removed only after). */
 function print(io, flags, value, human) {
-  io.stdout(flags.json ? JSON.stringify(value, null, 2) : human(value));
+  return io.stdout(flags.json ? JSON.stringify(value, null, 2) : human(value));
 }
 
 function renderJoin({ outcome, result }) {
@@ -87,7 +88,30 @@ function renderJoin({ outcome, result }) {
   return lines.join("\n");
 }
 
-export async function main(argv, { env = process.env, io = { stdout: (s) => process.stdout.write(`${s}\n`), stderr: (s) => process.stderr.write(`${s}\n`) }, fetchImpl = globalThis.fetch } = {}) {
+/** Write a line and settle when the stream has accepted it (rejects on e.g. EPIPE). */
+function writeLine(stream, text) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    stream.once("error", onError);
+    stream.write(`${text}\n`, (error) => {
+      stream.off("error", onError);
+      if (error) reject(error); else resolve();
+    });
+  });
+}
+
+/** An invite link that could not be written keeps its journal; say how to get it back. */
+async function keepIfUnwritten(written) {
+  try {
+    await written;
+  } catch (error) {
+    throw new OutcomeUnknownError("The result could not be written to stdout; nothing was lost. Run `triangle resume` to print it again.", { cause: error, resumeHint: "triangle resume" });
+  }
+}
+
+const PROCESS_IO = { stdout: (s) => writeLine(process.stdout, s), stderr: (s) => { process.stderr.write(`${s}\n`); } };
+
+export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch } = {}) {
   if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
     io.stdout(USAGE);
     return 0;
@@ -126,7 +150,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
             deviceLabel: flags["device-label"],
             device: Boolean(flags.device),
           });
-        print(io, flags, outcome, renderJoin);
+        await print(io, flags, outcome, renderJoin);
         return 0;
       }
       case "agent": {
@@ -135,13 +159,13 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           allowOnly(flags, ["handle", "name", "description", "read-only"]);
           if (!flags.handle) throw new UsageError("agent add needs --handle");
           const agent = await addAgent(session, { handle: flags.handle, name: flags.name ?? flags.handle, description: flags.description ?? "", readOnly: Boolean(flags["read-only"]) });
-          print(io, flags, agent, (a) => `Created ${a.handle} (${a.agent_id}); its workload key is stored on this device.`);
+          await print(io, flags, agent, (a) => `Created ${a.handle} (${a.agent_id}); its workload key is stored on this device.`);
           return 0;
         }
         if (sub === "list") {
           allowOnly(flags, []);
           const view = await listAgents(session);
-          print(io, flags, view.agents, (agents) => agents.map((a) => `${a.handle}\t${a.agent_id}\t${a.state}\trev ${a.revision ?? "?"}${a.on_this_device ? "\t(this device)" : ""}`).join("\n") || "No agents.");
+          await print(io, flags, view.agents, (agents) => agents.map((a) => `${a.handle}\t${a.agent_id}\t${a.state}\trev ${a.revision ?? "?"}${a.on_this_device ? "\t(this device)" : ""}`).join("\n") || "No agents.");
           return 0;
         }
         if (sub === "pause" || sub === "resume" || sub === "delete") {
@@ -152,7 +176,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           const handle = agents.find((a) => a.agent_id === agentId)?.handle ?? agentId;
           if (sub === "delete" && !flags.yes) throw new UsageError(`Deleting ${handle} is permanent. Re-run with --yes.`);
           const result = await setAgentState(session, agentId, sub);
-          print(io, flags, result, (r) => `${handle} is ${r.state}${r.outcome === "replayed" ? " (already applied)" : ""}.`);
+          await print(io, flags, result, (r) => `${handle} is ${r.state}${r.outcome === "replayed" ? " (already applied)" : ""}.`);
           return 0;
         }
         throw new UsageError(`unknown agent command ${sub ?? ""}`);
@@ -166,7 +190,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           if (rest.length > 1) throw new UsageError("permissions show takes one agent");
           const agentId = resolveAgent(session, rest[0], agents);
           const view = await readPermissions(session, agentId);
-          print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
+          await print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
           return 0;
         }
         if (sub === "set") {
@@ -177,12 +201,13 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           const changes = parseChanges(changeArgs);
           try {
             const view = await setPermissions(session, agentId, changes);
-            print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
+            await print(io, flags, view, (v) => renderPermissions(handleOf(agentId), v));
             return 0;
           } catch (error) {
             if (!(error instanceof RevisionConflictError)) throw error;
             if (flags.json) io.stderr(JSON.stringify(error.toJSON()));
-            else io.stderr(`${error.message}\n\nLatest:\n${renderPermissions(handleOf(agentId), error.latest)}`);
+            else if (error.latest) io.stderr(`${error.message}\n\nLatest:\n${renderPermissions(handleOf(agentId), error.latest)}`);
+            else io.stderr(`${error.message}\n\nNot applied: someone changed it first. Could not read the latest state (${error.refreshError}); run \`triangle permissions show\`.`);
             return 4;
           }
         }
@@ -192,7 +217,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           const agentId = resolveAgent(session, rest[0], agents);
           if (flags.limit !== undefined && !/^\d{1,3}$/.test(flags.limit)) throw new UsageError("--limit must be 1-200");
           const history = await permissionHistory(session, agentId, { limit: flags.limit === undefined ? undefined : Number(flags.limit) });
-          print(io, flags, history, (h) => renderHistory(handleOf(agentId), h));
+          await print(io, flags, history, (h) => renderHistory(handleOf(agentId), h));
           return 0;
         }
         throw new UsageError(`unknown permissions command ${sub}`);
@@ -209,14 +234,14 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
             displayNameHint: flags["name-hint"] ?? null,
             emailHint: flags["email-hint"] ?? null,
             expiresInSeconds: flags.expires === undefined ? null : Number(flags.expires),
-          }, { deliver: (outcome) => print(io, flags, outcome, renderInvite) });
+          }, { deliver: (outcome) => keepIfUnwritten(print(io, flags, outcome, renderInvite)) });
           return 0;
         }
         if (sub === "revoke") {
           allowOnly(flags, []);
           if (rest.length !== 1) throw new UsageError("invite revoke <invite_id>");
           const result = await revokeInvite(session, rest[0]);
-          print(io, flags, result, (r) => `Revoked ${r.invite_id ?? rest[0]}.`);
+          await print(io, flags, result, (r) => `Revoked ${r.invite_id ?? rest[0]}.`);
           return 0;
         }
         throw new UsageError(`unknown invite command ${sub ?? ""}`);
@@ -226,14 +251,14 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         if (sub === "list") {
           allowOnly(flags, []);
           const devices = await listDevices(session);
-          print(io, flags, devices, renderDevices);
+          await print(io, flags, devices, renderDevices);
           return 0;
         }
         if (sub === "approve" || sub === "revoke") {
           allowOnly(flags, sub === "revoke" ? ["yes"] : []);
           if (rest.length !== 1) throw new UsageError(`device ${sub} <fingerprint>`);
           const result = sub === "approve" ? await approveDevice(session, rest[0]) : await revokeDevice(session, rest[0], { allowSelf: Boolean(flags.yes) });
-          print(io, flags, result, (r) => `${r.device_label ?? "Device"} (${r.fingerprint}) is ${r.state}.`);
+          await print(io, flags, result, (r) => `${r.device_label ?? "Device"} (${r.fingerprint}) is ${r.state}.`);
           return 0;
         }
         throw new UsageError(`unknown device command ${sub ?? ""}`);
@@ -243,7 +268,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         allowOnly(flags, []);
         const session = openSession({ home, env, fetchImpl, requireJoined: false });
         const report = await doctor(session);
-        print(io, flags, report, renderDoctor);
+        await print(io, flags, report, renderDoctor);
         return report.warnings.length && command === "doctor" ? 1 : 0;
       }
       case "resume": {
@@ -255,7 +280,7 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
             for (const name of pending) session.custody.removeJournal(name);
             return pending;
           });
-          print(io, flags, dropped, (items) => (items.length ? `Discarded ${items.length} unfinished request(s). If one had been applied, its effect stays on the server (an agent created that way has no key here).` : "Nothing to discard."));
+          await print(io, flags, dropped, (items) => (items.length ? `Discarded ${items.length} unfinished request(s). If one had been applied, its effect stays on the server (an agent created that way has no key here).` : "Nothing to discard."));
           return 0;
         }
         return await session.custody.withLock(async () => {
@@ -264,10 +289,15 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
         const conflicts = [];
         // Each result is printed as soon as it is known (an invite link before its
         // journal is removed), so a later failure cannot swallow earlier output.
-        const emit = (item) => {
+        const emit = async (item) => {
           done.push(item);
-          if (flags.json) io.stdout(JSON.stringify(item));
-          else io.stdout(`${item.operation} ${item.target ?? ""} → ${item.outcome}${item.invite ? `\n  link: ${item.invite.link}` : ""}${item.latest ? `\n  not applied: someone changed it first (now revision ${item.latest.revision}); re-run \`triangle permissions set\` if still wanted` : ""}`);
+          const conflictNote = item.outcome !== "revision_conflict" ? ""
+            : item.latest ? `\n  not applied: someone changed it first (now revision ${item.latest.revision}); re-run \`triangle permissions set\` if still wanted`
+              : `\n  not applied: someone changed it first; could not read the latest state (${item.refresh_error}); run \`triangle permissions show\``;
+          const text = flags.json ? JSON.stringify(item) : (`${item.operation} ${item.target ?? ""} → ${item.outcome}${item.invite ? `\n  link: ${item.invite.link}` : ""}${conflictNote}`);
+          const written = io.stdout(text);
+          // Only an invite's journal is still held (it is the sole copy of the link).
+          await (item.invite ? keepIfUnwritten(written) : written);
         };
         for (const name of names) {
           const pending = session.custody.readJournal(name);
@@ -280,10 +310,9 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
             // gets revision_conflict never committed: retire it and report the latest state.
             if (pending?.kind === "permissions-update" && error instanceof MeshApiError && error.code === "revision_conflict") {
               session.custody.removeJournal(name);
-              const latest = await readPermissions(session, pending.agent_id, { fresh: true });
-              const { from_cache, ...view } = latest;
               conflicts.push(name);
-              emit({ operation: pending.kind, target: pending.agent_id, outcome: "revision_conflict", latest: view });
+              const { latest, refreshError } = await rereadAfterConflict(session, pending.agent_id);
+              await emit({ operation: pending.kind, target: pending.agent_id, outcome: "revision_conflict", latest, ...(refreshError ? { refresh_error: refreshError } : {}) });
               continue;
             }
             throw error;
@@ -291,10 +320,10 @@ export async function main(argv, { env = process.env, io = { stdout: (s) => proc
           const { entry, result } = replayed;
           const item = { operation: entry.operation ?? entry.kind, target: entry.target ?? entry.agent_id ?? null, outcome: result?.outcome };
           if (isInvite) item.invite = inviteOutcome(session, result, entry.invite_secret).invite;
-          emit(item);
+          await emit(item);
           if (isInvite) session.custody.removeJournal(name);
         }
-        if (!done.length) print(io, flags, [], () => "Nothing to resume.");
+        if (!done.length) await print(io, flags, [], () => "Nothing to resume.");
         return conflicts.length ? 4 : 0;
         });
       }
