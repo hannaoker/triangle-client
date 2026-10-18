@@ -154,8 +154,9 @@ export function createWakeClient({
   transport,
   cursorStore = createMemoryCursorStore(0),
   coalesceMs = 300,
-  // Safe default for non-held / unknown transports. Install dispatcher passes
-  // INSTALL_WATCH_HELD_POLL_IDLE_MS (2s) explicitly after hold is proven.
+  // Safe default for non-held / unknown transports. The client supervisor's
+  // install dispatcher also uses safe idle (INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+  // 30s); INSTALL_WATCH_HELD_POLL_IDLE_MS (2s) is a distinct, unused opt-in.
   idlePollIntervalMs = 30_000,
   idleJitterRatio = 0.1,
   random = Math.random,
