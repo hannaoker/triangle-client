@@ -61,14 +61,29 @@ function writeAtomic(file, text, mode) {
   ensurePrivateDir(dir);
   const temp = `${file}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   const fd = openSync(temp, "wx", mode);
+  let installed = false;
+  let closed = false;
   try {
-    writeSync(fd, text);
+    // writeSync may write fewer bytes than asked; never install a truncated file.
+    const buffer = Buffer.from(text, "utf8");
+    let offset = 0;
+    while (offset < buffer.length) {
+      const written = writeSync(fd, buffer, offset, buffer.length - offset);
+      if (!(written > 0)) throw new Error(`short write to ${path.basename(file)}`);
+      offset += written;
+    }
     fsyncSync(fd);
-  } finally {
+    closed = true;
     closeSync(fd);
+    chmodSync(temp, mode);
+    renameSync(temp, file);
+    installed = true;
+  } finally {
+    if (!installed) {
+      if (!closed) try { closeSync(fd); } catch {}
+      try { rmSync(temp, { force: true }); } catch {}
+    }
   }
-  chmodSync(temp, mode);
-  renameSync(temp, file);
   syncDir(dir);
 }
 
