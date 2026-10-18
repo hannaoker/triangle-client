@@ -63,6 +63,20 @@ node ./scripts/triangle-headless-engagement-doctor.mjs --json
 
 Missing runtime auth fails doctor/enable clearly (no silent empty drain).
 
+Doctor is a read-only, complete inventory. It enumerates every
+`client/instances/*.json` registry row (enabled and disabled) and reconciles each
+with the binding its lane needs: `headless-runtime-binding.json` (Codex
+headless), `cursor-acp-runtime-binding.json` (Cursor ACP), or
+`worker-runtime/<adapter>.manifest.json` (worker mode). Per profile it reports
+runtime, delivery mode, enabled state, enrollment, owner/generation, effective
+poll/watch selection, backlog, and last claim/reply/ack evidence. A field the
+local journal does not record prints `unavailable`. Retry/expiry,
+capabilities, live watch/grant health, and supervisor admission currently print
+`unavailable`. An enabled profile with no binding, unverified enrollment, or an
+invalid registry row exits 2. An enabled profile with no progress evidence exits 1.
+Disabled profiles are listed and never started. Credential files are checked for
+existence only, and message bodies are never read into output.
+
 ## Defaults
 
 | Selected by default | Not default |

@@ -1,6 +1,11 @@
 /**
  * Read-only headless engagement doctor: progress, not presence.
  * Redacts message bodies and credentials. Never deletes open transactions.
+ *
+ * The complete profile inventory (installation registry reconciled with the
+ * Codex, Cursor ACP, and worker bindings) comes from
+ * `installation-inventory.mjs`; the Codex v2 binding alone is never treated as
+ * the full inventory, and a missing binding/diagnostic is never healthy.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -11,6 +16,7 @@ import {
   isPidAlive,
   readClaimerDiagnostics,
 } from "./claimer-advisory-lock.mjs";
+import { readInstallationInventory, stripSecretKeys, UNAVAILABLE } from "./installation-inventory.mjs";
 
 const HARD_BLOCKER_CODES = new Set([
   "no_ready_generation",
@@ -208,7 +214,8 @@ export function runHeadlessEngagementDoctor({
   } else if (binding != null && binding.__error) {
     blockers.push({ code: "binding_mismatch", message: "headless-runtime-binding.json unreadable" });
   } else if (binding == null) {
-    warnings.push({ code: "binding_absent", message: "headless-runtime-binding.json not present" });
+    // Absence is judged per registered profile by the inventory below
+    // (binding_missing for an enabled Codex headless profile).
   } else if (binding.version !== 2) {
     blockers.push({ code: "binding_mismatch", message: "headless binding is not v2" });
   }
@@ -225,8 +232,25 @@ export function runHeadlessEngagementDoctor({
     }
   }
 
+  const inventory = readInstallationInventory({
+    clientRoot,
+    now,
+    pidAlive,
+    advisoryHeldAt,
+    progress: progress != null && !progress.__error ? progress : null,
+  });
+  const seen = new Set([...blockers, ...warnings].map((row) => `${row.code}:${row.profile ?? ""}`));
+  for (const row of inventory.blockers) {
+    const key = `${row.code}:${row.profile ?? ""}`;
+    if (!seen.has(key)) { seen.add(key); blockers.push(row); }
+  }
+  for (const row of inventory.warnings) {
+    const key = `${row.code}:${row.profile ?? ""}`;
+    if (!seen.has(key)) { seen.add(key); warnings.push(row); }
+  }
+
   const report = Object.freeze({
-    version: 1,
+    version: 2,
     generatedAt: new Date(now).toISOString(),
     supervisor: Object.freeze({
       readyGeneration: ready?.generation ?? null,
@@ -244,15 +268,26 @@ export function runHeadlessEngagementDoctor({
       profileCount: Array.isArray(binding?.profiles) ? binding.profiles.length : 0,
     }),
     profiles: Object.freeze(profiles),
+    inventory: stripSecretKeys({
+      registry: inventory.registry,
+      bindings: inventory.bindings,
+      profiles: inventory.profiles,
+      orphanBindings: inventory.orphanBindings,
+      enrolledUnregistered: inventory.enrolledUnregistered,
+    }),
     blockers: Object.freeze(blockers),
     warnings: Object.freeze(warnings),
   });
 
-  const hard = blockers.some((row) => HARD_BLOCKER_CODES.has(row.code));
+  // Every blocker is hard: inventory faults (missing binding, unverified
+  // enrollment, invalid registry) must never yield a healthy exit.
+  const hard = blockers.length > 0 || blockers.some((row) => HARD_BLOCKER_CODES.has(row.code));
   const degraded = warnings.some((row) => row.code === "kick_ok_drain_stale");
+  const exitCode = hard ? 2 : degraded || warnings.length > 0 ? 1 : 0;
   return Object.freeze({
-    ok: !hard && !degraded,
-    exitCode: hard ? 2 : degraded || warnings.length > 0 ? 1 : 0,
+    // Healthy only when nothing is missing, faulted, or unaccounted for.
+    ok: exitCode === 0,
+    exitCode,
     report,
   });
 }
@@ -267,10 +302,21 @@ export function formatDoctorReport(report) {
     `watch connection=${report.watch.connection ?? "unknown"} grant=${report.watch.grantHealth ?? "unknown"}`,
   );
   lines.push(`binding v${report.binding.version ?? "?"} profiles=${report.binding.profileCount}`);
+  const inv = report.inventory;
+  if (inv) {
+    lines.push(
+      `registry ${inv.registry.status} profiles=${inv.registry.count} bindings codex=${inv.bindings.codexHeadless.status}[${inv.bindings.codexHeadless.profiles.join(",")}] cursor-acp=${inv.bindings.cursorAcp.status}[${inv.bindings.cursorAcp.profiles.join(",")}]`,
+    );
+    for (const row of inv.profiles) lines.push(...formatInventoryProfile(row));
+    for (const row of inv.orphanBindings) lines.push(`orphan binding ${row.kind}:${row.profile} (not in registry)`);
+    if (inv.enrolledUnregistered.length > 0) {
+      lines.push(`enrolled but not registered (not started): ${inv.enrolledUnregistered.join(", ")}`);
+    }
+  }
   for (const profile of report.profiles) {
     const p = profile.progress;
     lines.push(
-      `profile ${profile.profile}: kick=${p.lastAcceptedKickAt ?? "-"} claim=${p.lastClaimAt ?? "-"} reply=${p.lastReplyAt ?? "-"} ack=${p.lastAckAt ?? "-"} pending=${p.pendingCount ?? "-"} open=${profile.openTransaction?.state ?? "none"} claimerHeld=${profile.claimer.advisoryHeld}`,
+      `codex-binding ${profile.profile}: kick=${p.lastAcceptedKickAt ?? "-"} claim=${p.lastClaimAt ?? "-"} reply=${p.lastReplyAt ?? "-"} ack=${p.lastAckAt ?? "-"} pending=${p.pendingCount ?? "-"} open=${profile.openTransaction?.state ?? "none"} claimerHeld=${profile.claimer.advisoryHeld}`,
     );
   }
   for (const row of report.blockers) {
@@ -279,8 +325,37 @@ export function formatDoctorReport(report) {
   for (const row of report.warnings) {
     lines.push(`WARN ${row.code}: ${row.message}`);
   }
-  if (report.blockers.length === 0 && report.warnings.length === 0) {
+  if (report.blockers.length === 0 && report.warnings.length === 0 && (inv?.profiles?.length ?? 0) > 0) {
     lines.push("ok");
   }
   return `${lines.join("\n")}\n`;
+}
+
+function show(value) {
+  if (value == null) return "-";
+  return String(value);
+}
+
+function formatInventoryProfile(row) {
+  if (row.registry?.valid === false) {
+    return [`profile ${row.profile} [fault] registry entry invalid: ${row.registry.problems.join(",")}`];
+  }
+  const claimer = row.owner.claimers.find((c) => c.advisoryHeld === true) ?? row.owner.claimers[0] ?? null;
+  const owner = claimer
+    ? `${claimer.lock} held=${claimer.advisoryHeld} owner=${show(claimer.owner)} family=${show(claimer.family)} pid=${show(claimer.pid)} gen=${show(claimer.generation)}`
+    : UNAVAILABLE;
+  const ho = row.owner.headlessOwnership;
+  const ownership = ho && typeof ho === "object"
+    ? ` ownership=${show(ho.ownershipState)} ownerGeneration=${show(ho.ownerGeneration)} leaseExpired=${show(ho.leaseExpired)}`
+    : "";
+  const a = row.activity;
+  const open = row.journal.openTransaction;
+  return [
+    `profile ${row.profile} [${row.status}] runtime=${row.runtimeAdapter} delivery=${row.deliveryMode} enabled=${row.enabled} lane=${row.lane} support=${row.support}`,
+    `  enrollment=${show(row.enrollment.state)} agent=${show(row.enrollment.agentId)} credential=${row.credential} capabilities=${row.capabilities}`,
+    `  binding=${row.binding.kind}:${row.binding.status} pollWatch=${row.pollWatch.mode} pollMs=${show(row.pollWatch.pollIntervalMs)} watchMember=${row.pollWatch.watchMember} watch=${show(row.pollWatch.watchConnection)} grant=${show(row.pollWatch.grantHealth)}`,
+    `  owner: ${owner}${ownership} admission=${row.owner.supervisorAdmission}`,
+    `  activity: claim=${show(a.lastClaimAt)} reply=${show(a.lastReplyAt)}${a.lastReplySource ? `(${a.lastReplySource})` : ""} ack=${show(a.lastAckAt)} conversationUpdate=${show(a.lastConversationUpdateAt)} pending=${show(a.pendingCount)} oldestPendingAgeMs=${show(a.oldestPendingAgeMs)} retryExpiry=${a.retryExpiry}`,
+    `  backlog: open=${open ? show(open.state) : "none"} openAgeMs=${show(a.openTransactionAgeMs)} quarantined=${row.journal.quarantinedCount}${row.faults.length ? ` faults=${row.faults.join(",")}` : ""}${row.notes.length ? ` notes=${row.notes.join(",")}` : ""}`,
+  ];
 }
