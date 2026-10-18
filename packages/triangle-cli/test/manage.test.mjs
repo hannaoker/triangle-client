@@ -282,6 +282,25 @@ test("invite: a link that cannot be written to stdout keeps its journal (exit 3)
   assert.equal(readdirSync(path.join(home, "journal")).filter((n) => n.startsWith("op-")).length, 0);
 });
 
+test("writeLine: a real closed stdout pipe rejects the write and does not crash the process", async () => {
+  const { spawn } = await import("node:child_process");
+  const cliUrl = new URL("../src/cli.mjs", import.meta.url).href;
+  const script = `const { writeLine } = await import(${JSON.stringify(cliUrl)});
+    await new Promise((r) => setTimeout(r, 200));
+    let outcome = "resolved";
+    try { for (let i = 0; i < 64; i += 1) await writeLine(process.stdout, "x".repeat(65536)); } catch (error) { outcome = "rejected:" + (error.code ?? error.message); }
+    await new Promise((r) => setTimeout(r, 100));
+    process.stderr.write(outcome);
+    process.exitCode = 3;`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.destroy();
+  let err = "";
+  child.stderr.on("data", (d) => { err += d; });
+  const code = await new Promise((resolve) => child.once("exit", resolve));
+  assert.equal(code, 3, err);
+  assert.match(err, /^rejected:/);
+});
+
 function conflictThenUnreadable(fake, agentId) {
   let raced = false;
   return async (input, init) => {
