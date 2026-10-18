@@ -684,6 +684,28 @@ test("codex #88 r2: a legacy session file with a literal backslash in its name i
   }
 });
 
+test("codex #88 r3: an unreadable legacy session is unsafe_source; other sessions still migrate", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, () => {
+  const { home, cursorHome, cleanup } = fixture();
+  const unreadable = seedLegacySession(home, SESSION_B, "legacy-b");
+  try {
+    seedLegacySession(home, SESSION_A, "legacy-a");
+    chmodSync(unreadable, 0o000);
+    const plan = planLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A, SESSION_B] });
+    assert.deepEqual(
+      plan.entries.map(({ sessionId, action }) => [sessionId, action]),
+      [[SESSION_A, "copy"], [SESSION_B, "unsafe_source"]],
+    );
+    const applied = applyLegacyCursorAcpSessionCopy({ home, cursorHome, sessionIds: [SESSION_A, SESSION_B] });
+    assert.deepEqual(applied.copied, [SESSION_A]);
+    assert.deepEqual(applied.skipped, [{ sessionId: SESSION_B, action: "unsafe_source" }]);
+  } finally {
+    chmodSync(unreadable, 0o700);
+    cleanup();
+  }
+});
+
 test("Triangle Cursor home may not be inside ~/.cursor or ~/.codex (incl. '..'-prefixed child names)", () => {
   const { home, cleanup } = fixture();
   try {

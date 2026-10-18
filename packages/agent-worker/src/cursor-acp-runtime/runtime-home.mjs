@@ -743,7 +743,15 @@ export function planLegacyCursorAcpSessionCopy({ home = process.env.HOME, cursor
     if (!sourceState.leaf.isDirectory()) {
       return Object.freeze({ sessionId, action: "unsafe_source", source, target });
     }
-    const { files, unsafe } = listRegularFilesNoFollow(sourceState.absolute);
+    let listing;
+    try {
+      listing = listRegularFilesNoFollow(sourceState.absolute);
+    } catch {
+      // Unreadable (EACCES, vanished mid-walk, ...): classify this session,
+      // never abort the whole plan/apply for the other sessions.
+      return Object.freeze({ sessionId, action: "unsafe_source", source, target });
+    }
+    const { files, unsafe } = listing;
     if (unsafe.length > 0) {
       return Object.freeze({ sessionId, action: "unsafe_source", source, target });
     }
@@ -981,7 +989,12 @@ function revertOneSession(anchor, record, persistProgress = () => {}) {
   // the recorded regular files and their ancestor directories, each file
   // still identical. Any extra entry (file, directory, symlink, socket), type
   // change, modification or missing file keeps the whole session.
-  const present = listRegularFilesNoFollow(sessionDir.absolute);
+  let present;
+  try {
+    present = listRegularFilesNoFollow(sessionDir.absolute);
+  } catch (error) {
+    return { status: "kept", reason: "unsafe_path", detail: error?.code ?? "enumeration_failed" };
+  }
   if (present.unsafe.length > 0) {
     return { status: "kept", reason: "unsafe_path", detail: "non_regular_entry", newFiles: present.unsafe };
   }
@@ -1234,7 +1247,14 @@ export function planLegacyCursorTranscriptCopy({
     if (ownedTargetState(anchor, targetRelative) === "unsafe") {
       return Object.freeze({ ...base, action: "unsafe_target", files: Object.freeze([]) });
     }
-    const { files, unsafe } = listRegularFilesNoFollow(sourceState.absolute);
+    let listing;
+    try {
+      listing = listRegularFilesNoFollow(sourceState.absolute);
+    } catch {
+      // Unreadable transcript tree: classify this workspace only.
+      return Object.freeze({ ...base, action: "unsafe_source", files: Object.freeze([]) });
+    }
+    const { files, unsafe } = listing;
     const entries = [
       ...files.map((relative) => {
         const state = ownedTargetState(anchor, `${targetRelative}/${relative}`);

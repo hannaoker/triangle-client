@@ -1060,6 +1060,27 @@ test("codex #88 r2: a transcript with a literal backslash in its name is copied,
   }
 });
 
+test("codex #88 r3: an unreadable transcript tree is unsafe_source; other workspaces still migrate", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, () => {
+  const { home, cleanup } = fixture();
+  const blocked = path.join(home, "ws9");
+  const { transcripts: blockedTranscripts } = seedLegacyTranscripts(home, blocked);
+  try {
+    const workspace = path.join(home, "ws8");
+    seedLegacyTranscripts(home, workspace);
+    chmodSync(blockedTranscripts, 0o000);
+    const plan = planLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, blocked] });
+    assert.deepEqual(plan.workspaces.map(({ action }) => action), ["copy", "unsafe_source"]);
+    const applied = applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace, blocked] });
+    assert.equal(applied.copied.length, 3);
+    assert.deepEqual(applied.skipped, [{ slug: cursorWorkspaceSlug(blocked), action: "unsafe_source" }]);
+  } finally {
+    chmodSync(blockedTranscripts, 0o700);
+    cleanup();
+  }
+});
+
 test("runtime status preflights the configured workspace, not just the data dir", () => {
   const { home, cursorHome, cleanup } = fixture();
   try {

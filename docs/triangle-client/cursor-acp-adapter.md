@@ -95,7 +95,9 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
   Legacy sources are checked the same way below `realpath(HOME)`: a symlinked
   `~/.cursor`, `~/.cursor/acp-sessions`, `~/.cursor/projects`, slug,
   session or `agent-transcripts` directory is reported as `unsafe_source` and
-  nothing is copied from it (move the real tree into place first).
+  nothing is copied from it (move the real tree into place first). A source
+  tree that cannot be enumerated (e.g. `EACCES`) is also `unsafe_source` for
+  that session/workspace only; the others still migrate.
 - **Data dir creation:** the forbidden-root check (`~/.cursor`, `~/.codex`,
   `/tmp/.cursor`) projects a not-yet-existing data dir through the realpath
   of its deepest existing ancestor, so a path below a symlink into a
