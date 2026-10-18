@@ -3,6 +3,17 @@
  *
  * Never shares CODEX_HOME. Never copies mesh_ / mesh_watch_ credentials.
  * CURSOR_API_KEY may be injected via allowlisted extra only (not from MESH).
+ *
+ * Cursor CLI state isolation: the Cursor CLI resolves its config/state root as
+ * `CURSOR_CONFIG_DIR` -> `$XDG_CONFIG_HOME/cursor` -> `~/.cursor` (verified in
+ * cursor-agent 2026.09.10-fd3934a, `../cursor-config/dist/paths.js`). ACP
+ * sessions live at `<configDir>/acp-sessions/<sessionId>/{meta.json,store.db}`
+ * and CLI settings at `<configDir>/cli-config.json`. The child env therefore
+ * pins `CURSOR_CONFIG_DIR` to the Triangle-owned Cursor home so Triangle never
+ * reads or writes the user's `~/.cursor`. HOME is preserved on purpose: the
+ * macOS login lives in the keychain (and the `~/.cursor/auth.json` fallback is
+ * HOME-relative, not config-dir-relative), so the existing login is reused,
+ * never replaced.
  */
 
 import { mkdirSync, realpathSync, statSync } from "node:fs";
@@ -16,6 +27,10 @@ const FORBIDDEN_CHILD_ENV = Object.freeze([
   "MESH_API_KEY",
   "OPENAI_API_KEY",
   "CODEX_HOME",
+  // Only CURSOR_CONFIG_DIR may choose the Cursor state root; XDG would point
+  // the CLI at a shared `$XDG_CONFIG_HOME/cursor` if CURSOR_CONFIG_DIR were
+  // ever unset.
+  "XDG_CONFIG_HOME",
 ]);
 
 const MESH_SECRET = /mesh_(?:watch_)?[A-Za-z0-9_-]{8,}/;
@@ -63,20 +78,25 @@ export function resolveTriangleCursorHome({
   }
 
   const userCursor = typeof home === "string" ? path.join(home, ".cursor") : null;
-  if (userCursor && pathsEqual(candidate, userCursor)) {
-    throw createCodedError(
-      "cursor_home_user_fallback_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.cursor",
-    );
-  }
-
   const userCodex = typeof home === "string" ? path.join(home, ".codex") : null;
-  if (userCodex && pathsEqual(candidate, userCodex)) {
-    throw createCodedError(
-      "cursor_home_codex_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.codex or CODEX_HOME",
-    );
-  }
+  // Neither ~/.cursor nor ~/.codex, nor anything inside them (canonicalized,
+  // projected through existing symlinked ancestors), checked before mkdir and
+  // again on the resolved path.
+  const assertNotForbidden = (value) => {
+    if (userCursor && isSameOrInside(value, userCursor)) {
+      throw createCodedError(
+        "cursor_home_user_fallback_forbidden",
+        "dedicated Triangle Cursor home must not resolve to or inside ~/.cursor",
+      );
+    }
+    if (userCodex && isSameOrInside(value, userCodex)) {
+      throw createCodedError(
+        "cursor_home_codex_forbidden",
+        "dedicated Triangle Cursor home must not resolve to or inside ~/.codex or CODEX_HOME",
+      );
+    }
+  };
+  assertNotForbidden(candidate);
 
   if (allowCreate) {
     mkdirSync(candidate, { recursive: true, mode: 0o700 });
@@ -95,12 +115,7 @@ export function resolveTriangleCursorHome({
     }
   }
 
-  if (userCursor && pathsEqual(resolved, userCursor)) {
-    throw createCodedError(
-      "cursor_home_user_fallback_forbidden",
-      "dedicated Triangle Cursor home must not resolve to ~/.cursor",
-    );
-  }
+  assertNotForbidden(resolved);
 
   try {
     const mode = statSync(resolved).mode & 0o777;
@@ -120,6 +135,33 @@ function pathsEqual(left, right) {
   } catch {
     return path.resolve(left) === path.resolve(right);
   }
+}
+
+/**
+ * Physical projection of a possibly-missing path: realpath of its deepest
+ * existing ancestor joined with the missing suffix. A not-yet-created dir
+ * below a symlink therefore projects to where it WOULD be created.
+ */
+function physicalProjection(value) {
+  let existing = path.resolve(value);
+  const suffix = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(existing), ...suffix.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) return path.resolve(value);
+      suffix.push(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+function isSameOrInside(candidate, root) {
+  const relative = path.relative(physicalProjection(root), physicalProjection(candidate));
+  // Only an exact `..` component means "outside": `..triangle` is a child name.
+  return relative === "" || !(relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
 }
 
 /**
@@ -149,6 +191,20 @@ export function buildSanitizedCursorChildEnv({
     TRIANGLE_CURSOR_HOME: home,
     ...extra,
   };
+
+  if (
+    extra != null &&
+    Object.prototype.hasOwnProperty.call(extra, "CURSOR_CONFIG_DIR") &&
+    extra.CURSOR_CONFIG_DIR != null &&
+    !pathsEqual(String(extra.CURSOR_CONFIG_DIR), home)
+  ) {
+    throw createCodedError(
+      "cursor_config_dir_conflict",
+      "CURSOR_CONFIG_DIR must point at the dedicated Triangle Cursor home",
+    );
+  }
+  // Isolate Cursor CLI state (acp-sessions, cli-config.json, ...) from ~/.cursor.
+  child.CURSOR_CONFIG_DIR = home;
 
   for (const key of Object.keys(child)) {
     if (child[key] == null) delete child[key];
