@@ -33,6 +33,9 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant recovers from stale replacement credential", run: recoversFromStaleReplacement),
             .init(name: "watch grant does not discard local binding on unrelated create rejection", run: unrelatedCreateRejectionKeepsLocalBinding),
             .init(name: "watch grant keeps local binding when stale recreate fails", run: failedStaleRecreateKeepsLocalBinding),
+            .init(name: "watch grant ensure and status report grant expiry", run: ensureAndStatusReportExpiry),
+            .init(name: "watch grant expiry is omitted for legacy bindings and stale sidecars", run: expiryOmittedForLegacyAndStaleSidecar),
+            .init(name: "watch grant file expiry sidecar is private, validated, and revoke clears it", run: fileExpirySidecar),
         ]
 #if canImport(Security)
         cases.append(.init(name: "watch grant Keychain query policy", run: keychainQueryPolicy))
@@ -240,6 +243,84 @@ public enum WatchGrantContractCases {
         try expect(fixture.transport.paths.contains { $0.hasSuffix("/join") }, "join was not called")
         try expect(fixture.transport.paths.contains { $0.hasSuffix("/finalize") }, "finalize was not called")
         try expect(!fixture.transport.loggedBodies.contains { $0.contains("mesh_watch_") }, "transport log exposed secrets")
+    }
+
+    public static func ensureAndStatusReportExpiry() async throws {
+        let expiry = InMemoryWatchGrantExpiryStore()
+        let fixture = try await Fixture(expiryStore: expiry)
+        let ensured = try await fixture.service.ensureGrant(
+            installationID: fixture.installationID,
+            actorProfile: fixture.actorProfile,
+            memberProfiles: [fixture.actorProfile]
+        )
+        try expect(ensured.expiresAt == "2099-01-01T00:00:00.000Z", "ensure did not report MESH expires_at")
+        let rendered = String(decoding: try WatchGrantOperatorStatusRenderer.render(ensured).stdout, as: UTF8.self)
+        try expect(rendered.contains("\"expiresAt\":\"2099-01-01T00:00:00.000Z\""), "rendered ensure omitted expiresAt")
+        try expect(!rendered.contains("mesh_"), "rendered ensure exposed a secret")
+        let status = try fixture.service.status(installationID: fixture.installationID)
+        try expect(status.expiresAt == ensured.expiresAt, "status did not report stored expiry")
+        try expect(expiry.read(for: fixture.installationID)?.grantID == status.grantID, "sidecar not keyed by grant id")
+        // The stored binding schema is unchanged so older helpers can still read it.
+        let stored = try fixture.store.read(for: fixture.installationID)
+        let encoded = String(decoding: try JSONEncoder().encode(stored), as: UTF8.self)
+        try expect(!encoded.contains("expiresAt"), "binding schema must stay rollback-compatible")
+    }
+
+    public static func expiryOmittedForLegacyAndStaleSidecar() async throws {
+        // Helper without a sidecar store (and bindings written by older helpers): no expiry.
+        let legacy = try await Fixture()
+        let legacyStatus = try await legacy.service.ensureGrant(
+            installationID: legacy.installationID,
+            actorProfile: legacy.actorProfile,
+            memberProfiles: [legacy.actorProfile]
+        )
+        try expect(legacyStatus.expiresAt == nil, "legacy status invented an expiry")
+        let rendered = String(decoding: try WatchGrantOperatorStatusRenderer.render(legacyStatus).stdout, as: UTF8.self)
+        try expect(!rendered.contains("expiresAt"), "legacy JSON must omit expiresAt")
+
+        // Sidecar left behind by a different grant must not be reported.
+        let expiry = InMemoryWatchGrantExpiryStore()
+        let fixture = try await Fixture(expiryStore: expiry)
+        try fixture.store.create(try binding(digit: "7"))
+        try expiry.write(WatchGrantExpiryRecord(
+            installationID: fixture.installationID,
+            grantID: try WatchGrantID("watchgrant_" + String(repeating: "8", count: 64)),
+            expiresAt: "2099-01-01T00:00:00.000Z"
+        ))
+        let status = try fixture.service.status(installationID: fixture.installationID)
+        try expect(status.state == "finalized", "fixture binding should be finalized")
+        try expect(status.expiresAt == nil, "stale sidecar reported against a newer binding")
+    }
+
+    public static func fileExpirySidecar() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-expiry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = FileWatchGrantExpiryStore(root: root)
+        let installationID = try InstallationID("inst_N7VhDq3mQ2")
+        let grantID = try WatchGrantID("watchgrant_" + String(repeating: "3", count: 64))
+        try expect(store.read(for: installationID) == nil, "empty store returned a record")
+        try store.write(WatchGrantExpiryRecord(installationID: installationID, grantID: grantID, expiresAt: "2026-10-17T20:39:24.123Z"))
+        let url = root.appendingPathComponent("inst_N7VhDq3mQ2.json")
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        try expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "sidecar must be 0600")
+        try expect(store.read(for: installationID)?.expiresAt == "2026-10-17T20:39:24.123Z", "round trip failed")
+        try Data(#"{"version":1,"installationId":"inst_N7VhDq3mQ2","grantId":"x","expiresAt":"tomorrow"}"#.utf8).write(to: url)
+        try expect(store.read(for: installationID) == nil, "invalid timestamp must be ignored")
+        try expect(!WatchGrantExpiryRecord.isValidTimestamp("2026-10-17T20:39:24"), "zone-less timestamp accepted")
+        try expect(WatchGrantExpiryRecord.isValidTimestamp("2026-10-17T20:39:24Z"), "whole-second timestamp rejected")
+
+        // Revoke removes the sidecar along with the binding.
+        let memory = InMemoryWatchGrantExpiryStore()
+        let fixture = try await Fixture(expiryStore: memory)
+        _ = try await fixture.service.ensureGrant(
+            installationID: fixture.installationID,
+            actorProfile: fixture.actorProfile,
+            memberProfiles: [fixture.actorProfile]
+        )
+        try expect(memory.read(for: fixture.installationID) != nil, "ensure did not write sidecar")
+        _ = try await fixture.service.revoke(installationID: fixture.installationID)
+        try expect(memory.read(for: fixture.installationID) == nil, "revoke left the expiry sidecar")
     }
 
     public static func statusSecretFree() async throws {
@@ -588,7 +669,11 @@ public enum WatchGrantContractCases {
         let instances: InMemoryClientInstanceStore
         let service: WatchGrantService
 
-        init(failingStore: Bool = false, cursorAcpBindingURL: URL? = nil) async throws {
+        init(
+            failingStore: Bool = false,
+            cursorAcpBindingURL: URL? = nil,
+            expiryStore: (any WatchGrantExpiryStore)? = nil
+        ) async throws {
             installationID = try InstallationID("inst_N7VhDq3mQ2")
             actorProfile = try ProfileName("codex-mailbox-live")
             memberProfile = try ProfileName("hermes-mailbox-live")
@@ -672,7 +757,8 @@ public enum WatchGrantContractCases {
                 auth: SequencedWatchGrantAuthProvider(),
                 credentialGate: gate,
                 instanceStore: instances,
-                cursorAcpBindingURL: cursorAcpBindingURL
+                cursorAcpBindingURL: cursorAcpBindingURL,
+                expiryStore: expiryStore
             )
         }
     }

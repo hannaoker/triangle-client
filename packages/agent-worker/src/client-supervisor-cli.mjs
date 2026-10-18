@@ -728,14 +728,26 @@ function sanitizedHttpStatus(detail) {
   return Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null;
 }
 
-function sanitizedLogger(stderr) {
+function isoTimestamp(now) {
+  try {
+    const value = new Date(now()).toISOString();
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function sanitizedLogger(stderr, { now = () => Date.now() } = {}) {
   return Object.freeze({
     error(event, detail) {
       const code = sanitizedErrorCode(detail);
       const httpStatus = sanitizedHttpStatus(detail);
       // Keep production stderr secret-free; optionally surface a short code so
       // operators can tell helper_unavailable apart from already_started spam.
-      let line = "triangle-client: instance cycle failed";
+      // Lead with an ISO 8601 UTC timestamp so failures can be put on a timeline
+      // without an external `tail | date` wrapper.
+      const timestamp = isoTimestamp(now);
+      let line = `${timestamp ? `${timestamp} ` : ""}triangle-client: instance cycle failed`;
       if (code && httpStatus != null) line += ` (${code}/${httpStatus})`;
       else if (code) line += ` (${code})`;
       // Name the emitting loop (a fixed internal event id) and, for per-instance

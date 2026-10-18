@@ -69,6 +69,235 @@ export {
   HEADLESS_WAKE_KEYS,
 } from "./client-supervisor-schema.mjs";
 
+/**
+ * Installation-scoped watch-grant renewal (reactive + proactive).
+ *
+ * Kept inside client-supervisor.mjs on purpose: worker bundles are validated by
+ * the signed helper against an exact artifact set, so a new module would need a
+ * manifest version bump and a helper rebuild before the supervisor could load.
+ *
+ * MESH fixes a watch grant's `expires_at` at create time (TTL capped at 3600 s;
+ * finalize does not extend it). Before L1e the supervisor only renewed after a
+ * poll was rejected with `watch_credential_invalid`, so every grant lifetime
+ * ended in one logged failure plus a stop / renew / backoff / restart cycle.
+ *
+ * Helpers that know the expiry return it from `watch-ensure` as `expiresAt`.
+ * This registry then schedules ONE proactive renewal per installation at
+ * PROACTIVE_RENEWAL_FRACTION of the observed lifetime. All renewals (proactive
+ * timer and rejection-driven) go through the same generation / in-flight
+ * coalescing, so concurrent triggers share a single `watch-ensure`. When the
+ * expiry is unknown (older helper, or the reused-existing probe path) nothing is
+ * scheduled and the reactive path is the only renewal, exactly as before.
+ */
+
+export const PROACTIVE_RENEWAL_FRACTION = 0.85;
+/** Lifetimes shorter than this are not worth a timer; reactive renewal handles them. */
+export const PROACTIVE_MIN_LIFETIME_MS = 10_000;
+/** After a failed proactive attempt, retry no sooner than this. */
+export const PROACTIVE_RETRY_MIN_MS = 15_000;
+/** Never schedule a retry closer to expiry than this; let the reactive path take over. */
+export const PROACTIVE_RETRY_EXPIRY_MARGIN_MS = 5_000;
+/** Cap a single wait so long sleeps stay below Node's 2^31 ms timer limit and re-check the clock. */
+export const PROACTIVE_MAX_WAIT_MS = 60 * 60_000;
+/** Expiries further out than this are treated as unknown (clock skew / bad data). */
+export const MAX_TRUSTED_GRANT_LIFETIME_MS = 7 * 24 * 60 * 60_000;
+
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+
+/** Parse a helper-reported ISO 8601 UTC expiry into epoch ms, or null when untrusted. */
+export function parseGrantExpiry(value, nowMs) {
+  if (typeof value !== "string" || value.length > 40 || !ISO_UTC.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  if (ms <= nowMs || ms - nowMs > MAX_TRUSTED_GRANT_LIFETIME_MS) return null;
+  return ms;
+}
+
+function isAbort(error) {
+  return error?.name === "AbortError";
+}
+
+async function defaultSleep(ms, { signal } = {}) {
+  await new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", done);
+      resolve();
+    }
+    signal?.addEventListener?.("abort", done, { once: true });
+  });
+}
+
+export function createWatchGrantRenewalRegistry({
+  ensureWatchGrant,
+  now = () => Date.now(),
+  logger = null,
+} = {}) {
+  if (typeof ensureWatchGrant !== "function") throw new TypeError("ensureWatchGrant is required");
+  const states = new Map();
+
+  function state(installationId) {
+    let entry = states.get(installationId);
+    if (!entry) {
+      entry = {
+        generation: 0,
+        inFlight: null,
+        // Expiry bookkeeping. `expiryVersion` changes whenever a new grant is
+        // observed so a pending proactive timer for an older grant is discarded.
+        expiresAtMs: null,
+        renewAtMs: null,
+        expiryVersion: 0,
+        listeners: new Set(),
+        proactiveOwner: null,
+      };
+      states.set(installationId, entry);
+    }
+    return entry;
+  }
+
+  function notify(entry) {
+    for (const listener of [...entry.listeners]) {
+      try { listener(); } catch { /* ignore */ }
+    }
+  }
+
+  /** Record the outcome of a successful `watch-ensure` (initial or renewal). */
+  function recordEnsure(installationId, result) {
+    const entry = state(installationId);
+    const recordedAt = now();
+    const expiresAtMs = parseGrantExpiry(result?.expiresAt, recordedAt);
+    entry.expiryVersion += 1;
+    if (expiresAtMs == null || expiresAtMs - recordedAt < PROACTIVE_MIN_LIFETIME_MS) {
+      entry.expiresAtMs = expiresAtMs;
+      entry.renewAtMs = null;
+    } else {
+      entry.expiresAtMs = expiresAtMs;
+      entry.renewAtMs = recordedAt + Math.floor((expiresAtMs - recordedAt) * PROACTIVE_RENEWAL_FRACTION);
+    }
+    notify(entry);
+    return entry.expiresAtMs;
+  }
+
+  /**
+   * Renew through the shared generation / in-flight gate. A caller that observed
+   * an older generation reuses the renewal that already happened; concurrent
+   * callers on the same generation join one in-flight `watch-ensure`.
+   */
+  function renew({ helperPath, installationId, actorProfile, signal }, observedGeneration, { trigger = "rejection" } = {}) {
+    const entry = state(installationId);
+    if (entry.generation !== observedGeneration) {
+      return Promise.resolve({ renewed: false, reusedRenewal: true, trigger });
+    }
+    if (!entry.inFlight) {
+      entry.inFlight = Promise.resolve().then(async () => {
+        const result = await ensureWatchGrant({ helperPath, installationId, actorProfile, signal });
+        entry.generation += 1;
+        recordEnsure(installationId, result);
+        return { renewed: true, trigger };
+      }).finally(() => {
+        entry.inFlight = null;
+      });
+    }
+    return entry.inFlight;
+  }
+
+  /**
+   * One proactive scheduler per installation per supervisor watch(). Resolves
+   * when `signal` aborts. A second caller for the same installation is a no-op.
+   */
+  async function runProactive({ renewal, signal, sleep = defaultSleep }) {
+    if (!renewal || typeof renewal.installationId !== "string") return;
+    const entry = state(renewal.installationId);
+    if (entry.proactiveOwner) return;
+    const owner = Symbol("proactive-renewal");
+    entry.proactiveOwner = owner;
+    let stalls = 0;
+    try {
+      while (!signal?.aborted) {
+        const version = entry.expiryVersion;
+        if (entry.renewAtMs == null || stalls >= 3) {
+          await waitForChange(entry, version, signal);
+          stalls = 0;
+          continue;
+        }
+        const before = now();
+        const delay = entry.renewAtMs - before;
+        if (delay > 0) {
+          await waitOrChange(entry, version, Math.min(delay, PROACTIVE_MAX_WAIT_MS), signal, sleep);
+          if (signal?.aborted) return;
+          if (entry.expiryVersion !== version) {
+            stalls = 0;
+            continue;
+          }
+          if (now() < entry.renewAtMs) {
+            // Clock did not reach the target (long wait chunk, or an injected
+            // sleep that returns early). Guard against a hot loop.
+            stalls = now() === before ? stalls + 1 : 0;
+            continue;
+          }
+        }
+        stalls = 0;
+        try {
+          await renew({ ...renewal, signal }, entry.generation, { trigger: "proactive" });
+        } catch (error) {
+          if (signal?.aborted || isAbort(error)) return;
+          logger?.error?.("triangle_client_watch_grant_proactive_renewal_failed", {
+            error: "Proactive watch grant renewal failed",
+            code: error?.code,
+            status: error?.status ?? error?.httpStatus,
+            rejectedCode: typeof error?.rejectedCode === "string" ? error.rejectedCode : undefined,
+            failureCode: typeof error?.failureCode === "string" ? error.failureCode : undefined,
+          });
+          if (entry.expiryVersion === version && entry.expiresAtMs != null) {
+            const t = now();
+            const retryAt = t + Math.max(PROACTIVE_RETRY_MIN_MS, Math.floor((entry.expiresAtMs - t) / 2));
+            entry.renewAtMs = retryAt < entry.expiresAtMs - PROACTIVE_RETRY_EXPIRY_MARGIN_MS ? retryAt : null;
+          }
+        }
+      }
+    } finally {
+      if (entry.proactiveOwner === owner) entry.proactiveOwner = null;
+    }
+  }
+
+  function waitForChange(entry, version, signal) {
+    if (signal?.aborted || entry.expiryVersion !== version) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        entry.listeners.delete(done);
+        signal?.removeEventListener?.("abort", done);
+        resolve();
+      };
+      entry.listeners.add(done);
+      signal?.addEventListener?.("abort", done, { once: true });
+    });
+  }
+
+  async function waitOrChange(entry, version, ms, signal, sleep) {
+    if (entry.expiryVersion !== version) return;
+    const wake = new AbortController();
+    const onChange = () => wake.abort();
+    const onAbort = () => wake.abort();
+    entry.listeners.add(onChange);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    try {
+      await sleep(ms, { signal: wake.signal });
+    } catch (error) {
+      if (!isAbort(error) && !wake.signal.aborted) throw error;
+    } finally {
+      entry.listeners.delete(onChange);
+      signal?.removeEventListener?.("abort", onAbort);
+    }
+  }
+
+  return Object.freeze({ state, recordEnsure, renew, runProactive });
+}
+
 export function createClientSupervisor({
   instances = [],
   eventWake = null,
@@ -103,6 +332,8 @@ export function createClientSupervisor({
   idleJitterRatio = 0.1,
   random = Math.random,
   logger = console,
+  /** Clock for watch-grant expiry scheduling (tests inject a virtual clock). */
+  now = () => Date.now(),
   /**
    * One install watch dispatcher for App Server, headless Codex, and enrolled
    * Cursor ACP. Kicks register only when agentId is on that wake bootstrap.
@@ -140,8 +371,10 @@ export function createClientSupervisor({
   // coalesce onto a single watch-poll.
   const sharedWatchTransport = createInstallationWatchTransportFactory(createWatchTransport);
   // A grant is installation-scoped too. Track its generation so listeners that
-  // fail together on one expired credential join (or observe) one renewal.
-  const watchGrantRenewals = new Map();
+  // fail together on one expired credential join (or observe) one renewal, and
+  // its MESH expiry so one proactive renewal per installation can run before
+  // the credential dies (see watch-grant-renewal.mjs).
+  const watchGrantRenewals = createWatchGrantRenewalRegistry({ ensureWatchGrant, now, logger });
   // One install dispatcher. Anchor is appServerWake or a headless Codex wake
   // that carries agentId + installationId. Cursor ACP is a member of that
   // watch, never the anchor or grant actor. Bob webhook removed.
@@ -191,27 +424,11 @@ export function createClientSupervisor({
   }
 
   function watchGrantState(installationId) {
-    let state = watchGrantRenewals.get(installationId);
-    if (!state) {
-      state = { generation: 0, inFlight: null };
-      watchGrantRenewals.set(installationId, state);
-    }
-    return state;
+    return watchGrantRenewals.state(installationId);
   }
 
-  async function renewWatchGrant({ helperPath, installationId, actorProfile, signal }, observedGeneration) {
-    const state = watchGrantState(installationId);
-    if (state.generation !== observedGeneration) return { renewed: false, reusedRenewal: true };
-    if (!state.inFlight) {
-      state.inFlight = Promise.resolve().then(async () => {
-        await ensureWatchGrant({ helperPath, installationId, actorProfile, signal });
-        state.generation += 1;
-        return { renewed: true };
-      }).finally(() => {
-        state.inFlight = null;
-      });
-    }
-    return state.inFlight;
+  async function renewWatchGrant(renewal, observedGeneration) {
+    return watchGrantRenewals.renew(renewal, observedGeneration);
   }
 
   const entries = instances.map((instance) => {
@@ -596,7 +813,9 @@ export function createClientSupervisor({
       laneCursorStores,
       // Hobby Fluid memory: 2s reconnect after empty hold burns ~44 GB-hrs/day
       // per always-on watcher. Prefer SAFE idle (30s) so one watcher stays near
-      // ~12–22 GB-hrs/day depending on server poll timeout.
+      // ~12–22 GB-hrs/day depending on server poll timeout. This is the
+      // selected M0a operating cadence; INSTALL_WATCH_HELD_POLL_IDLE_MS (2s)
+      // stays a distinct opt-in and is not used by the supervisor.
       idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
       logger,
     });
@@ -709,6 +928,22 @@ export function createClientSupervisor({
         });
       }
 
+      // Proactive renewal schedulers live for this watch() call only: they stop
+      // on the caller's abort or once every loop below has settled.
+      const proactiveController = new AbortController();
+      const proactiveSignal = signal
+        ? AbortSignal.any([signal, proactiveController.signal])
+        : proactiveController.signal;
+      const proactiveRenewals = [];
+      function startProactiveRenewal(renewal) {
+        if (!renewal) return;
+        proactiveRenewals.push(watchGrantRenewals.runProactive({
+          renewal,
+          signal: proactiveSignal,
+          sleep: typeof sleep === "function" ? sleep : undefined,
+        }).catch(() => {}));
+      }
+
       async function runDurableWakeLoop({
         start,
         stop = null,
@@ -719,14 +954,17 @@ export function createClientSupervisor({
       }) {
         let consecutiveFailures = 0;
         let initialEnsureDone = false;
+        startProactiveRenewal(renewal);
         while (!signal?.aborted) {
-          const observedGeneration = renewal
+          let observedGeneration = renewal
             ? watchGrantState(renewal.installationId).generation
             : null;
           try {
             if (ensure && !initialEnsureDone) {
-              await ensureWatchGrant({ ...ensure, signal });
+              const ensured = await ensureWatchGrant({ ...ensure, signal });
               initialEnsureDone = true;
+              watchGrantRenewals.recordEnsure(ensure.installationId, ensured);
+              if (renewal) observedGeneration = watchGrantState(renewal.installationId).generation;
             }
             const result = await start();
             consecutiveFailures = 0;
@@ -747,6 +985,7 @@ export function createClientSupervisor({
               logger.error?.(logEvent, {
                 error: logMessage,
                 code: error?.code,
+                status,
                 rejectedCode: typeof error?.rejectedCode === "string" ? error.rejectedCode : undefined,
                 failureCode: typeof error?.failureCode === "string" ? error.failureCode : undefined,
                 message: typeof error?.message === "string" ? error.message.slice(0, 200) : undefined,
@@ -771,6 +1010,7 @@ export function createClientSupervisor({
                 logger.error?.("triangle_client_watch_grant_renewal_failed", {
                   error: "Watch grant renewal failed",
                   code: renewalError?.code,
+                  status: renewalError?.status ?? renewalError?.httpStatus,
                   rejectedCode: typeof renewalError?.rejectedCode === "string"
                     ? renewalError.rejectedCode
                     : undefined,
@@ -989,14 +1229,21 @@ export function createClientSupervisor({
             : [],
         );
 
-      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult] = await Promise.all([
-        workerLoop,
-        wakeLoop,
-        installDispatcherLoop,
-        appServerLoop,
-        headlessLoop,
-        cursorAcpLoop,
-      ]);
+      let settled;
+      try {
+        settled = await Promise.all([
+          workerLoop,
+          wakeLoop,
+          installDispatcherLoop,
+          appServerLoop,
+          headlessLoop,
+          cursorAcpLoop,
+        ]);
+      } finally {
+        proactiveController.abort();
+        await Promise.allSettled(proactiveRenewals);
+      }
+      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult] = settled;
       return {
         instances,
         eventWake: wakeResult,
