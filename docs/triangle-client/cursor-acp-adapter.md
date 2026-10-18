@@ -103,6 +103,9 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
   or `..` segments are rejected (`cursor_data_dir_invalid`), and an absent
   override resolves only from the injected env (never the host
   `process.env`).
+  Containment is checked by exact path component (`~/.cursor/..x` is
+  inside `~/.cursor`). An existing data dir must be owned by the current
+  user with no group/other bits (`cursor_data_dir_not_private`).
 - **Snapshot identity:** apply records each copied file's size, mtime and
   sha256 plus every directory it created (manifest schema 2). Manifest
   entries are constrained on revert: session entries to
