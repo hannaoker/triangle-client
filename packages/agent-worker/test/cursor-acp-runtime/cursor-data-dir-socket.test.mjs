@@ -957,3 +957,71 @@ test("codex r1: data dir below a symlink into ~/.cursor or ~/.codex is rejected 
     }
   }
 });
+
+test("codex r2: transcript apply runs the socket preflight before creating or copying anything", () => {
+  const { home, cleanup } = fixture();
+  try {
+    const workspace = path.join(home, "ws5");
+    seedLegacyTranscripts(home, workspace);
+    const tooLong = path.join(home, "d".repeat(90));
+    const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: tooLong, workspacePaths: [workspace] });
+    assert.equal(plan.socketPreflight.ok, false);
+    assert.throws(
+      () => applyLegacyCursorTranscriptCopy({ home, cursorDataDir: tooLong, workspacePaths: [workspace] }),
+      { code: "cursor_socket_path_too_long" },
+    );
+    assert.equal(existsSync(tooLong), false, "data dir not created");
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r2: runtime status preflights the configured workspace, not just the data dir", () => {
+  const { home, cursorHome, cleanup } = fixture();
+  try {
+    // One 2-byte char in the data dir + a long workspace slug: the truncated
+    // socket dir is 92 chars, so the socket path is 104 chars / 105 bytes.
+    const dataDir = path.join(home, "d\u00e9");
+    const workingDirectory = `/${"w".repeat(120)}`;
+    const ok = describeTriangleCursorDirs({ cursorHome, cursorDataDir: dataDir, env: { HOME: home } });
+    assert.equal(ok.socketPreflight.ok, true, "data dir alone passes");
+    const runtime = createHeadlessCursorAcpRuntime({
+      profileConfig: createDefaultCursorAcpShadowProfile({
+        workingDirectory,
+        workload: "conversational",
+        model: "composer-2.5[fast=true]",
+      }),
+      enableShadow: true,
+      command: "agent",
+      args: ["acp"],
+      cursorHome,
+      cursorDataDir: dataDir,
+      env: { HOME: home, PATH: "/usr/bin" },
+      logger: { info() {}, error() {} },
+    });
+    const dirs = runtime.status().cursorDirs;
+    assert.deepEqual([...dirs.socketPreflight.workspacePaths], [workingDirectory]);
+    assert.equal(dirs.socketPreflight.ok, false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("codex r2: revert removes the projects dir that apply created once the manifest is gone", () => {
+  for (const seeded of [true, false]) {
+    const { home, cleanup } = fixture();
+    try {
+      const workspace = path.join(home, "ws6");
+      if (seeded) seedLegacyTranscripts(home, workspace);
+      const projectsRoot = path.join(home, ".triangle", "cursor-data", "projects");
+      assert.equal(existsSync(projectsRoot), false);
+      applyLegacyCursorTranscriptCopy({ home, workspacePaths: [workspace] });
+      assert.ok(existsSync(projectsRoot));
+      const reverted = revertLegacyCursorTranscriptCopy({ home });
+      assert.ok(reverted.removedDirs.includes("projects"), `seeded=${seeded}`);
+      assert.equal(existsSync(projectsRoot), false);
+    } finally {
+      cleanup();
+    }
+  }
+});

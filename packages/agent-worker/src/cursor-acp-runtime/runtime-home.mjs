@@ -412,6 +412,7 @@ export function describeTriangleCursorDirs({
   cursorDataDir,
   env = process.env,
   workspacePaths = [],
+  defaultWorkspaceToConfigDir = false,
 } = {}) {
   const override = cursorDataDir ?? env.TRIANGLE_CURSOR_DATA_DIR;
   const dataDirSource =
@@ -424,9 +425,16 @@ export function describeTriangleCursorDirs({
   }
   try {
     result.dataDir = resolveTriangleCursorDataDir({ override, home: env.HOME, allowCreate: false });
-    const plan = planCursorSocketPaths({ dataDir: result.dataDir, workspacePaths });
+    const workspaces =
+      workspacePaths.length > 0
+        ? workspacePaths
+        : defaultWorkspaceToConfigDir && result.configDir
+          ? [result.configDir]
+          : [];
+    const plan = planCursorSocketPaths({ dataDir: result.dataDir, workspacePaths: workspaces });
     result.socketPreflight = Object.freeze({
       ok: plan.ok,
+      workspacePaths: Object.freeze([...workspaces]),
       base: plan.base.kind,
       reasons: Object.freeze(plan.problems.map((problem) => problem.reason)),
     });
@@ -1149,7 +1157,20 @@ export function planLegacyCursorTranscriptCopy({
       files: Object.freeze(entries),
     });
   });
-  return Object.freeze({ dataDir: anchor, sourceRoot, targetRoot, workspaces: Object.freeze(planned) });
+  const socketPlan = planCursorSocketPaths({
+    dataDir: anchor,
+    workspacePaths: workspaces.map((entry) => entry.workspacePath),
+  });
+  return Object.freeze({
+    dataDir: anchor,
+    sourceRoot,
+    targetRoot,
+    socketPreflight: Object.freeze({
+      ok: socketPlan.ok,
+      reasons: Object.freeze(socketPlan.problems.map((problem) => problem.reason)),
+    }),
+    workspaces: Object.freeze(planned),
+  });
 }
 
 function readTranscriptManifest(anchor) {
@@ -1186,11 +1207,23 @@ export function applyLegacyCursorTranscriptCopy({
   workspacePaths,
   now = () => new Date().toISOString(),
 } = {}) {
+  // Fail closed BEFORE creating or copying anything: never migrate context
+  // into a data dir the ACP runtime would refuse (cursor_socket_path_too_long).
+  {
+    const { anchor: candidate } = legacyTranscriptRoots({ home, cursorDataDir });
+    assertCursorSocketPathsFit({
+      dataDir: candidate,
+      workspacePaths: assertWorkspacePaths(workspacePaths).map((entry) => entry.workspacePath),
+    });
+  }
   const { anchor, sourceAnchor } = legacyTranscriptRoots({ home, cursorDataDir, allowCreate: true });
   const plan = planLegacyCursorTranscriptCopy({ home, cursorDataDir: anchor, workspacePaths });
-  ensureOwnedDirectory(anchor, PROJECTS_DIRNAME);
+  const projectsCreated = ensureOwnedDirectory(anchor, PROJECTS_DIRNAME).length > 0;
   const { manifestPath, manifest } = readTranscriptManifest(anchor);
   manifest.schemaVersion = LEGACY_TRANSCRIPT_MANIFEST_SCHEMA;
+  // Remember that apply created `projects/` so revert can remove it (when
+  // empty) once the manifest that lives inside it is gone.
+  if (projectsCreated) manifest.createdProjectsRoot = true;
   const copied = [];
   const skipped = [];
   try {
@@ -1289,9 +1322,14 @@ export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, curs
       continue;
     }
     const identity = typeof file?.sha256 === "string" ? file : null;
-    const result = identity
-      ? removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity })
-      : { status: "modified", reason: "no_snapshot" };
+    let result;
+    try {
+      result = identity
+        ? removeOwnedFileIfUnchanged({ anchor, relative: file.path, identity })
+        : { status: "modified", reason: "no_snapshot" };
+    } catch (error) {
+      result = { status: "remove_failed", reason: error?.code ?? null };
+    }
     if (result.status === "removed" || result.status === "missing") {
       if (result.status === "removed") removedFiles.push(file.path);
       continue;
@@ -1308,9 +1346,14 @@ export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, curs
       remainingDirs.push(relative);
       continue;
     }
-    const result = removeOwnedEmptyDirectory({ anchor, relative });
+    let result;
+    try {
+      result = removeOwnedEmptyDirectory({ anchor, relative });
+    } catch (error) {
+      result = { status: "remove_failed", reason: error?.code ?? null };
+    }
     if (result.status === "removed") removedDirs.push(relative);
-    if (result.status === "not_empty" || result.status === "unsafe_path") {
+    if (result.status !== "removed" && result.status !== "missing") {
       keptDirs.push(relative);
       remainingDirs.push(relative);
     }
@@ -1321,6 +1364,16 @@ export function revertLegacyCursorTranscriptCopy({ home = process.env.HOME, curs
       allowMissingAncestors: true,
     });
     if (resolved.leaf?.isFile()) unlinkSync(resolved.absolute);
+    if (manifest.createdProjectsRoot === true) {
+      let result;
+      try {
+        result = removeOwnedEmptyDirectory({ anchor, relative: PROJECTS_DIRNAME });
+      } catch {
+        result = { status: "remove_failed" };
+      }
+      if (result.status === "removed") removedDirs.push(PROJECTS_DIRNAME);
+      else if (result.status !== "missing") keptDirs.push(PROJECTS_DIRNAME);
+    }
   } else {
     writeTranscriptManifest(anchor, { ...manifest, createdFiles: remainingFiles, createdDirs: remainingDirs });
   }

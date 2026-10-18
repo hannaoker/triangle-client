@@ -110,7 +110,21 @@ or delete the `~/.cursor` source, and share `owned-fs.mjs`:
   A session copy that fails is rolled back (identity-checked) and returned in
   `failed` without being recorded, so a later apply can retry it (if rollback
   cannot finish the record is kept with `incomplete: true` for revert).
-  Transcript copies are per file: files already copied stay recorded.
+  Transcript copies are per file: files already copied stay recorded. The
+  session rollback also runs if the manifest cannot be written after a copy.
+- **Socket preflight first:** transcript apply runs the
+  `cursor_socket_path_too_long` preflight for the target data dir and the
+  migrated workspaces before creating or copying anything (plan reports it
+  as `socketPreflight`). Runtime `status().cursorDirs.socketPreflight`
+  checks the configured working directory (else the Cursor home, the
+  default session cwd) and lists it in `workspacePaths`.
+- **Resumable undo:** session revert persists `revertInProgress`
+  (write-ahead) before unlinking and records files already removed when an
+  I/O error interrupts it, so a later revert finishes instead of treating
+  them as post-migration use. Transcript revert is per file and reports I/O
+  errors as `remove_failed` (kept in the manifest). If transcript apply
+  created `projects/`, revert removes it (only when empty) once the manifest
+  is gone.
 - **Undo after use:** revert never deletes recursively and never deletes a
   file whose identity changed.
   - Sessions (`plan/apply/revertLegacyCursorAcpSessionCopy`,

@@ -438,7 +438,18 @@ export function createHeadlessCursorAcpRuntime({
       active: true,
       started,
       config: resolved,
-      cursorDirs: describeTriangleCursorDirs({ cursorHome, cursorDataDir, env }),
+      // Preflight the workspace sessions will actually use: the configured
+      // working directory, else the Cursor home (sessionNew's default cwd).
+      cursorDirs: describeTriangleCursorDirs({
+        cursorHome,
+        cursorDataDir,
+        env,
+        workspacePaths:
+          typeof profileConfig.workingDirectory === "string" && profileConfig.workingDirectory.startsWith("/")
+            ? [profileConfig.workingDirectory]
+            : [],
+        defaultWorkspaceToConfigDir: true,
+      }),
       pool: workerPool.status(),
       lastSettlementTrace: Object.freeze([...lastSettlementTrace]),
     });
