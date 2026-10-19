@@ -63,7 +63,7 @@ test('guided setup composes real enrollment, verification, private runtime stagi
           assert.ok(existsSync(keyFile));
           writeFileSync(path.join(appRoot, 'profiles-v1', `profile-${Buffer.from(profile).toString('hex')}.json`), JSON.stringify({ profile, keyFile }), { mode: 0o600 });
         } else assert.equal(args[0], 'status');
-        result = { status: 'verified', agentId: verifiedAgentId, origin: authority.authority };
+        result = { ...(args[0] === 'status' ? {lifecycle:'verified'} : {status:'verified'}), agentId: verifiedAgentId, origin: authority.authority };
       } else if (command === path.join(appRoot, 'bin/triangle-client')) {
         assert.equal(args[0], 'agent');
         assert.ok(['add', 'enable'].includes(args[1]));

@@ -90,7 +90,7 @@ function fixture() {
     let data = {};
     if (args[0] === "status")
       data = {
-        status: "verified",
+        lifecycle: "verified",
         agentId: "agent_" + "a".repeat(32),
         handle: "test-agent",
       };
@@ -190,6 +190,8 @@ test("Cursor selects explicit cursor-agent and stages a genuine supervisor host 
       keyFile: f.keyFile,
     });
     assert.equal(result.state, "running");
+    const status = await r.status({profile:"test-agent"});
+    assert.equal(status.identity, "verified");
     const binding = JSON.parse(
       readFileSync(path.join(f.app, "client/cursor-acp-runtime-binding.json")),
     );
@@ -495,4 +497,9 @@ test("existing Codex worker retains delivery mode without joining shared headles
   } finally {
     f.cleanup();
   }
+});
+
+test("helper status contract names lifecycle, not bind's status field", () => {
+ const source=readFileSync(new URL("../../macos-mailbox-helper/Sources/TriangleMailboxCore/OperatorStatus.swift",import.meta.url),"utf8");
+ assert.match(source,/case profile, origin, handle, lifecycle, verificationTimestamp/);
 });

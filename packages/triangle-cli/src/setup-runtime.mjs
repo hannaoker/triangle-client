@@ -736,7 +736,7 @@ export function createSetupRuntime({
           ["status", "--profile", profile],
           "Profile status",
         );
-        if (actual.status !== "verified" || actual.agentId !== agent.agent_id)
+        if (actual.lifecycle !== "verified" || actual.agentId !== agent.agent_id)
           fail("Profile did not remain verified. Run triangle doctor.");
         const service = await run(
           "/bin/launchctl",
@@ -775,14 +775,14 @@ export function createSetupRuntime({
     );
     return {
       state:
-        identity.status === "verified" &&
+        identity.lifecycle === "verified" &&
         local?.enabled &&
         service.code === 0 &&
         /(?:^|\n)\s*state = running\b/.test(service.stdout)
           ? "running"
           : "needs_attention",
       profile,
-      identity: identity.status,
+      identity: identity.lifecycle,
       enabled: local?.enabled ?? false,
     };
   }
