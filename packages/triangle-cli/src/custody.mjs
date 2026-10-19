@@ -132,6 +132,12 @@ export function openCustody(home = defaultHome()) {
   const root = path.resolve(home);
   const p = (...parts) => path.join(root, ...parts);
 
+  const SAFE_NAME = /^[A-Za-z0-9_-]{1,80}$/;
+  function cachePath(kind, id) {
+    if (!SAFE_NAME.test(kind) || !SAFE_NAME.test(id)) throw new LocalStateError(`invalid cache entry ${kind}/${id}`);
+    return p("cache", kind, `${id}.json`);
+  }
+
   function init() {
     ensurePrivateDir(root);
     return api;
@@ -219,8 +225,14 @@ export function openCustody(home = defaultHome()) {
     removeJournal: (name) => removeDurable(p("journal", `${name}.json`)),
     listJournal: () => (existsSync(p("journal")) ? readdirSync(p("journal")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)) : []),
 
-    readCache: (kind, id) => readJsonFile(p("cache", kind, `${id}.json`)),
-    writeCache: (kind, id, value) => writeAtomic(p("cache", kind, `${id}.json`), `${JSON.stringify(value)}\n`, 0o600),
+    readCache: (kind, id) => readJsonFile(cachePath(kind, id)),
+    writeCache: (kind, id, value) => writeAtomic(cachePath(kind, id), `${JSON.stringify(value)}\n`, 0o600),
+    removeCache: (kind, id) => rmSync(cachePath(kind, id), { force: true }),
+    /** Forget an agent that no longer exists on the server: its workload key and cached views. */
+    removeAgent(agentId) {
+      rmSync(api.agentDir(agentId), { recursive: true, force: true });
+      rmSync(cachePath("permissions", agentId), { force: true });
+    },
 
     /** Paths whose mode must stay private, for doctor. */
     auditModes() {

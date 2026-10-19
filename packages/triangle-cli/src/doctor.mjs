@@ -25,7 +25,8 @@ export async function doctor(session) {
     report.warnings.push("Not joined. Run `triangle join <link>`.");
     return report;
   }
-  if (session.owner.state !== "active") {
+  report.device.state = (await session.refreshController()) ?? report.device.state;
+  if (report.device.state !== "active") {
     report.warnings.push(`Waiting for approval: on one of your other devices run \`triangle device approve ${session.owner.fingerprint}\`.`);
     return report;
   }

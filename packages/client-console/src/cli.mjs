@@ -11,7 +11,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectDashboard } from "./status.mjs";
+import { collectDashboard, readTrianglePermissions } from "./status.mjs";
 import { formatDashboardHuman } from "./format.mjs";
 import { enrollAction, watchEnsureAction, serviceAction } from "./actions.mjs";
 import { assertSecretFree } from "./secrets.mjs";
@@ -50,6 +50,7 @@ async function runStatus(args) {
     installation: "string",
     "service-script": "string",
     home: "string",
+    "triangle-home": "string",
   });
   const serviceScriptPath =
     flags["service-script"] ??
@@ -57,6 +58,8 @@ async function runStatus(args) {
 
   const dashboard = await collectDashboard({
     home: flags.home,
+    readPermissions: readTrianglePermissions,
+    triangleHome: flags["triangle-home"],
     installationId: flags.installation,
     serviceScriptPath,
   });
@@ -182,7 +185,7 @@ function printHelp() {
   process.stdout.write(`triangle-client-console — Triangle Client local operator console (scaffold)
 
 Commands:
-  status [--human] [--installation inst_…] [--service-script PATH]
+  status [--human] [--installation inst_…] [--service-script PATH] [--triangle-home DIR]
   enroll --profile NAME --origin URL [--execute]   # with --execute, read enrollment JSON from stdin
   watch-ensure --installation inst_… --actor-profile NAME [--execute]
   service status|start|stop [--script PATH] [--execute]

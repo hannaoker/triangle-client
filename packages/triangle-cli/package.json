@@ -15,6 +15,7 @@
     ".": "./src/index.mjs",
     "./protocol": "./src/protocol.mjs",
     "./workload": "./src/workload.mjs",
+    "./read-model": "./src/read-model.mjs",
     "./errors": "./src/errors.mjs"
   },
   "scripts": {

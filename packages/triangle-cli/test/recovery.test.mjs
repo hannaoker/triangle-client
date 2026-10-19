@@ -20,7 +20,7 @@ function runner(fetchImpl, home) {
     const out = [];
     const err = [];
     const code = await main([...argv, "--home", home], { env: {}, fetchImpl, io: { stdout: (s) => out.push(s), stderr: (s) => err.push(s) } });
-    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")) };
+    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")), lines: () => out.join("\n").split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
   };
 }
 
@@ -73,7 +73,7 @@ test("a response cut off after its headers keeps the journal (outcome unknown), 
   assert.equal(journals(home).length, 1);
   const resumed = await runner(fake.fetchImpl, home)("resume", "--json");
   assert.equal(resumed.code, 0, resumed.err);
-  assert.deepEqual(resumed.json().map((d) => d.outcome), ["replayed"]);
+  assert.deepEqual(resumed.lines().map((d) => d.outcome), ["replayed"]);
   assert.deepEqual(journals(home), []);
 });
 

@@ -17,7 +17,7 @@ function runner(fake, home) {
     const out = [];
     const err = [];
     const code = await main([...argv, "--home", home], { env: {}, fetchImpl: fake.fetchImpl, io: { stdout: (s) => out.push(s), stderr: (s) => err.push(s) } });
-    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")) };
+    return { code, out: out.join("\n"), err: err.join("\n"), json: () => JSON.parse(out.join("\n")), lines: () => out.join("\n").split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
   };
 }
 
@@ -159,7 +159,7 @@ test("agent add: lost response → `triangle resume` replays and installs the jo
   assert.match(first.err, /triangle resume/);
   const resumed = await run("resume", "--json");
   assert.equal(resumed.code, 0, resumed.err);
-  assert.deepEqual(resumed.json().map((d) => d.outcome), ["replayed"]);
+  assert.deepEqual(resumed.lines().map((d) => d.outcome), ["replayed"]);
   const created = [...fake.state.agents.entries()].find(([, a]) => a.handle === "flaky-net")[0];
   assert.ok(statSync(path.join(home, "agents", created, "workload-key.json")).isFile());
   assert.equal(fake.state.agents.size, 2, "exactly one agent created");
