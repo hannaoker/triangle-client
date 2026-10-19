@@ -348,7 +348,9 @@ async function runChild(command, args, { env, cwd } = {}) {
     let stdout = "",
       stderr = "",
       bytes = 0;
-    const timer = setTimeout(() => child.kill("SIGTERM"), 90000);
+    // Lifecycle failure can wait twice: activation, then restoration of the
+    // previous service. Keep the outer bound beyond both readiness windows.
+    const timer = setTimeout(() => child.kill("SIGTERM"), 180000);
     child.stdout.on("data", (b) => {
       bytes += b.length;
       if (bytes > 256 * 1024) child.kill("SIGTERM");
