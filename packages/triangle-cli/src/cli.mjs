@@ -42,6 +42,8 @@ export const USAGE = `Usage: triangle <command> [options]
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
+Linux: setup defaults to identity enrollment; background harness services are macOS-only.
+
 Global: --home DIR (default ${defaultHome()}), --json`;
 
 export class UsageError extends Error {}

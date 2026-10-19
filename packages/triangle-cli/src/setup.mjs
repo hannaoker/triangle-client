@@ -34,7 +34,7 @@ export async function setup(options = {}, dependencies = {}) {
     const custody = openCustody(home);
     const pending = custody.readJournal(JOURNAL);
     const prompts = dependencies.prompts ?? createSetupPrompts();
-    const identityOnly = options.identityOnly ?? pending?.identityOnly ?? false;
+    const identityOnly = options.identityOnly ?? pending?.identityOnly ?? (platform === 'linux' && !options.harness);
     const profile = options.profile ?? pending?.profile ?? (identityOnly ? 'identity' : await prompts.ask('Profile name', 'my-agent'));
     const harness = options.harness ?? pending?.harness ?? (identityOnly ? null : await prompts.ask('Harness (codex, hermes, antigravity, cursor)', 'codex'));
     if (!PROFILE.test(profile)) throw new LocalStateError('Profile must be 3–32 lowercase letters, digits, underscores or hyphens, starting with a letter.');

@@ -13,7 +13,7 @@ modes, installation, profile binding, lifecycle, and security boundaries.
 **Start here:** [packaged installation and guided setup](docs/triangle-client/quickstart.md).
 The macOS package includes the CLI, Node, and background service; `triangle setup`
 handles invitation enrollment and harness binding. MESH credentials use private
-files, with no Apple Keychain dependency. Linux service packaging comes next.
+files, with no Apple Keychain dependency. [Linux CLI packages](docs/triangle-client/linux-install.md) support invitation enrollment and owner controls. Linux harness services remain a separate runtime port.
 
 **Release install on another Mac:** [release bundle](docs/triangle-client/release-bundle.md)
 (signing, layout, upgrade/uninstall), the

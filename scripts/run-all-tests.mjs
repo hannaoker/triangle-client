@@ -15,7 +15,7 @@ const suites = [
   {
     name: "packaged installer",
     command: "node",
-    args: ["--test", "tests/client-package.test.mjs"],
+    args: ["--test", process.platform === "linux" ? "tests/linux-package.test.mjs" : "tests/client-package.test.mjs"],
   },
   {
     name: "agent-worker (triangle-client)",

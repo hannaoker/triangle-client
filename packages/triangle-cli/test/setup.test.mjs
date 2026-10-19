@@ -232,3 +232,22 @@ test('setup rejects unknown or cached-conflicting runtime identity before remote
   assert.equal(openCustody(f.home).readCache('setup', f.options.profile).agentId, first.agent.agent_id);
   assert.equal(f.fake.state.agents.size, 2);
 });
+
+test('Linux packaged setup defaults to portable enrollment and resumes without a runtime or new keys', async () => {
+  const f = fixture();
+  const options = { home:f.home, profile:'linux-agent', inviteFile:f.file };
+  const dependencies = {...f.dependencies, platform:'linux', runtime:undefined, prompts:{ask:()=>{throw Error('Unexpected harness prompt');},invite:()=>{throw Error('Unexpected invite prompt');}}};
+  f.fake.state.failNext='drop-after-commit';
+  f.fake.state.failPath=/\/redeem$/;
+  await assert.rejects(setup(options,dependencies),/unknown/i);
+  const ownerBefore=readFileSync(path.join(f.home,'owner/owner-key.json'),'utf8');
+  const result=await setup({home:f.home,resume:true},dependencies);
+  assert.equal(result.state,'joined');
+  assert.match(result.next_action,/Background service was not configured/);
+  assert.equal(f.fake.state.agents.size,1);
+  assert.equal(readFileSync(path.join(f.home,'owner/owner-key.json'),'utf8'),ownerBefore);
+  const again=await setup({...options,inviteFile:undefined},dependencies);
+  assert.equal(again.state,'joined');
+  assert.equal(f.fake.state.agents.size,1);
+  assert.deepEqual(f.calls,[]);
+});
