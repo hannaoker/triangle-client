@@ -75,3 +75,10 @@ Build x64 and ARM64 independently. The managed-runtime package contains the trac
 Use `triangle service start|stop|status|doctor|logs --profile NAME`. Readiness requires a fresh verified host report matching the systemd process. Profiles live under `$XDG_STATE_HOME/triangle/runtime-v1/profiles`; delivery journals are bound to their agent under `runtime-v1/agents`. Model sign-in state lives under `$XDG_DATA_HOME/triangle/model-state/NAME`; only Codex auth is copied, preserving unrelated user settings. Without `--workdir`, setup uses a private profile workspace.
 
 Ambiguous executions are quarantined after a crash. Inspect status before explicitly authorizing `triangle service retry --profile NAME --delivery ID --yes`; this can execute the model again. Delivery metadata is persisted without message bodies. Services require an active user manager; keeping them running after logout requires system administrator configuration of user lingering.
+
+The sandbox requires usable unprivileged user namespaces. Some distributions
+restrict them through AppArmor or container policy; setup fails closed when the
+real probe cannot establish isolation. Have an administrator configure an
+appropriate distribution policy rather than disabling security controls in the
+installer. Services pin their release directory; stop them before removing or
+manually changing that release.

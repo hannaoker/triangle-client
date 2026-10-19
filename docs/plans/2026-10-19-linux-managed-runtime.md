@@ -86,3 +86,13 @@ Restart=on-failure. Keep existing profile binding/mode, no identity replacement.
   over a disposable distinct MESH identity; Mini existing profiles never dual-claim.
 - Native Linux tests (ARM64; x64 under existing local emulation) and macOS owner
   CLI/package regression. Independent review in one batch, focused fixes.
+
+## Implementation checkpoint
+
+Implemented the Codex-first runtime, private profile configuration, fail-closed
+bubblewrap runner, durable transaction core, systemd lifecycle and Linux package
+closure. Live ARM64 MESH/Codex delivery and SIGKILL recovery passed; uncertain
+execution quarantines until explicit retry. See
+[validation evidence](../reviews/2026-10-19-linux-managed-runtime-validation.md)
+for tested boundaries and distribution limitations. Other harnesses remain a
+separate follow-up after this Linux milestone.

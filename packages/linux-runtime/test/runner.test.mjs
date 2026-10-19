@@ -128,3 +128,23 @@ test("writable model state cannot contain trusted host code or executables", () 
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("nonzero harness exits remain ambiguous and diagnostics never expose stderr", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(
+      f.config.bwrap,
+      "#!/bin/sh\necho private-provider-detail >&2\nexit 13\n",
+      { mode: 0o700 },
+    );
+    const runner = createLinuxRunner(f.config, { platform: "linux" });
+    await assert.rejects(runner.run({ text: "test" }), (error) => {
+      assert.equal(error.knownFailure, false);
+      assert.equal(error.code, "runner_failed");
+      assert.doesNotMatch(error.message, /private-provider-detail/);
+      return true;
+    });
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
