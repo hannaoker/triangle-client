@@ -438,3 +438,61 @@ test("existing Codex v2 binding adopts its custom authenticated home and verifie
     f.cleanup();
   }
 });
+
+test("existing Codex worker retains delivery mode without joining shared headless members", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(
+      path.join(
+        f.app,
+        "client/instances",
+        profileInstanceId("test-agent") + ".json",
+      ),
+      JSON.stringify({
+        profile: "test-agent",
+        runtimeAdapter: "codex",
+        enabled: true,
+        deliveryMode: "worker",
+      }),
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      path.join(
+        f.app,
+        "profiles-v1/profile-" +
+          Buffer.from("test-agent").toString("hex") +
+          ".json",
+      ),
+      JSON.stringify({ keyFile: f.keyFile }),
+      { mode: 0o600 },
+    );
+    rmSync(path.join(f.account, ".codex/auth.json"));
+    const file = path.join(f.app, "client/headless-runtime-binding.json");
+    const untouched = JSON.stringify({
+      version: 2,
+      common: {},
+      profiles: [{ profile: "another-headless-agent" }],
+    });
+    writeFileSync(file, untouched, { mode: 0o600 });
+    const r = createSetupRuntime({
+      accountHome: f.account,
+      releaseRoot: f.release,
+      platform: "darwin",
+      env: { PATH: path.join(f.account, "native-bin") },
+      run: f.run,
+    });
+    await r.preflight(f.options);
+    await r.configure({
+      ...f.options,
+      agent: { agent_id: f.id },
+      keyFile: f.keyFile,
+    });
+    assert.equal(readFileSync(file, "utf8"), untouched);
+    assert.equal(
+      f.calls.some((c) => c.args[0] === "agent" && c.args[1] === "add"),
+      false,
+    );
+  } finally {
+    f.cleanup();
+  }
+});

@@ -479,8 +479,12 @@ export function createSetupRuntime({
       fail(
         "Existing profile has no verified identity binding. Run triangle doctor.",
       );
+    const headless =
+      !current ||
+      current.deliveryMode ===
+        (harness === "codex" ? "headless-app-server" : "headless-cursor-acp");
     let configuredHome;
-    if (harness === "codex" || harness === "cursor") {
+    if (headless && (harness === "codex" || harness === "cursor")) {
       const config = readJson(
         path.join(
           clientRoot,
@@ -520,7 +524,7 @@ export function createSetupRuntime({
           );
       }
     }
-    if (harness === "codex") {
+    if (headless && harness === "codex") {
       const target = path.join(
         configuredHome ?? path.join(appRoot, "model-state/codex-runtime-home"),
         "auth.json",
@@ -547,7 +551,16 @@ export function createSetupRuntime({
         );
       regular(bound.keyFile, { privateMode: true });
     }
-    return { cli, adapter, current, bound, workdir, configuredHome, agentId };
+    return {
+      cli,
+      adapter,
+      current,
+      bound,
+      workdir,
+      configuredHome,
+      agentId,
+      headless,
+    };
   }
   async function call(command, args, description) {
     const r = await run(command, args, {
@@ -690,12 +703,13 @@ export function createSetupRuntime({
             cli: checked.cli,
             accountHome,
           });
-        configureHeadless({
-          ...options,
-          workdir: checked.workdir,
-          cli: checked.cli,
-          configuredHome: checked.configuredHome,
-        });
+        if (checked.headless)
+          configureHeadless({
+            ...options,
+            workdir: checked.workdir,
+            cli: checked.cli,
+            configuredHome: checked.configuredHome,
+          });
         if (!checked.current)
           await call(
             client,
