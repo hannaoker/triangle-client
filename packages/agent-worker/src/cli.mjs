@@ -84,10 +84,11 @@ export function resolveWorkerConfig(raw, configPath, env = process.env) {
   }
   const recipientId = agentId(requiredEnv(env, raw.agentIdEnv));
   // Permissions v1: the agent's workload key from triangle custody (no bearer token).
-  const credential = loadWorkloadCredential(requiredEnv(env, raw.workloadKeyFileEnv), { expectedAgentId: recipientId });
+  const mailboxUrl = meshUrl(requiredEnv(env, raw.meshUrlEnv));
+  const credential = loadWorkloadCredential(requiredEnv(env, raw.workloadKeyFileEnv), { expectedAgentId: recipientId, expectedAuthority: mailboxUrl });
   return {
     mailbox: {
-      meshUrl: meshUrl(requiredEnv(env, raw.meshUrlEnv)),
+      meshUrl: mailboxUrl,
       recipientId,
       pageLimit,
       workloadId: credential.workloadId,

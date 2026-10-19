@@ -140,3 +140,13 @@ test("worker requests the agent's registered bounds from agent.json (read-only a
     assert.throws(() => resolveWorkerConfig(raw, "/tmp/config.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: bad }), /agent\.json bounds are invalid/, JSON.stringify(bounds));
   }
 });
+
+test("workload key is refused for a MESH origin it was not registered with (authority or --via)", () => {
+  const registered = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, authority: "https://mesh.example", via: "https://preview.example" } });
+  const resolve = (url, keyFile) => resolveWorkerConfig(raw, "/tmp/config/worker.json", { ...env, MESH_URL: url, TRIANGLE_WORKLOAD_KEY_FILE: keyFile });
+  assert.equal(resolve("https://mesh.example", registered).mailbox.meshUrl, "https://mesh.example");
+  assert.equal(resolve("https://preview.example", registered).mailbox.meshUrl, "https://preview.example", "the --via transport it was created through is accepted");
+  assert.throws(() => resolve("https://other.example", registered), /different MESH authority/);
+  // agent.json written before authority was recorded stays usable.
+  assert.equal(resolve("https://other.example", custody()).mailbox.meshUrl, "https://other.example");
+});

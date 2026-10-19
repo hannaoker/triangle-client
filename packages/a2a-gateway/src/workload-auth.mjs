@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 
 import { assertPrivateJwk, compactJws } from "../../triangle-cli/src/keys.mjs";
 import { WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE, workloadScopes } from "../../triangle-cli/src/protocol.mjs";
-import { dpopProof } from "../../triangle-cli/src/workload.mjs";
+import { awaitWithSignal, dpopProof, TOKEN_EXCHANGE_TIMEOUT_MS } from "../../triangle-cli/src/workload.mjs";
 
 const SEED = /^[A-Za-z0-9_-]{43}$/;
 const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024;
@@ -123,8 +123,10 @@ export function createWorkloadAuth({ meshOrigin, workloadId, workloadPrivateKey,
   async function accessToken({ refresh = false, signal } = {}) {
     if (!refresh && cached && cached.expiresAt - 30_000 > now()) return cached;
     if (refresh) cached = null;
-    inflight ??= exchange(signal).finally(() => { inflight = null; });
-    return inflight;
+    // The exchange is shared by every waiting caller, so it must not run under
+    // any one caller's signal; each caller only stops waiting when its own aborts.
+    inflight ??= exchange(AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS)).finally(() => { inflight = null; });
+    return awaitWithSignal(inflight, signal);
   }
 
   async function headers(method, url, { refresh = false, signal } = {}) {
@@ -140,13 +142,23 @@ export function createWorkloadAuth({ meshOrigin, workloadId, workloadPrivateKey,
   return Object.freeze({ headers, agentId, secrets: Object.freeze([key.d]) });
 }
 
-/** One WL-authenticated fetch with a single fresh-token retry after 401. */
+/** True when `body` can be sent twice (a stream is consumed by the first send). */
+function replayableBody(body) {
+  return body === undefined || body === null || typeof body === "string" || body instanceof URLSearchParams || ArrayBuffer.isView(body) || body instanceof ArrayBuffer;
+}
+
+/**
+ * One WL-authenticated fetch with a single fresh-token retry after 401. The
+ * retry re-sends `init.body`, so it only happens for replayable bodies (string,
+ * URLSearchParams, buffers); a streamed body gets the 401 back unretried.
+ */
 export async function workloadFetch(auth, fetchImpl, url, init = {}) {
   const method = (init.method ?? "GET").toUpperCase();
+  const canRetry = replayableBody(init.body);
   for (let attempt = 0; ; attempt += 1) {
     const auth_ = await auth.headers(method, url, { refresh: attempt > 0, signal: init.signal });
     const response = await fetchImpl(new Request(url, { ...init, method, headers: { ...(init.headers ?? {}), ...auth_ } }));
-    if (response.status === 401 && attempt === 0) {
+    if (response.status === 401 && attempt === 0 && canRetry) {
       try { await response.body?.cancel(); } catch {}
       continue;
     }
