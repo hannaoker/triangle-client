@@ -13,6 +13,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** @type {{ name: string, command: string, args: string[] }[]} */
 const suites = [
   {
+    name: "packaged installer",
+    command: "node",
+    args: ["--test", "tests/client-package.test.mjs"],
+  },
+  {
     name: "agent-worker (triangle-client)",
     command: "npm",
     args: ["--prefix", "packages/agent-worker", "run", "test:triangle-client"],
@@ -77,9 +82,9 @@ const suites = [
 const group = process.argv[2]; // optional: runtime | gateway | all
 const selected =
   group === "runtime"
-    ? suites.slice(0, 6)
+    ? suites.slice(0, 7)
     : group === "gateway"
-      ? suites.slice(6)
+      ? suites.slice(7)
       : suites;
 
 const results = [];

@@ -67,8 +67,20 @@ function fixture() {
     }),
     { mode: 0o600 },
   );
-  const releaseFiles = ['bin/node',artifact,'worker-artifacts.json'];
-  writeFileSync(path.join(release,'package-manifest.json'), JSON.stringify({schema:1, files:releaseFiles.map(p=>({path:p,size:readFileSync(path.join(release,p)).length,sha256:hash(readFileSync(path.join(release,p))),mode:p.startsWith('bin/')?0o700:0o600}))}),{mode:0o600});
+  const releaseFiles = ["bin/node", artifact, "worker-artifacts.json"];
+  writeFileSync(
+    path.join(release, "package-manifest.json"),
+    JSON.stringify({
+      schema: 1,
+      files: releaseFiles.map((p) => ({
+        path: p,
+        size: readFileSync(path.join(release, p)).length,
+        sha256: hash(readFileSync(path.join(release, p))),
+        mode: p.startsWith("bin/") ? 0o700 : 0o600,
+      })),
+    }),
+    { mode: 0o600 },
+  );
   const calls = [];
   let registered = false;
   let running = false;
@@ -181,6 +193,7 @@ test("Cursor selects explicit cursor-agent and stages a genuine supervisor host 
     const binding = JSON.parse(
       readFileSync(path.join(f.app, "client/cursor-acp-runtime-binding.json")),
     );
+    assert.equal(binding.version, 1);
     assert.match(binding.common.command, /cursor-agent$/);
     assert.equal(
       binding.profiles[0].instanceId,
@@ -344,7 +357,83 @@ test("Codex setup binds, reuses sign-in file without changing user settings, the
       f.calls.some((c) => c.cmd.includes("python") || c.cmd.includes("bash")),
       false,
     );
+    const config = JSON.parse(
+      readFileSync(path.join(f.app, "client/headless-runtime-binding.json")),
+    );
+    assert.equal(config.version, 2);
+    // Cross-language contract: the real supervisor rejects any other Codex version.
+    const swift = readFileSync(
+      new URL(
+        "../../macos-mailbox-helper/Sources/TriangleMailboxCore/ClientSupervisor.swift",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    assert.match(swift, /object\["version"\] as\? Int == 2/);
     assert.equal(f.calls[0].args[0], "bind");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("existing Codex v2 binding adopts its custom authenticated home and verified identity", async () => {
+  const f = fixture();
+  try {
+    const custom = path.join(f.account, "custom-codex");
+    mkdirSync(custom, { mode: 0o700 });
+    writeFileSync(path.join(custom, "auth.json"), "{}", { mode: 0o600 });
+    rmSync(path.join(f.account, ".codex/auth.json"));
+    const installationId = "inst_1234567890123456";
+    writeFileSync(
+      path.join(f.app, "client/installation.json"),
+      JSON.stringify({ version: 1, installationId }),
+      { mode: 0o600 },
+    );
+    const config = {
+      version: 2,
+      common: {
+        adapterVersion: "1",
+        installationId,
+        workingDirectory: f.account,
+        codexHome: custom,
+        command: path.join(f.account, "native-bin/codex"),
+        pollIntervalMs: 30000,
+      },
+      profiles: [],
+    };
+    const file = path.join(f.app, "client/headless-runtime-binding.json");
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    writeFileSync(
+      path.join(
+        f.app,
+        "profiles-v1/profile-" +
+          Buffer.from("test-agent").toString("hex") +
+          ".json",
+      ),
+      JSON.stringify({ keyFile: f.keyFile }),
+      { mode: 0o600 },
+    );
+    const r = createSetupRuntime({
+      accountHome: f.account,
+      releaseRoot: f.release,
+      platform: "darwin",
+      env: { PATH: path.join(f.account, "native-bin") },
+      run: f.run,
+    });
+    assert.equal((await r.preflight(f.options)).agentId, f.id);
+    await r.configure({
+      ...f.options,
+      agent: { agent_id: f.id },
+      keyFile: f.keyFile,
+    });
+    assert.equal(JSON.parse(readFileSync(file)).common.codexHome, custom);
+    assert.equal(
+      existsSync(path.join(f.app, "model-state/codex-runtime-home")),
+      false,
+    );
+    config.version = 1;
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    await assert.rejects(r.preflight(f.options), /binding is invalid/);
   } finally {
     f.cleanup();
   }

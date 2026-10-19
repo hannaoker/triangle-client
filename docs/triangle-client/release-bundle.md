@@ -1,5 +1,11 @@
 # Triangle Client release bundle (macOS)
 
+For the bundled CLI and guided enrollment flow, start with the
+[packaged quickstart](quickstart.md). It requires no consumer-side compiler or
+Node installation and uses portable private-file MESH credentials. The detailed
+source-build and operator procedures below remain relevant to development and
+signing-specific deployments.
+
 This document is the **release-oriented install story** for putting Triangle
 Client on someone else’s Mac as one coherent bundle: what is installed, where
 it lives, how signing works, and how to upgrade or uninstall.

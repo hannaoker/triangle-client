@@ -180,9 +180,15 @@ function verifyReleaseFiles(releaseRoot, paths) {
   for (const relative of paths) {
     const entry = files.get(relative);
     const file = regular(path.join(releaseRoot, relative));
-    if (!entry || !/^[a-f0-9]{64}$/.test(entry.sha256) ||
-        lstatSync(file).size !== entry.size || hash(readFileSync(file)) !== entry.sha256)
-      fail("Installed release artifact integrity mismatch. Reinstall Triangle.");
+    if (
+      !entry ||
+      !/^[a-f0-9]{64}$/.test(entry.sha256) ||
+      lstatSync(file).size !== entry.size ||
+      hash(readFileSync(file)) !== entry.sha256
+    )
+      fail(
+        "Installed release artifact integrity mismatch. Reinstall Triangle.",
+      );
   }
 }
 function discoverRoots(kind, cli, accountHome) {
@@ -248,7 +254,11 @@ export function stageRuntimeBundle({
     executable: true,
   });
   const paths = artifactPaths(releaseRoot, kind);
-  verifyReleaseFiles(releaseRoot, ["bin/node", "worker-artifacts.json", ...paths]);
+  verifyReleaseFiles(releaseRoot, [
+    "bin/node",
+    "worker-artifacts.json",
+    ...paths,
+  ]);
   const artifacts = Object.fromEntries(
     paths.map((p) => [
       p,
@@ -422,7 +432,13 @@ export function createSetupRuntime({
       true,
     );
   }
-  function validateChoices({ profile, harness, workdir, workdirExplicit = false, home }) {
+  function validateChoices({
+    profile,
+    harness,
+    workdir,
+    workdirExplicit = false,
+    home,
+  }) {
     if (platform !== "darwin")
       fail(
         "Background service setup currently supports macOS. Use --identity-only.",
@@ -434,7 +450,11 @@ export function createSetupRuntime({
     regular(client, { executable: true, privateMode: true });
     regular(path.join(releaseRoot, "bin/node"), { executable: true });
     const artifacts = artifactPaths(releaseRoot, "supervisor");
-    verifyReleaseFiles(releaseRoot, ["bin/node", "worker-artifacts.json", ...artifacts]);
+    verifyReleaseFiles(releaseRoot, [
+      "bin/node",
+      "worker-artifacts.json",
+      ...artifacts,
+    ]);
     directory(workdir, { privateMode: false });
     const cli = selected(harness),
       adapter = HARNESSES[harness].adapter;
@@ -459,21 +479,7 @@ export function createSetupRuntime({
       fail(
         "Existing profile has no verified identity binding. Run triangle doctor.",
       );
-    if (harness === "codex") {
-      const target = path.join(
-        appRoot,
-        "model-state/codex-runtime-home/auth.json",
-      );
-      const source = path.join(accountHome, ".codex/auth.json");
-      if (!existsSync(target) && !existsSync(source))
-        fail(
-          'Sign in to Codex first. For an isolated sign-in use CODEX_HOME="' +
-            path.dirname(target) +
-            '" codex login, then rerun setup.',
-        );
-      if (existsSync(target)) regular(target, { privateMode: true });
-      else regular(source, { privateMode: true });
-    }
+    let configuredHome;
     if (harness === "codex" || harness === "cursor") {
       const config = readJson(
         path.join(
@@ -486,24 +492,62 @@ export function createSetupRuntime({
       );
       if (config) {
         if (
-          config.version !== 1 ||
+          config.version !== (harness === "codex" ? 2 : 1) ||
           !config.common ||
           !Array.isArray(config.profiles)
         )
           fail(
             "Existing headless runtime binding is invalid. Run triangle doctor.",
           );
+        configuredHome =
+          config.common[harness === "codex" ? "codexHome" : "cursorHome"];
+        if (
+          typeof configuredHome !== "string" ||
+          !path.isAbsolute(configuredHome)
+        )
+          fail("Existing harness home is invalid.");
+        directory(configuredHome);
         if (typeof config.common.workingDirectory !== "string")
           fail("Existing harness working directory is invalid.");
-        if (!workdirExplicit) workdir = path.resolve(config.common.workingDirectory);
-        if (config.common.command !== cli ||
-            path.resolve(config.common.workingDirectory) !== path.resolve(workdir))
+        if (!workdirExplicit)
+          workdir = path.resolve(config.common.workingDirectory);
+        if (
+          config.common.command !== cli ||
+          path.resolve(config.common.workingDirectory) !== path.resolve(workdir)
+        )
           fail(
             "The existing harness runtime has a different executable or working directory. Reuse those settings or choose its existing working directory.",
           );
       }
     }
-    return { cli, adapter, current, bound, workdir };
+    if (harness === "codex") {
+      const target = path.join(
+        configuredHome ?? path.join(appRoot, "model-state/codex-runtime-home"),
+        "auth.json",
+      );
+      const source = path.join(accountHome, ".codex/auth.json");
+      if (!existsSync(target) && (configuredHome || !existsSync(source)))
+        fail(
+          'Sign in to Codex first. For an isolated sign-in use CODEX_HOME="' +
+            path.dirname(target) +
+            '" codex login, then rerun setup.',
+        );
+      regular(existsSync(target) ? target : source, { privateMode: true });
+    }
+    let agentId;
+    if (bound) {
+      agentId = path.basename(path.dirname(bound.keyFile));
+      if (
+        !/^agent_[a-f0-9]{32}$/.test(agentId) ||
+        bound.keyFile !==
+          path.join(path.resolve(home), "agents", agentId, "workload-key.json")
+      )
+        fail(
+          "Profile identity conflicts with this owner home. Choose another profile.",
+        );
+      regular(bound.keyFile, { privateMode: true });
+    }
+    return { cli, adapter, current, bound, workdir, configuredHome, agentId };
   }
   async function call(command, args, description) {
     const r = await run(command, args, {
@@ -524,9 +568,21 @@ export function createSetupRuntime({
   }
   async function preflight(options) {
     const checked = validateChoices(options);
-    return { state: "ready", platform: "darwin", harness: options.harness, workdir: checked.workdir };
+    return {
+      state: "ready",
+      platform: "darwin",
+      harness: options.harness,
+      workdir: checked.workdir,
+      agentId: checked.agentId,
+    };
   }
-  function configureHeadless({ profile, harness, workdir, cli }) {
+  function configureHeadless({
+    profile,
+    harness,
+    workdir,
+    cli,
+    configuredHome,
+  }) {
     if (harness !== "codex" && harness !== "cursor") return;
     const installationFile = path.join(clientRoot, "installation.json");
     let installation = readJson(installationFile, true);
@@ -541,10 +597,12 @@ export function createSetupRuntime({
       fail("Invalid installation identity.");
     const model = path.join(appRoot, "model-state");
     directory(model, { create: true });
-    const runtimeHome = path.join(
-      model,
-      harness === "codex" ? "codex-runtime-home" : "cursor-acp-runtime-home",
-    );
+    const runtimeHome =
+      configuredHome ??
+      path.join(
+        model,
+        harness === "codex" ? "codex-runtime-home" : "cursor-acp-runtime-home",
+      );
     directory(runtimeHome, { create: true });
     if (harness === "codex" && !existsSync(path.join(runtimeHome, "auth.json")))
       copyPrivate(
@@ -558,7 +616,7 @@ export function createSetupRuntime({
         : "cursor-acp-runtime-binding.json",
     );
     const document = readJson(file, true) ?? {
-      version: 1,
+      version: harness === "codex" ? 2 : 1,
       common: {
         adapterVersion: "1",
         installationId: installation.installationId,
@@ -589,84 +647,103 @@ export function createSetupRuntime({
     atomicJson(file, document);
   }
   async function configure(options) {
-    return openCustody(path.join(clientRoot, ".setup-runtime-lock")).withLock(async () => {
-    const { profile, harness, agent, keyFile } = options;
-    const checked = validateChoices(options);
-    const expectedKey = path.join(
-      path.resolve(options.home),
-      "agents",
-      agent.agent_id,
-      "workload-key.json",
+    return openCustody(path.join(clientRoot, ".setup-runtime-lock")).withLock(
+      async () => {
+        const { profile, harness, agent, keyFile } = options;
+        const checked = validateChoices(options);
+        const expectedKey = path.join(
+          path.resolve(options.home),
+          "agents",
+          agent.agent_id,
+          "workload-key.json",
+        );
+        if (path.resolve(keyFile) !== expectedKey)
+          fail("Unexpected agent key file.");
+        regular(keyFile, { privateMode: true });
+        if (checked.bound && checked.bound.keyFile !== expectedKey)
+          fail(
+            "Profile is already bound to another agent. No binding was changed.",
+          );
+        const verified = await call(
+          helper,
+          ["bind", "--profile", profile, "--key-file", expectedKey],
+          "Profile verification",
+        );
+        if (
+          verified.status !== "verified" ||
+          verified.agentId !== agent.agent_id
+        )
+          fail(
+            "The helper verified a different identity. Run triangle doctor.",
+          );
+        stageRuntimeBundle({
+          appRoot,
+          releaseRoot,
+          kind: "supervisor",
+          accountHome,
+        });
+        if (harness !== "cursor")
+          stageRuntimeBundle({
+            appRoot,
+            releaseRoot,
+            kind: harness,
+            cli: checked.cli,
+            accountHome,
+          });
+        configureHeadless({
+          ...options,
+          workdir: checked.workdir,
+          cli: checked.cli,
+          configuredHome: checked.configuredHome,
+        });
+        if (!checked.current)
+          await call(
+            client,
+            [
+              "agent",
+              "add",
+              "--profile",
+              profile,
+              "--runtime",
+              checked.adapter,
+            ],
+            "Service setup",
+          );
+        else
+          await call(
+            client,
+            ["agent", "enable", "--profile", profile],
+            "Service activation",
+          );
+        const actual = await call(
+          helper,
+          ["status", "--profile", profile],
+          "Profile status",
+        );
+        if (actual.status !== "verified" || actual.agentId !== agent.agent_id)
+          fail("Profile did not remain verified. Run triangle doctor.");
+        const service = await run(
+          "/bin/launchctl",
+          ["print", `gui/${process.getuid()}/dev.thetriangle.client`],
+          { env: subprocessEnv, cwd: accountHome },
+        );
+        if (
+          service.code !== 0 ||
+          !/(?:^|\n)\s*state = running\b/.test(service.stdout)
+        )
+          fail(
+            "The background service is not running. Run triangle setup --resume.",
+          );
+        return {
+          state: "running",
+          profile,
+          harness,
+          agentId: agent.agent_id,
+          authority: actual.origin,
+          next_action: "Your agent is ready to receive messages.",
+        };
+      },
     );
-    if (path.resolve(keyFile) !== expectedKey)
-      fail("Unexpected agent key file.");
-    regular(keyFile, { privateMode: true });
-    if (checked.bound && checked.bound.keyFile !== expectedKey)
-      fail(
-        "Profile is already bound to another agent. No binding was changed.",
-      );
-    const verified = await call(
-      helper,
-      ["bind", "--profile", profile, "--key-file", expectedKey],
-      "Profile verification",
-    );
-    if (verified.status !== "verified" || verified.agentId !== agent.agent_id)
-      fail("The helper verified a different identity. Run triangle doctor.");
-    stageRuntimeBundle({
-      appRoot,
-      releaseRoot,
-      kind: "supervisor",
-      accountHome,
-    });
-    if (harness !== "cursor")
-      stageRuntimeBundle({
-        appRoot,
-        releaseRoot,
-        kind: harness,
-        cli: checked.cli,
-        accountHome,
-      });
-    configureHeadless({ ...options, workdir: checked.workdir, cli: checked.cli });
-    if (!checked.current)
-      await call(
-        client,
-        ["agent", "add", "--profile", profile, "--runtime", checked.adapter],
-        "Service setup",
-      );
-    else
-      await call(
-        client,
-        ["agent", "enable", "--profile", profile],
-        "Service activation",
-      );
-    const actual = await call(
-      helper,
-      ["status", "--profile", profile],
-      "Profile status",
-    );
-    if (actual.status !== "verified" || actual.agentId !== agent.agent_id)
-      fail("Profile did not remain verified. Run triangle doctor.");
-    const service = await run(
-      "/bin/launchctl",
-      ["print", `gui/${process.getuid()}/dev.thetriangle.client`],
-      { env: subprocessEnv, cwd: accountHome },
-    );
-    if (
-      service.code !== 0 ||
-      !/(?:^|\n)\s*state = running\b/.test(service.stdout)
-    )
-      fail(
-        "The background service is not running. Run triangle setup --resume.",
-      );
-    return {
-      state: "running",
-      profile,
-      harness,
-      agentId: agent.agent_id,
-      authority: actual.origin,
-      next_action: "Your agent is ready to receive messages.",
-    };
-    });
   }
   async function status({ profile }) {
     const identity = await call(
@@ -682,7 +759,10 @@ export function createSetupRuntime({
     );
     return {
       state:
-        identity.status === "verified" && local?.enabled && service.code === 0 && /(?:^|\n)\s*state = running\b/.test(service.stdout)
+        identity.status === "verified" &&
+        local?.enabled &&
+        service.code === 0 &&
+        /(?:^|\n)\s*state = running\b/.test(service.stdout)
           ? "running"
           : "needs_attention",
       profile,

@@ -1,5 +1,11 @@
 # E2E operator runbook (clean Mac)
 
+For the bundled CLI and guided enrollment flow, start with the
+[packaged quickstart](quickstart.md). It requires no consumer-side compiler or
+Node installation and uses portable private-file MESH credentials. The detailed
+source-build and operator procedures below remain relevant to development and
+signing-specific deployments.
+
 Goal: from a **zero** Triangle Client install to **helper + client installed,
 profile bound to a `triangle` agent, watch path documented**, without tribal chat history.
 
