@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   openSync,
   closeSync,
+  fsyncSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -140,6 +141,53 @@ if (lstatSync(lockPath).nlink !== 1) throw Error("Unsafe install transaction loc
 const transaction = new DatabaseSync(lockPath);
 transaction.exec("PRAGMA busy_timeout=30000; BEGIN IMMEDIATE;");
 process.once("exit",()=>{ transaction.close(); });
+const intentPath = join(home, ".triangle-package-install-intent.json");
+const digestPattern = /^[a-f0-9]{64}$/;
+function publishJSON(path, value) {
+  const temp = path + ".intent-stage-" + process.pid;
+  const fd = openSync(temp, "wx", 0o600);
+  try { writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fsyncSync(fd); } finally { closeSync(fd); }
+  try { renameSync(temp, path); } catch(error) { rmSync(temp,{force:true}); throw error; }
+  const directory = openSync(dirname(path), "r");
+  try { fsyncSync(directory); } finally { closeSync(directory); }
+}
+function verifyIntentRelease(intent) {
+  safePath(intent.release,{privateMode:true});
+  const manifestFile = join(intent.release,"package-manifest.json");
+  safePath(manifestFile,{directory:false,privateMode:true});
+  if (hash(readFileSync(manifestFile)) !== intent.releaseManifestSHA) throw Error("Interrupted release manifest changed");
+  const m = JSON.parse(readFileSync(manifestFile,"utf8"));
+  if (m.schema !== 1 || m.version !== intent.version || m.platform !== "linux" || m.arch !== process.arch || m.distribution !== "owner-cli" || m.serviceSupport !== false || m.signingMode !== "none" || m.credentialCustody !== "file" || !Array.isArray(m.files)) throw Error("Invalid interrupted release");
+  const expected = new Set(["package-manifest.json"]);
+  for (const entry of m.files) {
+    if (typeof entry.path !== "string" || entry.path.startsWith("/") || entry.path.split("/").some(p=>!p||p==="."||p==="..") || expected.has(entry.path) || ![0o600,0o700].includes(entry.mode) || !digestPattern.test(entry.sha256) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw Error("Invalid interrupted release entry");
+    expected.add(entry.path);
+    const target = join(intent.release,entry.path);safePath(target,{directory:false});
+    if ((lstatSync(target).mode & 0o777) !== entry.mode || lstatSync(target).size !== entry.size || hash(readFileSync(target)) !== entry.sha256) throw Error("Interrupted release integrity mismatch");
+  }
+  for (const required of ["bin/node","packages/triangle-cli/src/cli.mjs","scripts/release/install-linux-package.mjs","LICENSES/node-LICENSE","LICENSES/triangle-LICENSE","packages/triangle-cli/package.json"])if(!expected.has(required))throw Error("Incomplete interrupted release");
+  const walk = (dir,prefix="")=>{for(const name of readdirSync(dir)){const relative=prefix+name,target=join(dir,name),info=lstatSync(target);if(info.isDirectory()&&!info.isSymbolicLink())walk(target,relative+"/");else if(!info.isFile()||!expected.has(relative))throw Error("Interrupted release closure mismatch");}};
+  walk(intent.release);
+}
+let recoveredOwned = null;
+safePath(intentPath,{directory:false,privateMode:true});
+if (existsSync(intentPath)) {
+  if (lstatSync(intentPath).nlink !== 1) throw Error("Unsafe install intent");
+  const intent = JSON.parse(readFileSync(intentPath,"utf8"));
+  const keys=["schema","wrapper","previousHash","previousReceiptHash","proposedHash","receiptPath","receipt","app","release","version","releaseManifestSHA"].sort();
+  if (Object.keys(intent).sort().join() !== keys.join() || intent.schema !== 1 || intent.wrapper !== wrapper || typeof intent.app !== "string" || !intent.app.startsWith("/") || resolve(intent.app)!==intent.app || !intent.app.endsWith("/triangle") || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(intent.version) || intent.release !== join(intent.app,"releases",intent.version) || intent.receiptPath !== join(intent.app,"package-install.json") || !(intent.previousHash===null || digestPattern.test(intent.previousHash)) || !(intent.previousReceiptHash===null || digestPattern.test(intent.previousReceiptHash)) || !digestPattern.test(intent.proposedHash) || !digestPattern.test(intent.releaseManifestSHA)) throw Error("Invalid install intent");
+  const receipt=intent.receipt;
+  if (!receipt || Object.keys(receipt).sort().join() !== ["schema","distribution","version","release","owned"].sort().join() || receipt.schema!==1 || receipt.distribution!=="owner-cli" || receipt.version!==intent.version || receipt.release!==intent.release || !receipt.owned || Object.keys(receipt.owned).length!==1 || receipt.owned[wrapper]!==intent.proposedHash) throw Error("Invalid intended receipt");
+  verifyIntentRelease(intent);
+  safePath(intent.receiptPath,{directory:false,privateMode:true});
+  const receiptHash=existsSync(intent.receiptPath)?hash(readFileSync(intent.receiptPath)):null;
+  if(receiptHash!==intent.previousReceiptHash && receiptHash!==hash(Buffer.from(JSON.stringify(receipt,null,2)+"\n")))throw Error("Interrupted install receipt has unrelated changes");
+  safePath(wrapper,{directory:false});
+  const actual=existsSync(wrapper)?hash(readFileSync(wrapper)):null;
+  if(actual===intent.proposedHash){publishJSON(intent.receiptPath,receipt);recoveredOwned=receipt.owned;}
+  else if(actual!==intent.previousHash)throw Error("Interrupted install wrapper has unrelated changes");
+  rmSync(intentPath);
+}
 let prior = null;
 if (existsSync(receiptPath)) {
  prior=JSON.parse(readFileSync(receiptPath,"utf8"));
@@ -158,7 +206,7 @@ for (const [target, value] of writes) {
   safePath(target, { directory: false });
   if (!existsSync(target)) continue;
   const actual = hash(readFileSync(target));
-  if (prior?.owned[target] !== actual)
+  if (prior?.owned[target] !== actual && recoveredOwned?.[target] !== actual)
     throw Error(
       `Existing file is not an unchanged package-owned file: ${target}`,
     );
@@ -177,7 +225,7 @@ if (existsSync(release)) {
   }
 }
 const installed = [], createdDirectories = [], temporaryFiles = new Set();
-let releaseCreated = false, releaseStage = null;
+let releaseCreated = false, releaseStage = null, intentPublished = false;
 function createDirectory(path) {
   if (existsSync(path)) return;
   createDirectory(dirname(path));
@@ -201,7 +249,10 @@ try {
     releaseStage = null;
     releaseCreated = true;
   }
-  const owned = { ...(prior?.owned ?? {}) };
+  const owned = {[wrapper]:hash(Buffer.from(wrapperText))};
+  const receipt = { schema: 1, distribution: "owner-cli", version: manifest.version, release, owned };
+  publishJSON(intentPath,{schema:1,wrapper,previousReceiptHash:existsSync(receiptPath)?hash(readFileSync(receiptPath)):null,previousHash:existsSync(wrapper)?hash(readFileSync(wrapper)):null,proposedHash:owned[wrapper],receiptPath,receipt,app,release,version:manifest.version,releaseManifestSHA:hash(readFileSync(join(release,"package-manifest.json")))});
+  intentPublished = true;
   for (const [target, value] of writes) {
     const previous = existsSync(target)
       ? { data: readFileSync(target), mode: lstatSync(target).mode & 0o777 }
@@ -217,7 +268,6 @@ try {
     installed.push({ target, previous });
     owned[target] = hash(Buffer.from(value.data));
   }
-  const receipt = { schema: 1, distribution: "owner-cli", version: manifest.version, release, owned };
   const tmp = receiptPath + ".stage-" + process.pid;
   writeFileSync(tmp, JSON.stringify(receipt, null, 2) + "\n", {
     mode: 0o600,
@@ -226,6 +276,8 @@ try {
   temporaryFiles.add(tmp);
   renameSync(tmp, receiptPath);
   temporaryFiles.delete(tmp);
+  rmSync(intentPath);
+  intentPublished = false;
   console.log(
     JSON.stringify({
       state: "installed",
@@ -243,6 +295,7 @@ try {
       chmodSync(target, previous.mode);
     } else rmSync(target);
   }
+  if (intentPublished) rmSync(intentPath);
   for (const path of temporaryFiles) rmSync(path, {force:true});
   if (releaseStage) rmSync(releaseStage, {recursive:true,force:true});
   if (releaseCreated) rmSync(release, { recursive: true, force: true });

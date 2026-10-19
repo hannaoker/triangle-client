@@ -84,3 +84,16 @@ test('native Linux serializes parallel versions and a crashed lock holder releas
   assert.equal(receipt.owned[join(f.root,'home/.local/bin/triangle')],hash(readFileSync(join(f.root,'home/.local/bin/triangle'))));
  }finally{holder?.kill('SIGKILL');for(const child of children)child.kill('SIGKILL');rmSync(f.root,{recursive:true,force:true});rmSync(next.root,{recursive:true,force:true});}
 });
+test('native Linux recovers SIGKILL after fresh and upgrade wrapper publication and rejects edits',{skip:process.platform!=='linux'},()=>{
+ for(const mode of ['fresh','upgrade','edited']){
+  const f=fixture();try{
+   if(mode==='upgrade'){install(f);const path=join(f.stage,'package-manifest.json'),m=JSON.parse(readFileSync(path));m.version='1.2.4';writeFileSync(path,JSON.stringify(m),{mode:0o600});}
+   const wrapper=join(f.root,'home/.local/bin/triangle');
+   const script=`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.renameSync;fs.renameSync=(from,to)=>{original(from,to);if(to===${JSON.stringify(wrapper)})process.kill(process.pid,'SIGKILL');};syncBuiltinESMExports();process.argv=[process.execPath,${JSON.stringify(installer)},'--verified-stage',${JSON.stringify(f.stage)},'--test-root',${JSON.stringify(f.root)}];await import(${JSON.stringify('file://'+installer)});`;
+   assert.throws(()=>execFileSync(process.execPath,['--input-type=module','--eval',script],{stdio:'pipe'}));
+   const intent=join(f.root,'home/.triangle-package-install-intent.json');assert.ok(existsSync(intent));
+   if(mode==='edited'){writeFileSync(wrapper,'custom edit');assert.throws(()=>install(f));assert.equal(readFileSync(wrapper,'utf8'),'custom edit');assert.ok(existsSync(intent));}
+   else{install(f);assert.equal(existsSync(intent),false);const receipt=JSON.parse(readFileSync(join(f.root,'home/.local/share/triangle/package-install.json')));assert.equal(receipt.owned[wrapper],hash(readFileSync(wrapper)));assert.equal(receipt.version,mode==='upgrade'?'1.2.4':'1.2.3');}
+  }finally{rmSync(f.root,{recursive:true,force:true});}
+ }
+});
