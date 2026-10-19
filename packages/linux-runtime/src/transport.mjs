@@ -13,6 +13,28 @@ import { replyDigest } from "./transaction.mjs";
 const id = (v, p) =>
   typeof v === "string" && new RegExp("^" + p + "_[a-f0-9]{32}$").test(v);
 const positive = (n) => Number.isSafeInteger(n) && n > 0;
+function eventKey(event) {
+  if (
+    event.idempotency_key !== undefined &&
+    event.idempotencyKey !== undefined &&
+    event.idempotency_key !== event.idempotencyKey
+  )
+    fail();
+  return event.idempotency_key ?? event.idempotencyKey;
+}
+function bound(r) {
+  if (
+    !r ||
+    !positive(r.deliveryId) ||
+    !id(r.roomId, "room") ||
+    !id(r.eventId, "event") ||
+    !positive(r.roomSequence) ||
+    !id(r.claimId, "claim") ||
+    !id(r.replyKey, "reply")
+  )
+    throw Error("invalid_transaction_binding");
+}
+
 function fail() {
   throw Object.assign(Error("invalid_authority_response"), {
     code: "invalid_authority_response",
@@ -92,7 +114,7 @@ export function createTransport({
       e.sequence <= r.roomSequence ||
       e.type !== "message.created" ||
       e.senderAgentId !== agentId ||
-      (e.idempotencyKey ?? e.idempotency_key) !== r.replyKey ||
+      eventKey(e) !== r.replyKey ||
       e.body?.replyRequired !== false ||
       e.body.inReplyToEventId !== r.eventId ||
       !bounded(e.body.text) ||
@@ -151,6 +173,7 @@ export function createTransport({
       });
     },
     async claim(r, { signal } = {}) {
+      bound(r);
       const b = await request(
         "POST",
         "/api/v1/mailbox/claim",
@@ -168,6 +191,7 @@ export function createTransport({
       return { leaseExpiresAt: b.leaseExpiresAt };
     },
     async inbound(r, { signal } = {}) {
+      bound(r);
       const [e] = await history(r, r.roomSequence - 1, 1, signal);
       if (
         !e ||
@@ -193,6 +217,7 @@ export function createTransport({
       };
     },
     async findReply(r, { signal } = {}) {
+      bound(r);
       let after = r.roomSequence;
       for (let i = 0; i < 100; i++) {
         const items = await history(r, after, 100, signal);
@@ -200,8 +225,7 @@ export function createTransport({
         for (const e of items) {
           if (!positive(e?.sequence) || e.sequence <= last) fail();
           last = e.sequence;
-          if ((e.idempotencyKey ?? e.idempotency_key) === r.replyKey)
-            return matchReply(r, e);
+          if (eventKey(e) === r.replyKey) return matchReply(r, e);
         }
         if (items.length < 100) return null;
         after = last;
@@ -209,6 +233,7 @@ export function createTransport({
       fail();
     },
     async reply(r, text, { signal } = {}) {
+      bound(r);
       if (!bounded(text) || replyDigest(text) !== r.replyDigest) fail();
       const b = await request(
         "POST",
@@ -223,6 +248,7 @@ export function createTransport({
       return matchReply(r, b?.event);
     },
     async ack(r, { signal } = {}) {
+      bound(r);
       if (
         r.phase !== "replied" ||
         (!r.receiptOnly && (!id(r.replyEventId, "event") || !r.replyDigest))
