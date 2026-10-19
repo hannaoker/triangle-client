@@ -150,9 +150,14 @@ test("real agent host lock prevents second host from changing running health", a
   release();
   await running;
 });
-test("heartbeat stays fresh while a model cycle is pending", async () => {
+test("heartbeat stays fresh while a model cycle is pending", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   const f = fixture();
-  let cycles = 0;
+  let cycles = 0,
+    entered;
+  const cycleEntered = new Promise((resolve) => {
+    entered = resolve;
+  });
   f.args.heartbeatMs = 5;
   f.args.now = (() => {
     let n = 100;
@@ -161,14 +166,25 @@ test("heartbeat stays fresh while a model cycle is pending", async () => {
   f.args.createCustodianImpl = () => ({
     cycle: async ({ signal }) => {
       cycles++;
-      await new Promise((resolve) => setTimeout(resolve, 22));
-      f.ac.abort();
+      await new Promise((resolve) => {
+        signal.addEventListener("abort", resolve, { once: true });
+        entered();
+      });
       return { state: "idle" };
     },
   });
-  await runHost(f.args);
+  const running = runHost(f.args);
+  await cycleEntered;
+  const initialReady = f.health.filter((h) => h.ready);
+  assert.equal(initialReady.length, 1);
+  // Advance recurring heartbeats while the cycle remains blocked on abort.
+  t.mock.timers.tick(15);
+  const refreshed = f.health.filter((h) => h.ready);
+  assert.equal(refreshed.length, 4);
+  assert.ok(refreshed.at(-1).updatedAt > initialReady[0].updatedAt);
   assert.equal(cycles, 1);
-  assert.ok(f.health.filter((h) => h.ready).length >= 3);
+  f.ac.abort();
+  await running;
   assert.equal(f.health.at(-1).state, "stopped");
 });
 test("host requires private canonical managed configuration", () => {
