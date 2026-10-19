@@ -5,6 +5,19 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 const hash=data=>createHash('sha256').update(data).digest('hex');
+export function validateELFDependencies(dynamic, programHeaders, arch) {
+ const loader = { x64: '/lib64/ld-linux-x86-64.so.2', arm64: '/lib/ld-linux-aarch64.so.1' }[arch];
+ const interpreters = [...programHeaders.matchAll(/\[Requesting program interpreter:\s*([^\]]+)\]/g)].map(match=>match[1]);
+ if (!loader || interpreters.length !== 1 || interpreters[0] !== loader) throw Error('Bundled Node requires the standard architecture ELF interpreter');
+ if (/\((?:RPATH|RUNPATH)\)/.test(dynamic)) throw Error('Bundled Node must not specify RPATH or RUNPATH');
+ const allowed = new Set(['libc.so.6','libstdc++.so.6','libgcc_s.so.1','libm.so.6','libdl.so.2','libpthread.so.0','librt.so.1',loader.split('/').at(-1)]);
+ const neededLines = dynamic.split('\n').filter(line=>/\(NEEDED\)/.test(line));
+ if (!neededLines.length) throw Error('Bundled Node must declare standard dynamic libraries');
+ for (const line of neededLines) {
+  const soname = line.match(/\(NEEDED\)\s+Shared library:\s*\[([^\]]+)\]\s*$/)?.[1];
+  if (!soname || !allowed.has(soname)) throw Error('Bundled Node depends on a non-system dynamic library');
+ }
+}
 export function validateNode(node,license) {
  const env={...process.env}; delete env.NODE_OPTIONS; delete env.NODE_PATH;
  const bytes=readFileSync(node);
@@ -12,8 +25,11 @@ export function validateNode(node,license) {
  const info=JSON.parse(execFileSync(node,['-p','JSON.stringify({platform:process.platform,arch:process.arch,version:process.version})'],{env,encoding:'utf8',timeout:10000}));
  if(info.platform!=='linux'||info.arch!==process.arch||Number(info.version.slice(1).split('.')[0])<22)throw Error('Bundled Node must be native Linux Node >=22');
  execFileSync(node,['--input-type=module','--eval',"import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(':memory:');if(db.prepare('select 1 as ok').get().ok!==1)throw Error('SQLite failed');db.close();"],{env,timeout:10000,stdio:'pipe'});
- const dependencies=execFileSync('ldd',[node],{encoding:'utf8',env:{...env,LC_ALL:'C'},timeout:10000});
- if(/not found/.test(dependencies)||dependencies.split('\n').some(line=>{const path=line.match(/(?:=>\s*)?(\/[^\s]+)/)?.[1]; return path&&!/^\/(?:lib(?:64)?|usr\/lib(?:64)?)\//.test(path);})) throw Error('Bundled Node depends on non-system dynamic libraries');
+ // Inspect ELF metadata without executing its loader's trace mode. That mode
+ // crashes under some QEMU x64 environments even when Node and SQLite run.
+ // readelf (binutils) is a maintainer build prerequisite, never an install one.
+ const readELF = flags => execFileSync('readelf',[flags,'--wide',node],{encoding:'utf8',env:{...env,LC_ALL:'C'},timeout:10000});
+ validateELFDependencies(readELF('-d'),readELF('-l'),process.arch);
  // Node has no runtime license API. The caller must supply the LICENSE from
  // the same Node distribution; its exact bytes are hashed into the manifest.
  const licenseInfo=lstatSync(license);

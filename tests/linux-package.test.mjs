@@ -29,3 +29,14 @@ test('native Linux rolls back wrapper and release when receipt publication fails
  assert.throws(()=>execFileSync(process.execPath,['--input-type=module','--eval',script],{stdio:'pipe'}));assert.equal(readFileSync(wrapper,'utf8'),original);assert.equal(readFileSync(receipt,'utf8'),before);assert.equal(existsSync(join(f.root,'home/.local/share/triangle/releases/1.2.4')),false);
  }finally{rmSync(f.root,{recursive:true,force:true});}});
 test('native Linux builder packages real Node and rejects output replacement',{skip:process.platform!=='linux'||!existsSync('/usr/local/LICENSE')},()=>{const output=mkdtempSync(join(tmpdir(),'triangle-linux-artifacts-'));try{const args=['scripts/release/build-linux-package.mjs','--version','0.0.0-native-test','--output',output,'--node',process.execPath,'--node-license','/usr/local/LICENSE'];const result=JSON.parse(execFileSync(process.execPath,args,{encoding:'utf8'}));assert.ok(existsSync(result.archive));assert.throws(()=>execFileSync(process.execPath,args,{stdio:'pipe'}),e=>/Release output already exists/.test(e.stderr?.toString()));const manifest=JSON.parse(execFileSync('tar',['-xOf',result.archive,'package-manifest.json'],{encoding:'utf8'}));assert.equal(manifest.distribution,'owner-cli');assert.equal(manifest.serviceSupport,false);assert.equal(manifest.runtime.version,process.version);assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));}finally{rmSync(output,{recursive:true,force:true});}});
+test('ELF dependencies permit only standard libraries and the architecture loader',async()=>{
+ const {validateELFDependencies}=await import('../scripts/release/build-linux-package.mjs');
+ const dynamic=' 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n 0x0000000000000001 (NEEDED) Shared library: [libstdc++.so.6]';
+ const interpreter=' [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]';
+ assert.doesNotThrow(()=>validateELFDependencies(dynamic,interpreter,'x64'));
+ for(const bad of [' 0x1 (RPATH) Library rpath: [/opt/private]',' 0x1 (RUNPATH) Library runpath: [/opt/private]',' 0x1 (NEEDED) Shared library: [/opt/private/libc.so.6]',' 0x1 (NEEDED) Shared library: [libssl.so.3]'])assert.throws(()=>validateELFDependencies(dynamic+'\n'+bad,interpreter,'x64'));
+ assert.throws(()=>validateELFDependencies(dynamic,interpreter,'arm64'));
+ assert.throws(()=>validateELFDependencies('',interpreter,'x64'));
+ assert.throws(()=>validateELFDependencies(dynamic,'','x64'));
+ assert.doesNotThrow(()=>validateELFDependencies(dynamic,' [Requesting program interpreter: /lib/ld-linux-aarch64.so.1]','arm64'));
+});
