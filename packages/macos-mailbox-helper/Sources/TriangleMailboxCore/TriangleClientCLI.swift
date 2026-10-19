@@ -189,7 +189,10 @@ public struct LaunchdTriangleClientServiceControl: TriangleClientServiceControll
     public init() {
         executableURL = Self.executable
         homeURL = FileManager.default.homeDirectoryForCurrentUser
-        readinessTimeoutMilliseconds = 10_000
+        // Preparing several enrolled profiles performs network authentication
+        // before the coordinator can report readiness. Allow the supported
+        // startup window rather than rolling back a healthy cold start.
+        readinessTimeoutMilliseconds = 60_000
         stabilityMilliseconds = 500
     }
     @_spi(TriangleClientTesting)
