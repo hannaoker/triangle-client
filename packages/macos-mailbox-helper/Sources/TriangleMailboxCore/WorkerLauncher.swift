@@ -391,10 +391,71 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     /// `packages/agent-worker/src/cursor-acp-runtime/*`). The Cursor `agent`
     /// CLI itself is pinned per install in cursor-acp-runtime-binding.json and
     /// validated by ClientSupervisor when the drain is bootstrapped.
+    /// A harness-independent v8 host. Its content address uses "supervisor",
+    /// and its environment contains no worker selectors or credentials.
+    private func resolveSupervisorHost(script: String) throws -> WorkerCommand {
+        let root = try checkedDirectory(applicationRoot, exactMode: 0o700)
+        let runtime = try checkedDirectory(root.appendingPathComponent("worker-runtime"), exactMode: 0o700)
+        let bundles = try checkedDirectory(runtime.appendingPathComponent("bundles"), exactMode: 0o700)
+        let manifestURL = runtime.appendingPathComponent("supervisor.manifest.json")
+        try checkedFile(manifestURL, beneath: runtime, exactMode: 0o600, executable: false)
+        let manifest: WorkerInstallManifest
+        do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
+        catch { throw WorkerLauncherError.invalidManifest }
+        let required = Self.artifactPaths(for: .codex, manifestVersion: 8)!.subtracting([
+            "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
+        ])
+        guard manifest.version == 8, Set(manifest.artifacts.keys) == required,
+              manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
+        else { throw WorkerLauncherError.invalidManifest }
+        let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)
+        guard project.deletingLastPathComponent().path == bundles.path else { throw WorkerLauncherError.unsafeInstallation }
+        let node = project.appendingPathComponent("bin/node")
+        try checkedFile(node, beneath: project, exactMode: 0o500, executable: true)
+        try verifyHash(node, expected: manifest.nodeSHA256)
+        for (relative, hash) in manifest.artifacts {
+            let file = project.appendingPathComponent(relative)
+            try checkedFile(file, beneath: project, exactMode: 0o600, executable: false)
+            try verifyHash(file, expected: hash)
+        }
+        // Reject extra files, symlinks and unsafe directories, including entries
+        // not named in the manifest; do not let an untracked module be loaded.
+        var actual = Set<String>()
+        func inspect(_ directory: URL, prefix: String = "") throws {
+            _ = try checkedDirectory(directory, exactMode: 0o700)
+            for child in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                var metadata = stat()
+                guard lstat(child.path, &metadata) == 0 else { throw WorkerLauncherError.unsafeInstallation }
+                let relative = prefix + child.lastPathComponent
+                if metadata.st_mode & S_IFMT == S_IFDIR { try inspect(child, prefix: relative + "/") }
+                else {
+                    guard metadata.st_mode & S_IFMT == S_IFREG else { throw WorkerLauncherError.unsafeInstallation }
+                    actual.insert(relative)
+                }
+            }
+        }
+        try inspect(project)
+        guard actual == required.union(["bin/node"]) else { throw WorkerLauncherError.invalidManifest }
+        let lines = ["supervisor", manifest.nodeSHA256] + manifest.artifacts.keys.sorted().map { "\($0)=\(manifest.artifacts[$0]!)" }
+        let address = SHA256.hash(data: Data((lines.joined(separator: "\n") + "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        guard project.lastPathComponent == address else { throw WorkerLauncherError.integrityMismatch }
+        let entry = project.appendingPathComponent(script)
+        guard required.contains(script) else { throw WorkerLauncherError.invalidManifest }
+        return WorkerCommand(executable: node, arguments: [entry.path], workingDirectory: project, environment: manifest.environment)
+    }
+
+    private var hasSupervisorManifest: Bool {
+        var metadata = stat()
+        return lstat(applicationRoot.appendingPathComponent("worker-runtime/supervisor.manifest.json").path, &metadata) == 0
+    }
+
     public func resolveCursorAcpDrain(for instance: ClientInstance) throws -> WorkerCommand {
         guard instance.runtimeAdapter == .cursorAcp,
               instance.instanceID == .derive(profile: instance.profile)
         else { throw WorkerLauncherError.invalidManifest }
+        if hasSupervisorManifest {
+            return try resolveSupervisorHost(script: "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
+        }
         let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
         var lastError: Error = WorkerLauncherError.invalidManifest
         for worker in [WorkerKind.codex, .antigravity, .hermes] {
@@ -427,6 +488,9 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
 
     public func resolveCoordinator(for instances: [ClientInstance]) throws -> WorkerCommand {
         guard !instances.isEmpty else { throw WorkerLauncherError.invalidManifest }
+        if hasSupervisorManifest {
+            return try resolveSupervisorHost(script: "packages/agent-worker/src/client-supervisor-cli.mjs")
+        }
         var attempted = Set<WorkerKind>()
         for instance in instances {
             guard let worker = WorkerKind(rawValue: instance.runtimeAdapter.rawValue) else { continue }
@@ -462,21 +526,13 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 guard let manifest = try? JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)),
                       manifest.version >= 4
                 else { continue }
-                guard let canonicalProject = try? checkedDirectory(URL(fileURLWithPath: manifest.projectRoot, isDirectory: true), exactMode: 0o700) else { continue }
-                let node = canonicalProject.appendingPathComponent("bin/node")
-                guard FileManager.default.isExecutableFile(atPath: node.path) else { continue }
-                let script = canonicalProject.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
-                guard FileManager.default.isReadableFile(atPath: script.path) else { continue }
-                var environment: [String: String] = [:]
-                for key in ["PATH", "LANG", "LC_ALL", "NO_COLOR"] {
-                    if let value = manifest.environment[key] { environment[key] = value }
-                }
-                return WorkerCommand(
-                    executable: node,
-                    arguments: [script.path],
-                    workingDirectory: canonicalProject,
-                    environment: environment
-                )
+                let adapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
+                let host = try ClientInstance(profile: instances[0].profile, runtimeAdapter: adapter)
+                guard let base = try? resolve(worker, instance: host) else { continue }
+                let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
+                try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
+                let environment = base.environment.filter { ["PATH", "LANG", "LC_ALL", "NO_COLOR"].contains($0.key) }
+                return WorkerCommand(executable: base.executable, arguments: [script.path], workingDirectory: base.workingDirectory, environment: environment)
             }
         }
         throw WorkerLauncherError.invalidManifest

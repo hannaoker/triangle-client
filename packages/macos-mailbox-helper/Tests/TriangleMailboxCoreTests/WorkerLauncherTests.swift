@@ -3,6 +3,9 @@ import TriangleMailboxTestSupport
 
 @Suite("Keychain-backed worker launcher")
 struct WorkerLauncherTests {
+    @Test("standalone supervisor supports Cursor-only and rejects corruption")
+    func standaloneSupervisor() throws { try WorkerLauncherContractCases.standaloneSupervisorResolvesCursorAndRejectsCorruption() }
+
     @Test("closed worker kinds receive exact credential environment")
     func exactEnvironment() async throws { try await WorkerLauncherContractCases.exactEnvironment() }
 
