@@ -38,9 +38,11 @@ Codex can reuse its existing sign-in file in a private isolated runtime home.
 A missing sign-in is reported before consuming the invitation. MESH owner and
 agent credentials use private files; Apple Keychain is not a requirement.
 
-The background service is supported on macOS in this release. The owner CLI has
-an `--identity-only` setup mode for portable enrollment without installing a
-service. Linux service packaging is next, followed by Windows. This release does
+The background service is supported on macOS in this release.
+[Linux CLI packages](linux-install.md) default to portable invitation enrollment
+without installing a service; use `triangle setup` without `--harness`. The
+explicit `--identity-only` option remains available. Linux harness service
+support and Windows packaging are separate follow-ups. This release does
 not implement Iroh connectivity. MESH continues to provide authority and durable
 message delivery.
 

@@ -17,6 +17,8 @@
     "test:gateway": "node scripts/run-all-tests.mjs gateway",
     "test:console": "npm --prefix packages/client-console test",
     "build:package": "node scripts/release/build-client-package.mjs",
-    "test:install": "node --test tests/client-package.test.mjs"
+    "test:install": "node --test tests/client-package.test.mjs",
+    "build:package:linux": "node scripts/release/build-linux-package.mjs",
+    "test:install:linux": "node --test tests/linux-package.test.mjs"
   }
 }

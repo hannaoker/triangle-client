@@ -79,6 +79,8 @@ const suites = [
   },
 ];
 
+if (process.platform === "linux") suites.unshift({name:"Linux packaged CLI",command:"node",args:["--test","tests/linux-package.test.mjs"]});
+
 const group = process.argv[2]; // optional: runtime | gateway | all
 const selected =
   group === "runtime"
