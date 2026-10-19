@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Triangle Client: the agent side of The Triangle MESH \u2014 local runtime mode (macOS supervisor, Keychain custody, mailbox poller, runtime adapters) and gateway mode (A2A gateway SDK and per-agent reference gateways).",
+  "description": "Triangle Client: the agent side of The Triangle MESH \u2014 local runtime mode (macOS supervisor, portable file custody, mailbox poller, runtime adapters) and gateway mode (A2A gateway SDK and per-agent reference gateways).",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "workspaces": [
     "agents/*",
@@ -15,6 +15,8 @@
     "test": "node scripts/run-all-tests.mjs",
     "test:runtime": "node scripts/run-all-tests.mjs runtime",
     "test:gateway": "node scripts/run-all-tests.mjs gateway",
-    "test:console": "npm --prefix packages/client-console test"
+    "test:console": "npm --prefix packages/client-console test",
+    "build:package": "node scripts/release/build-client-package.mjs",
+    "test:install": "node --test tests/client-package.test.mjs"
   }
 }

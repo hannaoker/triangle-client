@@ -210,6 +210,10 @@ def copy_regular(source, destination, destination_mode=0o600):
 
 
 def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
+    if agent == "supervisor":
+        if version != CURRENT_MANIFEST_VERSION:
+            fail("unsupported supervisor manifest version")
+        return expected_artifacts("codex", version)[:-2]
     if agent not in AGENTS:
         fail("invalid worker kind")
     if version == 3:
@@ -305,6 +309,11 @@ def discover_runtime_roots(agent, cli):
 
 
 def strict_manifest(path, agent):
+    if agent == "supervisor":
+        runtime = checked_dir(os.path.dirname(path), exact_mode=0o700)
+        checked_dir(os.path.dirname(runtime), exact_mode=0o700)
+        if os.path.basename(path) != "supervisor.manifest.json":
+            fail("invalid supervisor manifest path")
     checked_file(path, mode=0o600)
     raw = open(path, "rb").read(32769)
     if len(raw) > 32768:
@@ -316,6 +325,8 @@ def strict_manifest(path, agent):
         "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
         "CODEX_CLI" if agent == "codex" else ("HERMES_CLI" if agent == "hermes" else "ANTIGRAVITY_CLI"),
     }
+    if agent == "supervisor":
+        expected_environment = {"PATH", "LANG", "LC_ALL"}
     if value["version"] not in {3, 4, 5, 6, 7, 8} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
@@ -326,11 +337,13 @@ def strict_manifest(path, agent):
     bundles = checked_dir(os.path.join(os.path.dirname(path), "bundles"), exact_mode=0o700)
     if os.path.dirname(project) != bundles or not re.fullmatch(r"[0-9a-f]{64}", os.path.basename(project)):
         fail("runtime bundle path is unsafe")
-    if value["environment"].get("TRIANGLE_PROJECT_ROOT") != project:
+    if agent != "supervisor" and value["environment"].get("TRIANGLE_PROJECT_ROOT") != project:
         fail("runtime bundle environment mismatch")
     checked_dir(os.path.join(project, "bin"), exact_mode=0o700)
     if value["environment"].get("PATH", "").split(os.pathsep)[0] != os.path.join(project, "bin"):
         fail("bundled Node must lead runtime PATH")
+    if agent == "supervisor" and value["environment"] != {"PATH": project + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}:
+        fail("supervisor environment mismatch")
     node = checked_file(os.path.join(project, "bin", "node"), mode=0o500, executable=True)
     if not isinstance(value["nodeSHA256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["nodeSHA256"]) or sha256(node) != value["nodeSHA256"]:
         fail("node integrity mismatch")
@@ -344,6 +357,16 @@ def strict_manifest(path, agent):
         checked_file(installed, mode=0o600)
         if sha256(installed) != expected:
             fail("artifact integrity mismatch")
+    if agent == "supervisor":
+        actual_files = set()
+        for current, directories, files in os.walk(project):
+            checked_dir(current, exact_mode=0o700)
+            for directory in directories:
+                checked_dir(os.path.join(current, directory), exact_mode=0o700)
+            for name in files:
+                actual_files.add(os.path.relpath(os.path.join(current, name), project))
+        if actual_files != set(value["artifacts"]) | {"bin/node"}:
+            fail("supervisor file set mismatch")
     if os.path.basename(project) != content_address(agent, value["nodeSHA256"], value["artifacts"]):
         fail("runtime content address mismatch")
     return value
@@ -357,7 +380,9 @@ def stage_runtime(args):
     if os.path.basename(node) != "node":
         fail("node executable must be canonical node")
     validate_node_compatibility(node)
-    cli = checked_file(os.path.realpath(args.cli), executable=True, owners={os.getuid(), 0})
+    if args.agent != "supervisor" and not args.cli:
+        fail("worker runtime requires --cli")
+    cli = None if args.agent == "supervisor" else checked_file(os.path.realpath(args.cli), executable=True, owners={os.getuid(), 0})
     project = os.path.abspath(args.project_root)
     bundle = os.path.join(bundles, ".stage-" + uuid.uuid4().hex)
     record_path = None
@@ -405,13 +430,15 @@ def stage_runtime(args):
             created_bundle = True
         bundle = final_bundle
         environment = {
-            "PATH": os.pathsep.join(dict.fromkeys([os.path.join(bundle, "bin"), os.path.dirname(cli), "/usr/bin", "/bin"])),
+            "PATH": os.pathsep.join(dict.fromkeys([os.path.join(bundle, "bin"), *([] if cli is None else [os.path.dirname(cli)]), "/usr/bin", "/bin"])),
             "LANG": "C",
             "LC_ALL": "C",
             "TRIANGLE_PROJECT_ROOT": bundle,
-            "TRIANGLE_RUNTIME_ROOTS": discover_runtime_roots(args.agent, cli),
+            "TRIANGLE_RUNTIME_ROOTS": "" if cli is None else discover_runtime_roots(args.agent, cli),
             ("CODEX_CLI" if args.agent == "codex" else ("HERMES_CLI" if args.agent == "hermes" else "ANTIGRAVITY_CLI")): cli,
         }
+        if args.agent == "supervisor":
+            environment = {"PATH": bundle + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
         manifest = {
             "version": CURRENT_MANIFEST_VERSION, "nodeSHA256": node_hash,
             "projectRoot": bundle, "environment": environment, "artifacts": artifacts,
@@ -545,10 +572,10 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     stage = sub.add_parser("stage-runtime")
     stage.add_argument("--application-root", required=True); stage.add_argument("--project-root", required=True)
-    stage.add_argument("--agent", choices=sorted(AGENTS), required=True); stage.add_argument("--node", required=True)
-    stage.add_argument("--cli", required=True)
+    stage.add_argument("--agent", choices=sorted(AGENTS | {"supervisor"}), required=True); stage.add_argument("--node", required=True)
+    stage.add_argument("--cli")
     validate = sub.add_parser("validate-runtime")
-    validate.add_argument("--manifest", required=True); validate.add_argument("--agent", choices=sorted(AGENTS), required=True)
+    validate.add_argument("--manifest", required=True); validate.add_argument("--agent", choices=sorted(AGENTS | {"supervisor"}), required=True)
     for name in ("commit-runtime", "rollback-runtime", "commit-plist", "rollback-plist"):
         command = sub.add_parser(name); command.add_argument("record")
     activate = sub.add_parser("activate-plist"); activate.add_argument("--target", required=True); activate.add_argument("--staged", required=True)

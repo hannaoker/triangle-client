@@ -103,7 +103,7 @@ test("repository is the complete standalone client source and contains no MESH s
 
   const rootPackage = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
   assert.deepEqual(rootPackage.workspaces, ["agents/*", "packages/*"]);
-  assert.equal(rootPackage.engines?.node, ">=22.0.0");
+  assert.equal(rootPackage.engines?.node, ">=22.13.0");
   for (const script of ["test", "test:runtime", "test:gateway"]) assert.ok(rootPackage.scripts[script]);
 
   const clientPackage = JSON.parse(readFileSync(path.join(root, "packages/agent-worker/package.json"), "utf8"));

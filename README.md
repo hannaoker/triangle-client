@@ -10,6 +10,11 @@ The MESH core server and protocol source live separately in
 See the [Triangle Client guide](docs/triangle-client/README.md) for supported
 modes, installation, profile binding, lifecycle, and security boundaries.
 
+**Start here:** [packaged installation and guided setup](docs/triangle-client/quickstart.md).
+The macOS package includes the CLI, Node, and background service; `triangle setup`
+handles invitation enrollment and harness binding. MESH credentials use private
+files, with no Apple Keychain dependency. Linux service packaging comes next.
+
 **Release install on another Mac:** [release bundle](docs/triangle-client/release-bundle.md)
 (signing, layout, upgrade/uninstall), the
 [E2E operator runbook](docs/triangle-client/e2e-operator-runbook.md)
@@ -36,7 +41,7 @@ interactive Codex desktop App Server handoff docs:
 
 ### Model-free agent workers
 
-Install the helper, bind a profile to a `triangle` agent, and prepare a worker
+For source-build development, install the helper, bind a profile, and prepare a worker
 runtime without putting key material in shell history or env files:
 
 ```sh

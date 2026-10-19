@@ -101,6 +101,7 @@ stage_one_runtime() {
 prepare_runtime_records() {
   runtime_records=()
   local agent record eligible=0
+  if manifest_is_supervisor_capable supervisor; then eligible=1; fi
   for agent in codex hermes antigravity; do
     if runtime_cli "$agent" >/dev/null; then
       record=$(stage_one_runtime "$agent") || return
@@ -169,7 +170,7 @@ prepare_runtime_transaction() {
 }
 
 validate_supervisor_capable_available() {
-  manifest_is_supervisor_capable codex || manifest_is_supervisor_capable hermes || manifest_is_supervisor_capable antigravity || {
+  manifest_is_supervisor_capable supervisor || manifest_is_supervisor_capable codex || manifest_is_supervisor_capable hermes || manifest_is_supervisor_capable antigravity || {
     echo "Triangle Client requires at least one trusted supervisor-capable runtime" >&2
     return 1
   }

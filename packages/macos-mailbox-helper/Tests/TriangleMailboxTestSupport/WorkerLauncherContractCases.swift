@@ -8,6 +8,7 @@ public enum WorkerLauncherContractCases {
         public let run: @Sendable () async throws -> Void
     }
     public static let all: [ContractCase] = [
+        .init(name: "standalone supervisor supports Cursor-only and rejects corruption", run: { try standaloneSupervisorResolvesCursorAndRejectsCorruption() }),
         .init(name: "closed worker kinds receive exact credential environment", run: exactEnvironment),
         .init(name: "ambient credentials and selectors are replaced", run: inheritedSecretsAreReplaced),
         .init(name: "triangle custody home is passed and must not overlap worker roots", run: identityRootIsIsolated),
@@ -280,6 +281,25 @@ public enum WorkerLauncherContractCases {
         } catch is WorkerLauncherError {}
     }
 
+    public static func standaloneSupervisorResolvesCursorAndRejectsCorruption() throws {
+        let cursor = try ClientInstance(profile: ProfileName("cursor-only"), runtimeAdapter: .cursorAcp)
+        let fixture = try ResolverFixture(manifestVersion: 8, supervisor: true); defer { fixture.cleanup() }
+        let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
+        let coordinator = try resolver.resolveCoordinator(for: [cursor])
+        let drain = try resolver.resolveCursorAcpDrain(for: cursor)
+        try expect(coordinator.executable == drain.executable, "cursor did not use the standalone supervisor")
+        try expect(Set(coordinator.environment.keys) == Set(["PATH", "LANG", "LC_ALL"]), "standalone supervisor leaked harness environment")
+        try fixture.withManifestMutation("nodeSHA256", value: String(repeating: "0", count: 64))
+        do {
+            _ = try resolver.resolveCoordinator(for: [cursor])
+            throw WorkerContractFailure("coordinator accepted corrupted standalone supervisor")
+        } catch is WorkerLauncherError {}
+        do {
+            _ = try resolver.resolveCursorAcpDrain(for: cursor)
+            throw WorkerContractFailure("Cursor accepted corrupted standalone supervisor")
+        } catch is WorkerLauncherError {}
+    }
+
     public static func cursorAcpReadinessResolvesDrain() throws {
         let fixture = try ResolverFixture(manifestVersion: 7); defer { fixture.cleanup() }
         let instance = try ClientInstance(profile: ProfileName("cursor-acp-ready"), runtimeAdapter: .cursorAcp)
@@ -496,7 +516,7 @@ private final class ResolverFixture {
     private let node: URL
     private let manifest: URL
     var manifestURL: URL { manifest }
-    init(manifestVersion: Int = 7) throws {
+    init(manifestVersion: Int = 7, supervisor: Bool = false) throws {
         fixtureHome = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("triangle-worker-\(UUID().uuidString)")
         applicationRoot = fixtureHome.appendingPathComponent("Library/Application Support/The Triangle")
         try manager.createDirectory(at: applicationRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -523,7 +543,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -539,7 +559,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -574,17 +594,21 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 {
+        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 {
+        if manifestVersion == 7 || manifestVersion == 8 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",
             ]
         }
+        if manifestVersion == 8 {
+            artifactNames += ["packages/agent-worker/src/workload-credential.mjs", "packages/triangle-cli/src/canonical.mjs", "packages/triangle-cli/src/errors.mjs", "packages/triangle-cli/src/keys.mjs", "packages/triangle-cli/src/protocol.mjs", "packages/triangle-cli/src/workload.mjs"]
+        }
+        if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]
         for name in artifactNames {
             let url = stagedBundle.appendingPathComponent(name)
@@ -596,13 +620,14 @@ private final class ResolverFixture {
             artifacts[name] = try sha256(url)
         }
         let nodeHash = try sha256(stagedNode)
-        let addressLines = ["codex", nodeHash] + artifacts.keys.sorted().map { "\($0)=\(artifacts[$0]!)" }
+        let addressLines = [supervisor ? "supervisor" : "codex", nodeHash] + artifacts.keys.sorted().map { "\($0)=\(artifacts[$0]!)" }
         let address = SHA256.hash(data: Data((addressLines.joined(separator: "\n") + "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         let bundle = bundles.appendingPathComponent(address)
         try manager.moveItem(at: stagedBundle, to: bundle)
         node = bundle.appendingPathComponent("bin/node")
-        manifest = runtime.appendingPathComponent("codex.manifest.json")
-        let values: [String: Any] = ["version": manifestVersion, "nodeSHA256": nodeHash, "projectRoot": bundle.path, "environment": ["PATH": bundle.appendingPathComponent("bin").path, "LANG": "C", "LC_ALL": "C", "TRIANGLE_PROJECT_ROOT": bundle.path, "TRIANGLE_RUNTIME_ROOTS": "/usr/bin", "CODEX_CLI": "/usr/bin/true"], "artifacts": artifacts]
+        manifest = runtime.appendingPathComponent(supervisor ? "supervisor.manifest.json" : "codex.manifest.json")
+        var values: [String: Any] = ["version": manifestVersion, "nodeSHA256": nodeHash, "projectRoot": bundle.path, "environment": ["PATH": bundle.appendingPathComponent("bin").path, "LANG": "C", "LC_ALL": "C", "TRIANGLE_PROJECT_ROOT": bundle.path, "TRIANGLE_RUNTIME_ROOTS": "/usr/bin", "CODEX_CLI": "/usr/bin/true"], "artifacts": artifacts]
+        if supervisor { values["environment"] = ["PATH": bundle.path + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"] }
         try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]).write(to: manifest)
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifest.path)
     }
