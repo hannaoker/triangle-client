@@ -540,18 +540,13 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
 
     private func ensureOwnedDirectory(_ url: URL, exactMode: mode_t?) throws -> URL {
         guard url.standardizedFileURL.path == url.path else { throw WorkerLauncherError.unsafeInstallation }
-        do {
-            try FileManager.default.createDirectory(
-                at: url,
-                withIntermediateDirectories: false,
-                attributes: [.posixPermissions: exactMode ?? 0o700]
-            )
-        } catch {
-            // Another resolver may have won the first-create race. Treat only a
-            // fully revalidated, application-owned directory as success.
-            do { return try checkedDirectory(url, exactMode: exactMode) }
-            catch { throw WorkerLauncherError.unsafeInstallation }
-        }
+        // mkdir applies private permissions atomically. Foundation may create
+        // the directory before applying its attributes, exposing a transient
+        // mode to another resolver racing to validate the same shared parent.
+        let result = url.path.withCString { Darwin.mkdir($0, exactMode ?? 0o700) }
+        guard result == 0 || errno == EEXIST else { throw WorkerLauncherError.unsafeInstallation }
+        // A concurrent creator is accepted only after the same complete
+        // nonsymlink, owner and mode checks as a newly created directory.
         return try checkedDirectory(url, exactMode: exactMode)
     }
 

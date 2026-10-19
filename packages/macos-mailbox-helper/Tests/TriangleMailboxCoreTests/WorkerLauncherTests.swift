@@ -3,6 +3,11 @@ import TriangleMailboxTestSupport
 
 @Suite("Keychain-backed worker launcher")
 struct WorkerLauncherTests {
+    @Test("concurrent fresh runtime roots remain private and resolve reliably")
+    func concurrentFreshRoots() async throws {
+        for _ in 0..<5 { try await WorkerLauncherContractCases.concurrentFreshRootResolution() }
+    }
+
     @Test("standalone supervisor supports Cursor-only and rejects corruption")
     func standaloneSupervisor() throws { try WorkerLauncherContractCases.standaloneSupervisorResolvesCursorAndRejectsCorruption() }
 
