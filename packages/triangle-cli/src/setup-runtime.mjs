@@ -348,7 +348,7 @@ async function runChild(command, args, { env, cwd } = {}) {
     let stdout = "",
       stderr = "",
       bytes = 0;
-    const timer = setTimeout(() => child.kill("SIGTERM"), 60000);
+    const timer = setTimeout(() => child.kill("SIGTERM"), 90000);
     child.stdout.on("data", (b) => {
       bytes += b.length;
       if (bytes > 256 * 1024) child.kill("SIGTERM");
