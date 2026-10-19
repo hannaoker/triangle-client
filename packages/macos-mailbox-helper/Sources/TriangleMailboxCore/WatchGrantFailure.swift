@@ -25,13 +25,12 @@ public enum WatchGrantFailureCode: String, Codable, Equatable, Sendable {
     case resyncRequired = "resync_required"
     case invalidResponse = "invalid_response"
     case profileNotFound = "profile_not_found"
-    case localAuthorizationRequired = "local_authorization_required"
+    case credentialInvalid = "credential_invalid"
+    case credentialRefused = "credential_refused"
+    case agentPaused = "agent_paused"
     case offline = "offline"
     case identityMismatch = "identity_mismatch"
     case verificationFailed = "verification_failed"
-    case journalIneligible = "journal_ineligible"
-    case credentialBusy = "credential_busy"
-    case profileStateInconsistent = "profile_state_inconsistent"
     case instanceStoreUnavailable = "instance_store_unavailable"
     case operationFailed = "operation_failed"
 }
@@ -106,7 +105,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
 
     public static let keychainSigningNotes: [String] = [
         "Ad-hoc helpers cannot embed Keychain access groups; Developer ID signing is out of scope for Triangle releases.",
-        "For LaunchAgent custody, use file custody: a public ad-hoc install enables credentials/local (0600 files), then re-enroll the profile.",
+        "For LaunchAgent custody, use file custody: a public ad-hoc install enables credentials/local (0600 files), then rebind the profile.",
         "If the login Keychain is locked, unlock it once and retry.",
     ]
 
@@ -182,8 +181,8 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 safeToRetry: true,
                 detail: "Workload authentication is unavailable for watch grant operations.",
                 operatorNotes: [
-                    "Confirm Keychain item dev.thetriangle.mesh.workload-key exists for the actor profile.",
-                    "Workload mint/DPoP failures are fail-closed; re-enroll or repair workload material without printing secrets.",
+                    "Confirm every member profile is bound (profiles-v1) to a triangle workload-key.json on the same origin as the actor.",
+                    "Workload mint/DPoP failures are fail-closed; rebind or repair the workload key file without printing secrets.",
                 ] + keychainSigningNotes
             )
         case .workloadKeyMissing:
@@ -194,7 +193,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
                 safeToRetry: false,
                 detail: "Workload key material is missing for a watch grant member profile.",
                 operatorNotes: [
-                    "Re-enroll the profile so workload-key Keychain material is installed.",
+                    "Bind the profile to the agent's workload key file (`triangle-mailbox bind`).",
                     "Do not place mailbox or watch credentials in Node env or plists.",
                 ]
             )
@@ -262,18 +261,33 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
             return WatchGrantFailureDiagnosis(
                 code: .profileNotFound,
                 gate: .profile,
-                operatorAction: .enrollOrVerifyProfile,
+                operatorAction: .bindOrVerifyProfile,
                 safeToRetry: false,
                 detail: "Actor or member profile credential was not found."
             )
-        case .localAuthorizationRequired:
+        case .credentialInvalid:
             return WatchGrantFailureDiagnosis(
-                code: .localAuthorizationRequired,
-                gate: .keychain,
-                operatorAction: .unlockLoginKeychain,
-                safeToRetry: true,
-                detail: "Login Keychain authorization is required before watch ensure can proceed.",
-                operatorNotes: keychainSigningNotes
+                code: .credentialInvalid,
+                gate: .profile,
+                operatorAction: .bindOrVerifyProfile,
+                safeToRetry: false,
+                detail: "The bound workload key file or agent record is missing, unsafe, or malformed."
+            )
+        case .credentialRefused:
+            return WatchGrantFailureDiagnosis(
+                code: .credentialRefused,
+                gate: .workloadAuth,
+                operatorAction: .bindOrVerifyProfile,
+                safeToRetry: false,
+                detail: "MESH refused this agent's workload key."
+            )
+        case .agentPaused:
+            return WatchGrantFailureDiagnosis(
+                code: .agentPaused,
+                gate: .profile,
+                operatorAction: .resumeAgent,
+                safeToRetry: false,
+                detail: "The agent is paused; the owner must resume it."
             )
         case .offline:
             return WatchGrantFailureDiagnosis(
@@ -287,7 +301,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
             return WatchGrantFailureDiagnosis(
                 code: .identityMismatch,
                 gate: .profile,
-                operatorAction: .enrollOrVerifyProfile,
+                operatorAction: .bindOrVerifyProfile,
                 safeToRetry: false,
                 detail: "Stored profile identity does not match MESH."
             )
@@ -295,38 +309,9 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
             return WatchGrantFailureDiagnosis(
                 code: .verificationFailed,
                 gate: .profile,
-                operatorAction: .enrollOrVerifyProfile,
+                operatorAction: .bindOrVerifyProfile,
                 safeToRetry: true,
                 detail: "Profile credential verification failed."
-            )
-        case .journalIneligible:
-            return WatchGrantFailureDiagnosis(
-                code: .journalIneligible,
-                gate: .profile,
-                operatorAction: .enrollOrVerifyProfile,
-                safeToRetry: false,
-                detail: "Enrollment journal state is ineligible for watch grant operations."
-            )
-        case .credentialBusy:
-            return WatchGrantFailureDiagnosis(
-                code: .credentialBusy,
-                gate: .profile,
-                operatorAction: .retryLater,
-                safeToRetry: true,
-                mustNotReregister: true,
-                detail: "Enrollment reservation is busy (enroll-*.lock contention); retry without reminting or reregistering.",
-                operatorNotes: [
-                    "Another triangle-mailbox process (watch-ensure, status, or transaction-*) holds the profile enrollment lock.",
-                    "Do not move aside watch JSON or re-enroll; wait briefly and retry the same command.",
-                ]
-            )
-        case .profileStateInconsistent:
-            return WatchGrantFailureDiagnosis(
-                code: .profileStateInconsistent,
-                gate: .profile,
-                operatorAction: .enrollOrVerifyProfile,
-                safeToRetry: false,
-                detail: "Profile Keychain and journal state are inconsistent."
             )
         }
     }
@@ -431,7 +416,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
         case .watchPoll:
             requires = ["--installation", "--cursor"]
             notes = ["Held poll for Node wake clients; credentials stay in the helper Keychain."]
-        case .enroll, .status, .mcp, .runWorker, .runSupervisor, .preflightSupervisor,
+        case .bind, .unbind, .status, .mcp, .runWorker, .runSupervisor, .preflightSupervisor,
              .transactionPreflight, .transactionStatus, .transactionClaim, .transactionClaimNext, .transactionDrainReceipts, .transactionReply,
              .transactionReadInbound, .transactionAck, .transactionAbandon, .transactionRecordFailure:
             requires = []

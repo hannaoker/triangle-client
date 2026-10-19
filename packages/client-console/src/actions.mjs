@@ -9,63 +9,51 @@ import { WATCH_STATUS_ALLOWED_KEYS, pickAllowedKeys, assertSecretFree } from "./
 
 const INSTALLATION_ID_RE = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const KEY_FILE_RE = /^\/(?:[^\0]*\/)?agents\/agent_[a-f0-9]{32}\/workload-key\.json$/;
 
 /**
- * Enroll stays a documented stdin handoff to the signed helper.
- * This scaffold refuses to invent a new credential channel; it only prints
- * the exact operator recipe unless `execute: true` and stdin JSON are supplied.
+ * Bind a helper profile to a `triangle` agent key file (permissions v1).
+ * The key file path is not a secret and nothing secret crosses argv or stdin:
+ * the helper reads the 0600 key file itself and verifies the identity with
+ * MESH before it writes the binding. Without `execute` this only returns the
+ * exact helper command.
  *
  * @param {object} options
  * @param {string} options.profile
- * @param {string} options.origin
+ * @param {string} options.keyFile Absolute `<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json`
+ * @param {string} [options.origin] Optional https origin override (defaults to the agent's authority)
  * @param {string} [options.home]
- * @param {string} [options.admissionJson] Full enrollment document (never logged)
  * @param {boolean} [options.execute]
  * @param {typeof runHelper} [options.run]
  */
-export async function enrollAction(options) {
-  const { profile, origin, execute = false, admissionJson = null, run = runHelper } = options;
+export async function bindAction(options) {
+  const { profile, keyFile, origin = null, execute = false, run = runHelper } = options;
   if (!PROFILE_RE.test(profile)) {
     throw Object.assign(new TypeError("profile is invalid"), { code: "invalid_profile" });
   }
-  if (typeof origin !== "string" || !/^https:\/\//.test(origin)) {
+  if (typeof keyFile !== "string" || !KEY_FILE_RE.test(keyFile) || Buffer.byteLength(keyFile) > 1024) {
+    throw Object.assign(new TypeError("key file must be an absolute .../agents/<agent_id>/workload-key.json path"), { code: "invalid_key_file" });
+  }
+  if (origin != null && (typeof origin !== "string" || !/^https:\/\//.test(origin))) {
     throw Object.assign(new TypeError("origin must be https URL"), { code: "invalid_origin" });
   }
 
   const paths = resolveTrianglePaths(options.home);
-  const recipe = {
-    stub: !execute,
-    command: [paths.helperPath, "enroll", "--profile", profile, "--origin", origin],
-    stdin: "<protected enrollment JSON on stdin — never argv or env>",
-    note: "Console does not store admission tokens. Pipe a one-shot JSON document into the helper.",
-  };
-
+  const args = ["bind", "--profile", profile, "--key-file", keyFile, ...(origin ? ["--origin", origin] : [])];
   if (!execute) {
-    return recipe;
+    return {
+      stub: true,
+      command: [paths.helperPath, ...args],
+      note: "The helper reads the 0600 key file itself and verifies the agent with MESH before binding; no secret is passed.",
+    };
   }
-
-  if (typeof admissionJson !== "string" || admissionJson.length === 0) {
-    throw Object.assign(new Error("execute requires admissionJson on this call only"), {
-      code: "missing_admission",
-    });
-  }
-  // Do not assertSecretFree on admission JSON — it is expected to contain secrets.
-  // Never include it in returned objects.
-  const result = await run(paths.helperPath, ["enroll", "--profile", profile, "--origin", origin], {
-    stdin: admissionJson,
-    assertFree: true, // helper stdout must remain secret-free
-  });
-  const payload = parseHelperJson(result.stdout, "triangle-mailbox enroll");
-  return {
-    stub: false,
-    exitCode: result.code,
-    result: payload,
-    note: "Admission material was passed only on helper stdin and is not retained by the console.",
-  };
+  const result = await run(paths.helperPath, args, { assertFree: true });
+  const payload = parseHelperJson(result.stdout, "triangle-mailbox bind");
+  return { stub: false, exitCode: result.code, result: payload };
 }
 
 /**
- * Safe watch-ensure: helper reads Keychain; no mesh_watch_ on argv.
+ * Safe watch-ensure: the helper reads its stored watch grant; no mesh_watch_ on argv.
  * @param {object} options
  * @param {string} options.installationId
  * @param {string} options.actorProfile
@@ -87,7 +75,7 @@ export async function watchEnsureAction(options) {
     return {
       stub: true,
       command: [paths.helperPath, ...args],
-      note: "Re-run with --execute to invoke the signed helper (Keychain-backed; no watch secret on argv).",
+      note: "Re-run with --execute to invoke the signed helper (no watch secret on argv).",
     };
   }
   const result = await run(paths.helperPath, args, { assertFree: true });

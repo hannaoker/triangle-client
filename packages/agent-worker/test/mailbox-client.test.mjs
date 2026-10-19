@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { createMailboxClient, MailboxRequestError, validateMailboxClientOptions } from "../src/mailbox-client.mjs";
+import { createMailboxClient, MailboxRequestError, parseWorkloadPrivateKey, validateMailboxClientOptions } from "../src/mailbox-client.mjs";
 import { TEST_WORKLOAD, testTokens } from "./support/test-workload.mjs";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -2210,7 +2210,7 @@ test("permissions v1: the workload key exchanges a canonical token proof (agent 
   const fetchImpl = async (request) => {
     const url = new URL(request.url);
     const body = request.method === "GET" ? null : await request.json();
-    calls.push({ url, method: request.method, headers: Object.fromEntries(request.headers.entries()), body });
+    calls.push({ url, method: request.method, headers: Object.fromEntries(request.headers.entries()), body, redirect: request.redirect });
     if (url.pathname === "/api/v1/identity/token-challenges") {
       return json({ challenge: { challenge_id: `challenge_${issued}`, workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: `nonce_${issued}` } }, 201);
     }
@@ -2236,6 +2236,8 @@ test("permissions v1: the workload key exchanges a canonical token proof (agent 
     "/api/v1/agents/me",
     "/api/v1/mailbox",
   ]);
+  // Redirects are never followed: proof bodies and DPoP headers stay on the origin (round 4 P2).
+  assert.ok(calls.every((c) => c.redirect === "manual"), "every token exchange and agent call refuses redirects");
   assert.equal(calls[0].body.workload_id, workloadId);
   assert.deepEqual(calls[1].body.requested_scopes, ["agent.read", "agent.write"]);
   const [h, p, sig] = calls[1].body.proof.split(".");
@@ -2512,6 +2514,30 @@ test("permissions v1: a refused token refresh never echoes MESH free text or the
   assert.equal(error.name, "MailboxRequestError");
   assert.equal(error.status, 401);
   assert.doesNotMatch(`${error.message} ${String(error.stack)} ${JSON.stringify(error)}`, /wl_token_previous_secret|stale token/);
+});
+
+test("the Swift helper's bootstrap key handoff (raw seed, base64url unpadded) is accepted (permissions v1 PR D)", () => {
+  // Swift `V1AgentMaterial.workloadPrivateKeySeed` = Base64URL(Curve25519 rawRepresentation),
+  // i.e. the 32-byte seed without padding. RFC 8032 §7.1 test 1 pins the public key.
+  const seed = Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex").toString("base64url");
+  assert.equal(seed.length, 43);
+  const jwk = parseWorkloadPrivateKey(seed);
+  assert.equal(Buffer.from(jwk.x, "base64url").toString("hex"), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+  assert.equal(jwk.d, seed);
+  // Exactly the six keys the Swift supervisor bootstrap writes (incl. the registered bounds).
+  const mailbox = validateMailboxClientOptions({
+    meshUrl: "https://mesh.example.test",
+    recipientId: "agent_0123456789abcdef0123456789abcdef",
+    pageLimit: 20,
+    workloadId: "workload_0123456789abcdef0123456789abcdef",
+    workloadPrivateKey: seed,
+    workloadScopes: ["agent.read"],
+  });
+  assert.deepEqual(Object.keys(mailbox).sort(), ["meshUrl", "pageLimit", "recipientId", "workloadId", "workloadPrivateKey", "workloadScopes"]);
+  assert.deepEqual(mailbox.workloadScopes, ["agent.read"]);
+  // Padded or truncated seeds are refused rather than reinterpreted.
+  assert.throws(() => parseWorkloadPrivateKey(`${seed}=`), /workloadPrivateKey/);
+  assert.throws(() => parseWorkloadPrivateKey(seed.slice(0, 42)), /workloadPrivateKey/);
 });
 
 test("permissions v1: a read-only agent (bounds agent.read) requests only agent.read, which MESH accepts", async () => {

@@ -11,12 +11,7 @@ enum TriangleClientCLI {
             let transport = URLSessionMeshTransport()
             let service = TriangleClientAgentService(
                 instanceStore: FileClientInstanceStore(),
-                credentialGate: VerifiedCredentialGate(
-                    store: LocalCredentialStores.mailbox(),
-                    workloadKeyStore: LocalCredentialStores.workload(),
-                    transport: transport,
-                    reservation: FileEnrollmentReservation(), journal: FileEnrollmentJournal()
-                ),
+                credentialGate: VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport),
                 runtimeReadiness: { instance in try FileWorkerCommandResolver().checkRuntimeReadiness(for: instance) },
                 serviceControl: LaunchdTriangleClientServiceControl(),
                 stateCleaner: FileTriangleClientMutableStateCleaner(),

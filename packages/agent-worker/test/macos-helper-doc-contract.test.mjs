@@ -128,68 +128,84 @@ test("watch command help and operator notes never expose credential prefixes", (
   }
 });
 
-test("enroll-lock contention maps to credentialBusy not journalIneligible", () => {
-  const gate = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/EnrollmentService.swift");
-  assert.match(gate, /case credentialBusy/);
-  assert.match(gate, /EnrollmentReservationError\.alreadyInProgress/);
-  assert.match(gate, /throw VerifiedCredentialGateError\.credentialBusy/);
-  // Contended acquire must not be a bare catch-all → journalIneligible.
-  assert.doesNotMatch(
-    gate,
-    /do \{ lease = try reservation\.acquire\(for: profile\) \}\s*catch \{ throw VerifiedCredentialGateError\.journalIneligible \}/,
-  );
+test("permissions v1 gate failures map to v1 codes and the enrollment surface is gone", () => {
+  const helperRoot = "packages/macos-mailbox-helper/Sources/TriangleMailboxCore";
+  for (const removed of ["EnrollmentService.swift", "EnrollmentJournal.swift", "EnrollmentReservation.swift", "CredentialStore.swift", "KeychainCredentialStore.swift"]) {
+    assert.equal(fs.existsSync(path.join(root, helperRoot, removed)), false, `${removed} must be removed`);
+  }
+  const failure = text(`${helperRoot}/WatchGrantFailure.swift`);
+  for (const code of ['case credentialInvalid = "credential_invalid"', 'case credentialRefused = "credential_refused"', 'case agentPaused = "agent_paused"']) {
+    assert.ok(failure.includes(code), code);
+  }
+  for (const gone of ["credentialBusy", "journalIneligible", "localAuthorizationRequired", "profileStateInconsistent"]) {
+    assert.doesNotMatch(failure, new RegExp(`case ${gone}\\b`), gone);
+  }
+  const profile = text(`${helperRoot}/V1ProfileService.swift`);
+  assert.match(profile, /case agentPaused/);
+  assert.match(profile, /agentSelf/);
+  const custody = text(`${helperRoot}/V1AgentCustody.swift`);
+  assert.match(custody, /O_NOFOLLOW/);
+  assert.match(custody, /workload-key\.json/);
+  const models = text(`${helperRoot}/Models.swift`);
+  assert.doesNotMatch(models, /case enroll\b/);
+  assert.match(models, /case bind\b/);
+  assert.match(models, /case unbind\b/);
 
-  const failure = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WatchGrantFailure.swift");
-  assert.match(failure, /case credentialBusy = "credential_busy"/);
-  assert.match(failure, /case \.credentialBusy:[\s\S]*?safeToRetry: true/);
-
-  const watch = text("packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WatchGrantService.swift");
+  const watch = text(`${helperRoot}/WatchGrantService.swift`);
   assert.match(watch, /Keep the local binding[\s\S]*until a new grant is stored/);
   assert.doesNotMatch(watch, /discardLocalWatchBinding/);
 });
 
-test("operator documentation defines the complete low-friction custody lifecycle", () => {
+test("operator documentation defines the permissions v1 binding lifecycle", () => {
   const helper = text("packages/macos-mailbox-helper/README.md");
   for (const pattern of [
-    /enroll[^\n]*--profile codex-mailbox-live[^\n]*--origin https:\/\/thetriangle\.dev/i,
-    /stdin/i,
-    /Keychain[^\n]*(authoritative|authority)/i,
-    /silent[^\n]*(normal|routine)/i,
-    /(locked Keychain|Keychain is locked)[\s\S]*(unlock|log in)/i,
+    /triangle agent add/,
+    /bind --profile codex-mailbox-live[^\n]*\\?\n?[^\n]*--key-file/i,
+    /workload-key\.json/,
+    /profiles-v1/,
+    /\/api\/v1\/agents\/me/,
+    /agent_paused/,
+    /credential_refused/,
+    /identity_mismatch/,
+    /unbind --profile/,
     /triangle-mailbox"? mcp --profile codex-mailbox-live/,
     /no (?:show|export)[^\n]*(?:command|operation)/i,
-    /(rotation|replacement)[\s\S]*(confirmation|confirm)/i,
-    /(deletion|delete)[\s\S]*(confirmation|confirm)/i,
-    /(ambiguous|outcome_unknown)[\s\S]*(journal|reconcil)/i,
+    /TRIANGLE_WORKLOAD_KEY_FILE/,
     /Developer ID/i,
     /local-ad-hoc[\s\S]*(non-public|local testing|development only)/i,
     /rollback/i,
     /watch-ensure --help/,
     /Upgrade an existing install/,
     /Interpreting watch-ensure failures/,
-    /credential_busy/,
     /mcp-interactive[\s\S]*watch membership/i,
     /gate[\s\S]*workload_auth|membership|keychain/i,
     /cliSurface/,
   ]) assert.match(helper, pattern);
-  assert.doesNotMatch(helper, /show-token|export-token/);
+  assert.doesNotMatch(helper, /show-token|export-token|admissionToken|enroll --profile|credential_busy/);
+
+  const policy = text("packages/macos-mailbox-helper/KEYCHAIN_POLICY.md");
+  assert.match(policy, /never live in the\s+Keychain/);
+  assert.match(policy, /dev\.thetriangle\.mesh\.mailbox-watch/);
+  assert.doesNotMatch(policy, /test-keychain-integration/);
 
   for (const relative of ["agents/codex/worker/README.md", "agents/hermes/worker/README.md"]) {
     const worker = text(relative);
-    assert.match(worker, /Keychain/);
+    assert.match(worker, /workload-key\.json/);
+    assert.match(worker, /TRIANGLE_WORKLOAD_KEY_FILE/);
     assert.match(worker, /triangle-mailbox run-worker --profile/);
     assert.match(worker, /install-macos-mailbox-helper\.sh/);
-    assert.match(worker, /rollback/i);
+    assert.doesNotMatch(worker, /MESH_AGENT_TOKEN/);
   }
   const top = text("README.md");
   assert.match(top, /macOS mailbox credential helper/i);
   assert.match(top, /triangle-mailbox"? mcp --profile/);
   const workerSection = top.match(/### Model-free agent workers[\s\S]*?(?=\n## Testing and builds)/)?.[0];
   assert.ok(workerSection, "top-level worker quickstart is missing");
-  assert.doesNotMatch(workerSection, /TRIANGLE_CREDENTIAL_FILE|set -a;\s*\.\s*"?\$TRIANGLE_CREDENTIAL_FILE|credentials\/(?:codex|hermes)\.env/);
+  assert.doesNotMatch(workerSection, /TRIANGLE_CREDENTIAL_FILE|set -a;\s*\.\s*"?\$TRIANGLE_CREDENTIAL_FILE|credentials\/(?:codex|hermes)\.env|enroll|admission/);
   for (const pattern of [
     /install-macos-mailbox-helper\.sh/,
-    /enroll[^\n]*--profile[^\n]*--origin/,
+    /triangle agent add/,
+    /bind --profile[^\n]*--key-file/,
     /status --profile/,
     /mcp --profile/,
     /triangle-worker-service\.sh prepare-runtime/,
@@ -197,17 +213,13 @@ test("operator documentation defines the complete low-friction custody lifecycle
     /triangle-worker-service\.sh install/,
     /VerifiedCredentialGate/,
     /CODEX_AGENT_ID[^\n]*HERMES_AGENT_ID|HERMES_AGENT_ID[^\n]*CODEX_AGENT_ID/,
-    /explicit(?: legacy)? rollback[\s\S]*mode-`0600` credential file/i,
-    /no silent fallback/i,
+    /TRIANGLE_WORKLOAD_KEY_FILE/,
+    /no backward compatibility/i,
   ]) assert.match(workerSection, pattern);
-  const normalUseREADME = top.replace(
-    /#### Explicit legacy rollback only[\s\S]*?(?=\nWorkers currently follow Mac availability\.)/,
-    "",
-  );
-  assert.doesNotMatch(normalUseREADME, /Operational worker credentials belong in an operator-owned `0600` file|The LaunchAgent injects them into the mailbox controller|credential root and all project/i);
+  assert.doesNotMatch(top, /Operational worker credentials belong in an operator-owned `0600` file|The LaunchAgent injects them into the mailbox controller|credential root and all project/i);
   const deployment = top.match(/## Deployment[\s\S]*?(?=\n## Security model)/)?.[0];
   assert.ok(deployment, "deployment documentation is missing");
-  assert.match(deployment, /Keychain[^\n]*(?:authoritative|authority)/i);
+  assert.match(deployment, /workload-key\.json[\s\S]*authoritative/i);
   assert.match(deployment, /VerifiedCredentialGate/);
   assert.match(deployment, /helper[^\n]*internally injects|internally injects[^\n]*helper/i);
 });

@@ -9,9 +9,12 @@ public struct OperatorStatus: Codable, Equatable, Sendable {
     public let lifecycle: ProfileVerificationStatus
     public let verificationTimestamp: String?
     public let operatorAction: ProfileOperatorAction
+    /// Permissions v1 toggles from `GET /agents/me`; present only when verified.
+    public let permissions: [String: Bool]?
+    public let permissionsRevision: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case profile, origin, handle, lifecycle, verificationTimestamp, operatorAction
+        case profile, origin, handle, lifecycle, verificationTimestamp, operatorAction, permissions, permissionsRevision
         case agentID = "agentId"
     }
 }
@@ -31,7 +34,9 @@ public enum OperatorStatusRenderer {
             handle: status.handle,
             lifecycle: status.status,
             verificationTimestamp: verificationTimestamp.map(formatter.string(from:)),
-            operatorAction: status.operatorAction
+            operatorAction: status.operatorAction,
+            permissions: status.permissions,
+            permissionsRevision: status.permissionsRevision
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

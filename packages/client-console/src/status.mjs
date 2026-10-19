@@ -1,6 +1,6 @@
 /**
  * Read-only operator dashboard aggregation.
- * Prefers signed helper / triangle-client CLIs over Keychain or credential files.
+ * Prefers signed helper / triangle-client CLIs over reading key or credential files.
  */
 
 import { readFile } from "node:fs/promises";
@@ -67,7 +67,7 @@ export async function collectDashboard(options = {}) {
     watch: null,
     service: null,
     stubs: {
-      enroll: "stdin handoff to triangle-mailbox enroll (see actions enroll)",
+      bind: "triangle-mailbox bind --profile NAME --key-file <TRIANGLE_HOME>/agents/<agent_id>/workload-key.json (see actions bind)",
       watchEnsure: "explicit triangle-mailbox watch-ensure (see actions watch-ensure)",
       serviceControl: "explicit scripts/triangle-client-service.sh start|stop",
     },

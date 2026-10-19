@@ -126,7 +126,7 @@ public enum TriangleClientCLIContractCases {
         try clientExpect(enabled.enabled, "enable targeted the wrong record")
         _ = try await service.execute(.remove(profile: fixture.profile))
         try clientExpect(fixture.credentials.deleteCount == 0, "remove deleted the credential")
-        _ = try fixture.credentials.read(for: fixture.profile)
+        _ = try fixture.credentials.material(for: fixture.profile)
     }
 
     public static func reloadFailureRollsBack() async throws {
@@ -178,7 +178,7 @@ public enum TriangleClientCLIContractCases {
         let afterCleanupFailure = try fixture.instances.list()
         try clientExpect(afterCleanupFailure.isEmpty, "cleanup failure restored stale polling")
         try clientExpect(fixture.credentials.deleteCount == 0, "cleanup failure touched the credential")
-        _ = try fixture.credentials.read(for: fixture.profile)
+        _ = try fixture.credentials.material(for: fixture.profile)
     }
 
     public static func enableReverifiesTarget() async throws {
@@ -203,10 +203,10 @@ public enum TriangleClientCLIContractCases {
         _ = try await credentialSetup.execute(.add(profile: credentialFixture.profile, adapter: .codex))
         _ = try await credentialSetup.execute(.disable(profile: credentialFixture.profile))
         try credentialFixture.instances.create(healthy)
-        try credentialFixture.credentials.delete(for: credentialFixture.profile)
+        credentialFixture.credentials.remove(credentialFixture.profile)
         let reloadsBeforeCredentialFailure = credentialFixture.serviceControl.reloadCount
         do { _ = try await credentialSetup.execute(.enable(profile: credentialFixture.profile)); throw TriangleClientContractFailure("enable accepted missing target credential") }
-        catch VerifiedCredentialGateError.profileStateInconsistent {}
+        catch VerifiedCredentialGateError.profileNotFound {}
         let afterCredentialFailure = try credentialFixture.instances.read(profile: credentialFixture.profile)
         try clientExpect(afterCredentialFailure.enabled == false, "credential failure mutated target state")
         try clientExpect(credentialFixture.serviceControl.reloadCount == reloadsBeforeCredentialFailure, "credential failure reloaded aggregate healthy service")
@@ -492,9 +492,10 @@ fi
 
 private final class Fixture: @unchecked Sendable {
     let profile = try! ProfileName("alpha-profile")
-    let token = "mesh_" + String(repeating: "7", count: 64)
+    let agent: V1TestAgent
+    var token: String { agent.seed }
     let instances: RecordingInstanceStore
-    let credentials: RecordingCredentialStore
+    let credentials: RecordingResolver
     let events = EventRecorder()
     let gate: VerifiedCredentialGate
     let serviceControl: RecordingServiceControl
@@ -502,16 +503,12 @@ private final class Fixture: @unchecked Sendable {
 
     init(serviceFailures: Set<Int> = [], cleanupFails: Bool = false) throws {
         instances = RecordingInstanceStore(events: events)
-        credentials = RecordingCredentialStore(events: events)
+        credentials = RecordingResolver(events: events)
         serviceControl = RecordingServiceControl(instances: instances, failures: serviceFailures)
         cleaner = RecordingStateCleaner(serviceControl: serviceControl, fails: cleanupFails)
-        let origin = try MeshOrigin("https://thetriangle.dev")
-        let agentID = try AgentID("agent_" + String(repeating: "a", count: 32))
-        let handle = try MailboxHandle("alpha-profile")
-        try credentials.create(CredentialBinding(origin: origin, agentID: agentID, handle: handle, token: try MeshToken(token)), for: profile)
-        let journal = InMemoryEnrollmentJournal()
-        try journal.write(.testing(profile: profile, origin: origin, state: .verified, agentID: agentID, handle: handle, reasonCode: "identity_verified"))
-        gate = VerifiedCredentialGate(store: credentials, transport: IdentityTransport(), reservation: InMemoryEnrollmentReservation(), journal: journal)
+        agent = try V1TestCustody.memoryAgent(profile: profile.value, handle: "alpha-profile", fill: "a")
+        credentials.set(agent.material, for: profile)
+        gate = VerifiedCredentialGate(resolver: credentials, transport: FakeV1Mesh(agents: [agent]))
         credentials.resetObservations()
     }
 
@@ -531,14 +528,13 @@ private final class RecordingInstanceStore: ClientInstanceStore, @unchecked Send
     func setRuntimeAdapter(_ runtimeAdapter: RuntimeAdapter, profile: ProfileName) throws { try backing.setRuntimeAdapter(runtimeAdapter, profile: profile) }
     func remove(profile: ProfileName) throws { try backing.remove(profile: profile) }
 }
-private final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
-    private let backing = InMemoryCredentialStore(); private let events: EventRecorder; private(set) var deleteCount = 0; private var observe = false
+private final class RecordingResolver: V1AgentResolver, @unchecked Sendable {
+    private let backing = InMemoryV1AgentResolver(); private let events: EventRecorder; private(set) var deleteCount = 0; private var observe = false
     init(events: EventRecorder) { self.events = events }
     func resetObservations() { observe = true }
-    func create(_ binding: CredentialBinding, for profile: ProfileName) throws { try backing.create(binding, for: profile) }
-    func read(for profile: ProfileName) throws -> CredentialBinding { if observe { events.append("credential") }; return try backing.read(for: profile) }
-    func replace(_ binding: CredentialBinding, for profile: ProfileName, confirmation: CredentialReplacementConfirmation) throws { try backing.replace(binding, for: profile, confirmation: confirmation) }
-    func delete(for profile: ProfileName) throws { deleteCount += 1; try backing.delete(for: profile) }
+    func set(_ material: V1AgentMaterial, for profile: ProfileName) { backing.set(material, for: profile) }
+    func material(for profile: ProfileName) throws -> V1AgentMaterial { if observe { events.append("credential") }; return try backing.material(for: profile) }
+    func remove(_ profile: ProfileName) { deleteCount += 1; backing.remove(profile) }
 }
 private final class EventRecorder: @unchecked Sendable { private let lock = NSLock(); private var storage: [String] = []; var values: [String] { lock.withLock { storage } }; func append(_ value: String) { lock.withLock { storage.append(value) } } }
 private final class OneShot: @unchecked Sendable { private let lock = NSLock(); private var available = true; func take() -> Bool { lock.withLock { let result = available; available = false; return result } } }
@@ -568,12 +564,6 @@ private final class InMemoryLifecycleLease: TriangleClientLifecycleLease, @unche
     init(semaphore: DispatchSemaphore) { self.semaphore = semaphore }
     func release() { guardLock.withLock { if !released { released = true; semaphore.signal() } } }
     deinit { release() }
-}
-private struct IdentityTransport: MeshTransport {
-    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        let body = Data(#"{"agent":{"id":"agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alpha","handle":"alpha-profile","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}"#.utf8)
-        return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-    }
 }
 private struct TriangleClientContractFailure: Error, CustomStringConvertible { let description: String; init(_ description: String) { self.description = description } }
 private func clientExpect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw TriangleClientContractFailure(message) } }

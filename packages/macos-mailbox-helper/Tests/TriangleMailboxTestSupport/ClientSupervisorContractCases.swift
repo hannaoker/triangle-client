@@ -1,7 +1,7 @@
 import Darwin
 import CryptoKit
 import Foundation
-@_spi(EnrollmentTesting) @_spi(ClientInstanceTesting) import TriangleMailboxCore
+@_spi(ClientInstanceTesting) import TriangleMailboxCore
 
 public enum ClientSupervisorContractCases {
     public struct ContractCase: Sendable {
@@ -109,10 +109,13 @@ public enum ClientSupervisorContractCases {
             let identifier = ClientInstanceID.derive(profile: specification.profile).value
             let instance = try require(bootstrap.instances.first { $0.instanceId == identifier }, "instance missing from bootstrap")
             try expect(instance.mailbox.meshUrl == origin, "origin crossed profiles")
-            try expect(instance.mailbox.meshToken == specification.token, "token crossed profiles")
+            try expect(instance.mailbox.workloadPrivateKey == specification.token, "workload key crossed profiles")
+            try expect(instance.mailbox.workloadId == specification.agent.workloadID.value, "workload id crossed profiles")
             try expect(instance.mailbox.recipientId == specification.agentID.value, "agent ID crossed profiles")
             try expect(instance.mailbox.pageLimit == 1, "mailbox page limit changed")
+            try expect(instance.mailbox.workloadScopes == specification.agent.material.scopes, "registered bounds not handed to the worker")
             try expect(instance.runnerEnvironment["TRIANGLE_INSTANCE_ID"] == identifier, "runner instance binding changed")
+            try expect(instance.runnerEnvironment["TRIANGLE_IDENTITY_ROOT"]?.hasPrefix("/") == true, "runner custody home deny missing")
             let activeHome = specification.adapter == .codex ? "CODEX_HOME" : "HERMES_HOME"
             let inactiveHome = specification.adapter == .codex ? "HERMES_HOME" : "CODEX_HOME"
             try expect(instance.runnerEnvironment[activeHome]?.contains(identifier) == true, "active model home was not isolated")
@@ -134,37 +137,16 @@ public enum ClientSupervisorContractCases {
                 digit: digit
             )
         }
-        let journal = InMemoryEnrollmentJournal()
-        var bindings: [ProfileName: CredentialBinding] = [:]
-        var identities: [String: IdentityResult] = [:]
         for specification in specifications {
             try instanceStore.create(ClientInstance(
                 profile: specification.profile,
                 runtimeAdapter: specification.adapter,
                 deliveryMode: .worker
             ))
-            let binding = CredentialBinding(
-                origin: try MeshOrigin(origin),
-                agentID: specification.agentID,
-                handle: specification.handle,
-                token: try MeshToken(specification.token)
-            )
-            bindings[specification.profile] = binding
-            identities[specification.token] = .identity(id: specification.agentID, handle: specification.handle)
-            try journal.write(.testing(
-                profile: specification.profile,
-                origin: binding.origin,
-                state: .verified,
-                agentID: binding.agentID,
-                handle: binding.handle,
-                reasonCode: "identity_verified"
-            ))
         }
         let gate = VerifiedCredentialGate(
-            store: RecordingMultiCredentialStore(bindings: bindings, events: EventLog()),
-            transport: MultiIdentityTransport(results: identities),
-            reservation: InMemoryEnrollmentReservation(),
-            journal: journal
+            resolver: RecordingMultiResolver(specifications: specifications, events: EventLog()),
+            transport: FakeV1Mesh(agents: specifications.map(\.agent))
         )
         let resolver = RecordingSupervisorResolver(events: EventLog(), failureAt: nil, coordinatorFails: false)
         let process = RecordingSupervisorProcess()
@@ -268,11 +250,9 @@ public enum ClientSupervisorContractCases {
         try expect(launch.omitted.count == 1, "bad profile omission was not recorded")
         try expect(launch.omitted[0].reasonCode == "credential_ineligible", "omission diagnostic was not bounded")
         try expect(!String(describing: launch.omitted[0]).contains(fixture.specifications[1].token), "omission diagnostic exposed token")
-        let quarantined = try fixture.journal.read(for: fixture.specifications[1].profile)
-        try expect(quarantined?.state == .quarantined, "failed identity was not quarantined independently")
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
-        try expect(!bootstrap.instances.contains { $0.mailbox.meshToken == fixture.specifications[1].token }, "ineligible token reached bootstrap")
+        try expect(!bootstrap.instances.contains { $0.mailbox.workloadPrivateKey == fixture.specifications[1].token }, "ineligible token reached bootstrap")
     }
 
     public static func mcpInteractiveDeliveryOmitted() async throws {
@@ -320,9 +300,10 @@ public enum ClientSupervisorContractCases {
         try expect(eventWake.drains.count == 1, "eventWake drain count changed")
         try expect(eventWake.drains[0].instanceId == eventWake.profiles[0].instanceId, "drain instance crossed profiles")
         try expect(eventWake.drains[0].mailbox.recipientId == fixture.specifications[1].agentID.value, "drain recipient crossed profiles")
-        try expect(eventWake.drains[0].mailbox.meshToken == fixture.specifications[1].token, "drain mailbox token missing")
+        try expect(eventWake.drains[0].mailbox.workloadPrivateKey == fixture.specifications[1].token, "drain mailbox token missing")
+        try expect(eventWake.drains[0].runnerEnvironment["TRIANGLE_IDENTITY_ROOT"]?.hasPrefix("/") == true, "drain custody home deny missing")
         try expect(eventWake.drains[0].runner.args[0].hasSuffix("/hermes-runner.mjs"), "drain runner adapter crossed profiles")
-        try expect(!bootstrap.instances.contains { $0.mailbox.meshToken == fixture.specifications[1].token }, "event-driven token leaked into worker instances")
+        try expect(!bootstrap.instances.contains { $0.mailbox.workloadPrivateKey == fixture.specifications[1].token }, "event-driven token leaked into worker instances")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
         try expect(!raw.contains("mesh_watch_"), "watch credential leaked into bootstrap")
@@ -1084,18 +1065,17 @@ public enum ClientSupervisorContractCases {
 private struct InstanceSpecification: Sendable {
     let profile: ProfileName
     let adapter: RuntimeAdapter
-    let token: String
-    let agentID: AgentID
-    let handle: MailboxHandle
+    let agent: V1TestAgent
+    /// The workload key seed handed to the Node worker (the only secret).
+    var token: String { agent.seed }
+    var agentID: AgentID { agent.agentID }
+    var handle: MailboxHandle { agent.handle }
     let verificationFails: Bool
 
-    init(profile: String, adapter: RuntimeAdapter, digit: Character, verificationFails: Bool = false) throws {
+    init(profile: String, adapter: RuntimeAdapter, digit: Character, verificationFails: Bool = false, scopes: [String] = V1AgentMaterial.agentBounds) throws {
         self.profile = try ProfileName(profile)
         self.adapter = adapter
-        token = "mesh_" + String(repeating: digit, count: 64)
-        agentID = try AgentID("agent_" + String(repeating: digit, count: 32))
-        let normalized = "agent-" + String(repeating: digit, count: 3)
-        handle = try MailboxHandle(normalized)
+        agent = try V1TestCustody.memoryAgent(profile: profile, handle: "agent-" + String(repeating: digit, count: 3), fill: digit, scopes: scopes)
         self.verificationFails = verificationFails
     }
 }
@@ -1103,8 +1083,7 @@ private struct InstanceSpecification: Sendable {
 private final class SupervisorFixture: @unchecked Sendable {
     let specifications: [InstanceSpecification]
     let instanceStore: InMemoryClientInstanceStore
-    let credentials: RecordingMultiCredentialStore
-    let journal: InMemoryEnrollmentJournal
+    let credentials: RecordingMultiResolver
     let process = RecordingSupervisorProcess()
     let supervisor: ClientSupervisor
     let helperRoot: URL
@@ -1132,7 +1111,6 @@ private final class SupervisorFixture: @unchecked Sendable {
         self.specifications = specifications
         let instances = InMemoryClientInstanceStore()
         instanceStore = instances
-        journal = InMemoryEnrollmentJournal()
         helperRoot = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("triangle-supervisor-wake-\(UUID().uuidString)", isDirectory: true)
@@ -1150,8 +1128,6 @@ private final class SupervisorFixture: @unchecked Sendable {
         let headlessRuntimeBindingURL = helperRoot.appendingPathComponent("headless-runtime-binding.json")
         let cursorAcpRuntimeBindingURL = helperRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
         let installationID = try InstallationID("inst_N7VhDq3mQ2")
-        var bindings: [ProfileName: CredentialBinding] = [:]
-        var identities: [String: IdentityResult] = [:]
         for specification in specifications {
             let instance = try ClientInstance(
                 profile: specification.profile,
@@ -1159,24 +1135,6 @@ private final class SupervisorFixture: @unchecked Sendable {
                 deliveryMode: .worker
             )
             try instances.create(instance)
-            let binding = CredentialBinding(
-                origin: try MeshOrigin(ClientSupervisorContractCases.origin),
-                agentID: specification.agentID,
-                handle: specification.handle,
-                token: try MeshToken(specification.token)
-            )
-            bindings[specification.profile] = binding
-            identities[specification.token] = specification.verificationFails
-                ? .failure
-                : .identity(id: specification.agentID, handle: specification.handle)
-            try journal.write(.testing(
-                profile: specification.profile,
-                origin: binding.origin,
-                state: .verified,
-                agentID: binding.agentID,
-                handle: binding.handle,
-                reasonCode: "identity_verified"
-            ))
         }
         if provisionAppServerBinding {
             let interactive = try require(
@@ -1281,12 +1239,11 @@ private final class SupervisorFixture: @unchecked Sendable {
             try bindingData.write(to: cursorAcpRuntimeBindingURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cursorAcpRuntimeBindingURL.path)
         }
-        credentials = RecordingMultiCredentialStore(bindings: bindings, events: events)
+        credentials = RecordingMultiResolver(specifications: specifications, events: events)
+        // A profile whose verification fails is unknown to MESH (workload_forbidden).
         let gate = VerifiedCredentialGate(
-            store: credentials,
-            transport: MultiIdentityTransport(results: identities),
-            reservation: InMemoryEnrollmentReservation(),
-            journal: journal
+            resolver: credentials,
+            transport: FakeV1Mesh(agents: specifications.filter { !$0.verificationFails }.map(\.agent))
         )
         supervisor = ClientSupervisor(
             instanceStore: instances,
@@ -1324,44 +1281,23 @@ private final class EventLog: @unchecked Sendable {
     func append(_ value: String) { lock.withLock { storage.append(value) } }
 }
 
-private final class RecordingMultiCredentialStore: CredentialStore, @unchecked Sendable {
+private final class RecordingMultiResolver: V1AgentResolver, @unchecked Sendable {
     private let lock = NSLock()
-    private let bindings: [ProfileName: CredentialBinding]
+    private let materials: [ProfileName: V1AgentMaterial]
     private let events: EventLog
     private var reads = 0
     var readCount: Int { lock.withLock { reads } }
-    init(bindings: [ProfileName: CredentialBinding], events: EventLog) { self.bindings = bindings; self.events = events }
-    func create(_ binding: CredentialBinding, for profile: ProfileName) throws { throw CredentialStoreError.duplicateItem }
-    func read(for profile: ProfileName) throws -> CredentialBinding {
+    init(specifications: [InstanceSpecification], events: EventLog) {
+        var materials: [ProfileName: V1AgentMaterial] = [:]
+        for specification in specifications { materials[specification.profile] = specification.agent.material }
+        self.materials = materials
+        self.events = events
+    }
+    func material(for profile: ProfileName) throws -> V1AgentMaterial {
         lock.withLock { reads += 1 }
         events.append("credential:\(profile.value)")
-        guard let binding = bindings[profile] else { throw CredentialStoreError.itemNotFound }
-        return binding
-    }
-    func replace(_ binding: CredentialBinding, for profile: ProfileName, confirmation: CredentialReplacementConfirmation) throws { throw CredentialStoreError.replacementNotConfirmed }
-    func delete(for profile: ProfileName) throws { throw CredentialStoreError.itemNotFound }
-}
-
-private enum IdentityResult: Sendable { case identity(id: AgentID, handle: MailboxHandle); case failure }
-private struct MultiIdentityTransport: MeshTransport {
-    let results: [String: IdentityResult]
-    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        let authorization = request.headers["Authorization"] ?? ""
-        let token = String(authorization.dropFirst("Bearer ".count))
-        guard let result = results[token] else { throw MeshClientError.transportUnavailable }
-        switch result {
-        case .failure:
-            return MeshHTTPResponse(statusCode: 401, headers: ["Content-Type": "application/json"], body: Data("{}".utf8), finalURL: request.url)
-        case .identity(let id, let handle):
-            let body = try JSONSerialization.data(withJSONObject: ["agent": [
-                "id": id.value,
-                "name": "Triangle Client Test",
-                "handle": handle.value,
-                "registrationMode": "mailbox",
-                "endpointUrl": ClientSupervisorContractCases.origin + "/api/v1/mailbox",
-            ]])
-            return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-        }
+        guard let material = materials[profile] else { throw V1CustodyError.profileNotBound }
+        return material
     }
 }
 
@@ -1465,7 +1401,31 @@ private struct TestBootstrapInstance: Decodable {
     let runner: TestRunner
     let runnerEnvironment: [String: String]
 }
-private struct TestMailbox: Decodable { let meshUrl: String; let meshToken: String; let recipientId: String; let pageLimit: Int }
+/// Exactly the keys the Node supervisor schema accepts (client-supervisor-schema.mjs).
+private struct TestMailbox: Decodable {
+    let meshUrl: String; let recipientId: String; let pageLimit: Int; let workloadId: String; let workloadPrivateKey: String; let workloadScopes: [String]
+    private struct AnyKey: CodingKey { let stringValue: String; let intValue: Int? = nil; init?(stringValue: String) { self.stringValue = stringValue }; init?(intValue: Int) { nil } }
+    private enum CodingKeys: String, CodingKey { case meshUrl, recipientId, pageLimit, workloadId, workloadPrivateKey, workloadScopes }
+    init(from decoder: Decoder) throws {
+        let keys = Set(try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue))
+        guard keys == ["meshUrl", "recipientId", "pageLimit", "workloadId", "workloadPrivateKey", "workloadScopes"] else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "bootstrap mailbox keys \(keys.sorted())"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        meshUrl = try values.decode(String.self, forKey: .meshUrl)
+        recipientId = try values.decode(String.self, forKey: .recipientId)
+        pageLimit = try values.decode(Int.self, forKey: .pageLimit)
+        workloadId = try values.decode(String.self, forKey: .workloadId)
+        workloadPrivateKey = try values.decode(String.self, forKey: .workloadPrivateKey)
+        workloadScopes = try values.decode([String].self, forKey: .workloadScopes)
+        guard !workloadScopes.isEmpty, workloadScopes == V1AgentMaterial.agentBounds.filter({ workloadScopes.contains($0) }) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "workload scopes are not canonical bounds"))
+        }
+        guard workloadPrivateKey.wholeMatch(of: /^[A-Za-z0-9_-]{43}$/) != nil else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "workload key is not an unpadded base64url seed"))
+        }
+    }
+}
 private struct TestRunner: Decodable { let command: String; let args: [String]; let timeoutMs: Int }
 private struct TestEventWake: Decodable {
     let installationId: String

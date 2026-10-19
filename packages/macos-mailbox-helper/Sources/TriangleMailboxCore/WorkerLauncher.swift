@@ -64,12 +64,18 @@ public struct WorkerLauncher: Sendable {
         let instance = try ClientInstance(profile: profile, runtimeAdapter: adapter)
         let command = try resolver.resolve(worker, instance: instance)
         let credential = try await gate.credential(for: profile)
+        // Workers reply and acknowledge; a read-only agent cannot run one.
+        guard credential.canWrite else { throw VerifiedCredentialGateError.credentialRefused }
         var environment = command.environment
         environment.keys.filter { key in
-            key.hasPrefix("MESH_") || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
+            key.hasPrefix("MESH_") || key.hasPrefix("TRIANGLE_WORKLOAD_") || key == "TRIANGLE_IDENTITY_ROOT"
+                || key == "CODEX_AGENT_ID" || key == "HERMES_AGENT_ID" || key == "ANTIGRAVITY_AGENT_ID"
         }.forEach { environment.removeValue(forKey: $0) }
         environment["MESH_ORIGIN"] = credential.origin.value
-        environment["MESH_AGENT_TOKEN"] = credential.binding.token.secretValue
+        // Permissions v1: the worker reads this agent's own key file (0600);
+        // key material never travels through the environment.
+        environment["TRIANGLE_WORKLOAD_KEY_FILE"] = credential.workloadKeyFile.path
+        environment["TRIANGLE_IDENTITY_ROOT"] = try Self.isolatedIdentityRoot(for: credential, environment: command.environment)
         environment[worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")] = credential.agentID.value
         try executor.execute(WorkerExecutionRequest(
             executable: command.executable,
@@ -77,6 +83,51 @@ public struct WorkerLauncher: Sendable {
             workingDirectory: command.workingDirectory,
             environment: environment
         ))
+    }
+}
+
+extension WorkerLauncher {
+    static let sandboxRootKeys = [
+        "TRIANGLE_PROJECT_ROOT", "TRIANGLE_CREDENTIAL_ROOT", "TRIANGLE_MODEL_STATE_BASE", "TRIANGLE_MODEL_ROOTS",
+        "TRIANGLE_RUNTIME_ROOTS", "TRIANGLE_WRITABLE_RUNTIME_ROOTS", "TRIANGLE_INSTANCE_TEMP_ROOT",
+        "CODEX_HOME", "HERMES_HOME", "ANTIGRAVITY_HOME",
+    ]
+
+    /// The `triangle` custody home (<home>/agents/<id>/workload-key.json) must
+    /// stay outside every root a seatbelt runner child can read or write; the
+    /// Node sandbox (runner-common.mjs) requires it and denies it explicitly.
+    /// The headless Codex app-server and Cursor ACP lanes are not covered
+    /// (same-user runtime, accepted under F1; v1.1 follow-up).
+    static func isolatedIdentityRoot(for credential: VerifiedCredential, environment: [String: String]) throws -> String {
+        let identityRoot = credential.workloadKeyFile
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        try requireIsolatedIdentityRoot(identityRoot, from: environment)
+        return identityRoot.path
+    }
+
+    /// A runner environment for the supervisor bootstrap with the custody home set.
+    static func isolatedRunnerEnvironment(_ environment: [String: String], credential: VerifiedCredential) throws -> [String: String] {
+        var result = environment
+        result["TRIANGLE_IDENTITY_ROOT"] = try isolatedIdentityRoot(for: credential, environment: environment)
+        return result
+    }
+
+    static func requireIsolatedIdentityRoot(_ identityRoot: URL, from environment: [String: String]) throws {
+        // APFS is case-insensitive by default: compare case-folded paths so a
+        // differently capitalized model root cannot hide an overlap.
+        func canonical(_ path: String) -> String {
+            URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+        }
+        func overlaps(_ left: String, _ right: String) -> Bool {
+            left == right || left.hasPrefix(right == "/" ? "/" : right + "/") || right.hasPrefix(left == "/" ? "/" : left + "/")
+        }
+        let identity = canonical(identityRoot.path)
+        for key in sandboxRootKeys {
+            guard let value = environment[key] else { continue }
+            for entry in value.split(separator: ":").map(String.init) where entry.hasPrefix("/") {
+                if overlaps(identity, canonical(entry)) { throw WorkerLauncherError.unsafeInstallation }
+            }
+        }
     }
 }
 

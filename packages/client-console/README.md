@@ -1,7 +1,7 @@
 # Triangle Client Console (scaffold)
 
 Local operator console for Triangle Client. It surfaces **secret-free**
-install / enroll / watch / worker status so you do not need to spelunk
+install / bind / watch / worker status so you do not need to spelunk
 `~/Library/Application Support/The Triangle/` JSON or remember every helper
 subcommand.
 
@@ -33,9 +33,9 @@ when that script path is available.
 
 | Surface | Source | Notes |
 | --- | --- | --- |
-| Helper / client binary presence | Path probe under Application Support | Does not read Keychain |
+| Helper / client binary presence | Path probe under Application Support | Does not read key files |
 | Instances (`deliveryMode`, runtime, enabled) | `triangle-client agent list` | Non-secret agent summary JSON |
-| Enrolled profile lifecycle | `triangle-mailbox status --profile …` | Operator status only (`operatorAction`, no tokens) |
+| Bound profile identity and permissions | `triangle-mailbox status --profile …` | Verified with MESH; `operatorAction` and permissions, no tokens |
 | Watch grant | `triangle-mailbox watch-status --installation …` | Secret-free; includes `operatorAction` |
 | Service | optional `triangle-client-service.sh status` | macOS / launchd |
 
@@ -45,12 +45,12 @@ Installation id may be passed with `--installation` or read from the non-secret
 ## Explicit actions (stubs / safe handoff)
 
 ```sh
-# Prints the stdin handoff recipe (default). Does not invent a credential channel.
-node packages/client-console/src/cli.mjs enroll \
-  --profile research --origin https://thetriangle.dev
+# Prints the exact helper command (default). The agent comes from `triangle agent add`;
+# only the key file path is passed, never key material.
+node packages/client-console/src/cli.mjs bind \
+  --profile research --key-file "$HOME/Library/Application Support/The Triangle/v1/agents/agent_…/workload-key.json"
 
-# Optional: pipe enrollment JSON once into the signed helper.
-# node packages/client-console/src/cli.mjs enroll … --execute < protected.json
+# Add --execute to run it: the helper verifies the agent with MESH, then binds.
 
 # Prints recipe unless --execute
 node packages/client-console/src/cli.mjs watch-ensure \
@@ -64,7 +64,7 @@ node packages/client-console/src/cli.mjs service status
 ## Intentionally stubbed / out of scope
 
 - No Mac GUI / menu bar app yet (CLI/JSON console only).
-- No Keychain reads from Node; always prefers the signed helper.
+- No key-file reads from Node; always prefers the signed helper.
 - No ambient `.env` / credential files.
 - Service start/stop require `--execute` (status may run immediately).
 - Linux CI uses a fake helper in tests; real helper is macOS-only.
@@ -82,4 +82,4 @@ npm --prefix packages/client-console test
 ```
 
 Tests inject a fake helper (`test/fixtures/fake-helper.mjs`) so Linux CI does
-not need the Swift binary or Keychain. Fixtures never contain real tokens.
+not need the Swift binary or real key files. Fixtures never contain real tokens.

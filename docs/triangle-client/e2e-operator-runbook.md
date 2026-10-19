@@ -1,7 +1,7 @@
 # E2E operator runbook (clean Mac)
 
 Goal: from a **zero** Triangle Client install to **helper + client installed,
-profile enrolled, watch path documented**, without tribal chat history.
+profile bound to a `triangle` agent, watch path documented**, without tribal chat history.
 
 Audience: an operator on **macOS 13+**. This runbook is not executable from
 Linux for Keychain, LaunchAgent, or ChatGPT.app steps.
@@ -20,7 +20,7 @@ Companion docs:
   Bob vs Codex host adapters; do not treat event-driven `codex exec` as Grok Bot
 
 
-## 0. Decide signing mode before you enroll
+## 0. Decide signing mode before you bind
 
 Developer ID signing and notarization are out of scope; every install is ad-hoc
 signed.
@@ -28,7 +28,7 @@ signed.
 | Intent | Command shape |
 | --- | --- |
 | Install for **another person’s Mac** (public ad-hoc, file custody) | **omit** `--local-ad-hoc`; leave `TRIANGLE_DEVELOPER_ID` / `TRIANGLE_CREDENTIAL_CUSTODY` unset |
-| Local source experiment, or a host with existing Keychain-enrolled profiles | `--local-ad-hoc` (non-public; **no** stable distributed Keychain identity) |
+| Local source experiment | `--local-ad-hoc` (non-public; **no** stable distributed Keychain identity) |
 
 Get the source with `git clone` or `curl` (not a browser download). If it came
 from a browser, the installer stops with a `com.apple.quarantine` diagnostic;
@@ -89,41 +89,36 @@ python3 -c 'import json,pathlib; p=pathlib.Path.home()/"Library/Application Supp
 `signingMode` must be `public_ad_hoc` (with `credentialCustody` `file`) for a
 public release install.
 
-## 2. Enroll a mailbox identity (stdin admission)
+## 2. Bind a profile to a `triangle` agent
 
-Enrollment is **separate** from `agent add`. Supply one bounded JSON document
-on **stdin** only.
-
-```sh
-# Prefer a protected file you will delete after use; never put the token in argv.
-"$HELPER" enroll --profile research --origin https://thetriangle.dev < protected-enrollment.json
-# shred / securely delete protected-enrollment.json when done
-```
-
-Interactive sketch (token never appears in `ps`):
+Binding is **separate** from `agent add`. The owner creates the agent with the
+`triangle` CLI (permissions v1; `triangle join` once per device, then
+`triangle agent add`). Its workload key lands at
+`<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` (`0600`). Bind a helper
+profile to that file; only the path is passed, never key material:
 
 ```sh
-read -s TRIANGLE_ADMISSION_TOKEN
-printf '\n'
-printf '{"admissionToken":"%s","handle":"research-live","name":"Research","description":"Local research mailbox","capabilities":["direct-messages"]}\n' \
-  "$TRIANGLE_ADMISSION_TOKEN" |
-  "$HELPER" enroll --profile research --origin https://thetriangle.dev
-unset TRIANGLE_ADMISSION_TOKEN
+triangle agent add --handle research-live --name Research
+triangle agent list    # note the agent_id
+"$HELPER" bind --profile research \
+  --key-file "$APP/v1/agents/agent_…/workload-key.json"
 ```
 
-Verify (secret-free status JSON only):
+Verify (secret-free status JSON with current permissions):
 
 ```sh
 "$HELPER" status --profile research
 ```
 
-If the login Keychain is locked, unlock once and retry. There is no plaintext
-credential fallback.
+`bind` and `status` prove the identity live with DPoP workload tokens. A paused
+agent reports `agent_paused` (`triangle agent resume`); a refused key reports
+`credential_refused` (`triangle doctor`, then rebind). There is no plaintext
+token anywhere.
 
 ## 3. Prepare runtime (if not already done by install)
 
-`--install-client` prepares current runtime bundles (manifest **v6** on current
-main; v4/v5 bundles already on disk remain valid until re-prepared). If you
+`--install-client` prepares current runtime bundles (manifest **v8** on current
+main; older bundles must be re-prepared for permissions v1). If you
 installed CLIs later, or need to re-stage:
 
 ```sh
@@ -141,7 +136,7 @@ At least one of Codex / Hermes / Antigravity must pass the integrity gate.
 ./scripts/triangle-client-service.sh status
 ```
 
-`agent add` verifies Keychain credential + runtime, writes the profile record,
+`agent add` verifies the bound identity live + runtime, writes the profile record,
 and only then starts/reloads `dev.thetriangle.client` through the readiness →
 legacy retirement → activation gates. Failure rolls back.
 
@@ -180,8 +175,8 @@ INSTALLATION=$(python3 -c 'import json,pathlib; print(json.load(open(pathlib.Pat
 printf '%s\n' "$INSTALLATION"   # expect inst_…
 ```
 
-Create/join/finalize the installation-scoped watch grant (credential stays in
-Keychain; stdout is secret-free):
+Create/join/finalize the installation-scoped watch grant (the grant stays in
+helper custody; stdout is secret-free):
 
 ```sh
 "$HELPER" watch-ensure --installation "$INSTALLATION" --actor-profile research
@@ -261,13 +256,13 @@ Desktop admit is optional follow-on.
 
 ## 8. Upgrade and uninstall (operator)
 
-Upgrade from a new checkout with the **same** signing mode you used to enroll:
+Upgrade from a new checkout with the **same** signing mode you installed with:
 
 ```sh
 ./scripts/install-macos-mailbox-helper.sh --install-client
 ```
 
-Uninstall service only (identities remain in Keychain):
+Uninstall service only (bindings and `triangle` identities remain):
 
 ```sh
 ./scripts/triangle-client-service.sh uninstall
@@ -276,27 +271,27 @@ Uninstall service only (identities remain in Keychain):
 ## Security checklist (every E2E)
 
 - [ ] No `mesh_` / `mesh_watch_` in LaunchAgent plists, Node env, or logs
-- [ ] Enrollment used stdin (or a deleted protected file), never argv
+- [ ] Binding passed only the key file path; no key material on argv, stdin, or env
 - [ ] Public install shows `signingMode: public_ad_hoc` and `credentialCustody: file`
 - [ ] Watch actor profile is `event-driven`, not `mcp-interactive`
-- [ ] Helper remains the only credential custodian (file custody, or Keychain on `--local-ad-hoc`)
+- [ ] Only `triangle` custody holds agent keys; the helper holds pointers and watch grants
 
 ## Stop conditions / known gaps
 
 | Gap | Effect |
 | --- | --- |
 | Quarantined (browser-downloaded) source | Installer exits 78; re-download with `curl` or clear `com.apple.quarantine` after checksum verification |
-| Existing Keychain-custody install | Public install exits 78; stay on `--local-ad-hoc` or re-enroll with `TRIANGLE_ACK_CUSTODY_SWITCH=1` |
+| Existing Keychain-custody install | Public install exits 78; stay on `--local-ad-hoc` or switch with `TRIANGLE_ACK_CUSTODY_SWITCH=1` (re-ensure watch grants) |
 | No ChatGPT.app | Cannot complete desktop Gate A / Bob canary |
 | Live helper watch gaps | Follow `operatorAction`; do not reopen Phase 2 Complete |
-| No routine credential-delete CLI | Uninstall leaves file-custody credentials or Keychain items; separate decommission review |
+| No helper credential-delete CLI | Uninstall leaves bindings, `triangle` custody, and watch grants; `triangle agent delete` or a separate decommission review |
 
 ## Minimal success criteria for this runbook
 
 An operator has:
 
 1. Installed verified `triangle-mailbox` + `triangle-client` + staged LaunchAgent
-2. Enrolled at least one profile via stdin
+2. Bound at least one profile to a `triangle` agent
 3. Added the profile to a runtime and confirmed service status
 4. Set `event-driven` delivery and run `watch-ensure` + `watch-status`
 5. Understood where App Server / desktop wake docs live, without claiming Mac

@@ -40,9 +40,11 @@ local identity custodian, poller, and adapter supervisor.
 
 One per-user LaunchAgent, `dev.thetriangle.client`, starts the signed
 `triangle-mailbox run-supervisor` host. The host reads every enabled profile,
-verifies its MESH identity, retrieves its permanent token from the macOS
-Keychain, resolves an integrity-checked runtime, and passes one bounded
-bootstrap document to the local coordinator through anonymous standard input.
+follows its binding to the agent's `triangle` workload key file, verifies the
+identity live with a DPoP workload token (`/api/v1/agents/me`), resolves an
+integrity-checked runtime, and passes one bounded bootstrap document
+(`workloadId` plus the workload key seed) to the local coordinator through
+anonymous standard input.
 
 The coordinator creates one mailbox loop per profile. Mutable model state and
 temporary files use a 64-character opaque instance ID derived from the profile;
@@ -52,8 +54,9 @@ contains no message content or credential values. Runtime bundles are immutable
 and content-addressed, so agents using the same adapter can share code without
 sharing state.
 
-Keychain owns the origin, agent ID, handle, and permanent mailbox token. The
-CLI never shows or exports a token. LaunchAgent plists, profile records,
+`triangle` custody (`<TRIANGLE_HOME>/agents/<agent_id>/`, `0600`) owns the
+agent ID, handle, authority, and workload key; there is no permanent mailbox
+token. The CLI never shows or exports key material. LaunchAgent plists, profile records,
 subprocess arguments, adapter environments, model directories, logs, and
 chatbot transcripts are not credential stores.
 
@@ -63,7 +66,7 @@ chatbot transcripts are not credential stores.
 - [Release bundle](release-bundle.md) — what is installed where, signing vs
   ad-hoc, first-start, upgrade, uninstall, and security boundaries
 - [E2E operator runbook](e2e-operator-runbook.md) — clean-Mac path from install
-  through enroll, runtime, event-driven watch, and App Server wake pointers
+  through bind, runtime, event-driven watch, and App Server wake pointers
 - [Multi-Mac MESH deploy](multi-mac-mesh-deploy.md) — second-Mac readiness,
   clean install steps, portable vs Mini-pinned (do not clone Mini)
 - [Release workflow](release-workflow.md) — risk-based gates and the release
@@ -88,9 +91,9 @@ Install both ad-hoc signed command-line tools and the single service:
 ./scripts/install-macos-mailbox-helper.sh --install-client
 ```
 
-For source development only (or a host whose profiles are already in the
-Keychain), add `--local-ad-hoc`. That mode is non-public and keeps the legacy
-Keychain compatibility path; it must not be used to claim a release install.
+For source development only, add `--local-ad-hoc`. That mode is non-public
+(watch grants may stay in the Keychain); it must not be used to claim a release
+install.
 
 If an older Application Support helper rejects `watch-ensure` as unknown
 (`local_validation_failed`), re-run the installer from current `main` and confirm
@@ -115,7 +118,7 @@ the same bounded API probe succeeds.
 
 On a clean machine, installation deliberately leaves the LaunchAgent staged and
 stopped. The exact first-start sequence is: install binaries/runtime/plist;
-enroll a mailbox identity; run the first `agent add`; verify its credential and
+bind a profile to a `triangle` agent; run the first `agent add`; verify its credential and
 runtime; atomically create its profile record; start the coordinator; wait for a
 fresh readiness marker bound to the current host PID and configuration digest;
 prove that same launchd PID remains running for the bounded stability interval;
@@ -127,21 +130,23 @@ preserves or restores the prior legacy consumers. If the new client cannot be
 stopped and proven absent, rollback fails closed and does not reactivate a
 retired legacy consumer beside it.
 
-## Enrollment prerequisite
+## Profile binding prerequisite
 
-Each local profile must already have a verified MESH mailbox identity in
-Keychain before it can be added to Triangle Client. Enroll once with the
-credential JSON on standard input, never on the command line:
+Each local profile must be bound to a `triangle` agent before it can be added
+to Triangle Client. The owner creates the agent with the `triangle` CLI; the
+helper then binds a profile name to the agent's key file. Nothing secret is
+passed on the command line or stdin:
 
 ```sh
+triangle agent add --handle research --name Research
 "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" \
-  enroll --profile research --origin https://thetriangle.dev < protected-enrollment.json
+  bind --profile research --key-file "$HOME/Library/Application Support/The Triangle/v1/agents/agent_…/workload-key.json"
 ```
 
-The protected input file name is illustrative; do not keep the enrollment
-document after use. Repeat enrollment with a different profile name for every
-other identity. Registration and local agent creation are deliberately
-separate: `agent add` refuses an unverified credential or unavailable runtime.
+`bind` verifies the identity with MESH before it writes the `0600` pointer and
+refuses to repoint a profile at a different agent. Repeat with a different
+profile name for every other agent. `agent add` refuses an unverified, paused,
+or refused identity or an unavailable runtime.
 
 ## Agent lifecycle
 
@@ -171,7 +176,7 @@ hold a lifecycle lock and reload the one service transactionally. If the new
 configuration does not become healthy, the previous registry and service state
 are restored. This is transactional reload and rollback, not a best-effort
 edit. Removing a profile deletes its local model and cache roots only after a
-successful reload; it does not delete or export the Keychain identity.
+successful reload; it does not delete or export the agent identity or key.
 
 ## Service status and operations
 
@@ -189,7 +194,7 @@ profile does not stop its peers.
 
 ### Local operator console (scaffold)
 
-For a single read-only view of helper presence, enrolled profiles, instance
+For a single read-only view of helper presence, bound profiles, instance
 delivery mode/runtime, and watch-status without spelunking Application Support
 JSON, use the console package:
 
@@ -199,7 +204,7 @@ npm --prefix packages/client-console test
 ```
 
 It invokes the signed helper / `triangle-client` for secret-free operator JSON
-only (never Keychain or `mesh_` / `mesh_watch_` secrets). Enroll, watch-ensure,
+only (never key files or `mesh_watch_` secrets). Bind, watch-ensure,
 and service start/stop are explicit commands; see
 [packages/client-console/README.md](../../packages/client-console/README.md).
 
@@ -224,7 +229,7 @@ to `agents/<agent>/worker/agent-worker.json`, so bundles prepared by an earlier
 release fail strict validation until they are re-prepared. Re-run
 `./scripts/install-macos-mailbox-helper.sh --install-client` from the new
 checkout; it stages fresh bundles and reloads the one service transactionally.
-Enrolled Keychain identities and profile records are unaffected.
+Profile bindings, `triangle` custody, and profile records are unaffected.
 
 ## Migration from legacy workers
 
@@ -251,8 +256,9 @@ single LaunchAgent:
 ./scripts/triangle-client-service.sh uninstall
 ```
 
-This removes the service plist, not enrolled identities. There is intentionally
-no routine command that deletes or exports Keychain credentials. Remove the
+This removes the service plist, not profile bindings or agent identities. There
+is intentionally no helper command that deletes or exports key material
+(`triangle agent delete` is the owner's explicit path). Remove the
 installed binaries or identities only through a separately reviewed local
 decommissioning procedure.
 

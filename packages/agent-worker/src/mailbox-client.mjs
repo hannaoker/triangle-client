@@ -449,6 +449,8 @@ export function createWorkloadTokenManager({
       new Request(new URL(path, `${origin}/`), {
         method: "POST",
         cache: "no-store",
+        // Never follow a redirect: the proof body must only reach this origin.
+        redirect: "manual",
         headers: { accept: "application/json", "content-type": "application/json" },
         body: JSON.stringify(body),
         signal,
@@ -640,6 +642,8 @@ export function createMailboxClient(
           new Request(fullUrl, {
             method,
             cache: "no-store",
+            // Never follow a redirect: the DPoP proof is bound to this URL only.
+            redirect: "manual",
             headers: {
               accept: "application/json",
               authorization: `Bearer ${accessToken}`,

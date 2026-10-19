@@ -1,5 +1,7 @@
 # Headless engagement enablement (portable Mac)
 
+> **Permissions v1 note (PR D, #93).** The doctor no longer checks enrollment journals or Keychain identity; it reports the v1 profile binding (`profiles-v1/`), key-file custody and the cached permissions view. References below to enrollment or Keychain identity are historical.
+
 Portable automatic engagement on any Mac: watch → kick → claim → reply → ack,
 without manual claimer cleanup and without dual claimers or silent redelivery.
 

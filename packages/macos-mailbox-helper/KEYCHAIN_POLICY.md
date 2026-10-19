@@ -1,69 +1,51 @@
-# macOS Keychain policy
+# Credential custody and Keychain policy
 
-**Scope (2026-10-17):** Developer ID signing and notarization are out of scope,
-so the public release does not use the Keychain. Public ad-hoc installs
-(`signingMode: public_ad_hoc`) are built with `TRIANGLE_FILE_CUSTODY_REQUIRED`
-and keep mailbox, workload, and watch-grant credentials in `0600` files under
-`~/Library/Application Support/The Triangle/credentials/local/` (selection:
-`CredentialCustodyPolicy.swift`). Requesting Keychain custody there
-(`TRIANGLE_CREDENTIAL_CUSTODY=keychain`) fails instead of falling back. This
-policy now governs the `--local-ad-hoc` compatibility path for existing
-Keychain-enrolled profiles.
+**Scope (2026-10-18, permissions v1):** agent identities never live in the
+Keychain. The `triangle` CLI owns each agent's Ed25519 workload key at
+`<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` (directories `0700`,
+files `0600`, beside a secret-free `agent.json`). The helper keeps only a
+`0600` pointer per profile at
+`~/Library/Application Support/The Triangle/profiles-v1/profile-<hex>.json`
+(`{"version":1,"keyFile":"…","origin":"…"}`) and reads the key file itself
+(`V1AgentCredentialLoader`: no-follow regular file owned by the user, no
+group/other bits, directory name equal to `agent_id`, public key matching the
+private key). There is no static `mesh_` bearer, no helper registration, no
+enrollment journal, and no Keychain identity item
+(`dev.thetriangle.mesh.mailbox` and `dev.thetriangle.mesh.workload-key` are
+gone). Old profiles are not migrated: wipe them and `triangle-mailbox bind`
+again.
 
-Mailbox credential items use the Data Protection Keychain and are explicitly
-non-synchronizable. The fixed generic-password service for mailbox credentials is
-`dev.thetriangle.mesh.mailbox`; the validated local profile name is the account.
-Installation-scoped watch-grant credentials use a separate service,
-`dev.thetriangle.mesh.mailbox-watch`, with the installation id (`inst_…`) as the
-account. Create uses `AfterFirstUnlockThisDeviceOnly` so the signed helper can
-operate without a prompt after the user's login Keychain becomes available.
+Handoff to runtimes:
 
-Queries intentionally do not accept or set an arbitrary Keychain access group.
-They use the signed helper's default Data Protection Keychain application access
-group. This keeps credential custody tied to the installed helper rather than to
-caller-controlled input.
+- Workers launched by `run-worker` receive only `TRIANGLE_WORKLOAD_KEY_FILE`
+  (the key file path) and `MESH_ORIGIN`; the Node worker opens the file.
+- The Triangle Client supervisor bootstrap mailbox carries `workloadId` and the
+  43-character base64url Ed25519 seed (`workloadPrivateKey`) on its private
+  launch channel only.
+- Reasoning children (model CLIs) receive neither: the runner environment is an
+  allowlist.
 
-Reads, updates, and deletes fall back to the legacy login Keychain when the Data
-Protection Keychain returns `errSecItemNotFound` or missing entitlements
-(`errSecMissingEntitlement`, status `-34018`). Background LaunchAgents pass
-`kSecUseAuthenticationUIFail` on legacy probes so macOS cannot show the login
-Keychain password dialog; foreground sessions may prompt once for migration.
-Creates never write to the legacy Keychain.
+## Watch grants
 
-Ad-hoc builds cannot embed Keychain entitlements; macOS AMFI rejects
-restricted entitlements on ad-hoc signatures. LaunchAgent deployments that need
-unattended custody use file custody (public install) instead.
+Installation-scoped watch-grant credentials (`mesh_watch_…`) are still stored
+by the helper. Public ad-hoc installs (`signingMode: public_ad_hoc`, built with
+`TRIANGLE_FILE_CUSTODY_REQUIRED`) keep them in `0600` files under
+`~/Library/Application Support/The Triangle/credentials/local/watch/`
+(selection: `CredentialCustodyPolicy.swift`); requesting Keychain custody there
+(`TRIANGLE_CREDENTIAL_CUSTODY=keychain`) fails instead of falling back.
 
-If credentials were enrolled under an unsigned or entitlement-less build, migrate
-them once from an interactive Terminal session:
+`--local-ad-hoc` development installs may keep watch grants in the Data
+Protection Keychain under the non-synchronizable generic-password service
+`dev.thetriangle.mesh.mailbox-watch`, with the installation id (`inst_…`) as
+the account, created `AfterFirstUnlockThisDeviceOnly`. Queries never accept a
+caller-chosen access group. Reads, updates, and deletes may fall back to the
+legacy login Keychain on `errSecItemNotFound` or `errSecMissingEntitlement`
+(`-34018`); background LaunchAgents pass `kSecUseAuthenticationUIFail` so no
+dialog can appear. Creates never write to the legacy Keychain.
 
-1. Stop Triangle Client: `launchctl bootout gui/$(id -u)/dev.thetriangle.client`
-2. Reinstall the helper (`--local-ad-hoc` to stay on Keychain custody; a public
-   install moves new enrollments to file custody and requires re-enrollment).
-3. For each profile, read the binding in the foreground (this may prompt once):
-   `"$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" status --profile PROFILE`
-4. If status reports `profile_state_inconsistent` or `local_authorization_required`
-   after reinstall, delete the legacy item and re-enroll from stdin, or use MESH
-   credential recovery if the server-side identity is still valid:
-   `security delete-generic-password -s dev.thetriangle.mesh.mailbox -a PROFILE`
-   `security delete-generic-password -s dev.thetriangle.mesh.workload-key -a PROFILE`
-5. Start Triangle Client again after a successful foreground `status`.
+Ad-hoc builds cannot embed Keychain entitlements (macOS AMFI rejects restricted
+entitlements on ad-hoc signatures), so unattended LaunchAgent deployments use
+file custody. Developer ID is out of scope.
 
-Developer ID is out of scope: the public release requires file custody rather
-than a stable application identifier with Keychain entitlements. For
-`--local-ad-hoc` Keychain compatibility hosts, verification requires an explicitly
-opted-in, uniquely named disposable real-Keychain lifecycle test against the
-signed artifact as a release gate; it creates, reads, replaces, and deletes only its own item.
-Unit and host contract tests inspect pure query dictionaries and never access a
-live Keychain.
-
-The disposable lifecycle scaffold is `scripts/test-keychain-integration.sh`.
-It refuses to run unless `TRIANGLE_RUN_DISPOSABLE_KEYCHAIN_TEST=1` is explicitly
-set, generates a unique profile, and cleans up only that exact profile. It must
-be run as a release gate after the helper has its stable production signature;
-ordinary unit-test and build commands do not execute it.
-
-Identity-v1 mailbox registration may store a **client-fabricated** `mesh_`
-compatibility bearer when the server omits `token`. That value is not
-server-authorized. Interactive MCP uses workload JWT + DPoP instead; see
-[`docs/triangle-client/identity-v1-token-auth.md`](../../docs/triangle-client/identity-v1-token-auth.md).
+Unit and host contract tests use temporary homes and in-memory stores; they
+never access a live Keychain or real `TRIANGLE_HOME`.

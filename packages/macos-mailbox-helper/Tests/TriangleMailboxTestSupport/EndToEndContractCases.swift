@@ -1,109 +1,67 @@
 import Foundation
-@_spi(EnrollmentTesting) @_spi(ClientInstanceTesting) import TriangleMailboxCore
+@_spi(ClientInstanceTesting) import TriangleMailboxCore
 
 public enum EndToEndContractCases {
+    /// Permissions v1: `triangle` custody on disk -> `bind` -> fresh `status`
+    /// -> MCP across two sessions -> worker launch with only the key file path.
     public static func crossSessionMailboxLifecycle() async throws {
         let runID = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-        let admissionCanary = "admission_\(runID)"
-        let tokenCanary = "mesh_\(runID)\(runID)"
         let inheritedCanary = "ambient_\(runID)"
-        let agentID = "agent_\(runID)"
         let profile = try ProfileName("integration-\(runID.prefix(20))")
         let neighborProfile = try ProfileName("neighbor-\(runID.prefix(20))")
-        let handle = try MailboxHandle("integration-\(runID.prefix(16))")
-        let origin = try MeshOrigin("https://thetriangle.dev")
-        let store = InMemoryCredentialStore()
-        let neighborBinding = CredentialBinding(
-            origin: origin,
-            agentID: try AgentID("agent_\(String(repeating: "f", count: 32))"),
-            handle: try MailboxHandle("neighbor-mailbox"),
-            token: try MeshToken("mesh_\(String(repeating: "e", count: 64))")
-        )
-        try store.create(neighborBinding, for: neighborProfile)
 
         let root = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appendingPathComponent("triangle-e2e-\(runID)", isDirectory: true)
-        let journalRoot = root.appendingPathComponent("journal", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: journalRoot,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("v1", isDirectory: true)
+        let agent = try V1TestCustody.makeAgent(home: home, profile: profile.value, handle: "integration-agent", fill: "1")
+        let neighbor = try V1TestCustody.makeAgent(home: home, profile: neighborProfile.value, handle: "neighbor-mailbox", fill: "e")
+        let bindingRoot = root.appendingPathComponent("profiles-v1", isDirectory: true)
+        let bindings = FileV1ProfileBindingStore(root: bindingRoot)
+        let methods = MethodRecorder()
+        let transport = FakeV1Mesh(agents: [agent, neighbor]) { request in
+            guard request.url.path == "/api/mcp",
+                  let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+                  let id = object["id"],
+                  let params = object["params"] as? [String: Any],
+                  let method = params["name"] as? String
+            else { throw EndToEndFailure("unexpected fixture request") }
+            methods.append(method)
+            return FakeV1Mesh.json(200, [
+                "jsonrpc": "2.0", "id": id,
+                "result": ["content": [["type": "text", "text": method == "mesh.mailbox.list" ? "empty mailbox" : "reply accepted"]]],
+            ], request)
+        }
+        let mcpAuthorized = MCPAuthorization(mesh: transport)
 
-        let journal = FileEnrollmentJournal(testRoot: journalRoot)
-        let transport = LifecycleTransport(
-            admissionToken: admissionCanary,
-            permanentToken: tokenCanary,
-            agentID: agentID,
-            handle: handle.value
-        )
-        let enrollmentInput = try JSONSerialization.data(withJSONObject: [
-            "admissionToken": admissionCanary,
-            "handle": handle.value,
-            "name": "Mailbox Integration",
-            "description": "Disposable local fixture",
-            "capabilities": ["direct-messages"],
-        ], options: [.sortedKeys])
-        let initialService = EnrollmentService(
-            store: store,
-            transport: transport,
-            reservation: InMemoryEnrollmentReservation(),
-            journal: journal
-        )
-        let enrolled = try await initialService.enroll(profile: profile, origin: origin, inputData: enrollmentInput)
-        try expect(enrolled.status == .verified, "enrollment did not finish verified")
-        let enrollmentOutput = try CLIOutputRenderer.render(enrolled)
+        let bound = try await ProfileBindingService(bindings: bindings, transport: mcpAuthorized)
+            .bind(profile: profile, keyFile: agent.keyFile, origin: nil)
+        try expect(bound.status == .verified, "bind did not finish verified")
+        _ = try await ProfileBindingService(bindings: bindings, transport: mcpAuthorized)
+            .bind(profile: neighborProfile, keyFile: neighbor.keyFile, origin: nil)
+        let bindOutput = try CLIOutputRenderer.render(bound)
 
-        // A new service instance receives only the profile and durable storage
-        // abstractions. It does not receive either credential as input.
-        let restartedService = EnrollmentService(
-            store: store,
-            transport: transport,
-            reservation: InMemoryEnrollmentReservation(),
-            journal: FileEnrollmentJournal(testRoot: journalRoot)
-        )
-        let restartedStatus = try await restartedService.status(profile: profile)
-        try expect(restartedStatus.status == .verified, "fresh service did not resume the stored identity")
+        // A fresh service gets only the profile and the on-disk pointer.
+        let restartedStatus = await ProfileBindingService(bindings: FileV1ProfileBindingStore(root: bindingRoot), transport: mcpAuthorized).status(profile: profile)
+        try expect(restartedStatus.status == .verified && restartedStatus.agentID == agent.agentID.value, "fresh service did not resume the bound agent")
+        try expect(restartedStatus.permissions?["dm_owner"] == true, "status did not carry permissions")
 
+        func freshGate() -> VerifiedCredentialGate {
+            VerifiedCredentialGate(resolver: FileV1AgentResolver(bindings: FileV1ProfileBindingStore(root: bindingRoot)), transport: mcpAuthorized)
+        }
         let firstOutput = CapturedProxyOutput()
-        let firstProxy = MCPProxy(
-            gate: VerifiedCredentialGate(
-                store: store,
-                transport: transport,
-                reservation: InMemoryEnrollmentReservation(),
-                journal: FileEnrollmentJournal(testRoot: journalRoot)
-            ),
-            transport: transport
-        )
         let firstRequest = #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mesh.mailbox.list","arguments":{"limit":10}}}"#
-        let firstResult = await firstProxy.run(
-            profile: profile,
-            input: Data("\(firstRequest)\n".utf8),
-            output: firstOutput
-        )
+        let firstResult = await MCPProxy(gate: freshGate(), transport: mcpAuthorized).run(profile: profile, input: Data("\(firstRequest)\n".utf8), output: firstOutput)
         try expect(firstResult == .completed, "first MCP turn failed")
 
-        // Recreate both proxy and gate to model a new chatbot process/session.
         let secondOutput = CapturedProxyOutput()
-        let secondProxy = MCPProxy(
-            gate: VerifiedCredentialGate(
-                store: store,
-                transport: transport,
-                reservation: InMemoryEnrollmentReservation(),
-                journal: FileEnrollmentJournal(testRoot: journalRoot)
-            ),
-            transport: transport
-        )
         let secondRequest = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mesh.messages.send","arguments":{"roomId":"room_fixture","text":"fixture reply"}}}"#
-        let secondResult = await secondProxy.run(
-            profile: profile,
-            input: Data("\(secondRequest)\n".utf8),
-            output: secondOutput
-        )
+        let secondResult = await MCPProxy(gate: freshGate(), transport: mcpAuthorized).run(profile: profile, input: Data("\(secondRequest)\n".utf8), output: secondOutput)
         try expect(secondResult == .completed, "second MCP turn failed")
-        try expect(transport.mcpMethods == ["mesh.mailbox.list", "mesh.messages.send"], "MCP turns were not forwarded in order")
+        try expect(methods.values == ["mesh.mailbox.list", "mesh.messages.send"], "MCP turns were not forwarded in order")
+        try expect(mcpAuthorized.mcpWorkloads == [agent.workloadID.value, agent.workloadID.value], "MCP used the wrong agent's token")
 
         let executor = CapturedWorkerExecutor()
         let command = WorkerCommand(
@@ -112,57 +70,28 @@ public enum EndToEndContractCases {
             workingDirectory: URL(fileURLWithPath: "/trusted"),
             environment: ["PATH": "/trusted/bin", "TRIANGLE_PROJECT_ROOT": "/trusted"]
         )
-        let launcher = WorkerLauncher(
-            gate: VerifiedCredentialGate(
-                store: store,
-                transport: transport,
-                reservation: InMemoryEnrollmentReservation(),
-                journal: FileEnrollmentJournal(testRoot: journalRoot)
-            ),
-            resolver: FixedWorkerCommandResolver(command: command),
-            executor: executor
-        )
-        try await launcher.launch(
-            profile: profile,
-            worker: .codex,
-            inheritedEnvironment: [
-                "MESH_AGENT_TOKEN": inheritedCanary,
-                "UNRELATED_SECRET": inheritedCanary,
-            ]
-        )
+        try await WorkerLauncher(gate: freshGate(), resolver: FixedWorkerCommandResolver(command: command), executor: executor)
+            .launch(profile: profile, worker: .codex, inheritedEnvironment: ["MESH_AGENT_TOKEN": inheritedCanary, "UNRELATED_SECRET": inheritedCanary])
         let launch = try require(executor.request, "worker launch was not prepared")
-        try expect(launch.environment["MESH_AGENT_TOKEN"] == tokenCanary, "worker did not receive the stored credential")
-        try expect(launch.environment["CODEX_AGENT_ID"] == agentID, "worker did not receive the stored identity")
+        try expect(launch.environment["TRIANGLE_WORKLOAD_KEY_FILE"] == agent.keyFile.path, "worker did not receive its key file")
+        try expect(launch.environment["MESH_AGENT_TOKEN"] == nil, "worker received a static bearer")
+        try expect(launch.environment["CODEX_AGENT_ID"] == agent.agentID.value, "worker did not receive the bound identity")
         try expect(launch.environment["UNRELATED_SECRET"] == nil, "ambient secret reached the worker")
 
         let sanitizer = try runProductionEnvironmentSanitizer(workerEnvironment: launch.environment, root: root)
-        let generatedFiles = try regularFileContents(beneath: root)
-        let argvSnapshot = Data(
-            ([launch.executable.path] + launch.arguments + sanitizer.argv).joined(separator: "\n").utf8
-        )
+        let argvSnapshot = Data(([launch.executable.path] + launch.arguments + sanitizer.argv).joined(separator: "\n").utf8)
         let visibleArtifacts = [
-            enrollmentOutput.stdout,
-            enrollmentOutput.stderr,
-            firstOutput.stdout,
-            firstOutput.stderr,
-            secondOutput.stdout,
-            secondOutput.stderr,
-            argvSnapshot,
-            sanitizer.stdout,
-            sanitizer.stderr,
-        ] + generatedFiles
-        for secret in [admissionCanary, tokenCanary, inheritedCanary] {
+            bindOutput.stdout, bindOutput.stderr, firstOutput.stdout, firstOutput.stderr,
+            secondOutput.stdout, secondOutput.stderr, argvSnapshot, sanitizer.stdout, sanitizer.stderr,
+        ] + (try regularFileContents(beneath: bindingRoot))
+        for secret in [agent.seed, neighbor.seed, inheritedCanary] + transport.issuedTokens {
             let needle = Data(secret.utf8)
-            try expect(
-                visibleArtifacts.allSatisfy { $0.range(of: needle) == nil },
-                "a canary appeared in stdout, stderr, argv, generated files, or the reasoning-child environment"
-            )
+            try expect(visibleArtifacts.allSatisfy { $0.range(of: needle) == nil },
+                       "a secret appeared in stdout, stderr, argv, bindings, or the reasoning-child environment")
         }
-        try expect(
-            !String(decoding: sanitizer.stdout, as: UTF8.self).contains("MESH_AGENT_TOKEN") &&
-                !String(decoding: sanitizer.stdout, as: UTF8.self).contains("CODEX_AGENT_ID"),
-            "production sanitizer preserved a controller credential selector"
-        )
+        let sanitized = String(decoding: sanitizer.stdout, as: UTF8.self)
+        try expect(!sanitized.contains("TRIANGLE_WORKLOAD_KEY_FILE") && !sanitized.contains("CODEX_AGENT_ID"),
+                   "production sanitizer preserved a controller credential selector")
 
         let instanceRoot = root.appendingPathComponent("client-instances", isDirectory: true)
         let instanceStore = FileClientInstanceStore(testRoot: instanceRoot)
@@ -170,131 +99,58 @@ public enum EndToEndContractCases {
             try ProfileName(index < 6 ? "codex-\(index + 1)" : "hermes-\(index + 1)")
         }
         for (index, clientProfile) in profiles.enumerated() {
-            try instanceStore.create(ClientInstance(
-                profile: clientProfile,
-                runtimeAdapter: index < 6 ? .codex : .hermes
-            ))
+            try instanceStore.create(ClientInstance(profile: clientProfile, runtimeAdapter: index < 6 ? .codex : .hermes))
         }
         let initialInstances = try instanceStore.list()
         try expect(initialInstances.count == 10, "ten Triangle Client instances were not persisted")
         try expect(initialInstances.filter { $0.runtimeAdapter == .codex }.count == 6, "Codex instance count changed")
         try expect(initialInstances.filter { $0.runtimeAdapter == .hermes }.count == 4, "Hermes instance count changed")
         try expect(Set(initialInstances.map(\.instanceID)).count == 10, "instance state was not isolated by opaque ID")
-
         try instanceStore.setEnabled(false, profile: profiles[5])
         let restartedInstanceStore = FileClientInstanceStore(testRoot: instanceRoot)
-        let restartedInstances = try restartedInstanceStore.list()
-        try expect(
-            restartedInstances.first { $0.profile == profiles[5] }?.enabled == false,
-            "exact disabled state did not survive a client restart"
-        )
+        try expect(try restartedInstanceStore.list().first { $0.profile == profiles[5] }?.enabled == false, "exact disabled state did not survive a client restart")
         try restartedInstanceStore.setEnabled(true, profile: profiles[5])
         try restartedInstanceStore.remove(profile: profiles[8])
         let remainingInstances = try restartedInstanceStore.list()
         try expect(remainingInstances.count == 9, "exact instance removal changed the wrong number of records")
         try expect(!remainingInstances.contains { $0.profile == profiles[8] }, "removed instance survived")
-        try expect(remainingInstances.contains { $0.profile == profiles[5] && $0.enabled }, "neighbor enable state was lost")
         for data in try regularFileContents(beneath: instanceRoot) {
-            try expect(data.range(of: Data(tokenCanary.utf8)) == nil, "permanent token reached the instance registry")
+            try expect(data.range(of: Data(agent.seed.utf8)) == nil, "workload key reached the instance registry")
             try expect(data.range(of: Data(inheritedCanary.utf8)) == nil, "ambient secret reached the instance registry")
         }
 
-        try store.delete(for: profile)
-        try journal.remove(for: profile)
+        try ProfileBindingService(bindings: bindings, transport: mcpAuthorized).unbind(profile: profile)
         do {
-            _ = try store.read(for: profile)
-            throw EndToEndFailure("deleted profile remained readable")
-        } catch CredentialStoreError.itemNotFound {
-            // Expected exact deletion.
-        }
-        try expect(try store.read(for: neighborProfile) == neighborBinding, "exact deletion changed a neighboring item")
-        try expect(try regularFileContents(beneath: journalRoot).isEmpty, "exact journal cleanup left generated state")
-        try expect(transport.registrationCount == 1, "a fresh session re-registered the mailbox identity")
-        try expect(transport.identityCount >= 5, "identity was not freshly authenticated across lifecycle boundaries")
+            _ = try freshGate().material(for: profile)
+            throw EndToEndFailure("unbound profile remained resolvable")
+        } catch VerifiedCredentialGateError.profileNotFound {}
+        try expect(try freshGate().material(for: neighborProfile).agentID == neighbor.agentID, "unbind changed a neighboring binding")
+        try expect(FileManager.default.fileExists(atPath: agent.keyFile.path), "unbind deleted triangle custody")
+        try expect(transport.requests.allSatisfy { !$0.url.path.contains("register") }, "the helper attempted self-registration")
+        try expect(transport.requestCount(path: "/api/v1/agents/me") >= 5, "identity was not freshly proven across lifecycle boundaries")
     }
 }
 
-private final class LifecycleTransport: MeshTransport, @unchecked Sendable {
-    private let lock = NSLock()
-    private let admissionToken: String
-    private let permanentToken: String
-    private let agentID: String
-    private let handle: String
-    private var registrations = 0
-    private var identities = 0
-    private var methods: [String] = []
+private final class MethodRecorder: @unchecked Sendable {
+    private let lock = NSLock(); private var storage: [String] = []
+    var values: [String] { lock.withLock { storage } }
+    func append(_ value: String) { lock.withLock { storage.append(value) } }
+}
 
-    init(admissionToken: String, permanentToken: String, agentID: String, handle: String) {
-        self.admissionToken = admissionToken
-        self.permanentToken = permanentToken
-        self.agentID = agentID
-        self.handle = handle
-    }
-
-    var registrationCount: Int { lock.withLock { registrations } }
-    var identityCount: Int { lock.withLock { identities } }
-    var mcpMethods: [String] { lock.withLock { methods } }
-
+/// Rejects any MCP call that does not carry a live workload token + DPoP.
+private final class MCPAuthorization: MeshTransport, @unchecked Sendable {
+    let mesh: FakeV1Mesh
+    private let lock = NSLock(); private var workloads: [String] = []
+    init(mesh: FakeV1Mesh) { self.mesh = mesh }
+    var mcpWorkloads: [String] { lock.withLock { workloads } }
     func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        try lock.withLock {
-            if request.url.path == "/api/v1/identity/registration-challenges" {
-                guard request.headers["X-Mesh-Admission-Token"] == admissionToken,
-                      request.headers["Authorization"] == nil,
-                      let body = try? JSONDecoder().decode(ChallengeRequestBody.self, from: request.body)
-                else { throw EndToEndFailure("challenge request was invalid") }
-                let challengeData = Data("""
-                {"challenge":{"challenge_id":"identity_challenge_\(String(repeating: "1", count: 32))","expires_at":"2099-01-01T00:00:00.000Z","nonce":"test_nonce","nonce_sha256":"\(String(repeating: "a", count: 64))","origin":"https://thetriangle.dev","proof_profile":"mesh.identity-registration-proof/1","workload_jkt":"\(body.workloadPublicJWK.jkt)","handle":"\(body.handle)","identity_profile":"mesh.identity/1","workload_id":"\(body.workloadID)","workload_public_jwk":\(body.workloadPublicJWK.canonicalJSONString)}}
-                """.utf8)
-                return jsonResponse(status: 201, path: request.url.path, body: challengeData)
+        if request.url.path == "/api/mcp" {
+            guard let workload = mesh.workload(forAuthorization: request.headers) else {
+                throw EndToEndFailure("MCP omitted the workload access token")
             }
-            if request.url.path == "/api/v1/agents/register-mailbox" {
-                guard request.headers["X-Mesh-Admission-Token"] == admissionToken,
-                      request.headers["Authorization"] == nil,
-                      !request.body.contains(Data(admissionToken.utf8)),
-                      let submission = try? JSONDecoder().decode(IdentityRegistrationSubmission.self, from: request.body)
-                else { throw EndToEndFailure("registration credential was sent through the wrong channel") }
-                registrations += 1
-                let body = Data("""
-                {"agent":{"id":"\(agentID)","handle":"\(handle)","name":"Mailbox Integration","description":"Disposable local fixture","endpointUrl":"https://thetriangle.dev/api/v1/mailbox","capabilities":["direct-messages"],"protocolVersion":"mailbox-v1","protocolBinding":"TRIANGLE","conformanceStatus":"unverified","registrationMode":"mailbox","agentCardUrl":"https://thetriangle.dev/api/v1/agents/\(agentID)"},"workload":{"workload_id":"\(submission.workloadID)","public_jwk":\(submission.workloadPublicJWK.canonicalJSONString),"jkt":"\(submission.workloadPublicJWK.jkt)","state":"active"},"token":"\(permanentToken)","warning":"Save this token now."}
-                """.utf8)
-                return jsonResponse(status: 201, path: request.url.path, body: body)
-            }
-            guard request.headers["Authorization"] == "Bearer \(permanentToken)" else {
-                throw EndToEndFailure("authenticated operation omitted the stored bearer")
-            }
-            if request.url.path == "/api/v1/agents/me" {
-                identities += 1
-                return jsonResponse(status: 200, path: request.url.path, body: Data("""
-                {"agent":{"id":"\(agentID)","name":"Mailbox Integration","handle":"\(handle)","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}
-                """.utf8))
-            }
-            guard request.url.path == "/api/mcp",
-                  let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
-                  let id = object["id"],
-                  let params = object["params"] as? [String: Any],
-                  let method = params["name"] as? String
-            else { throw EndToEndFailure("unexpected fixture request") }
-            methods.append(method)
-            let responseObject: [String: Any] = [
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": ["content": [["type": "text", "text": method == "mesh.mailbox.list" ? "empty mailbox" : "reply accepted"]]],
-            ]
-            return jsonResponse(
-                status: 200,
-                path: request.url.path,
-                body: try JSONSerialization.data(withJSONObject: responseObject, options: [.sortedKeys])
-            )
+            lock.withLock { workloads.append(workload) }
         }
-    }
-
-    private func jsonResponse(status: Int, path: String, body: Data) -> MeshHTTPResponse {
-        MeshHTTPResponse(
-            statusCode: status,
-            headers: ["Content-Type": "application/json"],
-            body: body,
-            finalURL: URL(string: "https://thetriangle.dev\(path)")!
-        )
+        return try await mesh.send(request)
     }
 }
 

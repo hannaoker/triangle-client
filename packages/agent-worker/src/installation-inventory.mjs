@@ -2,15 +2,18 @@
  * Read-only installation inventory for doctor/status.
  *
  * Enumerates the full installation registry (`client/instances/*.json`), the
- * enrollment journal, and every lane-specific binding (Codex v2 headless,
+ * permissions v1 profile bindings (`profiles-v1/profile-<hex>.json` -> a `triangle`
+ * agent key file), and every lane-specific binding (Codex v2 headless,
  * Cursor ACP, worker runtime manifests, App Server, Grok Bot), then reconciles
  * each registered profile with the binding its runtime/delivery mode requires.
  *
  * Contract:
  * - READ-ONLY. Only stat/read/readdir calls. No writes, renames, mkdirs,
  *   lock acquisition, process launches, Keychain or network access.
- * - Never returns credential material or message bodies. Credential files are
- *   checked for existence only; their contents are never opened.
+ * - Never returns credential material or message bodies. Workload key files are
+ *   checked for custody (mode/owner/type) only; their contents are never opened.
+ *   The agent record (`agent.json`) and `triangle`'s cached permissions view
+ *   are secret-free and are read.
  * - Every field that the local journal/registry does not supply is reported as
  *   the literal string "unavailable" (or "unsupported" for lanes with no such
  *   concept). Nothing is inferred from absence.
@@ -35,19 +38,24 @@ const MAX_JOURNAL_FILES = 5000;
 // Persisted enums (Swift `RuntimeAdapter`, `DeliveryMode`, `EnrollmentJournalState`).
 const RUNTIME_ADAPTERS = new Set(["codex", "hermes", "antigravity", "grok-bot", "cursor-acp"]);
 const DELIVERY_MODES = new Set(["worker", "mcp-interactive", "event-driven", "grok-bot", "headless-app-server", "headless-cursor-acp"]);
-const ENROLLMENT_STATES = new Set(["pending", "outcome_unknown", "registered_not_installed", "pending_verification", "quarantined", "verified"]);
 const REGISTRY_REQUIRED_KEYS = ["version", "instanceId", "profile", "runtimeAdapter", "enabled"];
 const REGISTRY_ALLOWED_KEYS = new Set([...REGISTRY_REQUIRED_KEYS, "deliveryMode"]);
-const ENROLLMENT_KEYS = ["version", "profile", "origin", "state", "agentID", "handle", "reasonCode"];
+const BINDING_KEYS_REQUIRED = ["version", "keyFile"];
+const BINDING_KEYS_ALLOWED = new Set(["version", "keyFile", "origin"]);
+const WORKLOAD_ID = /^workload_[a-f0-9]{32}$/;
+const AGENT_BOUNDS = ["agent.read", "agent.write"];
 const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+// Permission keys are dotted (`dm.send`, `posts.publish`, `tasks.claim`).
+const PERMISSION_NAME = /^(?=.{1,64}$)[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
 const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const MAILBOX_HANDLE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const OPEN_TXN_MAX_BYTES = 4096;
-const ENROLLMENT_MAX_BYTES = 4096;
+const PROFILE_BINDING_MAX_BYTES = 4096;
+const AGENT_RECORD_MAX_BYTES = 64 * 1024;
 const INSTALLATION_IDENTITY_MAX_BYTES = 512;
 const WORKER_MANIFEST_KEYS = ["version", "nodeSHA256", "projectRoot", "environment", "artifacts"];
-const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7]);
+const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8]);
 const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 
@@ -147,17 +155,6 @@ function ageMs(iso, now) {
   const value = isoOrNull(iso);
   if (value == null) return null;
   return Math.max(0, now - Date.parse(value));
-}
-
-function hexProfile(profile) {
-  return Buffer.from(profile, "utf8").toString("hex");
-}
-
-function decodeHexProfile(hex) {
-  if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
-  const text = Buffer.from(hex, "hex").toString("utf8");
-  // Round-trip check rejects invalid UTF-8 that Buffer would replace with U+FFFD.
-  return isValidProfileName(text) && Buffer.from(text, "utf8").toString("hex") === hex ? text : null;
 }
 
 /**
@@ -342,63 +339,125 @@ function readRegistry(clientRoot) {
   return { status: "present", path: dir, entries, strayNames };
 }
 
-/**
- * Mirrors Swift `FileEnrollmentJournal.read(for:)`: the record must decode
- * (exact keys, version 1, valid origin/state/agentID/handle/reasonCode) and
- * name the same profile as its file. Anything else is `invalid_record`, which
- * is never treated as verified.
- */
-function validateEnrollmentRecord(value, profile) {
-  if (!isPlainObject(value) || !sameKeys(value, ENROLLMENT_KEYS)) return false;
-  return value.version === 1
-    && value.profile === profile
-    && isValidMeshOrigin(value.origin)
-    && ENROLLMENT_STATES.has(value.state)
-    && (value.agentID === null || (typeof value.agentID === "string" && AGENT_ID.test(value.agentID)))
-    && (value.handle === null || (typeof value.handle === "string" && value.handle.length >= 3
-      && value.handle.length <= 32 && MAILBOX_HANDLE.test(value.handle)))
-    && typeof value.reasonCode === "string" && REASON_CODE.test(value.reasonCode);
+/** Swift loader: `authority.json` `via` applies only when its `authority` matches the agent's. */
+function transportVia(home, authority) {
+  const file = path.join(home, "authority.json");
+  if (custodyProblem(file, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true }) != null) return null;
+  const { value } = readJsonFile(file);
+  // Swift compares canonical MeshOrigins, so compare URL origins, not raw strings.
+  return isPlainObject(value) && isValidMeshOrigin(value.authority) && isValidMeshOrigin(authority)
+    && canonicalOrigin(value.authority) === canonicalOrigin(authority) && isValidMeshOrigin(value.via) ? value.via : null;
 }
 
-function readEnrollmentJournal(applicationRoot) {
-  const dir = path.join(applicationRoot, "enrollment-journal");
+function canonicalOrigin(value) {
+  try { return new URL(value).origin; } catch { return null; }
+}
+
+function decodeHexProfile(hex) {
+  if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
+  const text = Buffer.from(hex, "hex").toString("utf8");
+  // Round-trip check rejects invalid UTF-8 that Buffer would replace with U+FFFD.
+  return isValidProfileName(text) && Buffer.from(text, "utf8").toString("hex") === hex ? text : null;
+}
+
+function isPrivateDirectory(dirPath) {
+  try {
+    const meta = lstatSync(dirPath);
+    const uid = currentUid();
+    return meta.isDirectory() && (meta.mode & 0o077) === 0 && (uid == null || meta.uid === uid);
+  } catch {
+    return false;
+  }
+}
+
+/** A `triangle` permissions cache entry: `{ etag, view: { agent_id, revision, permissions } }`. */
+function readCachedPermissions(home, agentId) {
+  const file = path.join(home, "cache", "permissions", `${agentId}.json`);
+  if (custodyProblem(file, { maxBytes: AGENT_RECORD_MAX_BYTES }) != null) return { source: UNAVAILABLE, reason: "not_cached" };
+  const { value, error } = readJsonFile(file);
+  const view = value?.view;
+  if (error != null || !isPlainObject(view) || view.agent_id !== agentId || !Number.isSafeInteger(view.revision) || !isPlainObject(view.permissions)) {
+    return { source: UNAVAILABLE, reason: "cache_invalid" };
+  }
+  const values = {};
+  for (const [name, flag] of Object.entries(view.permissions)) {
+    if (PERMISSION_NAME.test(name) && typeof flag === "boolean") values[name] = flag;
+  }
+  return { source: "triangle_cache", revision: view.revision, values };
+}
+
+/**
+ * Mirrors Swift `FileV1ProfileBindingStore` + `V1AgentCredentialLoader`:
+ * `profiles-v1/profile-<hex>.json` (0700 dir, 0600 file) points at
+ * `<home>/agents/<agent_id>/workload-key.json`; the key file must be a
+ * no-follow 0600 regular file (never opened here) beside a valid `agent.json`.
+ */
+function readProfileBindings(applicationRoot) {
+  const dir = path.join(applicationRoot, "profiles-v1");
   const listing = listDir(dir);
   const byProfile = new Map();
   if (listing == null) return { status: "absent", path: dir, byProfile };
   if (!Array.isArray(listing)) return { status: "unreadable", path: dir, byProfile };
+  if (!isSafeManagedDirectory(dir)) return { status: "unsafe", path: dir, byProfile };
   for (const name of listing) {
+    // Swift `FileV1ProfileBindingStore.fileName`: `profile-<utf8 hex>.json`.
     const match = /^profile-([0-9a-f]+)\.json$/.exec(name);
-    if (!match) continue; // backups (*.bak-*) are never authoritative
-    const profile = decodeHexProfile(match[1]);
+    const profile = match ? decodeHexProfile(match[1]) : null;
     if (profile == null) continue;
-    // FileEnrollmentJournal.read: 0700 application + journal directories,
-    // no-follow 0600 owned file, at most 4096 bytes; else the credential is unusable.
-    const custody = custodyProblem(path.join(dir, name), {
-      maxBytes: ENROLLMENT_MAX_BYTES,
-      directories: [applicationRoot, dir],
-    });
-    if (custody != null) {
-      byProfile.set(profile, { state: custody === "oversized" ? "invalid_record" : "unsafe_storage", reasonCode: null, agentId: null, handle: null });
-      continue;
-    }
-    const { value, error } = readJsonFile(path.join(dir, name));
-    if (error != null || value == null) {
-      byProfile.set(profile, { state: "unreadable", reasonCode: null, agentId: null, handle: null });
-      continue;
-    }
-    if (!validateEnrollmentRecord(value, profile)) {
-      byProfile.set(profile, { state: "invalid_record", reasonCode: null, agentId: null, handle: null });
-      continue;
-    }
-    byProfile.set(profile, {
-      state: value.state,
-      reasonCode: value.reasonCode,
-      agentId: value.agentID,
-      handle: value.handle,
-      origin: value.origin,
-    });
+    byProfile.set(profile, readOneBinding(path.join(dir, name)));
   }
   return { status: "present", path: dir, byProfile };
+}
+
+function readOneBinding(file) {
+  const fail = (state, extra = {}) => ({ state, agentId: null, handle: null, keyFile: null, permissions: { source: UNAVAILABLE }, ...extra });
+  const custody = custodyProblem(file, { maxBytes: PROFILE_BINDING_MAX_BYTES, singleLink: true });
+  if (custody != null) return fail(custody === "oversized" ? "invalid_binding" : "unsafe_storage");
+  const { value, error } = readJsonFile(file);
+  if (error != null || !isPlainObject(value) || value.version !== 1
+    || !BINDING_KEYS_REQUIRED.every((key) => Object.hasOwn(value, key))
+    || !Object.keys(value).every((key) => BINDING_KEYS_ALLOWED.has(key))
+    || typeof value.keyFile !== "string" || value.keyFile.length > 1024 || !isStandardizedAbsolute(value.keyFile)
+    || (value.origin != null && !isValidMeshOrigin(value.origin))) {
+    return fail("invalid_binding");
+  }
+  const keyFile = value.keyFile;
+  const agentDir = path.dirname(keyFile);
+  const home = path.dirname(path.dirname(agentDir));
+  if (path.basename(keyFile) !== "workload-key.json" || path.basename(path.dirname(agentDir)) !== "agents" || !AGENT_ID.test(path.basename(agentDir))) {
+    return fail("invalid_binding", { keyFile });
+  }
+  // Swift `V1PrivateDirectory`: the custody home, agents/ and agents/<id>/
+  // must be real directories owned by this user with no group/other bits.
+  if ([home, path.dirname(agentDir), agentDir].some((dir) => !isPrivateDirectory(dir))) return fail("key_unsafe", { keyFile });
+  const keyCustody = custodyProblem(keyFile, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true });
+  if (keyCustody === "absent") return fail("key_missing", { keyFile });
+  if (keyCustody != null) return fail("key_unsafe", { keyFile });
+  const recordFile = path.join(agentDir, "agent.json");
+  if (custodyProblem(recordFile, { maxBytes: AGENT_RECORD_MAX_BYTES, singleLink: true }) != null) return fail("agent_record_invalid", { keyFile });
+  const record = readJsonFile(recordFile).value;
+  if (!isPlainObject(record) || typeof record.agent_id !== "string" || !AGENT_ID.test(record.agent_id)
+    || typeof record.workload_id !== "string" || !WORKLOAD_ID.test(record.workload_id)
+    || typeof record.handle !== "string" || !MAILBOX_HANDLE.test(record.handle)
+    || Buffer.byteLength(record.handle, "utf8") < 3 || Buffer.byteLength(record.handle, "utf8") > 32
+    || !isValidMeshOrigin(record.authority)) {
+    return fail("agent_record_invalid", { keyFile });
+  }
+  if (record.agent_id !== path.basename(agentDir)) return fail("agent_mismatch", { keyFile });
+  // Swift: `bounds as? [String]` filters the known bounds; anything else means all bounds.
+  const stringBounds = Array.isArray(record.bounds) && record.bounds.every((bound) => typeof bound === "string");
+  const bounds = stringBounds ? AGENT_BOUNDS.filter((bound) => record.bounds.includes(bound)) : [...AGENT_BOUNDS];
+  if (bounds.length === 0) return fail("agent_record_invalid", { keyFile });
+  return {
+    state: "bound",
+    agentId: record.agent_id,
+    handle: record.handle,
+    workloadId: record.workload_id,
+    bounds,
+    origin: value.origin ?? transportVia(home, record.authority) ?? record.authority,
+    keyFile,
+    permissions: readCachedPermissions(home, record.agent_id),
+  };
 }
 
 /** Swift `URL(fileURLWithPath:).standardizedFileURL.path` equivalence. */
@@ -905,7 +964,7 @@ export function evaluateOpenTransaction(open, { maxOpenTxnAgeMs = DEFAULT_MAX_OP
   return { verdict: "ok", fault: null };
 }
 
-function laneBinding(entry, lanes, applicationRoot, { enrollment = null, installation = null } = {}) {
+function laneBinding(entry, lanes, applicationRoot, { identity = null, installation = null } = {}) {
   const { lane } = classifyLane(entry);
   if (lane === "codex-headless" || lane === "cursor-acp") {
     const source = lane === "codex-headless" ? lanes.codexHeadless : lanes.cursorAcp;
@@ -954,10 +1013,10 @@ function laneBinding(entry, lanes, applicationRoot, { enrollment = null, install
     if (b.instanceId !== entry.instanceId) return { kind: lane, status: "missing", path: b.path };
     const mismatch = [];
     if (b.installationId !== installation.installationId) mismatch.push("installation_id_mismatch");
-    // Swift compares agentId with the verified credential; the keychain is not
-    // inspected here, so the verified enrollment record stands in for it.
+    // Swift compares agentId with the verified credential; the bound agent
+    // record stands in for it here (no network).
     if (b.agentId == null || !AGENT_ID.test(b.agentId)) mismatch.push("agent_id");
-    else if (enrollment?.state === "verified" && enrollment.agentId !== b.agentId) mismatch.push("agent_id_mismatch");
+    else if (identity?.state === "bound" && identity.agentId !== b.agentId) mismatch.push("agent_id_mismatch");
     if (mismatch.length > 0) return { kind: lane, status: "instance_id_mismatch", path: b.path, problems: mismatch };
     if (b.problems.length > 0) return { kind: lane, status: "invalid", path: b.path, problems: b.problems };
     return { kind: lane, status: "bound", path: b.path };
@@ -991,7 +1050,7 @@ export function readInstallationInventory({
   }
   const applicationRoot = path.resolve(clientRoot, "..");
   const registry = readRegistry(clientRoot);
-  const journal = readEnrollmentJournal(applicationRoot);
+  const custody = readProfileBindings(applicationRoot);
   const installation = readInstallationIdentity(clientRoot);
   // Swift lane membership (`participatesInHeadlessWake` / `participatesInCursorAcpWake`).
   const validEntries = registry.entries.filter((entry) => entry.valid && entry.enabled);
@@ -1025,8 +1084,8 @@ export function readInstallationInventory({
     // Swift list() throws invalidRecord on any non-instance file name.
     blockers.push({ code: "registry_stray_file", message: `installation registry contains ${registry.strayNames.length} non-instance file(s)` });
   }
-  if (journal.status !== "present") {
-    warnings.push({ code: "enrollment_journal_unavailable", message: `enrollment journal ${journal.status}` });
+  if (custody.status !== "present") {
+    warnings.push({ code: "profile_bindings_unavailable", message: `helper profile bindings (profiles-v1) ${custody.status}` });
   }
   for (const [key, label] of [["codexHeadless", "headless-runtime-binding.json"], ["cursorAcp", "cursor-acp-runtime-binding.json"]]) {
     const { status, problems } = lanes[key];
@@ -1056,13 +1115,15 @@ export function readInstallationInventory({
     }
     registeredProfiles.add(entry.profile);
     const classification = classifyLane(entry);
-    const enrollment = journal.byProfile.get(entry.profile) ?? null;
-    const binding = laneBinding(entry, lanes, applicationRoot, { enrollment, installation });
+    const identity = custody.byProfile.get(entry.profile) ?? null;
+    const binding = laneBinding(entry, lanes, applicationRoot, { identity, installation });
     const modelInstanceRoot = path.join(applicationRoot, "model-state", "instances", entry.instanceId);
     const transactions = readOpenTransaction(modelInstanceRoot, now, entry.instanceId);
     const openTxnHealth = evaluateOpenTransaction(transactions.open, { maxOpenTxnAgeMs });
-    const credentialFile = path.join(applicationRoot, "credentials", "local", "mailbox", `${entry.profile}.json`);
-    const credential = existsSync(credentialFile) ? "file_present" : `${UNAVAILABLE}:keychain_not_inspected`;
+    const credential = identity == null ? "unbound"
+      : identity.state === "bound" ? "key_file_present"
+        : identity.state === "key_missing" ? "key_file_missing"
+          : identity.state === "key_unsafe" ? "key_file_unsafe" : UNAVAILABLE;
 
     const claimers = [];
     for (const prefix of ["headless-claimer", "cursor-acp-claimer"]) {
@@ -1141,10 +1202,10 @@ export function readInstallationInventory({
       if (binding.status === "bound" && binding.commandPresent === false) {
         faults.push({ code: "runtime_command_missing", hard: true, reason: binding.kind });
       }
-      if (enrollment == null) {
-        faults.push({ code: "enrollment_missing", hard: true, reason: "no enrollment journal entry" });
-      } else if (enrollment.state !== "verified") {
-        faults.push({ code: "enrollment_unverified", hard: true, reason: `${enrollment.state}:${enrollment.reasonCode}` });
+      if (identity == null) {
+        faults.push({ code: "profile_unbound", hard: true, reason: "no helper profile binding (triangle-mailbox bind)" });
+      } else if (identity.state !== "bound") {
+        faults.push({ code: "profile_custody_invalid", hard: true, reason: identity.state });
       }
       if (transactions.open?.readable === false) {
         faults.push({ code: "unreadable_custody", hard: true, reason: `open transaction ${transactions.open.reason ?? "unreadable"}` });
@@ -1191,11 +1252,17 @@ export function readInstallationInventory({
       enabled: entry.enabled,
       lane: classification.lane,
       support: classification.support,
-      enrollment: enrollment
-        ? { state: enrollment.state, reasonCode: enrollment.reasonCode, agentId: enrollment.agentId, handle: enrollment.handle }
-        : { state: "missing" },
+      identity: identity
+        ? {
+          state: identity.state,
+          agentId: identity.agentId,
+          handle: identity.handle,
+          ...(identity.state === "bound" ? { workloadId: identity.workloadId, bounds: identity.bounds, origin: identity.origin } : {}),
+        }
+        : { state: "unbound" },
       credential,
-      capabilities: UNAVAILABLE,
+      // Last view `triangle permissions` cached on this device (no network here).
+      permissions: identity?.permissions ?? { source: UNAVAILABLE },
       binding,
       owner: {
         supervisorAdmission: UNAVAILABLE,
@@ -1236,8 +1303,8 @@ export function readInstallationInventory({
       }
     }
   }
-  const enrolledUnregistered = [...journal.byProfile.entries()]
-    .filter(([profile, row]) => row.state === "verified" && !registeredProfiles.has(profile))
+  const boundUnregistered = [...custody.byProfile.entries()]
+    .filter(([profile, row]) => row.state === "bound" && !registeredProfiles.has(profile))
     .map(([profile]) => profile)
     .sort();
 
@@ -1253,7 +1320,7 @@ export function readInstallationInventory({
     },
     profiles: profiles.sort((a, b) => String(a.profile).localeCompare(String(b.profile))),
     orphanBindings: orphans,
-    enrolledUnregistered,
+    boundUnregistered,
     blockers,
     warnings,
   };
@@ -1274,4 +1341,4 @@ export function stripSecretKeys(value) {
   return value;
 }
 
-export { hexProfile as enrollmentJournalProfileHex };
+

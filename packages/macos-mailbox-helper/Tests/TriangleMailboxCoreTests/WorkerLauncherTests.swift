@@ -8,6 +8,7 @@ struct WorkerLauncherTests {
 
     @Test("ambient credentials and selectors are replaced")
     func inheritedSecrets() async throws { try await WorkerLauncherContractCases.inheritedSecretsAreReplaced() }
+    func identityRootIsolated() async throws { try await WorkerLauncherContractCases.identityRootIsIsolated() }
 
     @Test("credential never enters worker arguments")
     func noArgumentSecret() async throws { try await WorkerLauncherContractCases.noSecretInArguments() }

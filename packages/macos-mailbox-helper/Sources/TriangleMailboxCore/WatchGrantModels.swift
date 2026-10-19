@@ -367,7 +367,8 @@ public enum WatchGrantOperatorAction: String, Codable, Equatable, Sendable {
     case useDeveloperIdHelper = "use_developer_id_helper"
     case retryNetwork = "retry_network"
     case retryLater = "retry_later"
-    case enrollOrVerifyProfile = "enroll_or_verify_profile"
+    case bindOrVerifyProfile = "bind_or_verify_profile"
+    case resumeAgent = "resume_agent"
     case resyncWatchCursor = "resync_watch_cursor"
 }
 

@@ -21,6 +21,8 @@ function canonicalRoot(value, name) {
 }
 
 function overlaps(left, right) {
+  // APFS is case-insensitive by default; fold case so capitalization cannot hide an overlap.
+  if (process.platform === "darwin") { left = left.toLowerCase(); right = right.toLowerCase(); }
   return left === right || left.startsWith(`${right}${path.sep}`) || right.startsWith(`${left}${path.sep}`);
 }
 
@@ -173,6 +175,14 @@ export function sandboxCommand(command, args, env = process.env) {
   }
   const project = canonicalRoot(env.TRIANGLE_PROJECT_ROOT, "TRIANGLE_PROJECT_ROOT");
   const credentials = canonicalRoot(env.TRIANGLE_CREDENTIAL_ROOT, "TRIANGLE_CREDENTIAL_ROOT");
+  // Permissions v1: the `triangle` custody home (agents/<id>/workload-key.json,
+  // owner key). Required: it is isolated and denied like the credential root
+  // so a child of this seatbelt runner cannot read a workload key. The
+  // headless Codex app-server and Cursor ACP lanes do not go through this
+  // sandbox; same-user children there can read the custody home in v1
+  // (accepted under F1; sandboxing them is a v1.1 follow-up).
+  const identity = canonicalRoot(env.TRIANGLE_IDENTITY_ROOT, "TRIANGLE_IDENTITY_ROOT");
+  const secretRoots = [credentials, identity];
   if (!env.HOME) throw new Error("HOME is required for application-owned sandbox state");
   const homeInput = path.resolve(env.HOME);
   const home = canonicalRoot(env.HOME, "HOME");
@@ -186,7 +196,7 @@ export function sandboxCommand(command, args, env = process.env) {
     : [];
   const instanceId = env.TRIANGLE_INSTANCE_ID;
   if (typeof instanceId !== "string" || !/^[a-f0-9]{64}$/.test(instanceId)) throw new Error("TRIANGLE_INSTANCE_ID must be an opaque 64-character identifier");
-  if (overlaps(project, credentials)) {
+  if (secretRoots.some((root) => overlaps(project, root))) {
     throw new Error("Credential and project roots must not overlap");
   }
   const expectedModelStateBase = path.join(home, "Library", "Application Support", "The Triangle", "model-state");
@@ -205,7 +215,7 @@ export function sandboxCommand(command, args, env = process.env) {
   if (modelRoots.length !== 1 || modelRoots[0] !== expectedInstanceModelRoot) throw new Error("Model root must select the exact Triangle instance");
   for (const candidate of [...modelRoots, ...runtimeRoots]) {
     if (candidate === "/" || (home && candidate === home)) throw new Error("Model/runtime root is an unsafe broad HOME or filesystem root");
-    if (overlaps(candidate, credentials)) throw new Error("Model/runtime root must not overlap the credential root");
+    if (secretRoots.some((root) => overlaps(candidate, root))) throw new Error("Model/runtime root must not overlap the credential root");
   }
   const workerNames = [["codex", env.CODEX_HOME], ["hermes", env.HERMES_HOME], ["antigravity", env.ANTIGRAVITY_HOME]].filter(([, value]) => Boolean(value));
   if (workerNames.length !== 1) throw new Error("Exactly one active worker model home is required");
@@ -230,11 +240,11 @@ export function sandboxCommand(command, args, env = process.env) {
     if (!runtimeRoots.some((entry) => writableRoot === entry || writableRoot.startsWith(`${entry}${path.sep}`))) {
       throw new Error("Every writable runtime root must be within a runtime root");
     }
-    if (overlaps(writableRoot, credentials) || overlaps(writableRoot, project) || overlaps(writableRoot, modelStateBase) || overlaps(writableRoot, temporary)) {
+    if (secretRoots.some((root) => overlaps(writableRoot, root)) || overlaps(writableRoot, project) || overlaps(writableRoot, modelStateBase) || overlaps(writableRoot, temporary)) {
       throw new Error("Writable runtime root must not overlap credential, project, model, or temp roots");
     }
   }
-  const isolatedRoots = [project, credentials, temporary, ...runtimeRoots];
+  const isolatedRoots = [project, ...secretRoots, temporary, ...runtimeRoots];
   for (let left = 0; left < isolatedRoots.length; left += 1) {
     for (let right = left + 1; right < isolatedRoots.length; right += 1) {
       if (overlaps(isolatedRoots[left], isolatedRoots[right])) {
@@ -289,7 +299,7 @@ export function sandboxCommand(command, args, env = process.env) {
     `(allow file-read* file-write* (subpath "${sandboxLiteral(temporary)}"))`,
     ...writableRuntimeRoots.map((entry) => `(allow file-read* file-write* (subpath "${sandboxLiteral(entry)}"))`),
     ...["/dev/null", "/dev/random", "/dev/urandom"].filter(existsSync).map((entry) => `(allow file-read* file-write* (literal "${entry}"))`),
-    `(deny file-read* file-write* (subpath "${sandboxLiteral(credentials)}"))`,
+    ...secretRoots.map((root) => `(deny file-read* file-write* (subpath "${sandboxLiteral(root)}"))`),
     `(deny file-read* file-write* (regex #"^${sandboxRegex(project)}/(.*/)?[.]env[^/]*(/.*)?$"))`,
   ].join("\n");
   if (Buffer.byteLength(profile) > 16 * 1024) throw new Error("Reasoning sandbox profile is too large");

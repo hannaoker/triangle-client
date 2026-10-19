@@ -19,11 +19,14 @@ import {
   UNAVAILABLE,
 } from "../src/installation-inventory.mjs";
 import {
-  enrollmentRecord,
+  boundAgentId,
+  bindingFile,
+  fixtureTriangleHome,
   FIXTURE_INSTALLATION_ID,
   openTransactionRecord,
   secureRegistry,
-  writeEnrollment,
+  writeBinding,
+  writePermissionsCache,
   writeInstallationIdentity,
   writeJson,
   writeWorkerManifest,
@@ -77,12 +80,14 @@ function mixedFixture({
       ...(row.deliveryMode ? { deliveryMode: row.deliveryMode } : {}),
     });
     const journal = journalOverrides[row.profile] ?? {};
-    if (journal !== "absent") writeEnrollment(app, row.profile, journal);
+    if (journal !== "absent") writeBinding(app, row.profile, journal);
   }
-  // Backup journal files are never authoritative.
-  writeFileSync(path.join(app, "enrollment-journal", `profile-${Buffer.from("bob").toString("hex")}.json.bak-old`), "{}");
-  // A verified enrollment with no registry row.
-  writeEnrollment(app, "loner");
+  // Hidden staging files are never authoritative.
+  writeFileSync(path.join(app, "profiles-v1", ".bob.json.tmp"), "{}", { mode: 0o600 });
+  // Legacy plain-name files are not Swift bindings.
+  writeFileSync(path.join(app, "profiles-v1", "bob.json"), "{}", { mode: 0o600 });
+  // A bound profile with no registry row.
+  writeBinding(app, "loner");
   writeInstallationIdentity(client);
   secureRegistry(app);
 
@@ -132,10 +137,12 @@ function mixedFixture({
   writeJson(path.join(app, "model-state", "instances", deriveClientInstanceId("gravity2"), "triangle-antigravity-conversations.json"), {
     version: 1, rooms: { room_g: { conversationId: "c1", updatedAt: "2026-10-16T22:00:00.000Z" } },
   });
-  // Credential file with a token: existence only, never read into output.
-  writeJson(path.join(app, "credentials", "local", "mailbox", "gravity2.json"), {
-    version: 1, origin: "https://example.test", token: FAKE_TOKEN, agentId: "agent_gravity2", handle: "gravity2",
+  // The workload key holds a fake secret: custody only, never read into output.
+  writeJson(path.join(fixtureTriangleHome(app), "agents", boundAgentId("gravity2"), "workload-key.json"), {
+    kty: "OKP", crv: "Ed25519", x: "x", d: FAKE_TOKEN,
   });
+  // `triangle permissions` cached a view for gravity2 only.
+  writePermissionsCache(app, "gravity2", { revision: 3, permissions: { "dm.send": true, "posts.publish": false, "tasks.claim": true, "bad key": true } });
   // A valid, recent open transaction for ghost.
   writeJson(
     path.join(app, "model-state", "instances", deriveClientInstanceId("ghost"), "mailbox-transactions", "open.json"),
@@ -201,17 +208,21 @@ test("mixed Codex/ACP/worker registry: every profile appears, reconciled to its 
     assert.equal(byName.gravity2.support, "experimental");
     assert.equal(byName.gravity2.binding.kind, "worker-runtime-manifest");
     assert.equal(byName.gravity2.binding.status, "bound");
-    assert.equal(byName.gravity2.credential, "file_present");
+    assert.equal(byName.gravity2.credential, "key_file_present");
+    assert.equal(byName.gravity2.identity.state, "bound");
+    assert.equal(byName.gravity2.identity.agentId, boundAgentId("gravity2"));
+    assert.deepEqual(byName.gravity2.identity.bounds, ["agent.read", "agent.write"]);
     assert.equal(byName.gravity2.pollWatch.mode, "poll");
     assert.equal(byName.gravity2.activity.lastConversationUpdateAt, "2026-10-16T22:00:00.000Z");
-    assert.equal(byName.gravity2.capabilities, UNAVAILABLE);
+    assert.deepEqual(byName.gravity2.permissions, { source: "triangle_cache", revision: 3, values: { "dm.send": true, "posts.publish": false, "tasks.claim": true } });
+    assert.deepEqual(byName.ghost.permissions, { source: UNAVAILABLE, reason: "not_cached" });
     assert.equal(byName.gravity2.owner.supervisorAdmission, UNAVAILABLE);
 
     assert.equal(byName["hermes-off"].status, "disabled");
     assert.equal(byName["hermes-off"].pollWatch.mode, "not_started_disabled");
     assert.deepEqual(byName["hermes-off"].faults, []);
 
-    assert.deepEqual(inv.enrolledUnregistered, ["loner"]);
+    assert.deepEqual(inv.boundUnregistered, ["loner"]);
     // Missing ACP/worker progress evidence must keep the result non-healthy.
     assert.equal(result.ok, false);
     assert.notEqual(result.exitCode, 0);
@@ -277,14 +288,14 @@ test("unsupported and mismatched entries are explicit faults", () => {
       { profile: "odd", runtimeAdapter: "hermes", deliveryMode: "headless-cursor-acp", enabled: true },
       { profile: "forged", runtimeAdapter: "codex", deliveryMode: "headless-app-server", enabled: true, instanceId: "f".repeat(64) },
     ],
-    journalOverrides: { odd: { state: "registered_not_installed", reasonCode: "unusable_registration_response" } },
+    journalOverrides: { odd: { omitKey: true } },
   });
   try {
     const result = runHeadlessEngagementDoctor({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
     const byName = Object.fromEntries(result.report.inventory.profiles.map((p) => [p.profile, p]));
     assert.equal(byName.grok.status, "unsupported");
     assert.equal(byName.odd.support, "unsupported");
-    assert.ok(byName.odd.faults.includes("enrollment_unverified"));
+    assert.ok(byName.odd.faults.includes("profile_custody_invalid"));
     assert.equal(byName.forged.status, "fault");
     assert.ok(result.report.blockers.some((b) => b.code === "registry_entry_invalid"));
     assert.equal(result.exitCode, 2);
@@ -559,11 +570,11 @@ test("existing uppercase/underscore/dot/64-byte profiles, including disabled Age
       assert.deepEqual(byName[name].faults, [], name);
       assert.ok(!result.report.blockers.some((b) => b.profile === name), name);
     }
-    // Enabled ones: identity preserved, enrollment resolved by exact name, no hard fault.
+    // Enabled ones: identity preserved, binding resolved by exact name, no hard fault.
     for (const name of ["Worker.Two", "ACP_Three", SIXTY_FOUR_UTF8]) {
       assert.equal(byName[name].profile, name);
       assert.equal(byName[name].instanceId, deriveClientInstanceId(name));
-      assert.equal(byName[name].enrollment.state, "verified", name);
+      assert.equal(byName[name].identity.state, "bound", name);
       assert.notEqual(byName[name].status, "fault", `${name}: ${byName[name].faults}`);
     }
     assert.equal(byName.ACP_Three.binding.status, "bound");
@@ -650,148 +661,77 @@ test("registry rows Swift cannot decode are faults even when disabled", () => {
   }
 });
 
-test("enrollment records are trusted only when they decode for the same profile", () => {
+test("profile bindings are trusted only when the pointer, key custody, and agent record all check out", () => {
   const f = mixedFixture();
   try {
     onlyProfiles(f, ["ghost"]);
     rmSync(openTxnPath(f.app, "ghost"));
     writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: "2026-10-17T19:00:00.000Z" } } });
-    const journalFile = path.join(f.app, "enrollment-journal", `profile-${Buffer.from("ghost").toString("hex")}.json`);
     assert.equal(runDoctor(f.client).exitCode, 0);
-    for (const bad of [
-      enrollmentRecord("ghost", { profile: "bob" }),
-      (({ origin, ...rest }) => rest)(enrollmentRecord("ghost")),
-      enrollmentRecord("ghost", { origin: "http://example.test" }),
-      enrollmentRecord("ghost", { agentID: "agent_ghost" }),
-      enrollmentRecord("ghost", { state: "VERIFIED" }),
-      { ...enrollmentRecord("ghost"), extra: true },
+    const good = JSON.parse(readFileSync(bindingFile(f.app, "ghost"), "utf8"));
+    const agentDir = path.dirname(good.keyFile);
+    for (const [label, mutate, state] of [
+      ["version 2", () => writeJson(bindingFile(f.app, "ghost"), { ...good, version: 2 }), "invalid_binding"],
+      ["no keyFile", () => writeJson(bindingFile(f.app, "ghost"), { version: 1 }), "invalid_binding"],
+      ["relative keyFile", () => writeJson(bindingFile(f.app, "ghost"), { version: 1, keyFile: "agents/x/workload-key.json" }), "invalid_binding"],
+      ["extra key", () => writeJson(bindingFile(f.app, "ghost"), { ...good, token: "x" }), "invalid_binding"],
+      ["http origin", () => writeJson(bindingFile(f.app, "ghost"), { ...good, origin: "http://example.test" }), "invalid_binding"],
+      ["not a key file", () => writeJson(bindingFile(f.app, "ghost"), { ...good, keyFile: path.join(agentDir, "agent.json") }), "invalid_binding"],
+      ["key missing", () => rmSync(good.keyFile), "key_missing"],
+      ["key group-readable", () => chmodSync(good.keyFile, 0o640), "key_unsafe"],
+      ["key symlink", () => symlinkInPlace(good.keyFile), "key_unsafe"],
+      ["key hard-linked", () => linkSync(good.keyFile, path.join(agentDir, "..", "second-link.json")), "key_unsafe"],
+      ["agent id mismatch", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), agent_id: boundAgentId("bob") }), "agent_mismatch"],
+      ["agent record unsafe", () => chmodSync(path.join(agentDir, "agent.json"), 0o644), "agent_record_invalid"],
+      ["agent record without authority", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), authority: "http://x.test" }), "agent_record_invalid"],
+      ["agent record with empty bounds", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), bounds: ["owner.admin"] }), "agent_record_invalid"],
+      ["agents dir shared", () => chmodSync(path.dirname(agentDir), 0o755), "key_unsafe"],
+      ["handle too short", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), handle: "ab" }), "agent_record_invalid"],
+      ["handle too long", () => writeJson(path.join(agentDir, "agent.json"), { ...JSON.parse(readFileSync(path.join(agentDir, "agent.json"), "utf8")), handle: "a".repeat(33) }), "agent_record_invalid"],
     ]) {
-      writeJson(journalFile, bad);
+      mutate();
       const result = runDoctor(f.client);
       const ghost = profileRow(result, "ghost");
-      assert.equal(ghost.enrollment.state, "invalid_record", JSON.stringify(bad));
-      assert.ok(ghost.faults.includes("enrollment_unverified"));
-      assert.equal(result.exitCode, 2);
+      assert.equal(ghost.identity.state, state, label);
+      assert.ok(ghost.faults.includes("profile_custody_invalid"), label);
+      assert.equal(result.exitCode, 2, label);
+      // Restore the valid binding for the next case.
+      rmSync(path.join(fixtureTriangleHome(f.app), "agents"), { recursive: true, force: true });
+      writeBinding(f.app, "ghost");
+      assert.equal(runDoctor(f.client).exitCode, 0, `${label}: restored`);
     }
+    // Transport origin follows Swift: binding override, then a matching authority.json `via`, then the authority.
+    const authorityFile = path.join(fixtureTriangleHome(f.app), "authority.json");
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://via.example.test");
+    writeJson(authorityFile, { authority: "https://other.example.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://example.test");
+    // Canonical origin compare like Swift MeshOrigin (round 4 P2): host case does not matter.
+    writeJson(authorityFile, { authority: "https://EXAMPLE.test", via: "https://via.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://via.example.test");
+    // A hard-linked authority.json is refused like Swift V1PrivateFile (nlink == 1).
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    const authorityLink = path.join(f.root, "authority-link.json");
+    linkSync(authorityFile, authorityLink);
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://example.test");
+    rmSync(authorityLink);
+    // A hard-linked profile pointer is unsafe storage.
+    const pointerLink = path.join(f.root, "pointer-link.json");
+    linkSync(bindingFile(f.app, "ghost"), pointerLink);
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.state, "unsafe_storage");
+    rmSync(pointerLink);
+    writeJson(authorityFile, { authority: "https://example.test", via: "https://via.example.test" });
+    writeJson(bindingFile(f.app, "ghost"), { ...good, origin: "https://override.example.test" });
+    assert.equal(profileRow(runDoctor(f.client), "ghost").identity.origin, "https://override.example.test");
+    rmSync(authorityFile);
+    // Output never carries the key file contents.
+    chmodSync(good.keyFile, 0o600);
+    assert.ok(!JSON.stringify(runDoctor(f.client).report).includes("fixture-not-a-key"));
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
 });
 
-test("lane bindings Swift would reject are invalid (never bound) when the lane has members", () => {
-  const f = mixedFixture();
-  try {
-    onlyProfiles(f, ["ghost"]);
-    const bindingPath = path.join(f.client, "cursor-acp-runtime-binding.json");
-    const good = JSON.parse(readFileSync(bindingPath, "utf8"));
-    const cases = {
-      state_root_not_standardized_absolute: (b) => { b.profiles[0].stateRoot = "relative/ghost"; },
-      installation_id_mismatch: (b) => { b.common.installationId = "inst_some_other_installation"; },
-      poll_interval_ms: (b) => { b.common.pollIntervalMs = 5; },
-      common_keys: (b) => { b.common.extra = 1; },
-      profile_keys: (b) => { b.profiles[0].unexpected = true; },
-      shadow_test_profile: (b) => { b.profiles[0].shadowTestProfile = "yes"; },
-    };
-    for (const [problem, mutate] of Object.entries(cases)) {
-      const b = structuredClone(good);
-      mutate(b);
-      writeJson(bindingPath, b);
-      const result = runDoctor(f.client);
-      const ghost = profileRow(result, "ghost");
-      assert.equal(ghost.binding.status, "invalid", problem);
-      assert.ok(ghost.binding.problems.includes(problem), `${problem}: ${ghost.binding.problems}`);
-      assert.ok(ghost.faults.includes("binding_invalid"));
-      assert.ok(result.report.blockers.some((row) => row.code === "binding_invalid"));
-      assert.equal(result.exitCode, 2);
-    }
-    // A symlinked component in the state root.
-    const real = path.join(f.root, "real-state");
-    mkdirSync(real, { recursive: true });
-    symlinkSync(real, path.join(f.root, "linked-state"));
-    const b = structuredClone(good);
-    b.profiles[0].stateRoot = path.join(f.root, "linked-state", "ghost");
-    writeJson(bindingPath, b);
-    assert.ok(profileRow(runDoctor(f.client), "ghost").binding.problems.includes("state_root_symlink"));
-    // Missing installation identity: Swift would mint a new id that cannot match.
-    writeJson(bindingPath, good);
-    rmSync(path.join(f.client, "installation.json"));
-    assert.ok(profileRow(runDoctor(f.client), "ghost").binding.problems.includes("installation_identity_absent"));
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
-  }
-});
-
-test("an invalid binding for a lane with no enabled members is only a warning", () => {
-  const f = mixedFixture();
-  try {
-    onlyProfiles(f, ["gravity2"]);
-    writeJson(path.join(f.client, "cursor-acp-runtime-binding.json"), { version: 1, profiles: [] });
-    const result = runDoctor(f.client);
-    assert.ok(result.report.warnings.some((w) => w.code === "binding_invalid"));
-    assert.ok(!result.report.blockers.some((b) => b.code === "binding_invalid"));
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
-  }
-});
-
-test("worker manifests are validated, not just found", () => {
-  const f = mixedFixture();
-  try {
-    onlyProfiles(f, ["gravity2"]);
-    const manifestPath = path.join(f.app, "worker-runtime", "antigravity.manifest.json");
-    const good = JSON.parse(readFileSync(manifestPath, "utf8"));
-    assert.equal(profileRow(runDoctor(f.client), "gravity2").binding.status, "bound");
-    assert.equal(profileRow(runDoctor(f.client), "gravity2").binding.integrity, "not_verified");
-    const cases = {
-      manifest_keys: () => ({}),
-      environment_keys: (m) => ({ ...m, environment: { ...m.environment, HERMES_CLI: "/x" } }),
-      path_not_project_bin: (m) => ({ ...m, environment: { ...m.environment, PATH: "/usr/bin" } }),
-      project_root_not_bundle: (m) => ({ ...m, projectRoot: "/x", environment: { ...m.environment, TRIANGLE_PROJECT_ROOT: "/x", PATH: "/x/bin" } }),
-      unsupported_version: (m) => ({ ...m, version: 1 }),
-    };
-    for (const [problem, make] of Object.entries(cases)) {
-      writeJson(manifestPath, make(structuredClone(good)));
-      const result = runDoctor(f.client);
-      const g = profileRow(result, "gravity2");
-      assert.equal(g.binding.status, "invalid", problem);
-      assert.ok(g.binding.problems.includes(problem), `${problem}: ${g.binding.problems}`);
-      assert.equal(g.status, "fault");
-      assert.equal(result.exitCode, 2);
-    }
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
-  }
-});
-
-test("parseable open transactions Swift would reject are custody faults, not ok", () => {
-  const f = mixedFixture();
-  try {
-    onlyProfiles(f, ["ghost"]);
-    writeJson(path.join(f.client, "headless-progress.json"), { version: 1, profiles: { ghost: { lane: "cursor-acp", lastClaimAt: "2026-10-17T19:50:00.000Z" } } });
-    const id = deriveClientInstanceId("ghost");
-    assert.equal(runDoctor(f.client).exitCode, 0);
-    for (const bad of [
-      openTransactionRecord(deriveClientInstanceId("bob")),
-      { ...openTransactionRecord(id), claimId: `claim_${"0".repeat(32)}` },
-      { ...openTransactionRecord(id), state: "replied" },
-      { ...openTransactionRecord(id), createdAt: "yesterday" },
-      (({ replyResolution, ...rest }) => rest)(openTransactionRecord(id)),
-    ]) {
-      writeJson(openTxnPath(f.app, "ghost"), bad);
-      const result = runDoctor(f.client);
-      const ghost = profileRow(result, "ghost");
-      assert.equal(ghost.journal.openTransaction.readable, false);
-      assert.ok(ghost.faults.includes("unreadable_custody"), JSON.stringify(ghost.faults));
-      assert.equal(result.exitCode, 2);
-    }
-    const legacy = openTransactionRecord(id);
-    delete legacy.inboundEventId; delete legacy.inboundRoomSequence; delete legacy.replyRequired;
-    writeJson(openTxnPath(f.app, "ghost"), legacy);
-    assert.equal(profileRow(runDoctor(f.client), "ghost").status, "ok", "legacy-optional keys may be absent");
-  } finally {
-    rmSync(f.root, { recursive: true, force: true });
-  }
-});
 
 function appServerBinding(profile, overrides = {}) {
   return {
@@ -799,7 +739,7 @@ function appServerBinding(profile, overrides = {}) {
     enabled: true,
     installationId: FIXTURE_INSTALLATION_ID,
     instanceId: deriveClientInstanceId(profile),
-    agentId: enrollmentRecord(profile).agentID,
+    agentId: boundAgentId(profile),
     roomScope: "room_scope_1",
     serverIdentity: "server-1",
     endpoint: "ws://127.0.0.1:4500",
@@ -988,22 +928,22 @@ function symlinkInPlace(file) {
   symlinkSync(target, file);
 }
 
-test("custody Swift refuses for enrollment, installation identity, and open transactions is never healthy (Codex review r4)", () => {
+test("custody Swift refuses for profile bindings, installation identity, and open transactions is never healthy (Codex review r4)", () => {
   const read = (client) => readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
-  const enrollmentFile = (client, profile) => path.join(path.dirname(client), "enrollment-journal", `profile-${Buffer.from(profile).toString("hex")}.json`);
-  const enrollmentCases = [
-    ["symlink", (client) => symlinkInPlace(enrollmentFile(client, "gravity2")), "unsafe_storage"],
-    ["group-readable", (client) => chmodSync(enrollmentFile(client, "gravity2"), 0o644), "unsafe_storage"],
-    ["oversized", (client) => writeFileSync(enrollmentFile(client, "gravity2"), `${readFileSync(enrollmentFile(client, "gravity2"), "utf8").trim()}${" ".repeat(4100)}\n`, { mode: 0o600 }), "invalid_record"],
-    ["journal dir 0755", (client) => chmodSync(path.dirname(enrollmentFile(client, "gravity2")), 0o755), "unsafe_storage"],
+  const pointer = (client) => bindingFile(path.dirname(client), "gravity2");
+  const bindingCases = [
+    ["symlink", (client) => symlinkInPlace(pointer(client)), "unsafe_storage", "profile_custody_invalid"],
+    ["group-readable", (client) => chmodSync(pointer(client), 0o644), "unsafe_storage", "profile_custody_invalid"],
+    ["oversized", (client) => writeFileSync(pointer(client), `${readFileSync(pointer(client), "utf8").trim()}${" ".repeat(4100)}\n`, { mode: 0o600 }), "invalid_binding", "profile_custody_invalid"],
+    ["bindings dir 0755", (client) => chmodSync(path.dirname(pointer(client)), 0o755), "unbound", "profile_unbound"],
   ];
-  for (const [name, mutate, state] of enrollmentCases) {
+  for (const [name, mutate, state, fault] of bindingCases) {
     const { root, client } = mixedFixture();
     try {
       mutate(client);
       const gravity = read(client).profiles.find((p) => p.profile === "gravity2");
-      assert.equal(gravity.enrollment.state, state, name);
-      assert.ok(gravity.faults.includes("enrollment_unverified"), name);
+      assert.equal(gravity.identity.state, state, name);
+      assert.ok(gravity.faults.includes(fault), name);
       assert.equal(gravity.status, "fault", name);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1056,7 +996,7 @@ test("custody Swift refuses for enrollment, installation identity, and open tran
   }
 });
 
-test("enrollment origins are checked on the raw path, before URL normalization (Codex review r5)", () => {
+test("binding origin overrides are checked on the raw path, before URL normalization (Codex review r5)", () => {
   for (const [origin, ok] of [
     ["https://example.test", true],
     ["https://example.test/", true],
@@ -1066,11 +1006,11 @@ test("enrollment origins are checked on the raw path, before URL normalization (
     ["https://example.test//", false],
     ["https://example.test/api", false],
   ]) {
-    const { root, client } = mixedFixture({ journalOverrides: { gravity2: { origin } } });
+    const { root, client } = mixedFixture({ journalOverrides: { gravity2: { binding: { origin } } } });
     try {
       const inventory = readInstallationInventory({ clientRoot: client, now: NOW, pidAlive: () => true, advisoryHeldAt: () => true });
       const gravity = inventory.profiles.find((p) => p.profile === "gravity2");
-      assert.equal(gravity.enrollment.state, ok ? "verified" : "invalid_record", origin);
+      assert.equal(gravity.identity.state, ok ? "bound" : "invalid_binding", origin);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

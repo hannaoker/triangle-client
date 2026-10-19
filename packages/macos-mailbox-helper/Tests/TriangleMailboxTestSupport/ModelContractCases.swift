@@ -21,8 +21,6 @@ public enum ModelContractCases {
         .init(name: "loopback HTTP", run: loopbackHTTP),
         .init(name: "identifiers", run: identifiers),
         .init(name: "mailbox handles", run: mailboxHandles),
-        .init(name: "credential binding schema", run: strictCredentialBinding),
-        .init(name: "credential diagnostics", run: credentialDiagnostics),
         .init(name: "command parser", run: commandParser),
     ]
 
@@ -73,18 +71,11 @@ public enum ModelContractCases {
 
     public static func identifiers() throws {
         let agentID = "agent_" + String(repeating: "a", count: 32)
-        let token = "mesh_" + String(repeating: "b", count: 64)
         try expect(try AgentID(agentID).value == agentID, "valid agent ID rejected")
-        _ = try MeshToken(token)
 
         for invalid in ["agent_123", "agent_" + String(repeating: "A", count: 32), "room_" + String(repeating: "a", count: 32)] {
             try expectThrows(ModelValidationError.self, "noncanonical agent ID accepted") {
                 try AgentID(invalid)
-            }
-        }
-        for invalid in ["mesh_short", "mesh_peer_" + String(repeating: "a", count: 64), "mesh_" + String(repeating: "G", count: 64)] {
-            try expectThrows(ModelValidationError.self, "noncanonical permanent token accepted") {
-                try MeshToken(invalid)
             }
         }
     }
@@ -109,57 +100,13 @@ public enum ModelContractCases {
         }
     }
 
-    public static func strictCredentialBinding() throws {
-        let binding = try JSONDecoder().decode(CredentialBinding.self, from: Data(bindingJSON().utf8))
-        try expect(binding.version == 1, "binding version changed")
-        try expect(binding.origin.value == "https://thetriangle.dev", "binding origin changed")
-        try expect(binding.handle.value == "codex-mailbox-live", "binding handle changed")
-
-        try expectThrows(DecodingError.self, "unsupported binding version accepted") {
-            try JSONDecoder().decode(CredentialBinding.self, from: Data(bindingJSON(version: 2).utf8))
-        }
-        try expectThrows(DecodingError.self, "unknown binding key accepted") {
-            try JSONDecoder().decode(CredentialBinding.self, from: Data(bindingJSON(extra: ",\"unexpected\":true").utf8))
-        }
-        for invalidHandle in ["ab", "Codex", "codex--live", "codex-", "codex\nlive", String(repeating: "a", count: 33)] {
-            try expectThrows(DecodingError.self, "malformed binding handle accepted") {
-                try JSONDecoder().decode(
-                    CredentialBinding.self,
-                    from: Data(bindingJSON(handle: invalidHandle).utf8)
-                )
-            }
-        }
-    }
-
-    public static func credentialDiagnostics() throws {
-        let canary = "mesh_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        let token = try MeshToken(canary)
-        let binding = try JSONDecoder().decode(
-            CredentialBinding.self,
-            from: Data(bindingJSON(token: canary).utf8)
-        )
-
-        var tokenDump = ""
-        dump(token, to: &tokenDump)
-        var bindingDump = ""
-        dump(binding, to: &bindingDump)
-        let outputs = [
-            String(describing: token),
-            String(reflecting: token),
-            tokenDump,
-            String(describing: binding),
-            String(reflecting: binding),
-            bindingDump,
-            String(describing: Mirror(reflecting: token).children.map { $0.value }),
-            String(describing: Mirror(reflecting: binding).children.map { $0.value }),
-        ]
-        for output in outputs {
-            try expect(!output.contains(canary), "credential diagnostic exposed permanent token")
-        }
-    }
-
     public static func commandParser() throws {
-        try expect(try CommandParser.parse(["enroll", "--profile", "mailbox", "--origin", "https://thetriangle.dev"]).command == .enroll, "enroll rejected")
+        let keyFile = "/tmp/v1/agents/agent_\(String(repeating: "a", count: 32))/workload-key.json"
+        let bind = try CommandParser.parse(["bind", "--profile", "mailbox", "--key-file", keyFile])
+        try expect(bind.command == .bind && bind.keyFile == keyFile && bind.origin == nil, "bind rejected")
+        let bindOrigin = try CommandParser.parse(["bind", "--profile", "mailbox", "--key-file", keyFile, "--origin", "https://thetriangle.dev"])
+        try expect(bindOrigin.origin?.value == "https://thetriangle.dev", "bind --origin rejected")
+        try expect(try CommandParser.parse(["unbind", "--profile", "mailbox"]).command == .unbind, "unbind rejected")
         try expect(try CommandParser.parse(["status", "--profile", "mailbox"]).command == .status, "status rejected")
         try expect(try CommandParser.parse(["mcp", "--profile", "mailbox"]).command == .mcp, "mcp rejected")
         let codexWorker = try CommandParser.parse(["run-worker", "--profile", "mailbox", "--worker", "codex"])
@@ -196,7 +143,12 @@ public enum ModelContractCases {
             ["show-token", "--profile", "mailbox"],
             ["export", "--profile", "mailbox"],
             ["status", "--profile", "mailbox", "--verbose"],
-            ["enroll", "--profile", "mailbox", "--origin", "https://thetriangle.dev", "--token", "secret"],
+            ["enroll", "--profile", "mailbox", "--origin", "https://thetriangle.dev"],
+            ["bind", "--profile", "mailbox"],
+            ["bind", "--profile", "mailbox", "--key-file", "relative/workload-key.json"],
+            ["bind", "--profile", "mailbox", "--key-file", keyFile, "--token", "secret"],
+            ["bind", "--profile", "mailbox", "--key-file", keyFile, "--origin", "http://thetriangle.dev"],
+            ["unbind", "--profile", "mailbox", "--key-file", keyFile],
             ["run-worker", "--profile", "mailbox", "--worker", "codex", "--", "/usr/bin/env"],
             ["run-worker", "--profile", "mailbox", "--worker", "/usr/bin/env"],
             ["run-worker", "--profile", "mailbox", "--worker", "other"],
@@ -236,25 +188,4 @@ public enum ModelContractCases {
         }
     }
 
-    private static func bindingJSON(
-        version: Int = 1,
-        handle: String = "codex-mailbox-live",
-        token: String = "mesh_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        extra: String = ""
-    ) -> String {
-        let escapedHandle = handle
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return """
-        {
-          "version": \(version),
-          "origin": "https://thetriangle.dev",
-          "agentId": "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "handle": "\(escapedHandle)",
-          "token": "\(token)"
-          \(extra)
-        }
-        """
-    }
 }

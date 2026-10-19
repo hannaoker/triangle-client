@@ -10,6 +10,7 @@ public enum WorkerLauncherContractCases {
     public static let all: [ContractCase] = [
         .init(name: "closed worker kinds receive exact credential environment", run: exactEnvironment),
         .init(name: "ambient credentials and selectors are replaced", run: inheritedSecretsAreReplaced),
+        .init(name: "triangle custody home is passed and must not overlap worker roots", run: identityRootIsIsolated),
         .init(name: "credential never enters worker arguments", run: noSecretInArguments),
         .init(name: "ineligible credential gate never executes", run: gateFailureNeverExecutes),
         .init(name: "resolver is validated before credential release", run: resolverFailureNeverRequestsCredential),
@@ -32,8 +33,9 @@ public enum WorkerLauncherContractCases {
         .init(name: "concurrent fresh instance resolution is idempotent", run: concurrentFreshRootResolution),
         .init(name: "clean installed runtime resolves and passes Node syntax smoke", run: { try installedBundleResolvesAndSmokes() }),
     ]
-    private static let token = "mesh_" + String(repeating: "7", count: 64)
-    private static let agentID = "agent_" + String(repeating: "8", count: 32)
+    private static let agent = try! V1TestCustody.memoryAgent(profile: "codex-mailbox-live", handle: "codex-mailbox-live", fill: "8")
+    private static var token: String { agent.seed }
+    private static var agentID: String { agent.agentID.value }
 
     public static func exactEnvironment() async throws {
         for worker in WorkerKind.allCases {
@@ -48,7 +50,9 @@ public enum WorkerLauncherContractCases {
             try await launcher.launch(profile: ProfileName("codex-mailbox-live"), worker: worker, inheritedEnvironment: [:])
             let request = try require(executor.request, "worker was not executed")
             try expect(request.environment["MESH_ORIGIN"] == "https://thetriangle.dev", "origin not exact")
-            try expect(request.environment["MESH_AGENT_TOKEN"] == token, "token not exact")
+            try expect(request.environment["TRIANGLE_WORKLOAD_KEY_FILE"] == agent.keyFile.path, "key file not exact")
+            try expect(request.environment["MESH_AGENT_TOKEN"] == nil, "static bearer still injected")
+            try expect(request.environment.values.allSatisfy { !$0.contains(token) }, "key material entered the environment")
             let expected = worker == .codex ? "CODEX_AGENT_ID" : (worker == .hermes ? "HERMES_AGENT_ID" : "ANTIGRAVITY_AGENT_ID")
             let inactiveKeys: [String] = {
                 switch worker {
@@ -68,10 +72,11 @@ public enum WorkerLauncherContractCases {
         let executor = RecordingWorkerExecutor()
         let command = WorkerCommand(
             executable: URL(fileURLWithPath: "/trusted/node"), arguments: ["/trusted/cli.mjs", "--watch"],
-            workingDirectory: URL(fileURLWithPath: "/trusted"), environment: ["PATH": "/trusted/bin", "TRIANGLE_PROJECT_ROOT": "/trusted"]
+            workingDirectory: URL(fileURLWithPath: "/trusted"),
+            environment: ["PATH": "/trusted/bin", "TRIANGLE_PROJECT_ROOT": "/trusted", "TRIANGLE_WORKLOAD_KEY_FILE": "/manifest/key.json", "TRIANGLE_WORKLOAD_OTHER": "x"]
         )
         let ambient = [
-            "MESH_ORIGIN": "https://evil.example", "MESH_AGENT_TOKEN": "stolen",
+            "MESH_ORIGIN": "https://evil.example", "MESH_AGENT_TOKEN": "stolen", "TRIANGLE_WORKLOAD_KEY_FILE": "/evil/key.json",
             "MESH_OTHER_SELECTOR": "bad", "CODEX_AGENT_ID": "bad", "HERMES_AGENT_ID": "bad", "ANTIGRAVITY_AGENT_ID": "bad",
             "TRIANGLE_PROJECT_ROOT": "/evil", "TRIANGLE_CREDENTIAL_ROOT": "/evil/credentials",
             "PATH": "/evil/bin", "UNRELATED_SECRET": "must-not-pass",
@@ -79,10 +84,40 @@ public enum WorkerLauncherContractCases {
         try await WorkerLauncher(gate: try gate(), resolver: FixedWorkerResolver(command), executor: executor)
             .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: ambient)
         let env = try require(executor.request, "worker missing").environment
-        try expect(env["MESH_ORIGIN"] == "https://thetriangle.dev" && env["MESH_AGENT_TOKEN"] == token, "ambient credential won")
+        try expect(env["MESH_ORIGIN"] == "https://thetriangle.dev" && env["TRIANGLE_WORKLOAD_KEY_FILE"] == agent.keyFile.path, "ambient credential won")
+        try expect(env["MESH_AGENT_TOKEN"] == nil && env["TRIANGLE_WORKLOAD_OTHER"] == nil, "stale credential selector survived")
         try expect(env["MESH_OTHER_SELECTOR"] == nil && env["HERMES_AGENT_ID"] == nil && env["ANTIGRAVITY_AGENT_ID"] == nil, "ambient selector survived")
         try expect(env["TRIANGLE_PROJECT_ROOT"] == "/trusted" && env["TRIANGLE_CREDENTIAL_ROOT"] == nil, "caller selected project or credential root")
         try expect(env["PATH"] == "/trusted/bin" && env["UNRELATED_SECRET"] == nil, "ambient environment was inherited")
+    }
+
+    public static func identityRootIsIsolated() async throws {
+        let home = agent.keyFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let executor = RecordingWorkerExecutor()
+        let safe = WorkerCommand(executable: URL(fileURLWithPath: "/trusted/node"), arguments: [], workingDirectory: URL(fileURLWithPath: "/trusted"),
+                                 environment: ["TRIANGLE_PROJECT_ROOT": "/trusted", "TRIANGLE_MODEL_ROOTS": "/model/instance", "TRIANGLE_IDENTITY_ROOT": "/evil"])
+        try await WorkerLauncher(gate: try gate(), resolver: FixedWorkerResolver(safe), executor: executor)
+            .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: [:])
+        let launched = try require(executor.request, "worker missing")
+        try expect(launched.environment["TRIANGLE_IDENTITY_ROOT"] == home.path, "identity root not exact")
+        let overlapping: [[String: String]] = [
+            ["TRIANGLE_MODEL_ROOTS": home.appendingPathComponent("..").standardizedFileURL.path],
+            ["CODEX_HOME": home.path],
+            ["TRIANGLE_RUNTIME_ROOTS": "/usr/bin:" + home.appendingPathComponent("agents").path],
+            ["TRIANGLE_INSTANCE_TEMP_ROOT": home.path + "/tmp"],
+            // Case-variant of an overlapping root (APFS is case-insensitive).
+            ["TRIANGLE_MODEL_ROOTS": home.path.uppercased()],
+        ]
+        for environment in overlapping {
+            let blocked = RecordingWorkerExecutor()
+            let command = WorkerCommand(executable: URL(fileURLWithPath: "/trusted/node"), arguments: [], workingDirectory: URL(fileURLWithPath: "/trusted"), environment: environment)
+            do {
+                try await WorkerLauncher(gate: try gate(), resolver: FixedWorkerResolver(command), executor: blocked)
+                    .launch(profile: ProfileName("codex-mailbox-live"), worker: .codex, inheritedEnvironment: [:])
+                throw WorkerContractFailure("overlapping custody home launched: \(environment.keys.sorted())")
+            } catch WorkerLauncherError.unsafeInstallation {}
+            try expect(blocked.request == nil, "overlap executed worker")
+        }
     }
 
     public static func noSecretInArguments() async throws {
@@ -96,9 +131,7 @@ public enum WorkerLauncherContractCases {
 
     public static func gateFailureNeverExecutes() async throws {
         let executor = RecordingWorkerExecutor()
-        let empty = InMemoryCredentialStore()
-        let transport = IdentityTransport()
-        let gate = VerifiedCredentialGate(store: empty, transport: transport, reservation: InMemoryEnrollmentReservation(), journal: InMemoryEnrollmentJournal())
+        let gate = VerifiedCredentialGate(resolver: InMemoryV1AgentResolver(), transport: FakeV1Mesh(agents: []))
         let command = WorkerCommand(executable: URL(fileURLWithPath: "/trusted/node"), arguments: [], workingDirectory: URL(fileURLWithPath: "/trusted"), environment: [:])
         do {
             try await WorkerLauncher(gate: gate, resolver: FixedWorkerResolver(command), executor: executor)
@@ -110,12 +143,9 @@ public enum WorkerLauncherContractCases {
 
     public static func resolverFailureNeverRequestsCredential() async throws {
         let events = EventRecorder()
-        let binding = CredentialBinding(origin: try MeshOrigin("https://thetriangle.dev"), agentID: try AgentID(agentID), handle: try MailboxHandle("codex-mailbox-live"), token: try MeshToken(token))
-        let store = RecordingCredentialStore(binding: binding, events: events)
+        let store = RecordingResolver(material: agent.material, events: events)
         let profile = try ProfileName("codex-mailbox-live")
-        let journal = InMemoryEnrollmentJournal()
-        try journal.write(.testing(profile: profile, origin: binding.origin, state: .verified, agentID: binding.agentID, handle: binding.handle, reasonCode: "identity_verified"))
-        let gate = VerifiedCredentialGate(store: store, transport: IdentityTransport(), reservation: InMemoryEnrollmentReservation(), journal: journal)
+        let gate = VerifiedCredentialGate(resolver: store, transport: FakeV1Mesh(agents: [agent]))
         do {
             try await WorkerLauncher(gate: gate, resolver: FailingWorkerResolver(events: events), executor: RecordingWorkerExecutor())
                 .launch(profile: profile, worker: .codex, inheritedEnvironment: [:])
@@ -418,11 +448,9 @@ public enum WorkerLauncherContractCases {
 
     private static func gate() throws -> VerifiedCredentialGate { try gate(profile: ProfileName("codex-mailbox-live")) }
     private static func gate(profile: ProfileName) throws -> VerifiedCredentialGate {
-        let binding = CredentialBinding(origin: try MeshOrigin("https://thetriangle.dev"), agentID: try AgentID(agentID), handle: try MailboxHandle("codex-mailbox-live"), token: try MeshToken(token))
-        let store = InMemoryCredentialStore(); try store.create(binding, for: profile)
-        let journal = InMemoryEnrollmentJournal()
-        try journal.write(.testing(profile: profile, origin: binding.origin, state: .verified, agentID: binding.agentID, handle: binding.handle, reasonCode: "identity_verified"))
-        return VerifiedCredentialGate(store: store, transport: IdentityTransport(), reservation: InMemoryEnrollmentReservation(), journal: journal)
+        let resolver = InMemoryV1AgentResolver()
+        resolver.set(agent.material, for: profile)
+        return VerifiedCredentialGate(resolver: resolver, transport: FakeV1Mesh(agents: [agent]))
     }
 }
 
@@ -454,20 +482,11 @@ private actor AsyncBarrier {
 }
 private final class RecordingWorkerExecutor: WorkerExecuting, @unchecked Sendable { var request: WorkerExecutionRequest?; func execute(_ request: WorkerExecutionRequest) throws { self.request = request } }
 private final class EventRecorder: @unchecked Sendable { private let lock = NSLock(); private var storage: [String] = []; var values: [String] { lock.withLock { storage } }; func append(_ value: String) { lock.withLock { storage.append(value) } } }
-private final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
-    private let binding: CredentialBinding; private let events: EventRecorder; private let lock = NSLock(); private var reads = 0
-    init(binding: CredentialBinding, events: EventRecorder) { self.binding = binding; self.events = events }
+private final class RecordingResolver: V1AgentResolver, @unchecked Sendable {
+    private let material: V1AgentMaterial; private let events: EventRecorder; private let lock = NSLock(); private var reads = 0
+    init(material: V1AgentMaterial, events: EventRecorder) { self.material = material; self.events = events }
     var readCount: Int { lock.withLock { reads } }
-    func create(_ binding: CredentialBinding, for profile: ProfileName) throws { throw CredentialStoreError.duplicateItem }
-    func read(for profile: ProfileName) throws -> CredentialBinding { lock.withLock { reads += 1 }; events.append("credential"); return binding }
-    func replace(_ binding: CredentialBinding, for profile: ProfileName, confirmation: CredentialReplacementConfirmation) throws { throw CredentialStoreError.replacementNotConfirmed }
-    func delete(for profile: ProfileName) throws { throw CredentialStoreError.itemNotFound }
-}
-private struct IdentityTransport: MeshTransport {
-    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
-        let body = Data(#"{"agent":{"id":"agent_88888888888888888888888888888888","name":"Codex Mailbox Live","handle":"codex-mailbox-live","registrationMode":"mailbox","endpointUrl":"https://thetriangle.dev/api/v1/mailbox"}}"#.utf8)
-        return MeshHTTPResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: body, finalURL: request.url)
-    }
+    func material(for profile: ProfileName) throws -> V1AgentMaterial { lock.withLock { reads += 1 }; events.append("credential"); return material }
 }
 
 private final class ResolverFixture {

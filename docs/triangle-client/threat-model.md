@@ -2,22 +2,46 @@
 
 ## Assets and trust boundary
 
-The protected assets are permanent MESH mailbox tokens, agent-ID/origin
+The protected assets are each agent's Ed25519 workload key (permissions v1,
+written by `triangle` under `<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json`),
+the short-lived DPoP-bound access tokens minted from it, profile-to-agent
 bindings, message confidentiality, profile isolation, and integrity of the code
 that can use those identities. Triangle Client assumes a trusted macOS host,
-trusted signed local binaries, the user's unlocked login Keychain, and the
-configured MESH HTTPS origin.
+trusted signed local binaries, owner-only file custody (`0700` directories,
+`0600` files, owned by the user), and the configured MESH HTTPS origin.
 
 The Swift host and the local coordinator are inside the trusted computing base.
-A permanent token exists in Keychain and remains in trusted-host coordinator
-memory for the active service lifetime of each profile because the coordinator
-performs authenticated mailbox I/O. This known coordinator memory boundary is
-not end-to-end hardware isolation. A reasoning subprocess never receives any
-token.
+The workload key seed and the access tokens it mints remain in trusted-host
+coordinator memory for the active service lifetime of each profile because the
+coordinator performs authenticated mailbox I/O. This known coordinator memory
+boundary is not end-to-end hardware isolation. A reasoning subprocess never
+receives any token or key through its argv, environment or bootstrap. Whether it
+can *read* the custody home depends on the lane; see "Same-user runtime (F1)"
+below.
+
+### Same-user runtime (F1, accepted in v1)
+
+Permissions v1 trusts the same-user local runtime (decision F1). The custody
+home (`<TRIANGLE_HOME>`, including `agents/<id>/workload-key.json` and
+`owner/owner-key.json`) is ordinary `0600`/`0700` file custody owned by the
+user, so any process running as that user can read it.
+
+- The seatbelt runner lanes (`run-worker` and supervisor-launched
+  `codex`/`hermes`/`antigravity` runners through `runner-common.mjs`) deny the
+  custody home explicitly (`TRIANGLE_IDENTITY_ROOT`).
+- The headless Codex app-server lane and the Cursor ACP lane do **not** run
+  under that seatbelt. Their children are spawned as the user with the real
+  `HOME`, and Codex's pinned `workspace-write` sandbox restricts writes, not
+  reads. Same-user runtime children in these lanes **can read the custody home
+  in v1**, including workload and owner keys. This is accepted under F1.
+- Sandboxing those two lanes (a custody-home read deny) is a **v1.1
+  follow-up**. Until then, do not claim that every reasoning child is isolated
+  from the custody home.
 
 Triangle Client does not protect secrets from a malicious or already
 compromised host administrator, injected code inside the trusted coordinator,
-Keychain compromise, or a compromised MESH service. It also cannot make an
+compromise of the user account that owns the key files, or a compromised MESH
+service. It also cannot make an
 agent's textual response truthful; adapter/tool policy remains responsible for
 what work the model may perform.
 
@@ -40,21 +64,31 @@ state is never stored in that shared bundle.
 
 ## Secret flow
 
-1. Enrollment sends a one-time admission credential through bounded stdin.
-2. The signed helper stores the permanent binding in the non-synchronizing
-   Data Protection Keychain and verifies it against MESH.
-3. At service start, adapter paths and integrity are checked before credential
-   retrieval.
-4. The host obtains each exact profile binding and sends a bounded bootstrap
-   through an anonymous pipe to the trusted coordinator.
-5. The coordinator confines each token to its mailbox client and sends a
-   credential-free request to the reasoning adapter.
+1. `triangle agent add` creates the agent and writes its workload key (`0600`)
+   and `agent.json` in the custody home. `triangle-mailbox bind` writes only a
+   `0600` pointer (`profiles-v1/profile-<hex>.json`) to that key file, after
+   proving the identity live with a DPoP-bound `GET /api/v1/agents/me`.
+2. At service start, adapter paths and integrity are checked before the key is
+   loaded. The loader refuses symlinks, hard links, foreign ownership and any
+   group/other mode bits on the key, `agent.json` and every custody directory.
+3. The host sends each verified profile's workload ID and key seed in a bounded
+   bootstrap through an anonymous pipe to the trusted coordinator. A worker
+   receives only the key file path (`TRIANGLE_WORKLOAD_KEY_FILE`).
+4. The coordinator confines each key to its mailbox client, exchanges it for
+   short-lived DPoP tokens, and sends a credential-free request to the
+   reasoning adapter. A token is only ever attached to requests on the origin
+   it was minted for; watch grant members on another origin fail closed.
 
-Tokens are forbidden from process argv, LaunchAgent plists, adapter
+Keys and tokens are forbidden from process argv, LaunchAgent plists, adapter
 environment, profile registry, model filesystem, temporary filesystem, logs,
-error descriptions, and result JSON. There is no show or export command and no
-fallback plaintext credential file. The adapter sandbox explicitly denies the
-credential root and environment files.
+error descriptions, and result JSON. There is no show or export command. The
+seatbelt adapter sandbox used by the runner lanes explicitly denies the
+credential root, the custody home (`TRIANGLE_IDENTITY_ROOT`, set by the helper
+for both `run-worker` and supervisor-launched runners, required by the sandbox,
+and refused if it overlaps any model, runtime, project or temp root, compared
+case-insensitively), and environment files. The headless Codex app-server and
+Cursor ACP lanes are outside this seatbelt; their children can read the custody
+home in v1 (accepted under F1, v1.1 follow-up; see above).
 
 ## Availability and lifecycle safety
 
@@ -82,14 +116,14 @@ without creating duplicate consumers.
 
 ## Residual risks
 
-- A trusted coordinator memory disclosure can expose currently loaded tokens.
+- A trusted coordinator memory disclosure can expose currently loaded keys and tokens.
 - A legitimate model may disclose message content in its provider interaction;
   select adapters and provider policies appropriate for the data.
-- Denial of service remains possible through provider outage, Keychain lock,
+- Denial of service remains possible through provider outage, Keychain lock (watch grants),
   MESH outage, disk exhaustion, or resource-heavy prompts.
-- Removing an agent intentionally preserves its Keychain identity. Credential
-  revocation and deletion require a separately reviewed decommissioning path.
-- The current macOS sandbox and Keychain controls do not define a portability
+- `triangle-mailbox unbind` removes only the pointer; the key stays with
+  `triangle`. Revocation is `triangle agent pause` or `triangle agent delete`.
+- The current macOS sandbox and file-custody controls do not define a portability
   model for Linux or Windows; this release is macOS only.
 
 Security reports should include the affected Triangle Client release, runtime

@@ -108,6 +108,15 @@ public struct ClientSupervisor: Sendable {
 
     private let instanceStore: any ClientInstanceStore
     private let gate: VerifiedCredentialGate
+
+    /// Every supervisor lane replies and acknowledges, so a read-only agent
+    /// (bounds without `agent.write`) is omitted instead of failing later at
+    /// token exchange.
+    private func workerCredential(for profile: ProfileName) async throws -> VerifiedCredential {
+        let credential = try await gate.credential(for: profile)
+        guard credential.canWrite else { throw VerifiedCredentialGateError.credentialRefused }
+        return credential
+    }
     private let workloadKeyStore: any WorkloadKeyStore
     private let resolver: any ClientSupervisorCommandResolving
     private let processRunner: any ClientSupervisorProcessRunning
@@ -151,17 +160,7 @@ public struct ClientSupervisor: Sendable {
     ) {
         self.instanceStore = instanceStore
         self.gate = gate
-        #if canImport(Security)
-        if let workloadKeyStore {
-            self.workloadKeyStore = workloadKeyStore
-        } else if LocalCredentialStores.fileCredentialsEnabled {
-            self.workloadKeyStore = FileWorkloadKeyStore()
-        } else {
-            self.workloadKeyStore = KeychainWorkloadKeyStore()
-        }
-        #else
-        self.workloadKeyStore = workloadKeyStore ?? InMemoryWorkloadKeyStore()
-        #endif
+        self.workloadKeyStore = workloadKeyStore ?? LocalCredentialStores.workload()
         self.resolver = resolver
         self.processRunner = processRunner
         self.installationIdentity = installationIdentity ?? FileClientInstallationIdentityStore()
@@ -327,34 +326,33 @@ public struct ClientSupervisor: Sendable {
         for (instance, command) in resolved {
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: instance.profile)
+                credential = try await workerCredential(for: instance.profile)
             } catch {
                 omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
             try validateAdapterSecretConfinement(command, credential: credential)
-            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             prepared.append(PreparedBootstrapInstance(
                 instanceId: instance.instanceID.value,
                 mailbox: PreparedBootstrapMailbox(
                     meshUrl: credential.origin.value,
-                    meshToken: credential.binding.token.secretValue,
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
-                    workloadId: workloadRecord?.workloadID?.value,
-                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
+                    workloadId: credential.workloadID.value,
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed,
+                    workloadScopes: credential.material.scopes
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
                     args: command.arguments,
                     timeoutMs: Self.maximumRunnerTimeoutMilliseconds
                 ),
-                runnerEnvironment: command.environment
+                runnerEnvironment: try WorkerLauncher.isolatedRunnerEnvironment(command.environment, credential: credential)
             ))
             publicInstances.append(.init(instanceID: instance.instanceID.value, runtimeAdapter: instance.runtimeAdapter))
         }
         if !prepared.isEmpty {
-            guard Set(prepared.map(\.mailbox.meshToken)).count == prepared.count else {
+            guard Set(prepared.map(\.mailbox.workloadId)).count == prepared.count else {
                 throw ClientSupervisorError.invalidBootstrap
             }
         }
@@ -462,9 +460,9 @@ public struct ClientSupervisor: Sendable {
             }
         }
 
-        var allMailboxTokens = prepared.map(\.mailbox.meshToken)
+        var allMailboxTokens = prepared.map(\.mailbox.workloadId)
         if let eventWake {
-            allMailboxTokens.append(contentsOf: eventWake.drains.map(\.mailbox.meshToken))
+            allMailboxTokens.append(contentsOf: eventWake.drains.map(\.mailbox.workloadId))
         }
         guard Set(allMailboxTokens).count == allMailboxTokens.count else {
             throw ClientSupervisorError.invalidBootstrap
@@ -528,13 +526,12 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: instance.profile)
+                credential = try await workerCredential(for: instance.profile)
             } catch {
                 omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
             try validateAdapterSecretConfinement(command, credential: credential)
-            let workloadRecord = try? workloadKeyStore.read(for: instance.profile)
             profiles.append(PreparedEventWakeProfile(
                 instanceId: instance.instanceID.value,
                 agentId: credential.agentID.value
@@ -543,18 +540,18 @@ public struct ClientSupervisor: Sendable {
                 instanceId: instance.instanceID.value,
                 mailbox: PreparedBootstrapMailbox(
                     meshUrl: credential.origin.value,
-                    meshToken: credential.binding.token.secretValue,
                     recipientId: credential.agentID.value,
                     pageLimit: 1,
-                    workloadId: workloadRecord?.workloadID?.value,
-                    workloadPrivateKey: workloadRecord?.privateKey.rawRepresentation.base64EncodedString()
+                    workloadId: credential.workloadID.value,
+                    workloadPrivateKey: credential.material.workloadPrivateKeySeed,
+                    workloadScopes: credential.material.scopes
                 ),
                 runner: PreparedBootstrapRunner(
                     command: command.executable.path,
                     args: command.arguments,
                     timeoutMs: Self.maximumRunnerTimeoutMilliseconds
                 ),
-                runnerEnvironment: command.environment
+                runnerEnvironment: try WorkerLauncher.isolatedRunnerEnvironment(command.environment, credential: credential)
             ))
         }
         guard !profiles.isEmpty, profiles.count == drains.count else {
@@ -634,7 +631,7 @@ public struct ClientSupervisor: Sendable {
         }
         let credential: VerifiedCredential
         do {
-            credential = try await gate.credential(for: primary.profile)
+            credential = try await workerCredential(for: primary.profile)
         } catch {
             omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
             return nil
@@ -748,7 +745,7 @@ public struct ClientSupervisor: Sendable {
         }
         let credential: VerifiedCredential
         do {
-            credential = try await gate.credential(for: primary.profile)
+            credential = try await workerCredential(for: primary.profile)
         } catch {
             omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
             return nil
@@ -946,7 +943,7 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: member.profile)
+                credential = try await workerCredential(for: member.profile)
             } catch {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
@@ -955,7 +952,7 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
-            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+            guard credentialTokens.insert(credential.workloadID.value).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
             prepared.append(PreparedHeadlessWakeBootstrap(
@@ -1137,7 +1134,7 @@ public struct ClientSupervisor: Sendable {
             }
             let credential: VerifiedCredential
             do {
-                credential = try await gate.credential(for: member.profile)
+                credential = try await workerCredential(for: member.profile)
             } catch {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
@@ -1146,7 +1143,7 @@ public struct ClientSupervisor: Sendable {
                 omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
                 continue
             }
-            guard credentialTokens.insert(credential.binding.token.secretValue).inserted,
+            guard credentialTokens.insert(credential.workloadID.value).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
             // agentId + installationId are emitted only for this set: enabled,
@@ -1219,7 +1216,7 @@ public struct ClientSupervisor: Sendable {
     }
 
     private func validateAdapterSecretConfinement(_ command: WorkerCommand, credential: VerifiedCredential) throws {
-        let secret = credential.binding.token.secretValue
+        let secret = credential.material.workloadPrivateKeySeed
         let outsideValues = [command.executable.path] + command.arguments + command.environment.keys + command.environment.values
         guard !outsideValues.contains(where: { $0.contains(secret) }) else {
             throw ClientSupervisorError.invalidBootstrap
@@ -1261,11 +1258,14 @@ private struct PreparedBootstrapInstance: Encodable {
 }
 private struct PreparedBootstrapMailbox: Encodable {
     let meshUrl: String
-    let meshToken: String
     let recipientId: String
     let pageLimit: Int
-    let workloadId: String?
-    let workloadPrivateKey: String?
+    /// Permissions v1: the agent's workload id and its key as an unpadded base64url seed.
+    let workloadId: String
+    let workloadPrivateKey: String
+    /// The agent's registered bounds (agent.json `bounds`): a read-only agent's
+    /// worker asks MESH for agent.read only, since MESH refuses more.
+    let workloadScopes: [String]
 }
 private struct PreparedBootstrapRunner: Encodable {
     let command: String

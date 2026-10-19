@@ -10,10 +10,6 @@ let package = Package(
         .executable(name: "triangle-mailbox", targets: ["TriangleMailbox"]),
         .executable(name: "triangle-client", targets: ["TriangleClient"]),
         .executable(name: "TriangleMailboxHostTests", targets: ["TriangleMailboxHostTests"]),
-        .executable(
-            name: "TriangleMailboxDisposableKeychainTest",
-            targets: ["TriangleMailboxDisposableKeychainTest"]
-        ),
     ],
     targets: [
         .target(name: "TriangleMailboxCore"),
@@ -34,11 +30,6 @@ let package = Package(
             name: "TriangleMailboxHostTests",
             dependencies: ["TriangleMailboxTestSupport"],
             path: "Tests/TriangleMailboxHostTests"
-        ),
-        .executableTarget(
-            name: "TriangleMailboxDisposableKeychainTest",
-            dependencies: ["TriangleMailboxCore"],
-            path: "Tests/TriangleMailboxDisposableKeychainTest"
         ),
         .testTarget(
             name: "TriangleMailboxCoreTests",

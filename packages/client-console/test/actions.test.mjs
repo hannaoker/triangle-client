@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { enrollAction, watchEnsureAction, serviceAction } from "../src/actions.mjs";
+import { bindAction, watchEnsureAction, serviceAction } from "../src/actions.mjs";
 import { findSecretLeak } from "../src/secrets.mjs";
 
 const fakeHelper = path.join(
@@ -32,37 +32,36 @@ function runRole(role) {
     });
 }
 
-test("enrollAction defaults to stdin-handoff recipe without executing", async () => {
-  const recipe = await enrollAction({
-    profile: "research",
-    origin: "https://thetriangle.dev",
-    home: "/tmp/triangle-console-test-home",
-  });
+const KEY_FILE = "/tmp/triangle-console-test-home/triangle/agents/agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/workload-key.json";
+
+test("bindAction defaults to the exact helper command without executing", async () => {
+  const recipe = await bindAction({ profile: "research", keyFile: KEY_FILE, home: "/tmp/triangle-console-test-home" });
   assert.equal(recipe.stub, true);
   assert.match(recipe.command[0], /triangle-mailbox$/);
-  assert.equal(recipe.stdin.includes("stdin"), true);
+  assert.deepEqual(recipe.command.slice(1), ["bind", "--profile", "research", "--key-file", KEY_FILE]);
   assert.equal(findSecretLeak(recipe).ok, true);
 });
 
-test("enrollAction execute pipes admission JSON and returns secret-free result", async () => {
-  const result = await enrollAction({
+test("bindAction validates the key file path and origin", async () => {
+  for (const keyFile of ["relative/agents/agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/workload-key.json", "/tmp/agent.json", "/tmp/agents/agent_x/workload-key.json"]) {
+    await assert.rejects(bindAction({ profile: "research", keyFile }), { code: "invalid_key_file" });
+  }
+  await assert.rejects(bindAction({ profile: "research", keyFile: KEY_FILE, origin: "http://x.test" }), { code: "invalid_origin" });
+});
+
+test("bindAction execute returns the secret-free verified status with permissions", async () => {
+  const result = await bindAction({
     profile: "research",
+    keyFile: KEY_FILE,
     origin: "https://thetriangle.dev",
     home: "/tmp/triangle-console-test-home",
     execute: true,
-    admissionJson: JSON.stringify({
-      admissionToken: "one-shot",
-      handle: "research",
-      name: "Research",
-      description: "test",
-      capabilities: ["direct-messages"],
-    }),
     run: runRole("mailbox"),
   });
   assert.equal(result.stub, false);
-  assert.equal(result.result.lifecycle, "verified");
+  assert.equal(result.result.status, "verified");
+  assert.deepEqual(result.result.permissions, { send_messages: true });
   assert.equal(findSecretLeak(result).ok, true);
-  assert.equal(Object.prototype.hasOwnProperty.call(result, "admissionJson"), false);
 });
 
 test("watchEnsureAction stub then execute", async () => {

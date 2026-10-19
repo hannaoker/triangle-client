@@ -253,12 +253,12 @@ public enum ClientInstanceContractCases {
             try store.setEnabled(true, profile: research.profile)
             try expect(try store.read(profile: research.profile).enabled, "exact enable failed")
 
-            let credentials = InMemoryCredentialStore()
-            let binding = try CredentialBinding(origin: MeshOrigin("https://thetriangle.dev"), agentID: AgentID("agent_" + String(repeating: "a", count: 32)), handle: MailboxHandle("research-agent"), token: MeshToken("mesh_" + String(repeating: "b", count: 64)))
-            try credentials.create(binding, for: research.profile)
+            let credentials = InMemoryV1ProfileBindingStore()
+            let binding = V1ProfileBinding(keyFile: "/tmp/v1/agents/agent_\(String(repeating: "a", count: 32))/workload-key.json")
+            try credentials.write(binding, for: research.profile)
             try store.remove(profile: research.profile)
             try expectError(.notFound, "removed instance remained readable") { _ = try store.read(profile: research.profile) }
-            try expect(try credentials.read(for: research.profile) == binding, "removing an instance deleted its credential")
+            try expect(try credentials.read(for: research.profile) == binding, "removing an instance deleted its binding")
             try expect(try store.read(profile: operations.profile) == operations, "remove affected another profile")
         }
     }

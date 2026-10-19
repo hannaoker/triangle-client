@@ -12,6 +12,15 @@ const AGENT_ID = /^agent_[a-f0-9]{32}$/;
 const WORKLOAD_ID = /^workload_[a-f0-9]{32}$/;
 const MAX_BYTES = 64 * 1024;
 
+// Swift `V1PrivateDirectory.isSafe`: a real directory (lstat, so never a
+// symlink) owned by this user with no group/other mode bits (0700-style).
+function requirePrivateDirectory(dir, name) {
+  const stat = lstatSync(dir, { throwIfNoEntry: false });
+  if (!stat || !stat.isDirectory()) throw new TypeError(`${name} must be a real directory`);
+  if (stat.uid !== process.getuid?.()) throw new TypeError(`${name} is not owned by this user`);
+  if ((stat.mode & 0o077) !== 0) throw new TypeError(`${name} must not be accessible by group or others (chmod 700)`);
+}
+
 function readPrivateFile(file, name) {
   const link = lstatSync(file, { throwIfNoEntry: false });
   if (!link) throw new TypeError(`${name} does not exist`);
@@ -20,6 +29,7 @@ function readPrivateFile(file, name) {
   try {
     const stat = fstatSync(fd);
     if (stat.uid !== process.getuid?.()) throw new TypeError(`${name} is not owned by this user`);
+    if (stat.nlink !== 1) throw new TypeError(`${name} must not have additional hard links`);
     if ((stat.mode & 0o077) !== 0) throw new TypeError(`${name} must not be readable by group or others (chmod 600)`);
     if (stat.size > MAX_BYTES) throw new TypeError(`${name} is too large`);
     return readFileSync(fd, "utf8");
@@ -32,6 +42,21 @@ export function loadWorkloadCredential(keyFile, { expectedAgentId } = {}) {
   if (typeof keyFile !== "string" || !path.isAbsolute(keyFile)) {
     throw new TypeError("workload key file must be an absolute path");
   }
+  // Same layout and parent checks as the Swift loader (V1AgentCredentialLoader):
+  // <home>/agents/<agent_id>/workload-key.json, every custody directory private,
+  // so a symlinked or shared parent cannot redirect the key.
+  const resolved = path.resolve(keyFile);
+  if (resolved !== keyFile || path.basename(keyFile) !== "workload-key.json") {
+    throw new TypeError("workload key file must be <home>/agents/<agent_id>/workload-key.json");
+  }
+  const agentDir = path.dirname(keyFile);
+  const agentsDir = path.dirname(agentDir);
+  if (path.basename(agentsDir) !== "agents") {
+    throw new TypeError("workload key file is not under the custody agents/ directory");
+  }
+  requirePrivateDirectory(path.dirname(agentsDir), "custody home");
+  requirePrivateDirectory(agentsDir, "custody agents/ directory");
+  requirePrivateDirectory(agentDir, "agent custody directory");
   const keyText = readPrivateFile(keyFile, "workload key file").trim();
   parseWorkloadPrivateKey(keyText);
   let agent;

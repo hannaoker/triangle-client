@@ -1,11 +1,17 @@
 # Triangle mailbox helper and Triangle Client host for macOS
 
-`triangle-mailbox` is the local credential custodian for a durable MESH mailbox
-identity. On a public ad-hoc install, `0600` files under
-`~/Library/Application Support/The Triangle/credentials/local/` are the
-authority for the origin, agent ID, handle, and permanent token binding; on a
-`--local-ad-hoc` compatibility install the Keychain is the authority. Chatbot transcripts, project files, LaunchAgent plists,
-and reasoning subprocesses are not credential stores.
+`triangle-mailbox` is the local runtime host for a MESH agent identity
+(permissions v1). The identity itself is created and owned by the `triangle`
+CLI (`triangle join` / `triangle agent add`), which writes the agent's Ed25519 workload key to
+`<TRIANGLE_HOME>/agents/<agent_id>/workload-key.json` (mode `0600`, beside a
+secret-free `agent.json`). A helper **profile** is only a `0600` pointer from a
+local profile name to that key file
+(`~/Library/Application Support/The Triangle/profiles-v1/profile-<hex>.json`); the
+helper never registers agents, never stores a static `mesh_` bearer, and has no
+Keychain identity path. Every use re-proves the identity with short-lived DPoP
+workload tokens against `/api/v1/agents/me`. Chatbot transcripts, project
+files, LaunchAgent plists, and reasoning subprocesses are not credential
+stores.
 
 ## Install
 
@@ -23,7 +29,9 @@ The public build sets `TRIANGLE_FILE_CUSTODY_REQUIRED`, writes the
 and `credentialCustody: file`. `TRIANGLE_CREDENTIAL_CUSTODY=keychain` is
 refused (installer exit 64; helper exit 78), and a public install over an
 existing Keychain-custody install is refused (exit 78) unless
-`TRIANGLE_ACK_CUSTODY_SWITCH=1` acknowledges re-enrollment. A source tree that
+`TRIANGLE_ACK_CUSTODY_SWITCH=1` acknowledges the switch. (This custody mode now
+governs only installation watch grants; agent identities are always the
+`triangle` key files above.) A source tree that
 carries `com.apple.quarantine` (browser download) is refused with remediation;
 see `scripts/release/check-quarantine.sh`.
 
@@ -48,41 +56,42 @@ For development only, an explicit ad-hoc mode is available:
 ./scripts/install-macos-mailbox-helper.sh --local-ad-hoc
 ```
 
-`--local-ad-hoc` is non-public, local testing only. It keeps the Keychain
-compatibility path (with the legacy login-Keychain fallback) for existing
-profiles and does not provide a stable application identity for a distributed
-Keychain credential. `TRIANGLE_CREDENTIAL_CUSTODY=file` opts it into file
-custody.
+`--local-ad-hoc` is non-public, local testing only. It keeps Keychain storage
+for installation watch grants and does not provide a stable application
+identity for a distributed Keychain credential.
+`TRIANGLE_CREDENTIAL_CUSTODY=file` opts it into file custody.
 
-## Enroll once through standard input
+## Bind a profile to a `triangle` agent
 
-Keep the admission credential out of shell arguments and history. Supply one
-bounded JSON document on stdin:
+Create the agent with the `triangle` CLI (owner-signed; see
+`packages/triangle-cli/README.md`), then point a helper profile at its key
+file. Nothing secret crosses argv, stdin, or the environment; the helper opens
+the `0600` key file itself:
 
 ```sh
-read -s TRIANGLE_ADMISSION_TOKEN
-printf '\n'
-printf '{"admissionToken":"%s","handle":"codex-mailbox-live","name":"Codex Mailbox Live","description":"Remote mailbox agent","capabilities":["direct-messages"]}\n' \
-  "$TRIANGLE_ADMISSION_TOKEN" |
-  "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" enroll --profile codex-mailbox-live --origin https://thetriangle.dev
-unset TRIANGLE_ADMISSION_TOKEN
+triangle agent add --handle codex-mailbox-live --name "Codex Mailbox Live"
+HELPER="$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox"
+"$HELPER" bind --profile codex-mailbox-live \
+  --key-file "$HOME/Library/Application Support/The Triangle/v1/agents/agent_…/workload-key.json"
 ```
 
-For automation, generate the JSON from a protected input source without
-printing it. The helper registers once, stores the authoritative binding in the
-non-synchronizing Data Protection Keychain, verifies `/api/v1/agents/me`, and
-emits only bounded non-secret lifecycle metadata. There is no show or export
-operation and no command that returns the permanent token.
+`bind` prints the same fields as `status` (with `status` for the outcome) and
+exits non-zero unless the identity verified; nothing is written then. It checks
+the key file custody (no-follow regular file owned by you, no
+group/other bits, inside `<TRIANGLE_HOME>/agents/<agent_id>/`, matching
+`agent.json`), proves the identity with a DPoP workload token against
+`/api/v1/agents/me`, and only then writes the pointer. It refuses to replace a
+binding that points at a different agent (`identity_mismatch`); run
+`"$HELPER" unbind --profile NAME` first. The origin defaults to the agent's
+authority (or the `via` deployment in `<TRIANGLE_HOME>/authority.json`);
+`--origin https://…` overrides it. There is no show or export operation and no
+command that returns key material or a token.
 
-Silent normal Keychain access begins after enrollment while the user's login
-Keychain is available. Polling, sending, claiming, acknowledging, status, MCP
-resume, and worker restart do not require Touch ID each time. If the Keychain is
-locked after logout, reboot, or a manual lock, the helper fails closed with
-`local_authorization_required`; unlock the login Keychain once and retry. It
-never falls back to a plaintext credential file.
-
-A locked Keychain therefore requires one local unlock or login before silent
-operation resumes.
+`status` re-verifies and reports the agent's current permissions and revision.
+Paused agents fail closed with `agent_paused` (`operatorAction: resume_agent`;
+run `triangle agent resume`). A key the server no longer accepts reports
+`credential_refused` (`run_triangle_doctor`). Rotate or revoke keys with the
+`triangle` CLI; the binding follows the key file path.
 
 ## Resume from a new chatbot session
 
@@ -176,7 +185,7 @@ Keychain is unavailable, watch commands fail closed.
 ### Interpreting watch-ensure failures
 
 Failed `watch-ensure` writes secret-free JSON to **stderr** (exit 1), not the
-opaque enrollment-era `operation_failed` blob. Fields:
+opaque legacy `operation_failed` blob. Fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -195,16 +204,15 @@ after a failure (operator-run on the Mac; not claimed from Linux CI):
    be a notify member with a matching App Server binding. `grok-bot` may notify
    (and may act) with a matching Grok Bot binding. `event-driven` remains the
    preferred actor when available.
-4. Keychain services `dev.thetriangle.mesh.mailbox` and
-   `dev.thetriangle.mesh.workload-key` should exist for the profile;
-   `dev.thetriangle.mesh.mailbox-watch` appears only after a successful ensure.
+4. The profile binding (`profiles-v1/profile-<hex>.json`) must point at an existing
+   `0600` `workload-key.json`; the watch grant (`credentials/local/watch/` or the
+   `dev.thetriangle.mesh.mailbox-watch` Keychain item) appears only after a
+   successful ensure.
 5. If `gate` is `keychain` on an ad-hoc helper, move the host to file custody
-   (public install, then re-enroll); Developer ID is out of scope.
-6. If `code` is `credential_busy` (or `operatorAction` is `retry_later`), another
-   helper process holds the profile `enroll-*.lock` (often concurrent
-   `watch-ensure` / `status` / `transaction-*`). Retry the same command; do
-   **not** remint, move aside watch JSON, or re-enroll. Node ensure/transaction
-   proxies retry briefly automatically.
+   (public install); Developer ID is out of scope.
+6. If `code` is `agent_paused`, resume the agent with `triangle agent resume`;
+   if it is `credential_refused` or `credential_invalid`, run `triangle doctor`
+   and rebind. Do **not** remint or move aside watch JSON for these.
 7. If `rejectedCode` is `replacement_unauthorized` or `watch_credential_invalid`,
    current helpers retry create without a replacement header and keep the local
    binding until the new grant is stored (so concurrent `watch-poll` is not
@@ -227,20 +235,21 @@ Use this MCP client configuration when the host accepts a stdio command:
 }
 ```
 
-`status` re-verifies the stored identity and returns only `profile`, `origin`,
-`agentId`, `handle`, `lifecycle`, `verificationTimestamp`, and a bounded
-`operatorAction`. The timestamp is present only for a successful live identity
-verification. Status never emits credential material.
+`status` re-verifies the bound identity and returns only `profile`, `origin`,
+`agentId`, `handle`, `lifecycle`, `verificationTimestamp` (only after a live
+verification), a bounded `operatorAction`, and (when verified)
+`permissions` with `permissionsRevision`. Status never emits credential
+material.
 
 ## Interactive MCP (stdio)
 
 Use interactive MCP when a chatbot session drives mailbox operations directly
 through `triangle-mailbox mcp`. The helper authenticates with workload JWT and
 DPoP via `MCPProxy`; do not put a bearer token in MCP host configuration.
-Run one stdio `mcp` process per profile — concurrent processes can hit
-enrollment locks. Sequential spawn is fine for scripts.
+Run one stdio `mcp` process per profile; each process mints its own short-lived
+workload tokens from the bound key file.
 
-The session must act only as its enrolled profile. Never impersonate the peer.
+The session must act only as its bound profile. Never impersonate the peer.
 
 ### Stdio configuration
 
@@ -253,7 +262,7 @@ args = ["mcp", "--profile", "codex-mailbox-live"]
 ```
 
 Hermes and Antigravity (AGY) use the same `command` / `args` shape in their
-respective MCP server tables. Replace the profile name with your enrolled
+respective MCP server tables. Replace the profile name with your bound
 selector.
 
 Generic JSON (Cursor and other stdio hosts):
@@ -282,7 +291,7 @@ CLIENT="$HOME/Library/Application Support/The Triangle/bin/triangle-client"
 
 Restore headless worker polling with `--mode worker`. The profile stays enabled;
 only coordinator bootstrap omits it. See [`KEYCHAIN_POLICY.md`](KEYCHAIN_POLICY.md)
-for credential custody during mode changes.
+for credential custody (identity key files and watch grants).
 
 ### Receiver prompt pattern
 
@@ -330,22 +339,19 @@ Use `mesh.agents.find` with the handle; room IDs come from `mesh.rooms.direct.op
 
 ### Auth note
 
-MCP stdio uses workload key material from the Data Protection Keychain and
-exchanges short-lived tokens with DPoP proofs on each forwarded call
-(`MCPProxy`, commit `92224cf`). Permanent `mesh_` bearer tokens are stored
-locally for worker bootstrap only and must not appear in MCP host config.
+MCP stdio reads the bound `triangle` workload key file and exchanges
+short-lived DPoP-bound access tokens (scopes from the agent's bounds) for each
+forwarded call (`MCPProxy`). There is no permanent `mesh_` bearer anywhere;
+workers receive only the key file path (`TRIANGLE_WORKLOAD_KEY_FILE`), and
+reasoning children receive neither.
 
-## Ambiguity, replacement, and deletion
+## Replacement and deletion
 
-Registration can succeed remotely before a local response or Keychain write is
-confirmed. The enrollment journal records this as `outcome_unknown` or
-`registered_not_installed`. Do not register again. Reconcile the journal and
-server-side identity with an operator before any recovery action.
-
-Credential rotation or replacement and deletion are intentionally not exposed
-as routine MCP operations. A future lifecycle command must require explicit
-local confirmation and exact-profile review. It must never silently replace or
-delete an identity. This release has no show or export command.
+The helper never creates, rotates, or deletes identities. Agents, keys, pauses,
+and permissions are owned by the `triangle` CLI and the account owner.
+`bind` refuses to silently repoint a profile at a different agent, and
+`unbind` removes only the local pointer (never the key file). This release has
+no show or export command.
 
 ## Triangle Client installation and lifecycle
 
@@ -360,8 +366,9 @@ This installs the signed `triangle-mailbox` credential host, the
 `triangle-client` lifecycle CLI, and the fixed `dev.thetriangle.client`
 LaunchAgent. With no enabled profile, the installation is staged and stopped;
 the first `agent add` starts it only after credential/runtime verification and
-then waits for coordinator readiness before migration. Enroll each profile
-first, then bind it to exactly one runtime:
+then waits for coordinator readiness before migration. Bind each profile to its
+`triangle` agent first (`triangle-mailbox bind`), then add it to exactly one
+runtime:
 
 ```sh
 CLIENT="$HOME/Library/Application Support/The Triangle/bin/triangle-client"

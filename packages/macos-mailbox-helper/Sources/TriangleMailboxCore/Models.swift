@@ -184,142 +184,10 @@ public struct MailboxHandle: RawRepresentable, Codable, Equatable, Hashable, Sen
     }
 }
 
-public struct MeshToken: Codable, Equatable, Hashable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
-{
-    let secretValue: String
-
-    public init(_ value: String) throws {
-        guard value.wholeMatch(of: /^mesh_[a-f0-9]{64}$/) != nil else {
-            throw ModelValidationError.invalidToken
-        }
-        secretValue = value
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        let decoded = try container.decode(String.self)
-        do {
-            try self.init(decoded)
-        } catch {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Invalid MESH token"
-            )
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(secretValue)
-    }
-
-    public var description: String { "<redacted MESH token>" }
-
-    public var debugDescription: String { description }
-
-    public var customMirror: Mirror {
-        Mirror(self, children: ["value": "<redacted>"], displayStyle: .struct)
-    }
-}
-
-public struct CredentialBinding: Codable, Equatable, Sendable,
-    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
-{
-    public let version: Int
-    public let origin: MeshOrigin
-    public let agentID: AgentID
-    public let handle: MailboxHandle
-    public let token: MeshToken
-
-    public init(origin: MeshOrigin, agentID: AgentID, handle: MailboxHandle, token: MeshToken) {
-        version = 1
-        self.origin = origin
-        self.agentID = agentID
-        self.handle = handle
-        self.token = token
-    }
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case version
-        case origin
-        case agentID = "agentId"
-        case handle
-        case token
-    }
-
-    private struct AnyCodingKey: CodingKey {
-        let stringValue: String
-        let intValue: Int?
-
-        init?(stringValue: String) {
-            self.stringValue = stringValue
-            intValue = nil
-        }
-
-        init?(intValue: Int) {
-            stringValue = String(intValue)
-            self.intValue = intValue
-        }
-    }
-
-    public init(from decoder: Decoder) throws {
-        let allValues = try decoder.container(keyedBy: AnyCodingKey.self)
-        let expectedKeys = Set(CodingKeys.allCases.map(\.rawValue))
-        let actualKeys = Set(allValues.allKeys.map(\.stringValue))
-        guard actualKeys == expectedKeys else {
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: decoder.codingPath, debugDescription: "Credential binding schema mismatch")
-            )
-        }
-
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        version = try values.decode(Int.self, forKey: .version)
-        guard version == 1 else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .version,
-                in: values,
-                debugDescription: "Unsupported credential binding version"
-            )
-        }
-        origin = try values.decode(MeshOrigin.self, forKey: .origin)
-        agentID = try values.decode(AgentID.self, forKey: .agentID)
-        handle = try values.decode(MailboxHandle.self, forKey: .handle)
-        token = try values.decode(MeshToken.self, forKey: .token)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var values = encoder.container(keyedBy: CodingKeys.self)
-        try values.encode(version, forKey: .version)
-        try values.encode(origin, forKey: .origin)
-        try values.encode(agentID, forKey: .agentID)
-        try values.encode(handle, forKey: .handle)
-        try values.encode(token, forKey: .token)
-    }
-
-    public var description: String {
-        "CredentialBinding(version: \(version), origin: \(origin.value), agentID: \(agentID.value), handle: \(handle.value), token: <redacted>)"
-    }
-
-    public var debugDescription: String { description }
-
-    public var customMirror: Mirror {
-        Mirror(
-            self,
-            children: [
-                "version": version,
-                "origin": origin.value,
-                "agentID": agentID.value,
-                "handle": handle.value,
-                "token": "<redacted>",
-            ],
-            displayStyle: .struct
-        )
-    }
-}
-
 public enum HelperCommand: String, CaseIterable, Equatable, Sendable {
-    case enroll
+    /// Point a helper profile at an agent's v1 workload key file (`triangle agent add`).
+    case bind
+    case unbind
     case status
     case mcp
     case runWorker = "run-worker"
@@ -362,6 +230,8 @@ public struct ParsedCommand: Equatable, Sendable {
     public let confirmAbandon: Bool
     /// Optional explicit watch-ensure notify set (must include actor). Nil = auto membership.
     public let memberProfiles: [ProfileName]?
+    /// `bind --key-file`: absolute path of `<TRIANGLE_HOME>/agents/<id>/workload-key.json`.
+    public let keyFile: String?
 
     public init(
         command: HelperCommand,
@@ -376,7 +246,8 @@ public struct ParsedCommand: Equatable, Sendable {
         eventID: String? = nil,
         failureReason: String? = nil,
         confirmAbandon: Bool = false,
-        memberProfiles: [ProfileName]? = nil
+        memberProfiles: [ProfileName]? = nil,
+        keyFile: String? = nil
     ) {
         self.command = command
         self.profile = profile
@@ -391,6 +262,7 @@ public struct ParsedCommand: Equatable, Sendable {
         self.failureReason = failureReason
         self.confirmAbandon = confirmAbandon
         self.memberProfiles = memberProfiles
+        self.keyFile = keyFile
     }
 }
 
@@ -448,9 +320,9 @@ public enum CommandParser {
 
         let allowedFlags: Set<String>
         switch command {
-        case .enroll:
-            allowedFlags = ["--profile", "--origin"]
-        case .status, .mcp:
+        case .bind:
+            allowedFlags = ["--profile", "--key-file", "--origin"]
+        case .unbind, .status, .mcp:
             allowedFlags = ["--profile"]
         case .runWorker:
             allowedFlags = ["--profile", "--worker"]
@@ -474,20 +346,21 @@ public enum CommandParser {
         }
 
         switch command {
-        case .enroll:
-            guard let originValue = flagValues["--origin"] else {
+        case .bind:
+            guard let keyFile = flagValues["--key-file"] else {
                 throw CommandParseError.missingRequiredFlag
             }
+            guard keyFile.hasPrefix("/"), keyFile.utf8.count <= 1024, !keyFile.contains("\0") else {
+                throw CommandParseError.invalidFlagValue
+            }
+            let origin: MeshOrigin?
             do {
-                return ParsedCommand(
-                    command: command,
-                    profile: profile,
-                    origin: try MeshOrigin(originValue)
-                )
+                origin = try flagValues["--origin"].map { try MeshOrigin($0) }
             } catch {
                 throw CommandParseError.invalidFlagValue
             }
-        case .status, .mcp:
+            return ParsedCommand(command: command, profile: profile, origin: origin, keyFile: keyFile)
+        case .unbind, .status, .mcp:
             return ParsedCommand(command: command, profile: profile)
         case .runWorker:
             guard let workerValue = flagValues["--worker"] else {

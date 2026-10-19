@@ -1,5 +1,7 @@
 # Multi-Mac MESH deploy — how-to + readiness
 
+> **Permissions v1 note (PR D, #93).** The `enroll` and `mesh_` bearer steps below are removed. On a new Mac, run `triangle join <link>` (or `triangle agent add`), then bind the helper profile to the resulting key file. Steps that mention enrollment or Keychain identity are historical.
+
 **Question:** How to enable MESH on another Mac, and whether triangle-client / libraries are ready so agents on different computers can talk.
 
 **Verdict (short):** MESH A2A across Macs is **yes today** (cloud mailbox at `https://thetriangle.dev`; LAN not required). Standing up a second Mac with triangle-client is **partially ready**: the clean-Mac install path is documented and docs-preflight passes, but **public installs are ad-hoc signed with file credential custody (Developer ID is out of scope, 2026-10-17); clean-machine custody/quarantine proofs are still pending**, and a live Mini production tree is **not** a copy-paste template (ad-hoc helper, path pins, brew cask pins).
