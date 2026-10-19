@@ -28,7 +28,26 @@ test('native Linux rolls back wrapper and release when receipt publication fails
  const script=`import {writeFileSync} from 'node:fs';process.argv=[process.execPath,${JSON.stringify(installer)},'--verified-stage',${JSON.stringify(f.stage)},'--test-root',${JSON.stringify(f.root)}];writeFileSync(${JSON.stringify(receipt)}+'.stage-'+process.pid,'collision',{mode:0o600});await import(${JSON.stringify('file://'+installer)});`;
  assert.throws(()=>execFileSync(process.execPath,['--input-type=module','--eval',script],{stdio:'pipe'}));assert.equal(readFileSync(wrapper,'utf8'),original);assert.equal(readFileSync(receipt,'utf8'),before);assert.equal(existsSync(join(f.root,'home/.local/share/triangle/releases/1.2.4')),false);
  }finally{rmSync(f.root,{recursive:true,force:true});}});
-test('native Linux builder packages real Node and rejects output replacement',{skip:process.platform!=='linux'||!existsSync('/usr/local/LICENSE')},()=>{const output=mkdtempSync(join(tmpdir(),'triangle-linux-artifacts-'));try{const args=['scripts/release/build-linux-package.mjs','--version','0.0.0-native-test','--output',output,'--node',process.execPath,'--node-license','/usr/local/LICENSE'];const result=JSON.parse(execFileSync(process.execPath,args,{encoding:'utf8'}));assert.ok(existsSync(result.archive));assert.throws(()=>execFileSync(process.execPath,args,{stdio:'pipe'}),e=>/Release output already exists/.test(e.stderr?.toString()));const manifest=JSON.parse(execFileSync('tar',['-xOf',result.archive,'package-manifest.json'],{encoding:'utf8'}));assert.equal(manifest.distribution,'owner-cli');assert.equal(manifest.serviceSupport,false);assert.equal(manifest.runtime.version,process.version);assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));}finally{rmSync(output,{recursive:true,force:true});}});
+test('native Linux builder packages real Node, bootstrap installs with an empty tool PATH, and output is immutable',{skip:process.platform!=='linux'||!existsSync('/usr/local/LICENSE')},()=>{
+ const output=mkdtempSync(join(tmpdir(),'triangle-linux-artifacts-'));
+ const root=mkdtempSync(join(tmpdir(),'triangle-package-install-'));chmodSync(root,0o700);mkdirSync(join(root,'home'),{mode:0o700});
+ try {
+  const args=['scripts/release/build-linux-package.mjs','--version','0.0.0-native-test','--output',output,'--node',process.execPath,'--node-license','/usr/local/LICENSE'];
+  const result=JSON.parse(execFileSync(process.execPath,args,{encoding:'utf8'}));
+  assert.ok(existsSync(result.archive));
+  assert.throws(()=>execFileSync(process.execPath,args,{stdio:'pipe'}),e=>/Release output already exists/.test(e.stderr?.toString()));
+  const manifest=JSON.parse(execFileSync('tar',['-xOf',result.archive,'package-manifest.json'],{encoding:'utf8'}));
+  assert.equal(manifest.distribution,'owner-cli');assert.equal(manifest.serviceSupport,false);assert.equal(manifest.runtime.version,process.version);
+  assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));
+  const isolatedEnv={...process.env,PATH:'/nonexistent'};
+  execFileSync('/bin/bash',[result.installer,'--archive',result.archive,'--sha256',result.sha256,'--test-root',root],{env:isolatedEnv,encoding:'utf8'});
+  const wrapper=join(root,'home/.local/bin/triangle');
+  const help=execFileSync(wrapper,['--help'],{env:isolatedEnv,encoding:'utf8'});assert.match(help,/Triangle|triangle/);
+  const release=join(root,'home/.local/share/triangle/releases/0.0.0-native-test');
+  execFileSync(join(release,'bin/node'),['--input-type=module','--eval',"import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(':memory:');if(db.prepare('select 1 as ok').get().ok!==1)process.exit(1);db.close();"],{env:isolatedEnv,stdio:'pipe'});
+  assert.equal(existsSync(join(root,'home/.config/systemd')),false);
+ } finally {rmSync(output,{recursive:true,force:true});rmSync(root,{recursive:true,force:true});}
+});
 test('ELF dependencies permit only standard libraries and the architecture loader',async()=>{
  const {validateELFDependencies}=await import('../scripts/release/build-linux-package.mjs');
  const dynamic=' 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]\n 0x0000000000000001 (NEEDED) Shared library: [libstdc++.so.6]';
