@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import {existsSync,realpathSync,mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {existsSync,realpathSync,mkdtempSync,mkdirSync,writeFileSync,rmSync,lstatSync} from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -12,6 +12,7 @@ export function buildSandbox(config,{systemRoots=SYSTEM}={}){
  validateProfile(config);
  const protectedRoots=[config.identityHome,config.stateRoot];
  if(path.basename(path.dirname(config.stateRoot))==='agents')protectedRoots.push(path.dirname(path.dirname(config.stateRoot)));
+ for(const trusted of [config.releaseRoot,config.bwrap,config.node,config.command])if(overlaps(config.modelHome,trusted))throw Error('Writable model home overlaps protected runtime');
  const check=(root)=>{if(protectedRoots.some(p=>overlaps(p,root)))throw Error('Sandbox mount overlaps protected credentials');};
  for(const root of [config.releaseRoot,config.workdir,config.modelHome,config.command])check(root);
  if(overlaps(config.workdir,config.releaseRoot)||overlaps(config.workdir,config.modelHome)||config.workdir==='/'||config.workdir===os.homedir()||os.homedir().startsWith(config.workdir+'/'))throw Error('Workspace overlaps protected runtime or account home');
@@ -25,7 +26,7 @@ export function buildSandbox(config,{systemRoots=SYSTEM}={}){
  mount(config.releaseRoot,config.releaseRoot);
  if(!mounted.some(root=>config.command===root||config.command.startsWith(root+'/')))mount(config.command,config.command);
  const vendorPath=path.join(path.dirname(path.dirname(config.command)),'path');
- if(existsSync(vendorPath)){safeDirectory(vendorPath,{privateMode:false});mount(vendorPath,vendorPath);}
+ if(existsSync(vendorPath)){const st=lstatSync(vendorPath);if(!st.isDirectory()||![0,process.getuid()].includes(st.uid)||(st.mode&0o022)||realpathSync(vendorPath)!==vendorPath)throw Error('Unsafe vendor runtime');mount(vendorPath,vendorPath);}
  mount(config.workdir,config.workdir);mount(config.modelHome,config.modelHome,true);
  const environment={HOME:config.modelHome,CODEX_HOME:config.modelHome,PATH:[...(existsSync(vendorPath)?[vendorPath]:[]),'/usr/local/bin','/usr/bin','/bin'].join(':'),LANG:'C.UTF-8',LC_ALL:'C.UTF-8',TRIANGLE_PROJECT_ROOT:config.workdir,TRIANGLE_INSTANCE_TEMP_ROOT:'/tmp',TMPDIR:'/tmp',CODEX_CLI:config.command};
  for(const [key,value]of Object.entries(environment))args.push('--setenv',key,value);
@@ -54,7 +55,7 @@ export function createLinuxRunner(config,{platform=process.platform}={}){
  },
  async run(request,{signal}={}){
   linux();try{const sandbox=buildSandbox(config);return await createCommandRunner({...sandbox,timeoutMs:config.runnerTimeoutMs}).run(request,{signal});}
-  catch(cause){if(cause.name==='AbortError')throw cause;const error=Error('Linux runner failed');error.code='runner_failed';error.knownFailure=/^Runner exited with \d+/.test(cause.message);throw error;}
+  catch(cause){if(cause.name==='AbortError')throw cause;const error=Error('Linux runner failed');error.code='runner_failed';error.knownFailure=false;throw error;}
  }
  };
 }
