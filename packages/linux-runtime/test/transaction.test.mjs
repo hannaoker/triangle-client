@@ -192,20 +192,30 @@ test("known runner failure retries with bound and explicit retry releases quaran
     /private provider/,
   );
 });
-test("lease renewal failure aborts model and never replies or ACKs", async () => {
+test("lease renewal failure aborts model and never replies or ACKs", async (t) => {
+  // Admission fsyncs can outlast a tiny real lease under a busy combined suite.
+  // Advance only the renewal timer after the model has actually entered.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const f = fixture();
+  let entered;
+  const runnerEntered = new Promise((resolve) => {
+    entered = resolve;
+  });
   let claims = 0,
     aborted = false;
   f.transport.claim = async () => {
-    if (++claims > 1) throw Error("lease_lost");
-    return { leaseExpiresAt: new Date(Date.now() + 30).toISOString() };
+    if (++claims > 1) {
+      await runnerEntered;
+      throw Error("lease_lost");
+    }
+    return { leaseExpiresAt: new Date(Date.now() + 60000).toISOString() };
   };
   const c = createCustodian({
     ...f,
     agentId,
     runner: {
       run: async (_, { signal }) =>
-        new Promise((resolve, reject) =>
+        new Promise((resolve, reject) => {
           signal.addEventListener(
             "abort",
             () => {
@@ -213,11 +223,17 @@ test("lease renewal failure aborts model and never replies or ACKs", async () =>
               reject(signal.reason);
             },
             { once: true },
-          ),
-        ),
+          );
+          entered();
+        }),
     },
   });
-  await assert.rejects(c.cycle());
+  const cycle = c.cycle();
+  const rejected = assert.rejects(cycle);
+  await runnerEntered;
+  t.mock.timers.tick(20001);
+  await rejected;
+  assert.equal(claims, 2);
   assert.equal(aborted, true);
   assert.deepEqual(f.counts(), { ack: 0, reply: 0 });
   assert.equal(f.store.readHealth().state, "ownership_lost");
