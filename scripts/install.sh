@@ -62,7 +62,7 @@ die "Unsupported package platform or architecture\n" unless ($^O eq 'darwin'||$^
 die "Unsafe package version\n" unless ($manifest->{version}||'')=~/\A[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?\z/;
 die "Unsupported package contract\n" unless ($manifest->{schema}||0)==1&&($manifest->{credentialCustody}||'') eq 'file'&&
  (($^O eq 'darwin'&&($manifest->{signingMode}||'') eq 'public_ad_hoc')||
-  ($^O eq 'linux'&&($manifest->{signingMode}||'') eq 'none'&&($manifest->{distribution}||'') eq 'owner-cli'&&exists($manifest->{serviceSupport})&&!$manifest->{serviceSupport}));
+  ($^O eq 'linux'&&($manifest->{signingMode}||'') eq 'none'&&exists($manifest->{serviceSupport})&&((($manifest->{distribution}||'') eq 'owner-cli'&&!$manifest->{serviceSupport})||(($manifest->{distribution}||'') eq 'managed-runtime'&&$manifest->{serviceSupport}))));
 die "Test package cannot enter real account\n" if $manifest->{testOnly}&&!length($test_root||'');
 die "Invalid manifest\n" unless ref($manifest->{files}) eq 'ARRAY';my %listed;
 for my $entry (@{$manifest->{files}}){my $path=$entry->{path};die "Manifest closure mismatch\n" unless defined($path)&&exists($actual{$path})&&$path ne 'package-manifest.json'&&!$listed{$path}++;
@@ -72,6 +72,7 @@ for my $entry (@{$manifest->{files}}){my $path=$entry->{path};die "Manifest clos
 die "Unmanifested archive entry\n" unless keys(%listed)+1==keys(%actual);
 my @required=('bin/node','packages/triangle-cli/src/cli.mjs');
 push @required, $^O eq 'darwin' ? ('bin/triangle-mailbox','bin/triangle-client','scripts/release/install-client-package.mjs') : ('scripts/release/install-linux-package.mjs');
+push @required, ('packages/linux-runtime/src/host.mjs','packages/linux-runtime/src/runner.mjs','packages/linux-runtime/src/service.mjs','packages/agent-worker/runners/codex-runner.mjs') if $^O eq 'linux'&&$manifest->{serviceSupport};
 for my $required (@required){die "Incomplete package\n" unless $listed{$required};}
 TRIANGLE_PACKAGE_VERIFY
 args=(--verified-stage "$stage")

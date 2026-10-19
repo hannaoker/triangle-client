@@ -15,7 +15,7 @@ export function runCommand(command, args, options = {}) {
     child.on('close', code => { clearTimeout(timer); resolve({ code: code ?? 1, stdout }); });
   });
 }
-const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$') + '"';
+const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', () => '$$') + '"';
 export function renderUnit(config, configPath) {
   for (const value of [config.node, config.releaseRoot, configPath]) if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) fail('Invalid service path.');
   return `[Unit]\nDescription=Triangle managed agent\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${[config.node, path.join(config.releaseRoot, 'packages/linux-runtime/src/host.mjs'), '--config', configPath].map(quote).join(' ')}\nUMask=0077\nKillMode=control-group\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n`;

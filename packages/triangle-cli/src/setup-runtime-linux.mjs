@@ -18,6 +18,20 @@ function executable(candidates) {
   for (const file of candidates) try { const actual = regular(file); accessSync(actual, constants.X_OK); return actual; } catch {}
   fail('Required native executable is missing or unsafe. Install Codex and bubblewrap before setup.');
 }
+export function resolveNativeCodex(command, arch = process.arch) {
+  if (readFileSync(command).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) return command;
+  const root = path.dirname(path.dirname(command));
+  let metadata;
+  try { metadata = JSON.parse(readFileSync(regular(path.join(root, 'package.json')), 'utf8')); } catch { fail('Codex must be an official native Linux installation.'); }
+  if (metadata.name !== '@openai/codex' || path.basename(command) !== 'codex.js' || path.basename(path.dirname(command)) !== 'bin') fail('Unsupported Codex launcher. Install the official Codex CLI.');
+  const triple = { x64: 'x86_64-unknown-linux-musl', arm64: 'aarch64-unknown-linux-musl' }[arch];
+  if (!triple) fail('Unsupported native Codex architecture.');
+  const platform = 'codex-linux-' + arch;
+  const candidates = [path.join(root, 'vendor', triple), path.join(root, 'node_modules/@openai', platform, 'vendor', triple), path.join(path.dirname(root), platform, 'vendor', triple)].flatMap(vendor => ['bin/codex', 'codex/codex'].map(binary => path.join(vendor, binary)));
+  const native = executable(candidates);
+  if (!readFileSync(native).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) fail('Codex native executable is invalid.');
+  return native;
+}
 export function createSetupRuntime({ env = process.env, platform = process.platform, accountHome = os.homedir(), releaseRoot = fileURLToPath(new URL('../../../', import.meta.url)), run, runnerFactory = createLinuxRunner, service = createService({ env, accountHome, run }) } = {}) {
   const options = { env, accountHome }, roots = linuxPaths(options);
   function choices({ profile, harness, home, workdir, workdirExplicit }) {
@@ -25,7 +39,7 @@ export function createSetupRuntime({ env = process.env, platform = process.platf
     const current = readProfile(profile, options);
     if (current && (current.identityHome !== path.resolve(home) || current.harness !== harness)) fail('This profile is bound to another identity or harness. Choose a new profile.');
     if (current) regular(path.join(current.identityHome, 'agents', current.agentId, 'workload-key.json'), true);
-    const command = executable([env.CODEX_CLI, ...(env.PATH ?? '/usr/bin:/bin').split(':').filter(p => path.isAbsolute(p)).map(p => path.join(p, 'codex'))].filter(Boolean));
+    const command = resolveNativeCodex(executable([env.CODEX_CLI, ...(env.PATH ?? '/usr/bin:/bin').split(':').filter(p => path.isAbsolute(p)).map(p => path.join(p, 'codex'))].filter(Boolean)));
     if (!readFileSync(command).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) fail('Codex must be an installed native Linux executable.');
     const bwrap = executable(['/usr/bin/bwrap', ...(env.PATH ?? '').split(':').filter(p => path.isAbsolute(p)).map(p => path.join(p, 'bwrap'))]);
     const node = executable([path.join(releaseRoot, 'bin/node')]);
