@@ -4,7 +4,7 @@
 
 Goal: replace source-build/manual-bind onboarding with a packaged install and `triangle setup`.
 Architecture: ship reviewed source assets with a bundled Node and prebuilt public-file-custody macOS helper/client. Installer installs locally without Swift, stages the existing service, and exposes `triangle`. Owner CLI orchestrates the existing join/agent APIs and a separate local runtime adapter. No server or authentication protocol redesign.
-Tech: Node built-ins, existing Swift executables and Python worker/service installer. macOS service first; portable owner CLI remains usable on Linux. No claim of Linux service or Windows packaging yet.
+Tech: Node built-ins and prebuilt Swift executables; maintainers use Python to generate the reviewed artifact index at build time. Consumer setup stages bundles in Node and uses the native lifecycle CLI. macOS service first; portable owner CLI remains usable on Linux. No claim of Linux service or Windows packaging yet.
 
 ## Acceptance/proof matrix
 
@@ -26,6 +26,6 @@ Tech: Node built-ins, existing Swift executables and Python worker/service insta
 ## Execution
 
 1. Commit plan; implement CLI and packaging independently using the shared contracts.
-2. Parent implements runtime adapter against existing lifecycle/helper commands and joins the components. New profiles use existing worker runners for Codex/Hermes/Antigravity; retain existing headless profiles as configured. Cursor ACP needs its supported headless binding and a genuine supervisor host bundle; do not mislabel a fake Codex executable as an installed Codex runtime.
+2. Parent implements runtime adapter against existing lifecycle/helper commands and joins the components. New Codex profiles use the existing headless App Server mode; Hermes/Antigravity use their worker runners. Preserve existing profiles’ delivery modes. Cursor ACP needs its supported headless binding and a genuine supervisor host bundle; do not mislabel a fake Codex executable as an installed Codex runtime.
 3. Run owning suites once, package closure and corruption checks, clean temporary macOS smoke, then independent security/reliability review. Fix material findings in one batch.
 4. Open a PR with install instructions and concrete artifacts. Public release publication requires a runnable, checked artifact and clear version/checksum; do not advertise a nonexistent download URL.
