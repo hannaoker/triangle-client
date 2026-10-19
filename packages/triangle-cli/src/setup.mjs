@@ -47,18 +47,27 @@ export async function setup(options = {}, dependencies = {}) {
     }
     const previous = custody.readCache('setup', profile);
     if (previous && previous.harness !== harness && !identityOnly) throw new LocalStateError('This profile already has a different harness; choose a different profile.');
+    let selectedAgentId = pending?.agentId ?? previous?.agentId;
+    if (pending?.agentId && previous?.agentId && pending.agentId !== previous.agentId) {
+      throw new LocalStateError('The saved setup identity conflicts with this profile. Run `triangle doctor`.');
+    }
     let runtime;
     if (!identityOnly) {
       if (platform !== 'darwin') throw new LocalStateError('Background service setup currently supports macOS. Use --identity-only on this platform.');
       runtime = dependencies.runtime ?? (await import('./setup-runtime.mjs')).createSetupRuntime({ env, platform, accountHome: dependencies.accountHome ?? os.homedir(), releaseRoot: dependencies.releaseRoot, run: dependencies.run });
       const workdirExplicit = Boolean(options.workdir ?? pending?.workdir);
       const ready = await runtime.preflight({ ...choice, workdirExplicit });
+      if (ready?.agentId) {
+        if (selectedAgentId && selectedAgentId !== ready.agentId) throw new LocalStateError('The runtime binding conflicts with the saved setup identity. No identity was changed.');
+        if (!custody.listAgents().some((agent) => agent.agent_id === ready.agentId)) throw new LocalStateError('The runtime binding identity is missing locally. Run `triangle doctor`. No replacement was created.');
+        selectedAgentId = ready.agentId;
+      }
       if (!workdirExplicit && ready?.workdir) {
         workdir = path.resolve(ready.workdir);
         choice.workdir = workdir;
       }
     }
-    custody.withLock(() => custody.writeJournal(JOURNAL, { ...choice, ...(pending?.agentId ? { agentId: pending.agentId } : {}) }));
+    custody.withLock(() => custody.writeJournal(JOURNAL, { ...choice, ...(selectedAgentId ? { agentId: selectedAgentId } : {}) }));
     const fetchImpl = dependencies.fetchImpl ?? globalThis.fetch;
     let invite;
     try {
@@ -87,7 +96,7 @@ export async function setup(options = {}, dependencies = {}) {
         else if (entry.operation === 'agent.create') throw new LocalStateError('Another agent creation is unfinished. Run `triangle resume` before setup.');
       }
       let local = custody.listAgents();
-      const boundId = pending?.agentId ?? previous?.agentId;
+      const boundId = selectedAgentId;
       let agent = boundId ? local.find((a) => a.agent_id === boundId) : local.find((a) => a.handle === handle);
       if (boundId && !agent) throw new LocalStateError('The saved setup identity is missing locally; run `triangle doctor`. No replacement was created.');
       if (!agent) {

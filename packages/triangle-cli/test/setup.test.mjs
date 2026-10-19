@@ -204,3 +204,31 @@ test('setup creates an explicitly requested new profile identity rather than bin
   assert.equal(again.agent.agent_id, next.agent.agent_id);
   assert.equal(f.fake.state.agents.size, 2);
 });
+
+test('setup preserves legacy verified binding when runtime profile and agent handle differ', async () => {
+  const f = fixture();
+  const original = await setup(f.options, f.dependencies);
+  f.runtime.preflight = async () => ({ state: 'ready', agentId: original.agent.agent_id });
+  const before = f.fake.state.requests.filter((r) => r.path === '/api/v1/agents').length;
+  const adopted = await setup({ ...f.options, profile: 'legacy-worker', inviteFile: undefined }, f.dependencies);
+  assert.equal(adopted.agent.agent_id, original.agent.agent_id);
+  assert.equal(adopted.agent.handle, 'setup-agent');
+  assert.equal(f.fake.state.agents.size, 1);
+  assert.equal(f.fake.state.requests.filter((r) => r.path === '/api/v1/agents').length, before);
+  assert.equal(openCustody(f.home).readCache('setup', 'legacy-worker').agentId, original.agent.agent_id);
+});
+
+test('setup rejects unknown or cached-conflicting runtime identity before remote mutation', async () => {
+  const f = fixture();
+  const first = await setup(f.options, f.dependencies);
+  const second = await setup({ ...f.options, profile: 'second-identity', inviteFile: undefined }, f.dependencies);
+  const requestCount = f.fake.state.requests.length;
+  f.runtime.preflight = async () => ({ state: 'ready', agentId: 'agent_' + 'f'.repeat(32) });
+  await assert.rejects(setup({ ...f.options, profile: 'legacy-worker', inviteFile: undefined }, f.dependencies), /missing locally|unknown/i);
+  assert.equal(f.fake.state.requests.length, requestCount);
+  f.runtime.preflight = async () => ({ state: 'ready', agentId: second.agent.agent_id });
+  await assert.rejects(setup({ ...f.options, inviteFile: undefined }, f.dependencies), /conflict|different identity/i);
+  assert.equal(f.fake.state.requests.length, requestCount);
+  assert.equal(openCustody(f.home).readCache('setup', f.options.profile).agentId, first.agent.agent_id);
+  assert.equal(f.fake.state.agents.size, 2);
+});
