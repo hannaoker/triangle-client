@@ -13,9 +13,13 @@ import { LocalStateError, MeshApiError, OutcomeUnknownError } from "./errors.mjs
 import { join, resumeJoin } from "./join.mjs";
 import { openCustody } from "./custody.mjs";
 import { openSession } from "./session.mjs";
+import { setup, renderSetup } from "./setup.mjs";
 
 export const USAGE = `Usage: triangle <command> [options]
 
+  setup [--harness codex|hermes|antigravity|cursor] [--profile NAME] [--invite-file FILE]
+        [--identity-only] [--resume] [--name NAME] [--agent-name NAME] [--workdir DIR]
+                              Guided enrollment and background service setup. Invitation input stays private.
   join <link> [--name NAME] [--handle HANDLE] [--agent-name NAME] [--device-label LABEL] [--device] [--via URL]
                               Join a MESH with an invite link (creates this device's owner key and, for a
                               first-owner or teammate link, your first agent).
@@ -45,7 +49,7 @@ export class UsageError extends Error {}
 export function parseArgs(argv) {
   const positional = [];
   const flags = {};
-  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes"]);
+  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes", "identity-only"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--") { positional.push(...argv.slice(i + 1)); break; }
@@ -118,7 +122,7 @@ async function keepIfUnwritten(written) {
 
 const PROCESS_IO = { stdout: (s) => writeLine(process.stdout, s), stderr: (s) => { process.stderr.write(`${s}\n`); } };
 
-export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch } = {}) {
+export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch, setupDependencies = {} } = {}) {
   if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
     io.stdout(USAGE);
     return 0;
@@ -135,6 +139,17 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
   const [command, sub, ...rest] = positional;
   try {
     switch (command) {
+      case "setup": {
+        allowOnly(flags, ["harness", "profile", "invite-file", "identity-only", "resume", "name", "agent-name", "workdir"]);
+        if (sub !== undefined) throw new UsageError("setup takes no positional arguments; use hidden invitation input or --invite-file FILE");
+        const result = await setup({
+          home, harness: flags.harness, profile: flags.profile, inviteFile: flags["invite-file"],
+          identityOnly: flags["identity-only"], resume: flags.resume, name: flags.name,
+          agentName: flags["agent-name"], workdir: flags.workdir,
+        }, { ...setupDependencies, env, fetchImpl });
+        await print(io, flags, result, renderSetup);
+        return 0;
+      }
       case "join": {
         allowOnly(flags, ["resume", "abandon", "name", "handle", "agent-name", "device-label", "device", "via"]);
         if (flags.abandon && flags.resume) throw new UsageError("use --resume or --abandon, not both");
