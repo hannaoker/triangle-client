@@ -38,7 +38,7 @@ function readPrivateFile(file, name) {
   }
 }
 
-export function loadWorkloadCredential(keyFile, { expectedAgentId } = {}) {
+export function loadWorkloadCredential(keyFile, { expectedAgentId, expectedAuthority } = {}) {
   if (typeof keyFile !== "string" || !path.isAbsolute(keyFile)) {
     throw new TypeError("workload key file must be an absolute path");
   }
@@ -74,6 +74,16 @@ export function loadWorkloadCredential(keyFile, { expectedAgentId } = {}) {
   }
   if (expectedAgentId !== undefined && expectedAgentId !== agent.agent_id) {
     throw new TypeError("workload key belongs to a different agent");
+  }
+  // The key was registered with one MESH authority (and optionally the --via
+  // transport it was created through). Refuse to present it to any other origin,
+  // so a key copied from another environment fails here, not as a confusing 401.
+  if (expectedAuthority !== undefined && typeof agent.authority === "string") {
+    const origin = (value) => { try { return new URL(value).origin; } catch { return null; } };
+    const registered = [agent.authority, agent.via].filter((value) => typeof value === "string").map(origin);
+    if (!registered.includes(origin(expectedAuthority))) {
+      throw new TypeError("workload key was registered with a different MESH authority");
+    }
   }
   // Registered bounds (`agent.json` `bounds`, written by triangle): a
   // read-only agent requests agent.read only, since MESH refuses more.

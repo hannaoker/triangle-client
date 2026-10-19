@@ -241,3 +241,26 @@ test("gateway entry points pass MESH_WORKLOAD_SCOPES through as the registered b
   });
   assert.deepEqual(seen, ["agent.read", undefined]);
 });
+
+test("workloadFetch does not retry a streamed body after 401, and one caller's abort does not cancel the shared exchange", async () => {
+  const key = generateEd25519();
+  const mesh = fakeMesh(key);
+  const auth = createWorkloadAuth({ meshOrigin: MESH, workloadId: WORKLOAD, workloadPrivateKey: JSON.stringify(key), fetchImpl: mesh.fetchImpl });
+  const url = `${MESH}/api/v1/a2a/tasks`;
+  await workloadFetch(auth, mesh.fetchImpl, url);
+  mesh.rejectNext();
+  const streamed = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } });
+  const before = mesh.calls.length;
+  const response = await workloadFetch(auth, mesh.fetchImpl, url, { method: "POST", body: streamed, duplex: "half" });
+  assert.equal(response.status, 401, "401 is returned, not retried with a consumed stream");
+  assert.equal(mesh.calls.length - before, 1);
+
+  const fresh = createWorkloadAuth({ meshOrigin: MESH, workloadId: WORKLOAD, workloadPrivateKey: JSON.stringify(key), fetchImpl: mesh.fetchImpl });
+  const aborted = new AbortController();
+  const first = fresh.headers("GET", url, { signal: aborted.signal });
+  const second = fresh.headers("GET", url);
+  aborted.abort(new Error("caller gone"));
+  await assert.rejects(first, /caller gone/);
+  const headers = await second;
+  assert.match(headers.authorization, /^Bearer tok_/, "the other waiter still gets its token");
+});

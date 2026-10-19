@@ -12,6 +12,23 @@ import { AGENT_BOUNDS, WORKLOAD_TOKEN_PROOF_PROFILE } from "./protocol.mjs";
  * (scheme, host, path and query; no fragment), compared after WHATWG URL
  * serialization, so the proof is valid for exactly one request target.
  */
+/** Per-exchange deadline for a token exchange shared by several callers. */
+export const TOKEN_EXCHANGE_TIMEOUT_MS = 20_000;
+
+/**
+ * Wait for a promise that other callers share, giving up early when *this*
+ * caller's signal aborts. The shared work is never cancelled by one caller.
+ */
+export function awaitWithSignal(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 export function dpopProof({ workloadKey, method, url, accessToken, now = Date.now() }) {
   const parsed = new URL(url);
   if (parsed.username || parsed.password || parsed.hash) throw new TypeError("Invalid DPoP URL");

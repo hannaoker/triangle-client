@@ -2,7 +2,7 @@
 // signature names; the transport base is where bytes go. They differ only with
 // an explicit --via override, which is accepted only after GET /api/v1/authority
 // at that transport returns the same authority (§3.1).
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 
 import { MeshApiError, OutcomeUnknownError } from "./errors.mjs";
 import { canonicalOrigin } from "./protocol.mjs";
@@ -19,9 +19,22 @@ const FORBIDDEN_EXTRA = new Set(["authorization", "dpop", "mesh-owner-proof", "c
  */
 export function loadTransportHeaders(file) {
   if (!file) return {};
-  const mode = statSync(file).mode & 0o077;
-  if (mode !== 0) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE must not be readable by group or others (chmod 600).");
-  const parsed = JSON.parse(readFileSync(file, "utf8"));
+  const link = lstatSync(file, { throwIfNoEntry: false });
+  if (!link) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE does not exist");
+  if (!link.isFile()) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE must be a regular file (not a symlink)");
+  let text;
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (stat.uid !== process.getuid?.()) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE is not owned by this user");
+    if ((stat.mode & 0o077) !== 0) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE must not be readable by group or others (chmod 600).");
+    if (stat.size > 64 * 1024) throw new TypeError("TRIANGLE_TRANSPORT_HEADERS_FILE is too large");
+    text = readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw new TypeError("transport headers file is not valid JSON"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new TypeError("transport headers file must be a JSON object");
   const headers = {};
   for (const [rawName, value] of Object.entries(parsed)) {

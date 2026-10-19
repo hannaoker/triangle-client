@@ -27,6 +27,9 @@ export const OPERATION_METHODS = Object.freeze({
   "admin.agent.delete": "DELETE",
 });
 
+/** 4xx statuses an intermediary can answer without the origin having refused the request. */
+const AMBIGUOUS_4XX = new Set([408, 425, 429]);
+
 export function transportOptions(env = process.env) {
   return {
     headers: loadTransportHeaders(env.TRIANGLE_TRANSPORT_HEADERS_FILE),
@@ -94,6 +97,7 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
         workload_id: agent.workload.workload_id,
         bounds: agent.workload.bounds,
         authority: transport.authority,
+        ...(authorityRecord.via ? { via: authorityRecord.via } : {}),
         created_at: new Date().toISOString(),
       });
     }
@@ -115,9 +119,15 @@ export function openSession({ home = defaultHome(), env = process.env, fetchImpl
       if (error instanceof OutcomeUnknownError) {
         error.resumeHint = "triangle resume";
         if (!entry.outcome_unknown) custody.writeJournal(name, { ...entry, outcome_unknown: true });
-      } else if (original && error instanceof MeshApiError && error.status >= 400 && error.status < 500) {
+      } else if (original && error instanceof MeshApiError && error.status >= 400 && error.status < 500 && !AMBIGUOUS_4XX.has(error.status)) {
         // Definitive refusal of the first send, observed by this process: nothing committed.
+        // 408/425/429 are excluded: a proxy in front of the authority can emit them
+        // for a request the origin already accepted, so the journal (and with it the
+        // only copy of a new workload key) is kept for `triangle resume`.
         custody.removeJournal(name);
+      } else if (original && error instanceof MeshApiError && AMBIGUOUS_4XX.has(error.status)) {
+        error.message += ` The request may have been applied; it is kept. Retry \`triangle resume\`, or discard it with \`triangle resume --abandon\`.`;
+        error.resumeHint = "triangle resume";
       } else if (!original && error instanceof MeshApiError) {
         error.message += ` The earlier attempt may have been applied; its request is kept. Retry \`triangle resume\`, or discard it with \`triangle resume --abandon\`.`;
       }

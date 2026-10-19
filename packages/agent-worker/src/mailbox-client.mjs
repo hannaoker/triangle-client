@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 // triangle-cli protocol core. Bundled into every worker (installer manifest v8).
 import { compactJws, assertPrivateJwk } from "../../triangle-cli/src/keys.mjs";
 import { WORKLOAD_ID, WORKLOAD_TOKEN_PROOF_PROFILE, workloadScopes } from "../../triangle-cli/src/protocol.mjs";
-import { dpopProof } from "../../triangle-cli/src/workload.mjs";
+import { awaitWithSignal, dpopProof, TOKEN_EXCHANGE_TIMEOUT_MS } from "../../triangle-cli/src/workload.mjs";
 
 const DEFAULT_LIMIT = 1;
 const MAX_LIMIT = 100;
@@ -472,10 +472,12 @@ export function createWorkloadTokenManager({
     if (!refresh && cachedToken && cachedTokenExpiresAt - 30_000 > now()) {
       return cachedToken;
     }
-    if (refreshPromise) return refreshPromise;
+    if (refreshPromise) return awaitWithSignal(refreshPromise, signal);
+    // Shared by every waiting caller: it runs under its own deadline, never one caller's signal.
+    const exchangeSignal = AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS);
     refreshPromise = (async () => {
       try {
-        const challengePayload = await postJson("/api/v1/identity/token-challenges", { workload_id: workloadId }, signal);
+        const challengePayload = await postJson("/api/v1/identity/token-challenges", { workload_id: workloadId }, exchangeSignal);
         const ch = challengePayload?.challenge;
         if (!ch?.challenge_id || !ch.nonce || !ch.principal_id || !ch.audience) {
           throw new MailboxRequestError("Workload token challenge is invalid");
@@ -496,7 +498,7 @@ export function createWorkloadTokenManager({
         const tokenPayload = await postJson(
           "/api/v1/identity/tokens",
           { challenge_id: ch.challenge_id, proof, requested_scopes: requestedScopes },
-          signal,
+          exchangeSignal,
         );
         if (typeof tokenPayload?.access_token !== "string" || tokenPayload.token_type !== "DPoP") {
           throw new MailboxRequestError("Workload token response is invalid");
@@ -511,7 +513,7 @@ export function createWorkloadTokenManager({
         refreshPromise = null;
       }
     })();
-    return refreshPromise;
+    return awaitWithSignal(refreshPromise, signal);
   }
 
   function createDpopProof(method, fullUrl, accessToken) {
