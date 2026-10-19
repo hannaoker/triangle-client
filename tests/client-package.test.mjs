@@ -416,3 +416,28 @@ test("builder refuses an output archive symlink without following it", () => {
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+test("bundled Node must actually support unflagged SQLite, not only a major version", async () => {
+  const { assertNodeSQLite } = await import(
+    "../scripts/release/build-client-package.mjs"
+  );
+  assert.doesNotThrow(() => assertNodeSQLite(process.execPath));
+  const dir = mkdtempSync(
+    join(realpathSync(tmpdir()), "triangle-package-install-"),
+  );
+  try {
+    const wrapper = join(dir, "sqlite-unavailable-node");
+    const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nexec ${quote(process.execPath)} --no-experimental-sqlite "$@"\n`,
+      { mode: 0o700 },
+    );
+    assert.throws(
+      () => assertNodeSQLite(wrapper),
+      /Bundled Node must support unflagged node:sqlite/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
