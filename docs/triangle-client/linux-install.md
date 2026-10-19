@@ -53,10 +53,12 @@ installer does not create or enable systemd services.
 ## Maintainer build and verification
 
 Build on the target architecture's Linux environment with Node supporting
-unflagged `node:sqlite`, Git, GNU tar, and `ldd`. Supply the license from the same
+unflagged `node:sqlite`, Git, GNU tar, and `readelf` (binutils). Supply the license from the same
 Node distribution as the executable; validation hashes the included license and
-runtime, checks native ELF architecture/SQLite, and rejects unresolved or
-non-system dynamic library paths.
+runtime, checks native ELF architecture/SQLite, and restricts linked dependencies
+to core system libraries with the architecture’s expected glibc loader. It
+rejects custom loader paths, RPATH/RUNPATH and noncore dynamic libraries. Static
+ELF inspection works under x64 emulation where loader tracing can crash.
 
 ```sh
 npm run build:package:linux -- --version VERSION --output /absolute/output --node /path/to/node --node-license /path/to/matching/LICENSE
@@ -65,5 +67,5 @@ npm --prefix packages/triangle-cli test
 ```
 
 Build x64 and ARM64 independently. The package contains tracked owner CLI assets,
-its package metadata, installer, Node and license; it excludes credentials,
+its package metadata, installer, Node and both Node/Triangle licenses; it excludes credentials,
 macOS helper binaries, launchd files, worker assets and service claims.

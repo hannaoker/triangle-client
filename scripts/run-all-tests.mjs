@@ -15,7 +15,7 @@ const suites = [
   {
     name: "packaged installer",
     command: "node",
-    args: ["--test", "tests/client-package.test.mjs"],
+    args: ["--test", process.platform === "linux" ? "tests/linux-package.test.mjs" : "tests/client-package.test.mjs"],
   },
   {
     name: "agent-worker (triangle-client)",
@@ -78,8 +78,6 @@ const suites = [
     args: ["--prefix", "agents/hermes", "test"],
   },
 ];
-
-if (process.platform === "linux") suites.unshift({name:"Linux packaged CLI",command:"node",args:["--test","tests/linux-package.test.mjs"]});
 
 const group = process.argv[2]; // optional: runtime | gateway | all
 const selected =
