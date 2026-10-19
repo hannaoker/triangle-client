@@ -50,12 +50,17 @@ provider turn.
 ## Automated verification
 
 - Owner CLI suite: 85 passed.
-- Runtime plus setup suites: 66 passed before adding one further runner
-  stderr-sanitization/ambiguous-exit regression; that runner suite passed 4/4.
+- Linux runtime suite: 39 passed. Combined runtime/setup checks also passed;
+  the owner CLI total above includes setup and service-command coverage.
+- macOS packaged installer regression: 9 passed.
 - Native ARM64 packaging/bootstrap/installer and service suite: 21 passed,
   one intentional non-Linux platform check skipped. A real archive was built,
   extracted, installed and imported using its bundled Node; all runtime and
   Codex runner module dependencies were present.
+- x64 package/bootstrap/installer suite under Linux emulation: 15 passed,
+  one intentional platform skip. Non-sandbox runtime core: 35 passed. Extracted
+  x64 archive imports passed using its bundled x64 Node. Emulation is not a
+  native x64 kernel sandbox proof.
 - Transaction tests cover persisted claim admission, receipt-only messages,
   failed first execution, explicit retry, unknown execution, lost reply/ACK
   responses, ACK-only restart, process locks, paused identity, and lease
@@ -79,3 +84,21 @@ Alpine/musl and a native x64 kernel sandbox remain unverified. Installed service
 pin their code release; stop them before removing that release. Package download
 publication and deployment onto a user's permanent Linux machine are separate
 from this implementation and disposable verification.
+
+## Retained packages
+
+Version `0.2.0-linux-runtime.1`, bundled source commit `2b9773a` (subsequent
+commits change tests/docs only). Both archives, bootstrap installer, checksum
+files and `VALIDATION.md` are retained in the local project release directory
+`releases/triangle-client-0.2.0-linux-runtime.1`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Linux ARM64 archive | `79b45da54caad4f7812cb8ca2b4bea422ddfc33cf350b853657d67f44eb1dd0f` |
+| Linux x64 archive | `dd533c37cf9068a0e75ff6632d5ce879a4382e85d5160c9d7dfb14a91888e9da` |
+| Bootstrap installer | `be2e6cb95e4274ebeeaa9bf172d7dcc33bc9d96cb9982e861eb59ef730c00de1` |
+
+Cleanup removed both disposable containers, restored the VM's original
+unprivileged-namespace restriction and emulator registration, and restored
+Docker's previous context. No private provider/MESH credential is retained in
+release artifacts or committed evidence.
