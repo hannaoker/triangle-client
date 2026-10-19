@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 const installer=resolve('scripts/release/install-linux-package.mjs');
@@ -95,5 +95,51 @@ test('native Linux recovers SIGKILL after fresh and upgrade wrapper publication 
    if(mode==='edited'){writeFileSync(wrapper,'custom edit');assert.throws(()=>install(f));assert.equal(readFileSync(wrapper,'utf8'),'custom edit');assert.ok(existsSync(intent));}
    else{install(f);assert.equal(existsSync(intent),false);const receipt=JSON.parse(readFileSync(join(f.root,'home/.local/share/triangle/package-install.json')));assert.equal(receipt.owned[wrapper],hash(readFileSync(wrapper)));assert.equal(receipt.version,mode==='upgrade'?'1.2.4':'1.2.3');}
   }finally{rmSync(f.root,{recursive:true,force:true});}
+ }
+});
+
+test('validateNode enforces expected Node SHA-256 digest before ELF inspection', async () => {
+ const { validateNode } = await import('../scripts/release/build-linux-package.mjs');
+ const file = mkdtempSync(join(tmpdir(), 'node-digest-test-')) + '/dummy-node';
+ writeFileSync(file, 'dummy content');
+ try {
+  assert.throws(() => validateNode(file, file, 'invalid-hex'), /Invalid --node-sha256 digest/);
+  assert.throws(() => validateNode(file, file, '0'.repeat(64)), /Bundled Node digest mismatch/);
+ } finally {
+  rmSync(dirname(file), { recursive: true, force: true });
+ }
+});
+test('installer safePath and syncDir durably validate paths and handle directories', async () => {
+ const { safePath, syncDir } = await import('../scripts/release/install-linux-package.mjs');
+ const dir = mkdtempSync(join(tmpdir(), 'installer-safepath-test-'));
+ try {
+  chmodSync(dir, 0o700);
+  assert.doesNotThrow(() => safePath(dir, { privateMode: true }));
+  assert.doesNotThrow(() => syncDir(dir));
+  const link = join(dir, 'link-dest');
+  symlinkSync(dir, link);
+  assert.throws(() => safePath(link, { directory: true }), /Unsafe symlink path/);
+ } finally {
+  rmSync(dir, { recursive: true, force: true });
+ }
+});
+
+test('installer safePath rejects user-created ancestor symlinks and destination symlinks', async () => {
+ const { safePath } = await import('../scripts/release/install-linux-package.mjs');
+ const root = mkdtempSync(join(tmpdir(), 'installer-symlink-test-'));
+ try {
+  chmodSync(root, 0o700);
+  const realDir = join(root, 'real');
+  mkdirSync(realDir, { mode: 0o700 });
+  const realFile = join(realDir, 'file');
+  writeFileSync(realFile, 'hello', { mode: 0o600 });
+  const symlinkDir = join(root, 'symdir');
+  symlinkSync(realDir, symlinkDir);
+  // Destination symlink is rejected
+  assert.throws(() => safePath(symlinkDir, { directory: true }), /Unsafe symlink path/);
+  // User-owned ancestor symlink is rejected
+  assert.throws(() => safePath(join(symlinkDir, 'file'), { directory: false }), /Unsafe symlink path/);
+ } finally {
+  rmSync(root, { recursive: true, force: true });
  }
 });
