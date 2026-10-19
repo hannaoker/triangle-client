@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -511,6 +512,13 @@ export function instrumentCursorAcpProgress({ transactionProxy, progress = null,
   return Object.freeze({ transactionProxy: instrumented, wrapResolveDelivery });
 }
 
+// The Swift coordinator replaces the child environment and omits HOME. Cursor
+// needs it for its isolated data dir and existing account login. Resolve the
+// account home here, before building the sanitized Cursor child environment.
+export function runtimeEnvForCursorAcpWake(source = process.env, accountHome = homedir()) {
+  return { ...source, HOME: source.HOME ?? accountHome };
+}
+
 export function createInstalledCursorAcpDrain(config, {
   logger = console,
   ownerInstanceId = `cursor-acp-drain-${process.pid}`,
@@ -518,6 +526,7 @@ export function createInstalledCursorAcpDrain(config, {
   /** Optional `{ record(phase) }` progress recorder for this profile. */
   progress = null,
 } = {}) {
+  env = runtimeEnvForCursorAcpWake(env);
   const normalized = normalizeCursorAcpWakeConfig(config);
   assertCursorAcpDrainIdentity({
     profile: normalized.profile,
