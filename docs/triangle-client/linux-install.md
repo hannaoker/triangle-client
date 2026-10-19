@@ -11,7 +11,9 @@ Perl and its core JSON::PP, Digest::SHA and IO::Uncompress::Gunzip modules, and
 standard Unix utilities. No installed Node, npm, Swift or Python is required.
 The build/verification environment is Debian 12 with Node 22.22.3; ARM64 runs
 natively and x64 runs under local Linux emulation. This is a glibc package;
-Alpine/musl and other distributions have not been validated.
+Alpine/musl and other distributions have not been validated. Minimal Debian
+images need the `perl` and `libstdc++6` OS packages; both architectures were also
+tested in fresh minimal consumers without Node, npm, Python or compilers.
 
 Obtain the archive for your architecture, installer and checksum through an
 authenticated release channel. From their directory:
