@@ -18,9 +18,14 @@ export function validateELFDependencies(dynamic, programHeaders, arch) {
   if (!soname || !allowed.has(soname)) throw Error('Bundled Node depends on a non-system dynamic library');
  }
 }
-export function validateNode(node,license) {
+export function validateNode(node, license, expectedSha256) {
  const env={...process.env}; delete env.NODE_OPTIONS; delete env.NODE_PATH;
  const bytes=readFileSync(node);
+ const nodeDigest=hash(bytes);
+ if (expectedSha256) {
+  if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw Error('Invalid --node-sha256 digest');
+  if (nodeDigest !== expectedSha256) throw Error(`Bundled Node digest mismatch: expected ${expectedSha256}, got ${nodeDigest}`);
+ }
  if(bytes.subarray(0,4).toString('hex')!=='7f454c46' || bytes[4]!==2 || bytes[5]!==1 || bytes.readUInt16LE(18)!==({x64:62,arm64:183}[process.arch])) throw Error('Bundled Node must be a native Linux ELF executable');
  const info=JSON.parse(execFileSync(node,['-p','JSON.stringify({platform:process.platform,arch:process.arch,version:process.version})'],{env,encoding:'utf8',timeout:10000}));
  if(info.platform!=='linux'||info.arch!==process.arch||Number(info.version.slice(1).split('.')[0])<22)throw Error('Bundled Node must be native Linux Node >=22');
@@ -36,17 +41,17 @@ export function validateNode(node,license) {
  if(!licenseInfo.isFile()||licenseInfo.isSymbolicLink())throw Error('Matching Node LICENSE must be a regular file');
  const text=readFileSync(license,'utf8');
  if(text.length<1000||!text.includes('Node.js')||!text.includes('Permission is hereby granted, free of charge'))throw Error('Matching Node distribution LICENSE is required (--node-license)');
- return info;
+ return { ...info, sha256: nodeDigest };
 }
 function main() {
  const options={};const args=process.argv.slice(2);
- for(let i=0;i<args.length;i+=2){if(!['--version','--output','--node','--node-license'].includes(args[i])||!args[i+1])throw Error('Usage: build-linux-package.mjs --version VERSION --output DIR [--node FILE --node-license FILE]');options[args[i].slice(2)]=args[i+1];}
+ for(let i=0;i<args.length;i+=2){if(!['--version','--output','--node','--node-license','--node-sha256'].includes(args[i])||!args[i+1])throw Error('Usage: build-linux-package.mjs --version VERSION --output DIR [--node FILE --node-license FILE --node-sha256 DIGEST]');options[args[i].slice(2)]=args[i+1];}
  if(process.platform!=='linux'||!['x64','arm64'].includes(process.arch))throw Error('Linux packages require native Linux x64 or arm64');
  if(!/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(options.version??''))throw Error('Explicit safe release version required');
  if(!options.output)throw Error('--output is required');
  const root=resolve(import.meta.dirname,'../..'),node=realpathSync(options.node??process.execPath);
  const license=options['node-license']??join(dirname(node),'../LICENSE');
- const runtime=validateNode(node,license);
+ const runtime=validateNode(node,license,options['node-sha256']);
  const output=resolve(options.output);mkdirSync(output,{recursive:true,mode:0o700});
  const info=lstatSync(output);if(!info.isDirectory()||info.uid!==process.getuid()||(info.mode&0o022)||realpathSync(output)!==output)throw Error('Unsafe release output directory');
  const archive=join(output,`triangle-client-${options.version}-linux-${process.arch}.tar.gz`),installer=join(output,`triangle-install-${options.version}.sh`);
@@ -56,13 +61,15 @@ function main() {
  const stage=join(scratch,'payload');mkdirSync(stage,{mode:0o700});
  const source=execFileSync('git',['ls-files','-z'],{cwd:root}).toString().split('\0').filter(p=>p&&(/^packages\/triangle-cli\/src\/.*\.(mjs|json)$/.test(p)||p==='packages/triangle-cli/package.json'||p==='scripts/release/install-linux-package.mjs'));
  for(const required of ['packages/triangle-cli/src/cli.mjs','scripts/release/install-linux-package.mjs','packages/triangle-cli/package.json'])if(!source.includes(required))throw Error(`Missing tracked asset: ${required}`);
+ const dirty=execFileSync('git',['status','--porcelain','--',...source,'LICENSE','scripts/install.sh'],{cwd:root,encoding:'utf8'}).trim();
+ if(dirty) throw Error('Refusing to build package from dirty working tree:\n'+dirty);
  const files=[];
  for(const [path,from,mode] of [...source.map(p=>[p,join(root,p),0o600]),['bin/node',node,0o700],['LICENSES/node-LICENSE',license,0o600],['LICENSES/triangle-LICENSE',join(root,'LICENSE'),0o600]]){
  const info=lstatSync(from);if(!info.isFile()||info.isSymbolicLink())throw Error(`Nonregular asset: ${path}`);
  const target=join(stage,path);mkdirSync(dirname(target),{recursive:true,mode:0o700});copyFileSync(from,target);chmodSync(target,mode);files.push({path,size:info.size,mode,sha256:hash(readFileSync(target))});
  }
  files.sort((a,b)=>a.path.localeCompare(b.path));
- const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'owner-cli',serviceSupport:false,runtime:{name:'node',version:runtime.version,license:'LICENSES/node-LICENSE',licenseSHA256:hash(readFileSync(license))},files};
+ const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'owner-cli',serviceSupport:false,runtime:{name:'node',version:runtime.version,sha256:runtime.sha256,license:'LICENSES/node-LICENSE',licenseSHA256:hash(readFileSync(license))},files};
  writeFileSync(join(stage,'package-manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600});
  const temporaryArchive=join(scratch,'archive.tar.gz');
  execFileSync('tar',['--format=ustar','--owner=0','--group=0','--numeric-owner','-czf',temporaryArchive,'-C',stage,'package-manifest.json',...files.map(f=>f.path)],{env:{...process.env,COPYFILE_DISABLE:'1',TAR_OPTIONS:''}});
