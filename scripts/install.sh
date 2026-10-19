@@ -7,7 +7,12 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 [[ -n "$archive" && -n "$checksum" ]] || { echo '--archive and --sha256 are required; obtain the checksum through a trusted channel.' >&2; exit 64; }
-stage=$(/usr/bin/mktemp -d "/private/tmp/triangle-package-verify.XXXXXX")
+case "$(/usr/bin/uname -s)" in
+  Darwin) temp_base=/private/tmp; package_installer=scripts/release/install-client-package.mjs;;
+  Linux) temp_base=/tmp; package_installer=scripts/release/install-linux-package.mjs;;
+  *) echo 'Unsupported operating system' >&2; exit 64;;
+esac
+stage=$(/usr/bin/mktemp -d "$temp_base/triangle-package-verify.XXXXXX")
 trap '/bin/rm -rf "$stage"' EXIT
 /bin/chmod 700 "$stage"
 /usr/bin/perl - "$archive" "$checksum" "$stage" "$test_root" <<'TRIANGLE_PACKAGE_VERIFY'
@@ -52,10 +57,12 @@ while(1){
  $actual{$name}={size=>$size,sha256=>$hash->hexdigest};$manifest=decode_json($json) if $name eq 'package-manifest.json';
 }
 die "Missing manifest\n" unless ref($manifest) eq 'HASH';
-my $arch=`/usr/bin/uname -m`;chomp($arch);$arch='x64' if $arch eq 'x86_64';
-die "Unsupported package platform or architecture\n" unless $^O eq 'darwin'&&($manifest->{platform}||'') eq 'darwin'&&($manifest->{arch}||'') eq $arch;
+my $arch=`/usr/bin/uname -m`;chomp($arch);$arch='x64' if $arch eq 'x86_64';$arch='arm64' if $arch eq 'aarch64';
+die "Unsupported package platform or architecture\n" unless ($^O eq 'darwin'||$^O eq 'linux')&&($manifest->{platform}||'') eq $^O&&($manifest->{arch}||'') eq $arch;
 die "Unsafe package version\n" unless ($manifest->{version}||'')=~/\A[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?\z/;
-die "Unsupported package contract\n" unless ($manifest->{schema}||0)==1&&($manifest->{signingMode}||'') eq 'public_ad_hoc'&&($manifest->{credentialCustody}||'') eq 'file';
+die "Unsupported package contract\n" unless ($manifest->{schema}||0)==1&&($manifest->{credentialCustody}||'') eq 'file'&&
+ (($^O eq 'darwin'&&($manifest->{signingMode}||'') eq 'public_ad_hoc')||
+  ($^O eq 'linux'&&($manifest->{signingMode}||'') eq 'none'&&($manifest->{distribution}||'') eq 'owner-cli'&&exists($manifest->{serviceSupport})&&!$manifest->{serviceSupport}));
 die "Test package cannot enter real account\n" if $manifest->{testOnly}&&!length($test_root||'');
 die "Invalid manifest\n" unless ref($manifest->{files}) eq 'ARRAY';my %listed;
 for my $entry (@{$manifest->{files}}){my $path=$entry->{path};die "Manifest closure mismatch\n" unless defined($path)&&exists($actual{$path})&&$path ne 'package-manifest.json'&&!$listed{$path}++;
@@ -63,8 +70,10 @@ for my $entry (@{$manifest->{files}}){my $path=$entry->{path};die "Manifest clos
  chmod($entry->{mode},"$stage/$path") or die "Cannot set payload mode\n";
 }
 die "Unmanifested archive entry\n" unless keys(%listed)+1==keys(%actual);
-for my $required ('bin/node','bin/triangle-mailbox','bin/triangle-client','packages/triangle-cli/src/cli.mjs','scripts/release/install-client-package.mjs'){die "Incomplete package\n" unless $listed{$required};}
+my @required=('bin/node','packages/triangle-cli/src/cli.mjs');
+push @required, $^O eq 'darwin' ? ('bin/triangle-mailbox','bin/triangle-client','scripts/release/install-client-package.mjs') : ('scripts/release/install-linux-package.mjs');
+for my $required (@required){die "Incomplete package\n" unless $listed{$required};}
 TRIANGLE_PACKAGE_VERIFY
 args=(--verified-stage "$stage")
 if [[ -n "$test_root" ]]; then args+=(--test-root "$test_root"); fi
-"$stage/bin/node" "$stage/scripts/release/install-client-package.mjs" "${args[@]}"
+"$stage/bin/node" "$stage/$package_installer" "${args[@]}"
