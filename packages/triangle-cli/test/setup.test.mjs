@@ -171,3 +171,36 @@ test('hidden invitation prompt never echoes input and restores terminal on submi
     assert.equal(input.listenerCount('data'), 0);
   }
 });
+
+test('setup adopts preflight shared workdir only when no workdir was explicitly selected', async () => {
+  const f = fixture();
+  const shared = path.join(path.dirname(f.home), 'shared-harness-workdir');
+  f.runtime.preflight = async (options) => {
+    assert.equal(options.workdirExplicit, false);
+    return { state: 'ready', workdir: shared };
+  };
+  await setup(f.options, f.dependencies);
+  assert.equal(f.calls.find(([kind]) => kind === 'configure')[1].workdir, shared);
+  assert.equal(openCustody(f.home).readCache('setup', f.options.profile).workdir, shared);
+
+  const explicit = fixture();
+  const workdir = path.join(path.dirname(explicit.home), 'explicit');
+  explicit.runtime.preflight = async (options) => {
+    assert.equal(options.workdirExplicit, true);
+    return { state: 'ready', workdir: shared };
+  };
+  await setup({ ...explicit.options, workdir }, explicit.dependencies);
+  assert.equal(explicit.calls.find(([kind]) => kind === 'configure')[1].workdir, workdir);
+});
+
+test('setup creates an explicitly requested new profile identity rather than binding the sole existing agent', async () => {
+  const f = fixture();
+  const first = await setup(f.options, f.dependencies);
+  const next = await setup({ ...f.options, profile: 'second-profile', inviteFile: undefined }, f.dependencies);
+  assert.equal(next.agent.handle, 'second-profile');
+  assert.notEqual(next.agent.agent_id, first.agent.agent_id);
+  assert.equal(f.fake.state.agents.size, 2);
+  const again = await setup({ ...f.options, profile: 'second-profile', inviteFile: undefined }, f.dependencies);
+  assert.equal(again.agent.agent_id, next.agent.agent_id);
+  assert.equal(f.fake.state.agents.size, 2);
+});
