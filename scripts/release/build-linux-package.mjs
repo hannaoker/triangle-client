@@ -14,10 +14,12 @@ export function validateNode(node,license) {
  execFileSync(node,['--input-type=module','--eval',"import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(':memory:');if(db.prepare('select 1 as ok').get().ok!==1)throw Error('SQLite failed');db.close();"],{env,timeout:10000,stdio:'pipe'});
  const dependencies=execFileSync('ldd',[node],{encoding:'utf8',env:{...env,LC_ALL:'C'},timeout:10000});
  if(/not found/.test(dependencies)||dependencies.split('\n').some(line=>{const path=line.match(/(?:=>\s*)?(\/[^\s]+)/)?.[1]; return path&&!/^\/(?:lib(?:64)?|usr\/lib(?:64)?)\//.test(path);})) throw Error('Bundled Node depends on non-system dynamic libraries');
+ // Node has no runtime license API. The caller must supply the LICENSE from
+ // the same Node distribution; its exact bytes are hashed into the manifest.
+ const licenseInfo=lstatSync(license);
+ if(!licenseInfo.isFile()||licenseInfo.isSymbolicLink())throw Error('Matching Node LICENSE must be a regular file');
  const text=readFileSync(license,'utf8');
- const embedded=execFileSync(node,['--license'],{env,encoding:'utf8',maxBuffer:16*1024*1024,timeout:10000});
- const normalize=x=>x.replaceAll('\r\n','\n').trim();
- if(!text.includes('Node.js')||normalize(text)!==normalize(embedded))throw Error('Matching Node LICENSE is required (--node-license)');
+ if(text.length<1000||!text.includes('Node.js')||!text.includes('Permission is hereby granted, free of charge'))throw Error('Matching Node distribution LICENSE is required (--node-license)');
  return info;
 }
 function main() {
@@ -28,7 +30,7 @@ function main() {
  if(!options.output)throw Error('--output is required');
  const root=resolve(import.meta.dirname,'../..'),node=realpathSync(options.node??process.execPath);
  const license=options['node-license']??join(dirname(node),'../LICENSE');
- validateNode(node,license);
+ const runtime=validateNode(node,license);
  const output=resolve(options.output);mkdirSync(output,{recursive:true,mode:0o700});
  const info=lstatSync(output);if(!info.isDirectory()||info.uid!==process.getuid()||(info.mode&0o022)||realpathSync(output)!==output)throw Error('Unsafe release output directory');
  const archive=join(output,`triangle-client-${options.version}-linux-${process.arch}.tar.gz`),installer=join(output,`triangle-install-${options.version}.sh`);
@@ -44,7 +46,7 @@ function main() {
  const target=join(stage,path);mkdirSync(dirname(target),{recursive:true,mode:0o700});copyFileSync(from,target);chmodSync(target,mode);files.push({path,size:info.size,mode,sha256:hash(readFileSync(target))});
  }
  files.sort((a,b)=>a.path.localeCompare(b.path));
- const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'owner-cli',serviceSupport:false,files};
+ const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'owner-cli',serviceSupport:false,runtime:{name:'node',version:runtime.version,license:'LICENSES/node-LICENSE',licenseSHA256:hash(readFileSync(license))},files};
  writeFileSync(join(stage,'package-manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600});
  const temporaryArchive=join(scratch,'archive.tar.gz');
  execFileSync('tar',['--format=ustar','--owner=0','--group=0','--numeric-owner','-czf',temporaryArchive,'-C',stage,'package-manifest.json',...files.map(f=>f.path)],{env:{...process.env,COPYFILE_DISABLE:'1',TAR_OPTIONS:''}});

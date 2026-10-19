@@ -72,6 +72,7 @@ if (testRoot) {
   throw Error("HOME must be canonical account home");
 if (!options["verified-stage"]) throw Error("--verified-stage is required");
 const stage = realpathSync(options["verified-stage"]);
+if (stage !== resolve(options["verified-stage"])) throw Error("Unsafe stage symlink");
 safePath(stage, { privateMode: true });
 const manifest = JSON.parse(
   readFileSync(join(stage, "package-manifest.json"), "utf8"),
