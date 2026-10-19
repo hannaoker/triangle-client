@@ -1,0 +1,23 @@
+{
+  "name": "@the-triangle/triangle-cli",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "triangle: the permissions-v1 owner custodian and MESH protocol core (join, agents, permissions, workload tokens).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "triangle": "./src/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./protocol": "./src/protocol.mjs",
+    "./workload": "./src/workload.mjs",
+    "./errors": "./src/errors.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
