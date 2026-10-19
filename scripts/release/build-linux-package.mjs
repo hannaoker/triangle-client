@@ -59,8 +59,8 @@ function main() {
  const scratch=mkdtempSync(join(tmpdir(),'triangle-linux-build-'));
  try{
  const stage=join(scratch,'payload');mkdirSync(stage,{mode:0o700});
- const source=execFileSync('git',['ls-files','-z'],{cwd:root}).toString().split('\0').filter(p=>p&&(/^packages\/triangle-cli\/src\/.*\.(mjs|json)$/.test(p)||p==='packages/triangle-cli/package.json'||p==='scripts/release/install-linux-package.mjs'));
- for(const required of ['packages/triangle-cli/src/cli.mjs','scripts/release/install-linux-package.mjs','packages/triangle-cli/package.json'])if(!source.includes(required))throw Error(`Missing tracked asset: ${required}`);
+ const source=execFileSync('git',['ls-files','-z'],{cwd:root}).toString().split('\0').filter(p=>p&&(/^packages\/(triangle-cli|linux-runtime|agent-worker)\/(src|runners)\/.*\.(mjs|json)$/.test(p)||/^packages\/(triangle-cli|linux-runtime|agent-worker)\/package\.json$/.test(p)||p==='scripts/release/install-linux-package.mjs'));
+ for(const required of ['packages/triangle-cli/src/cli.mjs','scripts/release/install-linux-package.mjs','packages/triangle-cli/package.json','packages/linux-runtime/src/host.mjs','packages/linux-runtime/src/runner.mjs','packages/agent-worker/runners/codex-runner.mjs'])if(!source.includes(required))throw Error(`Missing tracked asset: ${required}`);
  const dirty=execFileSync('git',['status','--porcelain','--',...source,'LICENSE','scripts/install.sh'],{cwd:root,encoding:'utf8'}).trim();
  if(dirty) throw Error('Refusing to build package from dirty working tree:\n'+dirty);
  const files=[];
@@ -69,7 +69,7 @@ function main() {
  const target=join(stage,path);mkdirSync(dirname(target),{recursive:true,mode:0o700});copyFileSync(from,target);chmodSync(target,mode);files.push({path,size:info.size,mode,sha256:hash(readFileSync(target))});
  }
  files.sort((a,b)=>a.path.localeCompare(b.path));
- const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'owner-cli',serviceSupport:false,runtime:{name:'node',version:runtime.version,sha256:runtime.sha256,license:'LICENSES/node-LICENSE',licenseSHA256:hash(readFileSync(license))},files};
+ const manifest={schema:1,version:options.version,platform:'linux',arch:process.arch,credentialCustody:'file',signingMode:'none',distribution:'managed-runtime',serviceSupport:true,runtime:{name:'node',version:runtime.version,sha256:runtime.sha256,license:'LICENSES/node-LICENSE',licenseSHA256:hash(readFileSync(license))},files};
  writeFileSync(join(stage,'package-manifest.json'),JSON.stringify(manifest,null,2)+'\n',{mode:0o600});
  const temporaryArchive=join(scratch,'archive.tar.gz');
  execFileSync('tar',['--format=ustar','--owner=0','--group=0','--numeric-owner','-czf',temporaryArchive,'-C',stage,'package-manifest.json',...files.map(f=>f.path)],{env:{...process.env,COPYFILE_DISABLE:'1',TAR_OPTIONS:''}});

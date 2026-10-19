@@ -42,7 +42,8 @@ export const USAGE = `Usage: triangle <command> [options]
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
-Linux: setup defaults to identity enrollment; background harness services are macOS-only.
+Linux: setup defaults to identity enrollment; --harness codex installs a managed user service.
+  service start|stop|status|doctor|logs|retry --profile NAME [--lines N] [--delivery ID --yes]
 
 Global: --home DIR (default ${defaultHome()}), --json`;
 
@@ -124,7 +125,7 @@ async function keepIfUnwritten(written) {
 
 const PROCESS_IO = { stdout: (s) => writeLine(process.stdout, s), stderr: (s) => { process.stderr.write(`${s}\n`); } };
 
-export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch, setupDependencies = {} } = {}) {
+export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch, setupDependencies = {}, serviceDependencies = {} } = {}) {
   if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
     io.stdout(USAGE);
     return 0;
@@ -151,6 +152,17 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
         }, { ...setupDependencies, env, fetchImpl });
         await print(io, flags, result, renderSetup);
         return 0;
+      }
+      case "service": {
+        allowOnly(flags, ["profile", "lines", "delivery", "yes"]);
+        if (rest.length || !["start", "stop", "status", "doctor", "logs", "retry"].includes(sub)) throw new UsageError("service needs start, stop, status, doctor, logs or retry");
+        if (!/^[a-z][a-z0-9_-]{2,31}$/.test(flags.profile ?? "")) throw new UsageError("service needs --profile NAME");
+        if (sub !== "logs" && flags.lines !== undefined || sub !== "retry" && (flags.delivery !== undefined || flags.yes)) throw new UsageError("option does not apply to this service command");
+        if (flags.lines !== undefined && !/^\d{1,4}$/.test(flags.lines)) throw new UsageError("--lines must be 1-1000");
+        const service = serviceDependencies.service ?? (await import('../../linux-runtime/src/service.mjs')).createService({ env, ...serviceDependencies });
+        const result = await service[sub]({ profile: flags.profile, delivery: flags.delivery, yes: flags.yes, ...(flags.lines ? { lines: Number(flags.lines) } : {}) });
+        await print(io, flags, result, value => value.logs ?? `Service ${value.profile}: ${value.state}`);
+        return sub === "doctor" && result.state !== "running" ? 1 : 0;
       }
       case "join": {
         allowOnly(flags, ["resume", "abandon", "name", "handle", "agent-name", "device-label", "device", "via"]);

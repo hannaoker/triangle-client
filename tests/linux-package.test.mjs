@@ -25,7 +25,7 @@ test('native Linux rejects symlink destinations and modified releases',{skip:pro
 test('native Linux rolls back wrapper and release when receipt publication fails',{skip:process.platform!=='linux'},()=>{const f=fixture();try{
  install(f);const wrapper=join(f.root,'home/.local/bin/triangle');const original=readFileSync(wrapper,'utf8');const manifestPath=join(f.stage,'package-manifest.json');const manifest=JSON.parse(readFileSync(manifestPath));manifest.version='1.2.4';writeFileSync(manifestPath,JSON.stringify(manifest),{mode:0o600});
  const receipt=join(f.root,'home/.local/share/triangle/package-install.json');const before=readFileSync(receipt,'utf8');
- const script=`import {writeFileSync} from 'node:fs';process.argv=[process.execPath,${JSON.stringify(installer)},'--verified-stage',${JSON.stringify(f.stage)},'--test-root',${JSON.stringify(f.root)}];writeFileSync(${JSON.stringify(receipt)}+'.stage-'+process.pid,'collision',{mode:0o600});await import(${JSON.stringify('file://'+installer)});`;
+ const script=`import {writeFileSync} from 'node:fs';process.argv=[process.execPath,${JSON.stringify(installer)},'--verified-stage',${JSON.stringify(f.stage)},'--test-root',${JSON.stringify(f.root)}];writeFileSync(${JSON.stringify(receipt)}+'.intent-stage-'+process.pid,'collision',{mode:0o600});await import(${JSON.stringify('file://'+installer)});`;
  assert.throws(()=>execFileSync(process.execPath,['--input-type=module','--eval',script],{stdio:'pipe'}));assert.equal(readFileSync(wrapper,'utf8'),original);assert.equal(readFileSync(receipt,'utf8'),before);assert.equal(existsSync(join(f.root,'home/.local/share/triangle/releases/1.2.4')),false);
  }finally{rmSync(f.root,{recursive:true,force:true});}});
 test('native Linux builder packages real Node, bootstrap installs with an empty tool PATH, and output is immutable',{skip:process.platform!=='linux'||!existsSync('/usr/local/LICENSE')},()=>{
@@ -37,8 +37,8 @@ test('native Linux builder packages real Node, bootstrap installs with an empty 
   assert.ok(existsSync(result.archive));
   assert.throws(()=>execFileSync(process.execPath,args,{stdio:'pipe'}),e=>/Release output already exists/.test(e.stderr?.toString()));
   const manifest=JSON.parse(execFileSync('tar',['-xOf',result.archive,'package-manifest.json'],{encoding:'utf8'}));
-  assert.equal(manifest.distribution,'owner-cli');assert.equal(manifest.serviceSupport,false);assert.equal(manifest.runtime.version,process.version);
-  assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='LICENSES/triangle-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));
+  assert.equal(manifest.distribution,'managed-runtime');assert.equal(manifest.serviceSupport,true);assert.equal(manifest.runtime.version,process.version);
+  assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='LICENSES/triangle-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||/^packages\/(triangle-cli|linux-runtime|agent-worker)\/package\.json$/.test(f.path)||/^packages\/(triangle-cli|linux-runtime|agent-worker)\/(src|runners)\//.test(f.path)));
   const isolatedEnv={...process.env,PATH:'/nonexistent'};
   execFileSync('/bin/bash',[result.installer,'--archive',result.archive,'--sha256',result.sha256,'--test-root',root],{env:isolatedEnv,encoding:'utf8'});
   const wrapper=join(root,'home/.local/bin/triangle');
@@ -142,4 +142,8 @@ test('installer safePath rejects user-created ancestor symlinks and destination 
  } finally {
   rmSync(root, { recursive: true, force: true });
  }
+});
+
+test('native Linux managed runtime packages require host and runner closure', {skip:process.platform!=='linux'}, () => {
+ const f=fixture();try {const file=join(f.stage,'package-manifest.json');const m=JSON.parse(readFileSync(file));m.distribution='managed-runtime';m.serviceSupport=true;writeFileSync(file,JSON.stringify(m));assert.throws(()=>install(f));assert.equal(existsSync(join(f.root,'home/.local/share/triangle')),false);}finally{rmSync(f.root,{recursive:true,force:true});}
 });

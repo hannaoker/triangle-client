@@ -28,6 +28,11 @@ const suites = [
     args: ["--prefix", "packages/triangle-cli", "test"],
   },
   {
+    name: "linux-runtime",
+    command: "npm",
+    args: ["--prefix", "packages/linux-runtime", "test"],
+  },
+  {
     name: "client-console",
     command: "npm",
     args: ["--prefix", "packages/client-console", "test"],
@@ -82,9 +87,9 @@ const suites = [
 const group = process.argv[2]; // optional: runtime | gateway | all
 const selected =
   group === "runtime"
-    ? suites.slice(0, 7)
+    ? suites.slice(0, 8)
     : group === "gateway"
-      ? suites.slice(7)
+      ? suites.slice(8)
       : suites;
 
 const results = [];

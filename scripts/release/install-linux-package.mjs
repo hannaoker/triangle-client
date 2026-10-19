@@ -127,7 +127,7 @@ export function runInstaller() {
     !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(manifest.version) ||
     manifest.credentialCustody !== "file" ||
     manifest.signingMode !== "none" ||
-    manifest.distribution !== "owner-cli" || manifest.serviceSupport !== false || process.platform !== "linux" ||
+    !((manifest.distribution === "owner-cli" && manifest.serviceSupport === false) || (manifest.distribution === "managed-runtime" && manifest.serviceSupport === true)) || process.platform !== "linux" ||
     (manifest.testOnly && !testRoot)
   )
     throw Error("Invalid verified package");
@@ -163,6 +163,7 @@ export function runInstaller() {
   }
   checkClosure(stage);
   for (const required of ["bin/node","packages/triangle-cli/src/cli.mjs","scripts/release/install-linux-package.mjs","LICENSES/node-LICENSE","LICENSES/triangle-LICENSE","packages/triangle-cli/package.json"]) if (!listed.has(required)) throw Error("Missing required package asset");
+  if (manifest.serviceSupport) for (const required of ["packages/linux-runtime/src/host.mjs", "packages/linux-runtime/src/runner.mjs", "packages/linux-runtime/src/service.mjs", "packages/agent-worker/runners/codex-runner.mjs"]) if (!listed.has(required)) throw Error("Missing managed runtime asset");
   const dataHome = testRoot ? join(home, ".local/share") : (process.env.XDG_DATA_HOME || join(home, ".local/share"));
   if (!dataHome.startsWith("/") || resolve(dataHome) !== dataHome) throw Error("XDG_DATA_HOME must be a safe absolute path");
   const app = join(dataHome, "triangle"), releases = join(app,"releases"), release = join(releases,manifest.version), receiptPath = join(app,"package-install.json"), wrapper = join(home,".local/bin/triangle");
@@ -187,7 +188,7 @@ export function runInstaller() {
     safePath(manifestFile,{directory:false,privateMode:true});
     if (hash(readFileSync(manifestFile)) !== intent.releaseManifestSHA) throw Error("Interrupted release manifest changed");
     const m = JSON.parse(readFileSync(manifestFile,"utf8"));
-    if (m.schema !== 1 || m.version !== intent.version || m.platform !== "linux" || m.arch !== process.arch || m.distribution !== "owner-cli" || m.serviceSupport !== false || m.signingMode !== "none" || m.credentialCustody !== "file" || !Array.isArray(m.files)) throw Error("Invalid interrupted release");
+    if (m.schema !== 1 || m.version !== intent.version || m.platform !== "linux" || m.arch !== process.arch || !((m.distribution === "owner-cli" && m.serviceSupport === false) || (m.distribution === "managed-runtime" && m.serviceSupport === true)) || m.signingMode !== "none" || m.credentialCustody !== "file" || !Array.isArray(m.files)) throw Error("Invalid interrupted release");
     const expected = new Set(["package-manifest.json"]);
     for (const entry of m.files) {
       if (typeof entry.path !== "string" || entry.path.startsWith("/") || entry.path.split("/").some(p=>!p||p==="."||p==="..") || expected.has(entry.path) || ![0o600,0o700].includes(entry.mode) || !digestPattern.test(entry.sha256) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw Error("Invalid interrupted release entry");
@@ -195,6 +196,7 @@ export function runInstaller() {
       const target = join(intent.release,entry.path);safePath(target,{directory:false});
       if ((lstatSync(target).mode & 0o777) !== entry.mode || lstatSync(target).size !== entry.size || hash(readFileSync(target)) !== entry.sha256) throw Error("Interrupted release integrity mismatch");
     }
+    if (m.serviceSupport) for (const required of ["packages/linux-runtime/src/host.mjs", "packages/linux-runtime/src/runner.mjs", "packages/linux-runtime/src/service.mjs", "packages/agent-worker/runners/codex-runner.mjs"]) if (!expected.has(required)) throw Error("Incomplete interrupted managed runtime release");
     for (const required of ["bin/node","packages/triangle-cli/src/cli.mjs","scripts/release/install-linux-package.mjs","LICENSES/node-LICENSE","LICENSES/triangle-LICENSE","packages/triangle-cli/package.json"])if(!expected.has(required))throw Error("Incomplete interrupted release");
     const walk = (dir,prefix="")=>{for(const name of readdirSync(dir)){const relative=prefix+name,target=join(dir,name),info=lstatSync(target);if(info.isDirectory()&&!info.isSymbolicLink())walk(target,relative+"/");else if(!info.isFile()||!expected.has(relative))throw Error("Interrupted release closure mismatch");}};
     walk(intent.release);
@@ -316,7 +318,7 @@ export function runInstaller() {
         version: manifest.version,
         release,
         cli: wrapper,
-        serviceSupport: false,
+        serviceSupport: manifest.serviceSupport,
         next: `${wrapper} setup`,
       }),
     );

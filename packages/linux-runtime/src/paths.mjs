@@ -1,0 +1,282 @@
+import os from "node:os";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import {
+  constants,
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+const PROFILE = /^[a-z][a-z0-9_-]{2,31}$/;
+const AGENT = /^agent_[a-f0-9]{32}$/;
+export function assertAbsolutePath(value) {
+  if (
+    typeof value !== "string" ||
+    !path.isAbsolute(value) ||
+    path.resolve(value) !== value ||
+    /[\r\n\0]/.test(value)
+  )
+    throw Error("Expected canonical absolute path");
+  return value;
+}
+export function overlaps(a, b) {
+  return a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
+}
+function chain(value) {
+  assertAbsolutePath(value);
+  let current = path.parse(value).root;
+  for (const part of value
+    .slice(current.length)
+    .split(path.sep)
+    .filter(Boolean)) {
+    current = path.join(current, part);
+    const s = lstatSync(current, { throwIfNoEntry: false });
+    if (!s) continue;
+    if (s.isSymbolicLink() || realpathSync(current) !== current)
+      throw Error("Unsafe symlink or noncanonical path");
+    if (
+      current !== value &&
+      (!s.isDirectory() ||
+        ![0, process.getuid()].includes(s.uid) ||
+        ((s.mode & 0o022) !== 0 && !(s.mode & 0o1000 && s.uid === 0)))
+    )
+      throw Error("Unsafe path ancestor");
+  }
+}
+export function safeDirectory(
+  value,
+  { create = false, privateMode = true } = {},
+) {
+  chain(value);
+  if (create && !existsSync(value)) {
+    const missing = [];
+    for (let p = value; !existsSync(p); p = path.dirname(p)) missing.unshift(p);
+    for (const p of missing) {
+      try {
+        mkdirSync(p, { mode: 0o700 });
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+      chain(p);
+    }
+  }
+  const s = lstatSync(value, { throwIfNoEntry: false });
+  if (
+    !s ||
+    !s.isDirectory() ||
+    s.uid !== process.getuid() ||
+    (s.mode & 0o022) !== 0 ||
+    (privateMode && (s.mode & 0o077) !== 0)
+  )
+    throw Error("Directory must have safe owner and private permissions");
+  return value;
+}
+export function safeFile(
+  value,
+  { executable = false, privateMode = true } = {},
+) {
+  chain(value);
+  const s = lstatSync(value, { throwIfNoEntry: false });
+  if (
+    !s ||
+    !s.isFile() ||
+    s.nlink !== 1 ||
+    ![process.getuid(), ...(executable ? [0] : [])].includes(s.uid) ||
+    (s.mode & 0o022) !== 0 ||
+    (privateMode && (s.mode & 0o077) !== 0) ||
+    (executable && (s.mode & 0o111) === 0)
+  )
+    throw Error("File must have safe owner and private permissions");
+  return value;
+}
+export function readPrivateJSON(file, { missing = false } = {}) {
+  chain(file);
+  if (missing && !existsSync(file)) return null;
+  safeFile(file);
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const s = fstatSync(fd);
+    if (
+      !s.isFile() ||
+      s.uid !== process.getuid() ||
+      s.nlink !== 1 ||
+      s.mode & 0o077 ||
+      s.size > 128 * 1024
+    )
+      throw Error("Unsafe private JSON file");
+    return JSON.parse(readFileSync(fd, "utf8"));
+  } finally {
+    closeSync(fd);
+  }
+}
+export function atomicPrivateJSON(file, value) {
+  assertAbsolutePath(file);
+  safeDirectory(path.dirname(file), { create: true });
+  if (existsSync(file)) safeFile(file);
+  const temp = file + ".stage-" + randomBytes(8).toString("hex");
+  let fd;
+  try {
+    fd = openSync(
+      temp,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    writeFileSync(fd, JSON.stringify(value, null, 2) + "\n");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, file);
+    const parent = openSync(path.dirname(file), "r");
+    try {
+      fsyncSync(parent);
+    } finally {
+      closeSync(parent);
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temp, { force: true });
+  }
+}
+export function linuxPaths({
+  env = process.env,
+  accountHome = os.homedir(),
+} = {}) {
+  assertAbsolutePath(accountHome);
+  const xdg = (name, fallback) =>
+    assertAbsolutePath(env[name] || path.join(accountHome, fallback));
+  const dataRoot = path.join(xdg("XDG_DATA_HOME", ".local/share"), "triangle");
+  const stateRoot = path.join(
+    xdg("XDG_STATE_HOME", ".local/state"),
+    "triangle/runtime-v1",
+  );
+  return {
+    dataRoot,
+    stateRoot,
+    profilesRoot: path.join(stateRoot, "profiles"),
+    modelsRoot: path.join(dataRoot, "model-state"),
+    workspacesRoot: path.join(dataRoot, "workspaces"),
+    unitsRoot: path.join(xdg("XDG_CONFIG_HOME", ".config"), "systemd/user"),
+  };
+}
+export function profilePath(profile, options) {
+  if (!PROFILE.test(profile ?? "")) throw Error("Invalid profile name");
+  return path.join(linuxPaths(options).profilesRoot, profile + ".json");
+}
+const KEYS = [
+  "schema",
+  "profile",
+  "agentId",
+  "identityHome",
+  "authority",
+  "via",
+  "harness",
+  "command",
+  "bwrap",
+  "node",
+  "releaseRoot",
+  "workdir",
+  "modelHome",
+  "stateRoot",
+  "pollIntervalMs",
+  "runnerTimeoutMs",
+];
+function origin(value) {
+  const u = new URL(value);
+  if (
+    u.username ||
+    u.password ||
+    u.search ||
+    u.hash ||
+    u.pathname !== "/" ||
+    (u.protocol !== "https:" &&
+      !(
+        u.protocol === "http:" &&
+        ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)
+      ))
+  )
+    throw Error("Invalid authority origin");
+  return u.origin;
+}
+export function validateProfile(value) {
+  if (
+    !value ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join() !== [...KEYS].sort().join() ||
+    value.schema !== 1 ||
+    !PROFILE.test(value.profile) ||
+    !AGENT.test(value.agentId) ||
+    value.harness !== "codex"
+  )
+    throw Error("Invalid Linux profile schema");
+  for (const key of [
+    "identityHome",
+    "command",
+    "bwrap",
+    "node",
+    "releaseRoot",
+    "workdir",
+    "modelHome",
+    "stateRoot",
+  ])
+    assertAbsolutePath(value[key]);
+  if (
+    origin(value.authority) !== value.authority ||
+    (value.via !== null && origin(value.via) !== value.via)
+  )
+    throw Error("Invalid profile authority");
+  if (
+    !Number.isSafeInteger(value.pollIntervalMs) ||
+    value.pollIntervalMs < 1000 ||
+    value.pollIntervalMs > 300000 ||
+    !Number.isSafeInteger(value.runnerTimeoutMs) ||
+    value.runnerTimeoutMs < 1000 ||
+    value.runnerTimeoutMs > 3600000
+  )
+    throw Error("Invalid runtime bounds");
+  if (value.node !== path.join(value.releaseRoot, "bin/node"))
+    throw Error("Invalid bundled runtime path");
+  return value;
+}
+function checkManaged(value, options) {
+  validateProfile(value);
+  const p = linuxPaths(options);
+  if (
+    value.modelHome !== path.join(p.modelsRoot, value.profile) ||
+    value.stateRoot !== path.join(p.stateRoot, "agents", value.agentId)
+  )
+    throw Error("Profile state does not match managed paths");
+  return value;
+}
+export function readProfile(profile, options) {
+  const value = readPrivateJSON(profilePath(profile, options), {
+    missing: true,
+  });
+  return value === null ? null : checkManaged(value, options);
+}
+export function writeProfile(value, options) {
+  checkManaged(value, options);
+  atomicPrivateJSON(profilePath(value.profile, options), value);
+  return value;
+}
+export function listProfiles(options) {
+  const root = linuxPaths(options).profilesRoot;
+  if (!existsSync(root)) return [];
+  safeDirectory(root);
+  return readdirSync(root)
+    .filter((n) => n.endsWith(".json"))
+    .sort()
+    .map((n) => readProfile(n.slice(0, -5), options));
+}

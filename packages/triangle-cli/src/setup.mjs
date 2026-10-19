@@ -53,8 +53,9 @@ export async function setup(options = {}, dependencies = {}) {
     }
     let runtime;
     if (!identityOnly) {
-      if (platform !== 'darwin') throw new LocalStateError('Background service setup currently supports macOS. Use --identity-only on this platform.');
-      runtime = dependencies.runtime ?? (await import('./setup-runtime.mjs')).createSetupRuntime({ env, platform, accountHome: dependencies.accountHome ?? os.homedir(), releaseRoot: dependencies.releaseRoot, run: dependencies.run });
+      if (!['darwin', 'linux'].includes(platform)) throw new LocalStateError('Background service setup supports macOS and Linux.');
+      if (platform === 'linux' && harness !== 'codex') throw new LocalStateError('Linux managed runtime currently supports Codex only.');
+      runtime = dependencies.runtime ?? (await import(platform === 'linux' ? './setup-runtime-linux.mjs' : './setup-runtime.mjs')).createSetupRuntime({ env, platform, accountHome: dependencies.accountHome ?? os.homedir(), releaseRoot: dependencies.releaseRoot, run: dependencies.run });
       const workdirExplicit = Boolean(options.workdir ?? pending?.workdir);
       const ready = await runtime.preflight({ ...choice, workdirExplicit });
       if (ready?.agentId) {

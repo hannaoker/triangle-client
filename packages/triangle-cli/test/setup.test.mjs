@@ -47,7 +47,7 @@ test('setup preflights before join, configures once with a key path and reuses i
 
 test('setup rejects unsupported service platform and failed local preflight before reading or consuming invite', async () => {
   const f = fixture();
-  await assert.rejects(setup(f.options, { ...f.dependencies, platform: 'linux' }), /identity-only/);
+  await assert.rejects(setup(f.options, { ...f.dependencies, platform: 'win32' }), /macOS and Linux/);
   f.runtime.preflight = async () => { throw new Error('Missing installed harness'); };
   await assert.rejects(setup(f.options, f.dependencies), /Missing installed harness/);
   assert.equal(f.fake.state.requests.length, 0);
@@ -250,4 +250,10 @@ test('Linux packaged setup defaults to portable enrollment and resumes without a
   assert.equal(again.state,'joined');
   assert.equal(f.fake.state.agents.size,1);
   assert.deepEqual(f.calls,[]);
+});
+
+ test('Linux rejects unsupported harness before invitation or enrollment', async () => {
+  const f = fixture();
+  await assert.rejects(setup({ ...f.options, harness: 'hermes' }, { ...f.dependencies, platform: 'linux' }), /Codex only/);
+  assert.equal(f.fake.state.requests.length, 0);
 });
