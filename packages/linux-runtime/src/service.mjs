@@ -16,9 +16,13 @@ export function runCommand(command, args, options = {}) {
   });
 }
 const quote = value => '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', () => '$$') + '"';
-export function renderUnit(config, configPath) {
+export function renderUnit(config, configPath, xdg = {}) {
+  const environment = Object.entries(xdg).map(([key, value]) => {
+    if (!['XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME'].includes(key) || typeof value !== 'string' || !path.isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) fail('Invalid service environment.');
+    return 'Environment=' + quote(key + '=' + value).replaceAll('$$', () => '$') + '\n';
+  }).join('');
   for (const value of [config.node, config.releaseRoot, configPath]) if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) fail('Invalid service path.');
-  return `[Unit]\nDescription=Triangle managed agent\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${[config.node, path.join(config.releaseRoot, 'packages/linux-runtime/src/host.mjs'), '--config', configPath].map(quote).join(' ')}\nUMask=0077\nKillMode=control-group\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=Triangle managed agent\nAfter=network-online.target\n\n[Service]\nType=simple\n${environment}ExecStart=${[config.node, path.join(config.releaseRoot, 'packages/linux-runtime/src/host.mjs'), '--config', configPath].map(quote).join(' ')}\nUMask=0077\nKillMode=control-group\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n`;
 }
 export function createService({ env = process.env, accountHome, run = runCommand, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), readProfileImpl = readProfile, openStoreImpl } = {}) {
   const options = { env, accountHome };
@@ -38,11 +42,13 @@ export function createService({ env = process.env, accountHome, run = runCommand
     const ready = result.code === 0 && fields.ActiveState === 'active' && Number(fields.MainPID) > 0 && health?.pid === Number(fields.MainPID) && health?.ready === true && health?.verified === true && health?.profile === profile && health?.agentId === config.agentId && now() - at >= 0 && now() - at < Math.max(90000, config.pollIntervalMs * 3);
     return { profile, agentId: config.agentId, state: ready ? 'running' : 'needs_attention', active: fields.ActiveState === 'active', verified: ready, transaction };
   }
+  const unitFile = profile => path.join(linuxPaths(options).unitsRoot, unit(profile));
   async function install(config) {
-    const file = path.join(linuxPaths(options).unitsRoot, unit(config.profile));
+    const roots = linuxPaths(options);
+    const file = unitFile(config.profile);
     safeDirectory(path.dirname(file), { create: true });
     if (existsSync(file)) safeFile(file);
-    const text = renderUnit(config, profilePath(config.profile, options));
+    const text = renderUnit(config, profilePath(config.profile, options), { XDG_DATA_HOME: path.dirname(roots.dataRoot), XDG_STATE_HOME: path.dirname(path.dirname(roots.stateRoot)), XDG_CONFIG_HOME: path.dirname(path.dirname(roots.unitsRoot)) });
     if (existsSync(file) && readFileSync(file, 'utf8') !== text) fail('An existing service unit has different settings. No service was replaced.');
     writeFileSync(file, text, { mode: 0o600, flag: existsSync(file) ? 'r+' : 'wx' });
     if ((await call(['daemon-reload'])).code) fail('Unable to load the Linux user service.');
@@ -50,7 +56,7 @@ export function createService({ env = process.env, accountHome, run = runCommand
   async function start({ profile }) {
     const config = readProfileImpl(profile, options); if (!config) fail('This Linux service profile is not configured.');
     await manager(); await install(config);
-    if ((await call(['enable', '--now', unit(profile)])).code) fail('Unable to start the Linux user service.');
+    if ((await call(['enable', '--now', unitFile(profile)])).code) fail('Unable to start the Linux user service.');
     for (let i = 0; i < 30; i++) { const result = await status({ profile }); if (result.state === 'running') return result; await sleep(1000); }
     fail('The service did not report verified readiness. Run triangle service doctor --profile ' + profile + '.');
   }
