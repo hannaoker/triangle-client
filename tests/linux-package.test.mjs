@@ -10,7 +10,7 @@ const hash=x=>createHash('sha256').update(x).digest('hex');
 function fixture(version='1.2.3') {
  const root=mkdtempSync(join(tmpdir(),'triangle-package-install-')); chmodSync(root,0o700);
  mkdirSync(join(root,'home'),{mode:0o700}); const stage=join(root,'stage'); mkdirSync(stage,{mode:0o700});
- const assets={'bin/node':'runtime','packages/triangle-cli/src/cli.mjs':'console.log("help")','scripts/release/install-linux-package.mjs':'installer','LICENSES/node-LICENSE':'license','packages/triangle-cli/package.json':'{}'};
+ const assets={'bin/node':'runtime','packages/triangle-cli/src/cli.mjs':'console.log("help")','scripts/release/install-linux-package.mjs':'installer','LICENSES/node-LICENSE':'license','LICENSES/triangle-LICENSE':'triangle license','packages/triangle-cli/package.json':'{}'};
  const files=Object.entries(assets).map(([path,data])=>{mkdirSync(join(stage,path,'..'),{recursive:true,mode:0o700});writeFileSync(join(stage,path),data,{mode:path==='bin/node'?0o700:0o600});return {path,size:Buffer.byteLength(data),sha256:hash(data),mode:path==='bin/node'?0o700:0o600};});
  writeFileSync(join(stage,'package-manifest.json'),JSON.stringify({schema:1,version,platform:'linux',arch:process.arch,signingMode:'none',credentialCustody:'file',distribution:'owner-cli',serviceSupport:false,files}),{mode:0o600});return {root,stage};
 }
@@ -38,7 +38,7 @@ test('native Linux builder packages real Node, bootstrap installs with an empty 
   assert.throws(()=>execFileSync(process.execPath,args,{stdio:'pipe'}),e=>/Release output already exists/.test(e.stderr?.toString()));
   const manifest=JSON.parse(execFileSync('tar',['-xOf',result.archive,'package-manifest.json'],{encoding:'utf8'}));
   assert.equal(manifest.distribution,'owner-cli');assert.equal(manifest.serviceSupport,false);assert.equal(manifest.runtime.version,process.version);
-  assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));
+  assert.ok(manifest.files.every(f=>f.path==='bin/node'||f.path==='LICENSES/node-LICENSE'||f.path==='LICENSES/triangle-LICENSE'||f.path==='scripts/release/install-linux-package.mjs'||f.path==='packages/triangle-cli/package.json'||f.path.startsWith('packages/triangle-cli/src/')));
   const isolatedEnv={...process.env,PATH:'/nonexistent'};
   execFileSync('/bin/bash',[result.installer,'--archive',result.archive,'--sha256',result.sha256,'--test-root',root],{env:isolatedEnv,encoding:'utf8'});
   const wrapper=join(root,'home/.local/bin/triangle');
@@ -58,4 +58,29 @@ test('ELF dependencies permit only standard libraries and the architecture loade
  assert.throws(()=>validateELFDependencies('',interpreter,'x64'));
  assert.throws(()=>validateELFDependencies(dynamic,'','x64'));
  assert.doesNotThrow(()=>validateELFDependencies(dynamic,' [Requesting program interpreter: /lib/ld-linux-aarch64.so.1]','arm64'));
+});
+test('native Linux interrupted release copy leaves no published version and retry succeeds',{skip:process.platform!=='linux'},()=>{
+ const f=fixture();try {
+  const script=`import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const original=fs.copyFileSync;let copies=0;fs.copyFileSync=(...args)=>{original(...args);if(++copies===1)process.kill(process.pid,'SIGKILL');};syncBuiltinESMExports();process.argv=[process.execPath,${JSON.stringify(installer)},'--verified-stage',${JSON.stringify(f.stage)},'--test-root',${JSON.stringify(f.root)}];await import(${JSON.stringify('file://'+installer)});`;
+  assert.throws(()=>execFileSync(process.execPath,['--input-type=module','--eval',script],{stdio:'pipe'}));
+  assert.equal(existsSync(join(f.root,'home/.local/share/triangle/releases/1.2.3')),false);
+  install(f);assert.ok(existsSync(join(f.root,'home/.local/share/triangle/releases/1.2.3/bin/node')));
+ }finally{rmSync(f.root,{recursive:true,force:true});}
+});
+test('native Linux serializes parallel versions and a crashed lock holder releases the account lock',{skip:process.platform!=='linux'},async()=>{
+ const {spawn}=await import('node:child_process');const {once}=await import('node:events');
+ const f=fixture(), next=fixture('1.2.4');let holder,children=[];
+ try {
+  const lock=join(f.root,'home/.triangle-package-install.sqlite');writeFileSync(lock,'',{mode:0o600});
+  const script=`import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(${JSON.stringify(lock)});db.exec('BEGIN IMMEDIATE');process.stdout.write('locked');setInterval(()=>{},1000);`;
+  holder=spawn(process.execPath,['--input-type=module','--eval',script],{stdio:['ignore','pipe','pipe']});await once(holder.stdout,'data');
+  let closed=0;
+  children=[f.stage,next.stage].map(stage=>{const child=spawn(process.execPath,[installer,'--verified-stage',stage,'--test-root',f.root],{stdio:['ignore','pipe','pipe']});child.on('close',()=>closed++);return child;});
+  await new Promise(resolve=>setTimeout(resolve,150));assert.equal(closed,0,'both installers wait while the account lock is held');
+  const completions=children.map(child=>once(child,'close'));holder.kill('SIGKILL');
+  for(const [code] of await Promise.all(completions))assert.equal(code,0);
+  const receipt=JSON.parse(readFileSync(join(f.root,'home/.local/share/triangle/package-install.json')));
+  assert.match(readFileSync(join(f.root,'home/.local/bin/triangle'),'utf8'),new RegExp('releases/'+receipt.version.replaceAll('.','\\.')));
+  assert.equal(receipt.owned[join(f.root,'home/.local/bin/triangle')],hash(readFileSync(join(f.root,'home/.local/bin/triangle'))));
+ }finally{holder?.kill('SIGKILL');for(const child of children)child.kill('SIGKILL');rmSync(f.root,{recursive:true,force:true});rmSync(next.root,{recursive:true,force:true});}
 });

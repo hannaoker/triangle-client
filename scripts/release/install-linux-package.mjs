@@ -6,6 +6,9 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  openSync,
+  closeSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -14,6 +17,7 @@ import {
   rmdirSync,
   writeFileSync,
 } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 const args = process.argv.slice(2),
@@ -119,13 +123,23 @@ function checkClosure(dir, prefix = "") {
   }
 }
 checkClosure(stage);
-for (const required of ["bin/node","packages/triangle-cli/src/cli.mjs","scripts/release/install-linux-package.mjs","LICENSES/node-LICENSE","packages/triangle-cli/package.json"]) if (!listed.has(required)) throw Error("Missing required package asset");
+for (const required of ["bin/node","packages/triangle-cli/src/cli.mjs","scripts/release/install-linux-package.mjs","LICENSES/node-LICENSE","LICENSES/triangle-LICENSE","packages/triangle-cli/package.json"]) if (!listed.has(required)) throw Error("Missing required package asset");
 const dataHome = testRoot ? join(home, ".local/share") : (process.env.XDG_DATA_HOME || join(home, ".local/share"));
 if (!dataHome.startsWith("/") || resolve(dataHome) !== dataHome) throw Error("XDG_DATA_HOME must be a safe absolute path");
 const app = join(dataHome, "triangle"), releases = join(app,"releases"), release = join(releases,manifest.version), receiptPath = join(app,"package-install.json"), wrapper = join(home,".local/bin/triangle");
 const directories = [...new Set([dataHome, app, releases, join(home,".local"), join(home,".local/bin")])];
 for (const dir of directories) safePath(dir);
 safePath(receiptPath,{directory:false,privateMode:true});
+// One kernel-held SQLite writer lock serializes receipt checks, publication and
+// rollback across all XDG data locations that share this account's CLI wrapper.
+const lockPath = join(home, ".triangle-package-install.sqlite");
+safePath(lockPath, {directory:false,privateMode:true});
+try { closeSync(openSync(lockPath, "wx", 0o600)); } catch(error) { if(error.code !== "EEXIST") throw error; }
+safePath(lockPath, {directory:false,privateMode:true});
+if (lstatSync(lockPath).nlink !== 1) throw Error("Unsafe install transaction lock");
+const transaction = new DatabaseSync(lockPath);
+transaction.exec("PRAGMA busy_timeout=30000; BEGIN IMMEDIATE;");
+process.once("exit",()=>{ transaction.close(); });
 let prior = null;
 if (existsSync(receiptPath)) {
  prior=JSON.parse(readFileSync(receiptPath,"utf8"));
@@ -163,7 +177,7 @@ if (existsSync(release)) {
   }
 }
 const installed = [], createdDirectories = [], temporaryFiles = new Set();
-let releaseCreated = false;
+let releaseCreated = false, releaseStage = null;
 function createDirectory(path) {
   if (existsSync(path)) return;
   createDirectory(dirname(path));
@@ -173,17 +187,19 @@ function createDirectory(path) {
 try {
   for (const dir of directories) createDirectory(dir);
   if (!existsSync(release)) {
-    mkdirSync(release, { mode: 0o700 });
-    releaseCreated = true;
+    releaseStage = mkdtempSync(join(releases, "." + manifest.version + "-stage-"));
     for (const entry of [
       { path: "package-manifest.json", mode: 0o600 },
       ...manifest.files,
     ]) {
-      const target = join(release, entry.path);
+      const target = join(releaseStage, entry.path);
       mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
       copyFileSync(join(stage, entry.path), target);
       chmodSync(target, entry.mode);
     }
+    renameSync(releaseStage, release);
+    releaseStage = null;
+    releaseCreated = true;
   }
   const owned = { ...(prior?.owned ?? {}) };
   for (const [target, value] of writes) {
@@ -228,6 +244,7 @@ try {
     } else rmSync(target);
   }
   for (const path of temporaryFiles) rmSync(path, {force:true});
+  if (releaseStage) rmSync(releaseStage, {recursive:true,force:true});
   if (releaseCreated) rmSync(release, { recursive: true, force: true });
   for (const dir of createdDirectories.reverse()) {
     try { rmdirSync(dir); } catch (cleanupError) { if (!["ENOTEMPTY","ENOENT"].includes(cleanupError.code)) throw cleanupError; }

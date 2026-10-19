@@ -57,7 +57,7 @@ function main() {
  const source=execFileSync('git',['ls-files','-z'],{cwd:root}).toString().split('\0').filter(p=>p&&(/^packages\/triangle-cli\/src\/.*\.(mjs|json)$/.test(p)||p==='packages/triangle-cli/package.json'||p==='scripts/release/install-linux-package.mjs'));
  for(const required of ['packages/triangle-cli/src/cli.mjs','scripts/release/install-linux-package.mjs','packages/triangle-cli/package.json'])if(!source.includes(required))throw Error(`Missing tracked asset: ${required}`);
  const files=[];
- for(const [path,from,mode] of [...source.map(p=>[p,join(root,p),0o600]),['bin/node',node,0o700],['LICENSES/node-LICENSE',license,0o600]]){
+ for(const [path,from,mode] of [...source.map(p=>[p,join(root,p),0o600]),['bin/node',node,0o700],['LICENSES/node-LICENSE',license,0o600],['LICENSES/triangle-LICENSE',join(root,'LICENSE'),0o600]]){
  const info=lstatSync(from);if(!info.isFile()||info.isSymbolicLink())throw Error(`Nonregular asset: ${path}`);
  const target=join(stage,path);mkdirSync(dirname(target),{recursive:true,mode:0o700});copyFileSync(from,target);chmodSync(target,mode);files.push({path,size:info.size,mode,sha256:hash(readFileSync(target))});
  }
