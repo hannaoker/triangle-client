@@ -285,7 +285,7 @@ test("introspects only peer tickets with the gateway permanent credential", asyn
   const calls = [];
   const introspect = createMeshPeerIntrospector({
     meshOrigin,
-    agentToken: "mesh_codex_permanent",
+    meshAuth: { headers: async () => ({ authorization: "Bearer mesh_codex_permanent", dpop: "test-dpop" }) },
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
       return new Response(
@@ -320,7 +320,7 @@ test("peer introspection aborts at its deadline and rejects oversized JSON", asy
   let sawAbort = false;
   const aborting = createMeshPeerIntrospector({
     meshOrigin,
-    agentToken: "mesh_codex_permanent",
+    meshAuth: { headers: async () => ({ authorization: "Bearer mesh_codex_permanent", dpop: "test-dpop" }) },
     deadlineMs: 5,
     fetchImpl: async (_url, init) => {
       if (!init.signal) {
@@ -350,7 +350,7 @@ test("peer introspection aborts at its deadline and rejects oversized JSON", asy
 
   const oversized = createMeshPeerIntrospector({
     meshOrigin,
-    agentToken: "mesh_codex_permanent",
+    meshAuth: { headers: async () => ({ authorization: "Bearer mesh_codex_permanent", dpop: "test-dpop" }) },
     maxResponseBytes: 64,
     fetchImpl: async () =>
       new Response(

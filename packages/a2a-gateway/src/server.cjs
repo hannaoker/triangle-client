@@ -73,7 +73,7 @@ function createServer({
   origin = `http://localhost:${port}`,
   meshOrigin = "http://localhost:3000",
   internalToken,
-  agentToken,
+  meshAuth,
   introspectPeerToken: suppliedIntrospector,
   bridge,
   recipientAgentId,
@@ -90,7 +90,7 @@ function createServer({
   }
   let proofNonce = null;
   const agentCard = buildAgentCard({ origin, meshOrigin });
-  const introspectPeerToken = suppliedIntrospector || createMeshPeerIntrospector({ meshOrigin, agentToken });
+  const introspectPeerToken = suppliedIntrospector || createMeshPeerIntrospector({ meshOrigin, meshAuth });
   const handleA2A = createProtocolHandler({
     meshOrigin,
     getProofNonce: () => proofNonce,

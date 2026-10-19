@@ -238,6 +238,16 @@ function bridgeFailure(requestId, error) {
   if (error?.code === "idempotency_conflict") {
     return jsonRpcError(requestId, -32004, "Idempotency conflict", 409);
   }
+  // Permissions v1 (§1.4): a structured refusal, not an outage.
+  if (error?.code === "permission_denied") {
+    return jsonRpcError(requestId, -32003, `Not allowed by the agent's permissions${error.permission ? ` (${error.permission} is off)` : ""}`, 403);
+  }
+  if (error?.code === "agent_paused") {
+    return jsonRpcError(requestId, -32003, "The agent is paused by its owner", 403);
+  }
+  if (error?.code === "mesh_auth_failed") {
+    return jsonRpcError(requestId, -32000, "MESH refused this agent's workload credential", error.status === 429 ? 429 : 502);
+  }
   if (error?.name === "TimeoutError") {
     return jsonRpcError(requestId, -32000, "Task did not complete before deadline", 504);
   }
@@ -535,9 +545,14 @@ function decodeTaskCursor(value) {
   }
 }
 
+/**
+ * Peer-ticket introspection (§5.8). The gateway authenticates as the
+ * recipient agent with its workload credential: `meshAuth.headers(method,
+ * url, { refresh })` yields `{ authorization, dpop }` (see workload-auth.mjs).
+ */
 function createMeshPeerIntrospector({
   meshOrigin,
-  agentToken,
+  meshAuth,
   fetchImpl = globalThis.fetch,
   deadlineMs = DEFAULT_INTROSPECTION_DEADLINE_MS,
   maxResponseBytes = DEFAULT_INTROSPECTION_MAX_BYTES,
@@ -546,9 +561,8 @@ function createMeshPeerIntrospector({
     if (
       typeof peerToken !== "string" ||
       !peerToken.startsWith("mesh_peer_") ||
-      typeof agentToken !== "string" ||
-      !agentToken.startsWith("mesh_") ||
-      agentToken.startsWith("mesh_peer_")
+      !meshAuth ||
+      typeof meshAuth.headers !== "function"
     ) {
       return null;
     }
@@ -556,19 +570,24 @@ function createMeshPeerIntrospector({
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), deadlineMs);
     try {
-      const response = await fetchImpl(
-        new URL("/api/v1/peer-tokens/introspect", meshOrigin).toString(),
-        {
+      const url = new URL("/api/v1/peer-tokens/introspect", meshOrigin).toString();
+      let response;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const auth = await meshAuth.headers("POST", url, { refresh: attempt > 0, signal: controller.signal });
+        response = await fetchImpl(url, {
           method: "POST",
           headers: {
             accept: "application/json",
-            authorization: `Bearer ${agentToken}`,
+            authorization: auth.authorization,
+            dpop: auth.dpop,
             "content-type": "application/json",
           },
           body: JSON.stringify({ peer_token: peerToken }),
           signal: controller.signal,
-        },
-      );
+        });
+        // 401 = our access token expired or was revoked: one fresh exchange.
+        if (response.status !== 401) break;
+      }
       if (!response.ok) {
         return null;
       }

@@ -19,7 +19,7 @@ function expectedArtifacts(agent) {
     "import importlib.util, json, sys",
     "spec = importlib.util.spec_from_file_location('twi', sys.argv[1])",
     "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
-    "print(json.dumps(m.expected_artifacts(sys.argv[2], 7)))",
+    "print(json.dumps(m.expected_artifacts(sys.argv[2], m.CURRENT_MANIFEST_VERSION)))",
   ].join("\n");
   return new Set(JSON.parse(execFileSync(python, ["-c", code, installer, agent], { encoding: "utf8" })));
 }
@@ -43,23 +43,34 @@ function importClosure(entryRelative) {
 }
 
 for (const agent of ["codex", "hermes", "antigravity"]) {
-  test(`v7 ${agent} bundle contains every module the coordinator and its runner import`, () => {
+  test(`current-manifest ${agent} bundle contains every module the coordinator, its runner and the worker CLI import`, () => {
     const artifacts = expectedArtifacts(agent);
     const needed = new Set([
       ...importClosure("packages/agent-worker/src/client-supervisor-cli.mjs"),
       ...importClosure(`packages/agent-worker/runners/${agent}-runner.mjs`),
+      ...importClosure("packages/agent-worker/src/cli.mjs"),
     ]);
     const missing = [...needed].filter((relative) => !artifacts.has(relative)).sort();
     assert.deepEqual(missing, [], `${agent} bundle missing coordinator/runner imports`);
   });
 }
 
-test("Swift launcher requires codex-runtime in every v7 bundle (mirrors installer)", () => {
+test("Swift launcher requires codex-runtime in every v7+ bundle and the workload core in v8 (mirrors installer)", () => {
   const swift = readFileSync(
     path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),
     "utf8",
   );
-  assert.match(swift, /if worker == \.codex \|\| manifestVersion == 7 \{\s*artifacts\.formUnion\(\[\s*"packages\/agent-worker\/src\/codex-runtime\//);
+  assert.match(swift, /if worker == \.codex \|\| manifestVersion >= 7 \{\s*artifacts\.formUnion\(\[\s*"packages\/agent-worker\/src\/codex-runtime\//);
+  const code = [
+    "import importlib.util, json, sys",
+    "spec = importlib.util.spec_from_file_location('twi', sys.argv[1])",
+    "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+    "print(json.dumps(m.WORKLOAD_CORE_ARTIFACTS))",
+  ].join("\n");
+  const core = JSON.parse(execFileSync(python, ["-c", code, installer], { encoding: "utf8" }));
+  const v8 = /if manifestVersion == 8 \{\s*artifacts\.formUnion\(\[([^\]]*)\]\)/.exec(swift);
+  assert.ok(v8, "Swift v8 block");
+  assert.deepEqual([...v8[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort(), [...core].sort());
 });
 
 test("installer runtime roots for antigravity include both agy state directories", () => {

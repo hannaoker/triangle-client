@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createOutboundA2AHandler } from "../src/outbound-a2a.mjs";
+import { TEST_WORKLOAD_ENV, testMeshAuth } from "./support/mesh-auth.mjs";
 import {
   buildOutboundRpc,
   normalizeOutboundPayload,
@@ -11,12 +12,12 @@ import {
 const env = {
   GATEWAY_INTERNAL_TOKEN: "internal-token-with-sufficient-entropy",
   MESH_ORIGIN: "https://mesh.example",
-  MESH_AGENT_TOKEN: "mesh_sender_token",
+  ...TEST_WORKLOAD_ENV,
 };
 
 function peer(method = "SendMessage") {
   return {
-    id: "agent_recipient",
+    id: "agent_cccccccccccccccccccccccccccccccc",
     name: "Recipient",
     endpointUrl: "https://recipient.example/api/v1",
     protocolBinding: "JSONRPC",
@@ -40,14 +41,14 @@ function request(operation = "send") {
       operation === "send"
         ? {
             operation,
-            recipient_agent_id: "agent_recipient",
+            recipient_agent_id: "agent_cccccccccccccccccccccccccccccccc",
             message_id: "message_1",
             context_id: "context_1",
             text: "Hello",
           }
         : {
             operation,
-            recipient_agent_id: "agent_recipient",
+            recipient_agent_id: "agent_cccccccccccccccccccccccccccccccc",
             task_id: "task_1",
           },
     ),
@@ -168,13 +169,17 @@ test("normalizes a standard message result without reflecting arbitrary fields",
 test("message/send integration dispatches and safely normalizes a message reply", async () => {
   const seen = [];
   const recipient = peer("message/send");
+  const auth = testMeshAuth("mesh_sender_token");
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: () => auth,
     fetchImpl: async (outbound) => {
       seen.push(outbound);
       const path = new URL(outbound.url).pathname;
-      if (path === "/api/v1/agents") return Response.json({ agents: [recipient] });
+      if (path === `/api/v1/agents/${recipient.id}`) return Response.json({ agent: recipient });
       if (path === "/api/v1/peer-tokens") {
+        assert.equal(outbound.headers.get("authorization"), "Bearer mesh_sender_token");
+        assert.equal(outbound.headers.get("dpop"), "test-dpop.POST", "the ticket is issued to the gateway's workload credential");
         return Response.json({ token: "mesh_peer_ticket" }, { status: 201 });
       }
       const rpc = await outbound.json();
@@ -207,10 +212,11 @@ test("verified peers with unusable reports fail before ticket issuance", async (
     const seen = [];
     const handler = createOutboundA2AHandler({
       env,
+      createWorkloadAuthImpl: () => testMeshAuth(),
       fetchImpl: async (outbound) => {
         seen.push(outbound);
         return Response.json({
-          agents: [{ ...peer(), conformanceReport }],
+          agent: { ...peer(), conformanceReport },
         });
       },
     });

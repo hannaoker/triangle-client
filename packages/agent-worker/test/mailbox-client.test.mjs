@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 
-import { createMailboxClient } from "../src/mailbox-client.mjs";
+import { createMailboxClient, MailboxRequestError, validateMailboxClientOptions } from "../src/mailbox-client.mjs";
+import { TEST_WORKLOAD, testTokens } from "./support/test-workload.mjs";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_BODY_BYTES = 16 * 1024;
@@ -159,14 +160,14 @@ function createRetryScenario(overrides = {}) {
   });
   const config = {
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
   };
   return {
     ...transport,
     mailboxResponse,
-    client: createMailboxClient(config, { fetchImpl: transport.fetchImpl }),
-    createSecondClient: () => createMailboxClient(config, { fetchImpl: transport.fetchImpl }),
+    client: createMailboxClient(config, { workloadTokens: testTokens(), fetchImpl: transport.fetchImpl }),
+    createSecondClient: () => createMailboxClient(config, { workloadTokens: testTokens(), fetchImpl: transport.fetchImpl }),
   };
 }
 
@@ -205,11 +206,11 @@ test("listUnread authenticates and normalizes canonical mailbox deliveries", asy
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
 
   const messages = await client.listUnread();
@@ -238,11 +239,11 @@ test("listUnread does not query room history for empty mailbox", async () => {
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("secret"), fetchImpl },
   );
 
   assert.deepEqual(await client.listUnread(), []);
@@ -328,11 +329,11 @@ test("listUnread skips unsupported events and processes later supported messages
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
 
   const firstPass = await client.listUnread();
@@ -433,11 +434,11 @@ for (const scenario of [
     const client = createMailboxClient(
       {
         meshUrl: "https://mesh.example",
-        meshToken: "mesh-secret",
+        ...TEST_WORKLOAD,
         recipientId: "agent_11111111111111111111111111111111",
         pageLimit: 1,
       },
-      { fetchImpl },
+      { workloadTokens: testTokens("mesh-secret"), fetchImpl },
     );
 
     const firstPass = await client.listUnread();
@@ -491,11 +492,11 @@ test("completeAndAcknowledge generates once, persists reply, then acknowledges",
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   const expectedReplyId = replyIdFromMessage(message);
@@ -567,11 +568,11 @@ test("completeAndAcknowledge does not generate for replyRequired=false messages"
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   let generateCalls = 0;
@@ -643,11 +644,11 @@ test("completeAndAcknowledge loses append response after durable append and reco
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   let generateCalls = 0;
@@ -711,11 +712,11 @@ test("completeAndAcknowledge retries lost ack with no extra generation", async (
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
 
   const [message] = await client.listUnread();
@@ -775,11 +776,11 @@ test("completeAndAcknowledge rejects oversized generated replies before append",
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   await assert.rejects(
@@ -846,11 +847,11 @@ test("completeAndAcknowledge rejects replies when append response text mismatche
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   let generateCalls = 0;
@@ -922,11 +923,11 @@ test("completeAndAcknowledge does not ack after failed append and retries genera
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   let generateCalls = 0;
@@ -982,11 +983,11 @@ for (const acknowledged of [2, 1.5, -1]) {
     const client = createMailboxClient(
       {
         meshUrl: "https://mesh.example",
-        meshToken: "mesh-secret",
+        ...TEST_WORKLOAD,
         recipientId: "agent_11111111111111111111111111111111",
         pageLimit: 1,
       },
-      { fetchImpl },
+      { workloadTokens: testTokens("mesh-secret"), fetchImpl },
     );
     const [message] = await client.listUnread();
     await assert.rejects(
@@ -1062,11 +1063,11 @@ test("findExistingReply can reconcile beyond first 100 history events", async ()
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [messageToAck] = await client.listUnread();
   let generateCalls = 0;
@@ -1185,11 +1186,11 @@ test("findExistingReply starts scan from source room sequence and reconciles imm
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [messageToAck] = await client.listUnread();
   let generateCalls = 0;
@@ -1264,11 +1265,11 @@ test("findExistingReply rejects non-progressing room history pages", async () =>
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   const [message] = await client.listUnread();
   await assert.rejects(client.completeAndAcknowledge(message, () => ({ status: "completed", text: "x" })), /did not progress/);
@@ -1353,11 +1354,11 @@ test("findExistingReply enforces reconciliation scan bounds", async () => {
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
 
   const [message] = await client.listUnread();
@@ -1386,11 +1387,11 @@ test("listUnread rejects invalid delivery state and event identity", async () =>
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl },
   );
   await assert.rejects(client.listUnread(), /pending/);
   const badCursor = createMailboxFetch({
@@ -1425,11 +1426,11 @@ test("listUnread rejects invalid delivery state and event identity", async () =>
   const badCursorClient = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl: badCursor.fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: badCursor.fetchImpl },
   );
   await assert.rejects(
     badCursorClient.listUnread(),
@@ -1468,11 +1469,11 @@ test("listUnread rejects invalid delivery state and event identity", async () =>
   const badSenderClient = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl: badSender.fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: badSender.fetchImpl },
   );
   await assert.rejects(badSenderClient.listUnread(), /must not be this worker/);
 });
@@ -1486,11 +1487,11 @@ test("listUnread rejects malformed payloads, and oversized responses", async () 
   const nonCanonicalClient = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl: nonCanonical.fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: nonCanonical.fetchImpl },
   );
   await assert.rejects(nonCanonicalClient.listUnread(), /invalid/);
 
@@ -1503,11 +1504,11 @@ test("listUnread rejects malformed payloads, and oversized responses", async () 
   const clientOversize = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl: oversized.fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: oversized.fetchImpl },
   );
   await assert.rejects(clientOversize.listUnread(), /too large/);
 
@@ -1519,11 +1520,11 @@ test("listUnread rejects malformed payloads, and oversized responses", async () 
   const clientChunked = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    { fetchImpl: oversizedChunkedFetch.fetchImpl },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: oversizedChunkedFetch.fetchImpl },
   );
   await assert.rejects(clientChunked.listUnread(), /too large/);
 });
@@ -1532,11 +1533,11 @@ test("mailbox errors do not leak mesh token", async () => {
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "very-secret-token",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
       pageLimit: 1,
     },
-    {
+    { workloadTokens: testTokens("very-secret-token"),
       fetchImpl: async () => new Response("not-json", { status: 200 }),
     },
   );
@@ -1550,10 +1551,10 @@ test("one request deadline bounds a fetch that ignores abort", async () => {
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
     },
-    { fetchImpl: async () => new Promise(() => {}), requestTimeoutMs: 10 },
+    { workloadTokens: testTokens("secret"), fetchImpl: async () => new Promise(() => {}), requestTimeoutMs: 10 },
   );
 
   await assert.rejects(client.listUnread(), /timed out/);
@@ -1563,10 +1564,10 @@ test("one request deadline bounds a reader and cancel that never settle", async 
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
     },
-    {
+    { workloadTokens: testTokens("secret"),
       requestTimeoutMs: 10,
       fetchImpl: async () => ({
         ok: true,
@@ -1592,10 +1593,10 @@ test("caller abort stops a request whose transport ignores abort", async () => {
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
     },
-    { fetchImpl: async () => new Promise(() => {}), requestTimeoutMs: 60_000 },
+    { workloadTokens: testTokens("secret"), fetchImpl: async () => new Promise(() => {}), requestTimeoutMs: 60_000 },
   );
   const pending = client.listUnread({ signal: controller.signal });
   controller.abort();
@@ -1611,8 +1612,8 @@ test("canonical construction rejects malformed actor IDs before effects", () => 
   ]) {
     assert.throws(
       () => createMailboxClient(
-        { meshUrl: "https://mesh.example", meshToken: "secret", recipientId },
-        { fetchImpl: async () => { calls += 1; } },
+        { meshUrl: "https://mesh.example", ...TEST_WORKLOAD, recipientId },
+        { workloadTokens: testTokens("secret"), fetchImpl: async () => { calls += 1; } },
       ),
       /recipientId is invalid/,
     );
@@ -1658,9 +1659,9 @@ test("malformed room, event, and sender IDs are rejected before claim or ack eff
     });
     const client = createMailboxClient({
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
-    }, { fetchImpl });
+    }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
     await assert.rejects(client.listUnread(), /invalid/);
     assert.equal(state.claims.size, 0);
     assert.equal(state.acknowledgeCount, 0);
@@ -1673,10 +1674,10 @@ test("hostile server errors expose only generic allowlisted metadata", async () 
   const client = createMailboxClient(
     {
       meshUrl: "https://mesh.example",
-      meshToken: "mesh-secret",
+      ...TEST_WORKLOAD,
       recipientId: "agent_11111111111111111111111111111111",
     },
-    { fetchImpl: async () => json({ error: hostile, token: hostile }, 500) },
+    { workloadTokens: testTokens("mesh-secret"), fetchImpl: async () => json({ error: hostile, token: hostile }, 500) },
   );
   await assert.rejects(client.listUnread(), (error) => {
     const serialized = JSON.stringify(error);
@@ -1708,11 +1709,11 @@ test("durable claim elects one worker before generation and acknowledgement", as
   const { fetchImpl, state } = createMailboxFetch({ mailboxResponse, roomHistoryByRoom });
   const config = {
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
   };
-  const first = createMailboxClient(config, { fetchImpl });
-  const second = createMailboxClient(config, { fetchImpl });
+  const first = createMailboxClient(config, { workloadTokens: testTokens(), fetchImpl });
+  const second = createMailboxClient(config, { workloadTokens: testTokens(), fetchImpl });
   const [[firstMessage], [secondMessage]] = await Promise.all([
     first.listUnread(),
     second.listUnread(),
@@ -1762,9 +1763,9 @@ test("malformed claim responses are rejected before generation or acknowledgemen
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, { fetchImpl });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
   const [message] = await client.listUnread();
   let generations = 0;
   await assert.rejects(client.completeAndAcknowledge(message, async () => {
@@ -1992,10 +1993,10 @@ test("unsupported deliveries still ack without claims", async () => {
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, { fetchImpl });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
 
   assert.deepEqual(await client.listUnread(), []);
   const ackBody = state.calls.find((call) => call.url.pathname === "/api/v1/mailbox/ack").body;
@@ -2044,10 +2045,10 @@ test("poison delivery retries are capped and quarantined without blocking later 
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, { fetchImpl, maxDeliveryAttempts: 2 });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl, maxDeliveryAttempts: 2 });
 
   const [poison] = await client.listUnread();
   await assert.rejects(
@@ -2141,9 +2142,9 @@ test("claim lease renews during long processing and stops side effects after own
 
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, {
+  }, { workloadTokens: testTokens("mesh-secret"),
     fetchImpl,
     now: () => nowMs,
     setTimeoutFn: (fn, delay) => {
@@ -2196,119 +2197,118 @@ test("claim lease renews during long processing and stops side effects after own
   assert.equal(state.acknowledgeCount, 0);
 });
 
-test("identity-v1 workload key exchanges token challenge and sends DPoP proof on mailbox calls", async () => {
-  const rawKey = crypto.randomBytes(32);
-  const pkcs8 = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), rawKey]);
-  const privKey = crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" });
-  const pubKey = crypto.createPublicKey(privKey);
-  const jwk = pubKey.export({ format: "jwk" });
+test("permissions v1: the workload key exchanges a canonical token proof (agent scopes), verifies agents/me, and DPoP-binds every call to its full URL", async () => {
+  const { generateEd25519 } = await import("../../triangle-cli/src/keys.mjs");
+  const { canonicalJson } = await import("../../triangle-cli/src/canonical.mjs");
+  const key = generateEd25519();
   const workloadId = "workload_11111111111111111111111111111111";
-
+  const agentId = "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const calls = [];
-  const fakeToken = "kms_signed_jwt_access_token_12345";
+  const tokens = ["wl_token_1", "wl_token_2"];
+  let issued = 0;
+  let rejectNextMailbox = false;
   const fetchImpl = async (request) => {
     const url = new URL(request.url);
-    const body = request.body ? await request.json() : null;
-    calls.push({
-      url,
-      method: request.method,
-      headers: Object.fromEntries(request.headers.entries()),
-      body,
-    });
-
+    const body = request.method === "GET" ? null : await request.json();
+    calls.push({ url, method: request.method, headers: Object.fromEntries(request.headers.entries()), body });
     if (url.pathname === "/api/v1/identity/token-challenges") {
-      return json({
-        challenge: {
-          challenge_id: "challenge_test_123",
-          workload_id: workloadId,
-          principal_id: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          origin: "https://mesh.test",
-          audience: "https://mesh.test",
-          nonce: "test_nonce_12345",
-          expires_at: new Date(Date.now() + 60000).toISOString(),
-        },
-      });
+      return json({ challenge: { challenge_id: `challenge_${issued}`, workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: `nonce_${issued}` } }, 201);
     }
-
     if (url.pathname === "/api/v1/identity/tokens") {
-      return json({
-        access_token: fakeToken,
-        token_type: "DPoP",
-        expires_in: 300,
-      });
+      return json({ access_token: tokens[issued++], token_type: "DPoP", expires_in: 300 });
     }
-
-    if (url.pathname === "/api/v1/agents/me") {
-      return json({
-        agent: {
-          id: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          handle: "dawn-gemini-mini-two",
-        },
-      });
-    }
-
+    if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: agentId, handle: "wl-agent" }, state: "active" });
     if (url.pathname === "/api/v1/mailbox") {
+      if (rejectNextMailbox) { rejectNextMailbox = false; return json({ error: "agent_auth_required" }, 401); }
       return json({ items: [] });
     }
-
     return json({ error: "not_found" }, 404);
   };
-
   const client = createMailboxClient(
-    {
-      meshUrl: "https://mesh.test",
-      meshToken: "fallback_token_not_used",
-      recipientId: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      workloadId,
-      workloadPrivateKey: rawKey.toString("base64"),
-    },
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key) },
     { fetchImpl },
   );
 
-  const items = await client.listUnread();
-  assert.deepEqual(items, []);
-
-  // Verify sequence of network calls
-  const paths = calls.map((c) => c.url.pathname);
-  assert.deepEqual(paths, [
+  assert.deepEqual(await client.listUnread(), []);
+  assert.deepEqual(calls.map((c) => c.url.pathname), [
     "/api/v1/identity/token-challenges",
     "/api/v1/identity/tokens",
+    "/api/v1/agents/me",
     "/api/v1/mailbox",
   ]);
-
-  // Verify challenge call
   assert.equal(calls[0].body.workload_id, workloadId);
+  assert.deepEqual(calls[1].body.requested_scopes, ["agent.read", "agent.write"]);
+  const [h, p, sig] = calls[1].body.proof.split(".");
+  const header = JSON.parse(Buffer.from(h, "base64url"));
+  const payload = JSON.parse(Buffer.from(p, "base64url"));
+  assert.deepEqual(header, { alg: "EdDSA", kid: workloadId, typ: "mesh-workload-proof+jwt" });
+  assert.equal(Buffer.from(p, "base64url").toString(), canonicalJson(payload), "proof payload is RFC 8785 canonical");
+  assert.equal(payload.profile, "mesh.workload-token-proof/1");
+  assert.ok(crypto.verify(null, Buffer.from(`${h}.${p}`), crypto.createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: key.x }, format: "jwk" }), Buffer.from(sig, "base64url")));
 
-  // Verify token exchange call
-  assert.equal(calls[1].body.challenge_id, "challenge_test_123");
-  assert.deepEqual(calls[1].body.requested_scopes, ["mailbox.read", "mailbox.write"]);
-  const proofSegments = calls[1].body.proof.split(".");
-  assert.equal(proofSegments.length, 3);
-  const proofHeader = JSON.parse(Buffer.from(proofSegments[0], "base64url").toString());
-  assert.equal(proofHeader.alg, "EdDSA");
-  assert.equal(proofHeader.typ, "mesh-workload-proof+jwt");
-  assert.equal(proofHeader.kid, workloadId);
-
-  // Verify mailbox call uses Authorization: Bearer <fakeToken> and DPoP proof
-  const mailboxCall = calls[2];
-  assert.equal(mailboxCall.headers.authorization, `Bearer ${fakeToken}`);
-  assert.ok(mailboxCall.headers.dpop);
-  const dpopSegments = mailboxCall.headers.dpop.split(".");
-  assert.equal(dpopSegments.length, 3);
-  const dpopHeader = JSON.parse(Buffer.from(dpopSegments[0], "base64url").toString());
-  assert.equal(dpopHeader.alg, "EdDSA");
+  const mailbox = calls[3];
+  assert.equal(mailbox.headers.authorization, "Bearer wl_token_1");
+  const [dh, dp] = mailbox.headers.dpop.split(".");
+  const dpopHeader = JSON.parse(Buffer.from(dh, "base64url"));
+  const dpop = JSON.parse(Buffer.from(dp, "base64url"));
   assert.equal(dpopHeader.typ, "dpop+jwt");
-  assert.equal(dpopHeader.jwk.x, jwk.x);
+  assert.equal(dpopHeader.jwk.x, key.x);
+  assert.equal(dpopHeader.jwk.d, undefined, "never the private part");
+  assert.equal(dpop.htu, "https://mesh.test/api/v1/mailbox?after=0&limit=1", "htu includes the query");
+  assert.equal(dpop.ath, crypto.createHash("sha256").update("wl_token_1", "ascii").digest("base64url"));
 
-  const dpopPayload = JSON.parse(Buffer.from(dpopSegments[1], "base64url").toString());
-  assert.equal(dpopPayload.htm, "GET");
-  assert.equal(dpopPayload.htu, "https://mesh.test/api/v1/mailbox?after=0&limit=1");
-  const expectedAth = crypto.createHash("sha256").update(fakeToken, "utf8").digest("base64url");
-  assert.equal(dpopPayload.ath, expectedAth);
+  // An expired/revoked access token: one fresh exchange, then the call succeeds.
+  rejectNextMailbox = true;
+  assert.deepEqual(await client.listUnread(), []);
+  assert.equal(calls.filter((c) => c.url.pathname === "/api/v1/identity/tokens").length, 2);
+  assert.equal(calls.at(-1).headers.authorization, "Bearer wl_token_2");
+});
 
-  // Subsequent call should reuse cached token without re-fetching challenge
-  await client.listUnread();
-  assert.equal(calls.filter((c) => c.url.pathname === "/api/v1/identity/tokens").length, 1);
+test("permissions v1: agents/me must name the configured agent", async () => {
+  const fetchImpl = async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } });
+    return json({ items: [] });
+  };
+  const client = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ...TEST_WORKLOAD },
+    { workloadTokens: testTokens(), fetchImpl },
+  );
+  await assert.rejects(client.listUnread(), /does not match authenticated actor/);
+});
+
+test("permissions v1: permission_denied and agent_paused surface their code and the permission key", async () => {
+  for (const [status, payload, pattern] of [
+    [403, { error: "permission_denied", permission: "dm.receive" }, /dm\.receive is off/],
+    [403, { error: "agent_paused" }, /paused by its owner/],
+  ]) {
+    const fetchImpl = async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } });
+      return json(payload, status);
+    };
+    const client = createMailboxClient(
+      { meshUrl: "https://mesh.test", recipientId: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ...TEST_WORKLOAD },
+      { workloadTokens: testTokens(), fetchImpl },
+    );
+    const error = await client.listUnread().catch((e) => e);
+    assert.ok(error instanceof MailboxRequestError);
+    assert.match(error.message, pattern);
+    assert.equal(error.meshError, payload.error);
+    assert.equal(error.permission, payload.permission);
+  }
+});
+
+test("permissions v1: options refuse a mesh_ bearer and require a valid workload key", () => {
+  const base = { meshUrl: "https://mesh.test", recipientId: "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+  assert.throws(() => validateMailboxClientOptions({ ...base, ...TEST_WORKLOAD, meshToken: "mesh_x" }), /meshToken is no longer supported/);
+  assert.throws(() => validateMailboxClientOptions(base), /workloadId is required/);
+  assert.throws(() => validateMailboxClientOptions({ ...base, workloadId: "workload_x", workloadPrivateKey: TEST_WORKLOAD.workloadPrivateKey }), /workloadId is invalid/);
+  assert.throws(() => validateMailboxClientOptions({ ...base, workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: "not-a-key" }), /workloadPrivateKey/);
+  assert.throws(() => validateMailboxClientOptions({ ...base, workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: Buffer.alloc(32).toString("hex") }), /workloadPrivateKey/);
+  const ok = validateMailboxClientOptions({ ...base, ...TEST_WORKLOAD });
+  assert.equal(ok.workloadId, TEST_WORKLOAD.workloadId);
+  assert.equal(Object.hasOwn(ok, "meshToken"), false);
 });
 
 test("onProgress reports claim, reply, then ack for an owned delivery (no ids or bodies)", async () => {
@@ -2333,10 +2333,10 @@ test("onProgress reports claim, reply, then ack for an owned delivery (no ids or
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, {
+  }, { workloadTokens: testTokens("mesh-secret"),
     fetchImpl,
     onProgress(event) {
       assert.deepEqual(Object.keys(event), ["phase"]);
@@ -2373,10 +2373,10 @@ test("onProgress reports claim+ack for replyRequired=false and never throws into
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, {
+  }, { workloadTokens: testTokens("mesh-secret"),
     fetchImpl,
     onProgress(event) {
       phases.push(event.phase);
@@ -2413,10 +2413,10 @@ test("onProgress records no reply/ack when the reply append fails", async () => 
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, { fetchImpl, onProgress: (event) => phases.push(event.phase) });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl, onProgress: (event) => phases.push(event.phase) });
   const [message] = await client.listUnread();
   await assert.rejects(client.completeAndAcknowledge(message, () => ({ status: "completed", text: "reply text" })));
   assert.deepEqual(phases, ["claim"]);
@@ -2426,9 +2426,9 @@ test("onProgress records no reply/ack when the reply append fails", async () => 
 test("onProgress must be a function when provided", () => {
   assert.throws(() => createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
-  }, { fetchImpl: async () => json({}), onProgress: "nope" }), /onProgress must be a function/);
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl: async () => json({}), onProgress: "nope" }), /onProgress must be a function/);
 });
 
 test("onProgress records reply evidence when a retry verifies a reply whose append response was lost (Codex review r3)", async () => {
@@ -2472,10 +2472,10 @@ test("onProgress records reply evidence when a retry verifies a reply whose appe
   });
   const client = createMailboxClient({
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
+    ...TEST_WORKLOAD,
     recipientId: "agent_11111111111111111111111111111111",
     pageLimit: 1,
-  }, { fetchImpl, onProgress: (event) => phases.push(event.phase) });
+  }, { workloadTokens: testTokens("mesh-secret"), fetchImpl, onProgress: (event) => phases.push(event.phase) });
   const [message] = await client.listUnread();
   const generate = () => ({ status: "completed", text: "reply text" });
   await assert.rejects(client.completeAndAcknowledge(message, generate), /response dropped/);
@@ -2484,4 +2484,82 @@ test("onProgress records reply evidence when a retry verifies a reply whose appe
   assert.deepEqual(result, { reconciled: true, acknowledged: true });
   assert.equal(state.appendCount, 1);
   assert.deepEqual(phases, ["claim", "claim", "reply", "ack"]);
+});
+
+test("permissions v1: a refused token refresh never echoes MESH free text or the previous access token", async () => {
+  const { generateEd25519 } = await import("../../triangle-cli/src/keys.mjs");
+  const key = generateEd25519();
+  const workloadId = "workload_11111111111111111111111111111111";
+  const agentId = "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  let exchanges = 0;
+  const fetchImpl = async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/v1/identity/token-challenges") {
+      exchanges += 1;
+      if (exchanges > 1) return json({ error: "stale token wl_token_previous_secret", message: "wl_token_previous_secret" }, 401);
+      return json({ challenge: { challenge_id: "challenge_1", workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: "nonce_1" } }, 201);
+    }
+    if (url.pathname === "/api/v1/identity/tokens") return json({ access_token: "wl_token_previous_secret", token_type: "DPoP", expires_in: 300 });
+    if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: agentId, handle: "wl-agent" }, state: "active" });
+    if (url.pathname === "/api/v1/mailbox") return json({ error: "agent_auth_required" }, 401);
+    return json({ error: "not_found" }, 404);
+  };
+  const client = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key) },
+    { fetchImpl },
+  );
+  const error = await client.listUnread().catch((e) => e);
+  assert.equal(error.name, "MailboxRequestError");
+  assert.equal(error.status, 401);
+  assert.doesNotMatch(`${error.message} ${String(error.stack)} ${JSON.stringify(error)}`, /wl_token_previous_secret|stale token/);
+});
+
+test("permissions v1: a read-only agent (bounds agent.read) requests only agent.read, which MESH accepts", async () => {
+  const { generateEd25519 } = await import("../../triangle-cli/src/keys.mjs");
+  const key = generateEd25519();
+  const workloadId = "workload_22222222222222222222222222222222";
+  const agentId = "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  // MESH refuses any request beyond the registered bounds (workload_forbidden) and never narrows it.
+  function readOnlyMesh() {
+    const calls = [];
+    const fetchImpl = async (request) => {
+      const url = new URL(request.url);
+      const body = request.method === "GET" ? null : await request.json();
+      calls.push({ url, body });
+      if (url.pathname === "/api/v1/identity/token-challenges") {
+        return json({ challenge: { challenge_id: "challenge_ro", workload_id: workloadId, principal_id: agentId, audience: "https://mesh.test", nonce: "nonce_ro" } }, 201);
+      }
+      if (url.pathname === "/api/v1/identity/tokens") {
+        const signed = JSON.parse(Buffer.from(body.proof.split(".")[1], "base64url")).requested_scopes;
+        if ([...body.requested_scopes, ...signed].some((scope) => scope !== "agent.read")) return json({ error: "workload_forbidden" }, 403);
+        return json({ access_token: "wl_ro", token_type: "DPoP", expires_in: 300 });
+      }
+      if (url.pathname === "/api/v1/agents/me") return json({ agent: { id: agentId, handle: "ro-agent" }, state: "active" });
+      if (url.pathname === "/api/v1/mailbox") return json({ items: [] });
+      return json({ error: "not_found" }, 404);
+    };
+    return { calls, fetchImpl };
+  }
+  const mesh = readOnlyMesh();
+  const client = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key), workloadScopes: ["agent.read"] },
+    { fetchImpl: mesh.fetchImpl },
+  );
+  assert.deepEqual(await client.listUnread(), []);
+  const token = mesh.calls.find((c) => c.url.pathname === "/api/v1/identity/tokens");
+  assert.deepEqual(token.body.requested_scopes, ["agent.read"]);
+
+  // The previous behavior (always both bounds) is refused for this agent.
+  const unbounded = createMailboxClient(
+    { meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key) },
+    { fetchImpl: readOnlyMesh().fetchImpl },
+  );
+  await assert.rejects(() => unbounded.listUnread(), (error) => error instanceof MailboxRequestError && (error.status === 403 || error.meshError === "workload_forbidden"));
+
+  for (const workloadScopes of [[], ["agent.admin"], ["agent.read", "agent.read"]]) {
+    assert.throws(
+      () => validateMailboxClientOptions({ meshUrl: "https://mesh.test", recipientId: agentId, workloadId, workloadPrivateKey: JSON.stringify(key), workloadScopes }),
+      /workloadScopes must be a non-empty subset/,
+    );
+  }
 });

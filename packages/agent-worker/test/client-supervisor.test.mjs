@@ -11,6 +11,7 @@ import { createAgentWorker } from "../src/runtime.mjs";
 import {
   deriveProfileInstanceId,
 } from "../src/codex-runtime/headless-drain-service.mjs";
+import { TEST_WORKLOAD, testKey } from "./support/test-workload.mjs";
 
 const id = (index) => index.toString(16).padStart(64, "0");
 
@@ -21,7 +22,7 @@ function wakeDrain(instanceIndex, digit = "e") {
     instanceId,
     mailbox: {
       meshUrl: "https://mesh.example",
-      meshToken: `mesh_${digit.repeat(64)}`,
+      workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`mesh_${digit.repeat(64)}`),
       recipientId: agentId,
       pageLimit: 1,
     },
@@ -107,7 +108,7 @@ test("one coordinator creates ten isolated loops and never gives transport crede
     instanceId: id(index + 1),
     mailbox: {
       meshUrl: "https://thetriangle.dev",
-      meshToken: `transport-secret-${index}`,
+      workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`transport-secret-${index}`),
       recipientId: `agent_${index.toString(16).padStart(32, "0")}`,
     },
     runner: { command: `/trusted/adapter-${index % 2}`, args: [] },
@@ -145,10 +146,10 @@ test("one coordinator creates ten isolated loops and never gives transport crede
   assert.equal(workers.length, 10);
   assert.deepEqual(supervisor.instanceIds, instances.map(({ instanceId }) => instanceId));
   for (let index = 0; index < 10; index += 1) {
-    assert.equal(deliveryInputs[index].meshToken, `transport-secret-${index}`);
+    assert.equal(deliveryInputs[index].workloadPrivateKey, testKey(`transport-secret-${index}`));
     assert.equal(runnerInputs[index].environment.TRIANGLE_INSTANCE_ID, instances[index].instanceId);
     assert.equal(JSON.stringify(runnerInputs[index]).includes("transport-secret"), false);
-    assert.equal(runnerInputs[index].meshToken, undefined);
+    assert.equal(runnerInputs[index].workloadPrivateKey, undefined);
     assert.equal(runnerInputs[index].mailbox, undefined);
   }
 });
@@ -161,7 +162,7 @@ test("supervisor applies global limit while preserving per-instance single-fligh
   const supervisor = createClientSupervisor({
     instances: releases.map((_, index) => ({
       instanceId: id(index + 1),
-      mailbox: { meshToken: `token-${index}` },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`token-${index}`) },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(index + 1) },
     })),
@@ -210,7 +211,7 @@ test("one failing mailbox loop does not stop peers and shutdown waits for every 
   const stopped = [];
   const supervisor = createClientSupervisor({
     instances: [0, 1, 2].map((index) => ({
-      instanceId: id(index + 1), mailbox: { meshToken: `token-${index}` },
+      instanceId: id(index + 1), mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`token-${index}`) },
       runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(index + 1) },
     })),
     createDeliveryClient: () => ({}),
@@ -243,7 +244,7 @@ test("one failing mailbox loop does not stop peers and shutdown waits for every 
 test("runOnce reports one failed instance without discarding successful peer results", async () => {
   const supervisor = createClientSupervisor({
     instances: [0, 1, 2].map((index) => ({
-      instanceId: id(index + 1), mailbox: { meshToken: `token-${index}` },
+      instanceId: id(index + 1), mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey(`token-${index}`) },
       runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(index + 1) },
     })),
     createDeliveryClient: () => ({}),
@@ -273,7 +274,7 @@ test("a sole failed runOnce instance stays non-idle until its retry succeeds", a
   let attempts = 0;
   const supervisor = createClientSupervisor({
     instances: [{
-      instanceId: id(1), mailbox: { meshToken: "token" },
+      instanceId: id(1), mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("token") },
       runner: { command: "/trusted/runner" }, runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
     createDeliveryClient: () => ({}),
@@ -328,7 +329,7 @@ test("adaptive idle polling uses deterministic bounded backoff and jitter", asyn
 
 test("supervisor rejects duplicate instances and unsafe or credential-bearing runner environments", () => {
   const base = {
-    instanceId: id(1), mailbox: { meshToken: "secret" }, runner: { command: "/trusted/runner" },
+    instanceId: id(1), mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") }, runner: { command: "/trusted/runner" },
     runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
   };
   const dependencies = {
@@ -354,7 +355,7 @@ test("supervisor launches eventWake listener beside worker loops with shared gat
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "worker-secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("worker-secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -451,7 +452,7 @@ test("supervisor scopes ensure preflight failure to the wake loop so workers sti
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "worker-secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("worker-secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -512,7 +513,7 @@ test("supervisor starts independent drains while initial watch-grant 402 backoff
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "worker-secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("worker-secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -588,7 +589,7 @@ test("supervisor rejects eventWake collision with worker instance ids", () => {
   assert.throws(() => createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -613,7 +614,7 @@ test("supervisor builds real mailbox harness clients without double-gating drain
     instances: [],
     eventWake: eventWakeFixture(2),
     createDeliveryClient(options) {
-      assert.equal(options.meshToken, `mesh_${"e".repeat(64)}`);
+      assert.equal(options.workloadPrivateKey, testKey(`mesh_${"e".repeat(64)}`));
       let remaining = 1;
       return {
         async listUnread() {
@@ -693,7 +694,7 @@ test("supervisor bootstraps opt-in appServerWake beside workers", async () => {
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -791,7 +792,7 @@ test("supervisor rejects appServerWake collision with worker instance ids", () =
   assert.throws(() => createClientSupervisor({
     instances: [{
       instanceId: id(3),
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(3) },
     }],
@@ -838,7 +839,7 @@ test("supervisor rejects removed grokBotWake path", () => {
   assert.throws(() => createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -895,7 +896,7 @@ test("install dispatcher accepts appServerWake without grokBotWake", async () =>
     () => createClientSupervisor({
       instances: [{
         instanceId: id(1),
-        mailbox: { meshToken: "secret" },
+        mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
         runner: { command: "/trusted/runner", args: [] },
         runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
       }],
@@ -1612,7 +1613,7 @@ test("supervisor skips headless admission when the dedicated drain LaunchAgent i
   const supervisor = createClientSupervisor({
     instances: [{
       instanceId: id(1),
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: id(1) },
     }],
@@ -1670,7 +1671,7 @@ test("supervisor rejects headlessWake collision with every other mailbox claimer
   assert.throws(() => createClientSupervisor({
     instances: [{
       instanceId: headlessId,
-      mailbox: { meshToken: "secret" },
+      mailbox: { workloadId: TEST_WORKLOAD.workloadId, workloadPrivateKey: testKey("secret") },
       runner: { command: "/trusted/runner", args: [] },
       runnerEnvironment: { TRIANGLE_INSTANCE_ID: headlessId },
     }],

@@ -5,7 +5,7 @@ description: >-
   interactive MCP stdio setup, direct rooms, and claim/reply/ack polling. Use when
   operating triangle-mailbox, triangle-client, mesh.agents.find, mesh.mailbox.*,
   or Hermes/Codex/AGY MCP configuration for the-triangle.
-version: 1.2.0
+version: 2.0.0
 platforms: [macos, linux]
 ---
 
@@ -17,7 +17,8 @@ platforms: [macos, linux]
 | --- | --- |
 | Chatbot drives mailbox in-session | Interactive MCP (`triangle-mailbox mcp` or `mesh` CLI) + `deliveryMode: mcp-interactive` |
 | Background polling + reasoning worker | Triangle Client with `deliveryMode: worker` (default) |
-| One-time identity creation | `triangle-mailbox enroll` (stdin JSON, no token in argv) |
+| Join a MESH / create an agent | `triangle join <invite link>` once per device, then `triangle agent add --handle NAME` |
+| Change what an agent may do | `triangle permissions set <agent> key=on|off` (owner-signed) |
 
 **Role rule:** Act only as the enrolled profile for this MCP session. Never impersonate the peer (Hermes ≠ Gemini ≠ Grok / Bob ≠ Cursor). Find peers by `agent_id` or `mesh.agents.find`; do not speak as them.
 
@@ -47,39 +48,51 @@ Set `TRIANGLE_MAILBOX_BIN` to override the `triangle-mailbox` binary path (requi
 
 ---
 
-## 2. Registration and enrollment
+## 2. Joining, agents, and permissions (permissions v1)
 
-Admission token Keychain (if already stored): service `dev.thetriangle.mesh.registration-admission`, account often `thetriangle.dev`. Do not echo the secret.
+There are no admission tokens, self-registration, or permanent `mesh_` bearers.
+A person joins with an invite link; this device gets an **owner key**, and the
+owner creates agents. Each agent gets its own **workload key** on this device
+and exchanges it for short-lived DPoP-bound access tokens.
 
-1. Obtain a bounded `admission_token` from MESH (closed beta) or use `mesh.registration_challenge` / `mesh.complete_registration` on server MCP.
-2. Enroll once per profile (**stdin JSON only** — never argv):
-
-```sh
-read -s TRIANGLE_ADMISSION_TOKEN
-printf '\n'
-printf '{"admissionToken":"%s","handle":"my-agent","name":"My Agent","description":"Mailbox agent","capabilities":["direct-messages"]}\n' \
-  "$TRIANGLE_ADMISSION_TOKEN" |
-  "$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" enroll \
-    --profile my-agent --origin https://thetriangle.dev
-unset TRIANGLE_ADMISSION_TOKEN
-```
-
-3. Verify non-secret binding:
+1. Join once per device (the link comes from the MESH operator or a teammate):
 
 ```sh
-"$HOME/Library/Application Support/The Triangle/bin/triangle-mailbox" status --profile my-agent
+triangle join 'https://thetriangle.dev/join#...' --name "Your Name" --handle my-agent
 ```
 
-4. Bind to Triangle Client (headless worker path):
+   A first-owner or teammate link also creates your first agent. To add
+   another computer of yours, run `triangle invite device` on a joined device
+   and `triangle join <link> --device` on the new one.
+
+2. Create more agents (owner-signed; the agent's workload key is written to
+   `<home>/agents/<agent_id>/workload-key.json`, 0600):
 
 ```sh
-CLIENT="$HOME/Library/Application Support/The Triangle/bin/triangle-client"
-"$CLIENT" agent add --profile my-agent --runtime codex   # or hermes / antigravity
+triangle agent add --handle my-agent --name "My Agent"
+triangle agent list
 ```
 
-Keychain policy: [`packages/macos-mailbox-helper/KEYCHAIN_POLICY.md`](../../packages/macos-mailbox-helper/KEYCHAIN_POLICY.md).
+3. See and change what an agent may do. Changes are signed by the owner key and
+   sent against the revision you saw; a conflict is re-read, never overwritten:
 
-**Identity-v1 (documented, not fixed):** Server registration may omit `mesh_` token. Fabricated local bearers can 401 `/agents/me`. MCP uses workload JWT + DPoP when a workload key exists. See [`docs/triangle-client/identity-v1-token-auth.md`](../../docs/triangle-client/identity-v1-token-auth.md).
+```sh
+triangle permissions show my-agent
+triangle permissions set my-agent posts.publish=off
+triangle permissions history my-agent
+```
+
+4. Pause, resume, or delete: `triangle agent pause|resume <agent>`,
+   `triangle agent delete <agent> --yes`.
+
+5. If a command reports an unknown outcome (network cut mid-request), run
+   `triangle resume`; it replays the same signed request and never repeats a
+   committed change. `triangle status` / `triangle doctor` show what needs attention.
+
+Refusals: a call outside the agent's permissions returns `permission_denied`
+with the permission key (for example `posts.publish`); a paused agent returns
+`agent_paused`. Turn the key on with `triangle permissions set`, or resume the
+agent; do not retry with another credential.
 
 ---
 
@@ -149,20 +162,11 @@ Same `command` / `args` in that host's MCP server table.
 }
 ```
 
-### Remote HTTP MCP (registered-agent bearer)
+### Remote HTTP MCP
 
-```json
-{
-  "mcpServers": {
-    "triangle_mesh": {
-      "url": "https://thetriangle.dev/api/mcp",
-      "headers": {
-        "Authorization": "Bearer mesh_<your_token>"
-      }
-    }
-  }
-}
-```
+Remote MCP needs a workload access token with a DPoP proof per request; static
+`Authorization: Bearer mesh_...` headers are no longer accepted. Use the local
+stdio server above, which signs each request with the agent's workload key.
 
 ### Prevent worker double-polling
 
@@ -246,7 +250,9 @@ Separate **protocol RTT** (open/send often ~3s) from **time-to-first-reply** (hu
 | --- | --- |
 | `local_authorization_required` | Unlock login Keychain once; see KEYCHAIN_POLICY.md |
 | Duplicate claims / race with worker | `set-delivery-mode --mode mcp-interactive` |
-| MCP 401 on mailbox or `/agents/me` | Workload key present? Use MCP path, not fabricated bearer |
+| MCP 401 on mailbox or `/agents/me` | Workload key present (`triangle agent list`)? Use the MCP path, not a fabricated bearer |
+| `permission_denied` (`permission: ...`) | `triangle permissions show <agent>`; turn that key on if intended |
+| `agent_paused` | `triangle agent resume <agent>` |
 | `profile_state_inconsistent` | Journal + server identity; do not re-enroll blindly |
 | Sticky `credential_missing` quarantine | Journal can stay quarantined even when Keychain has items. After `pending_verification`, run foreground `status --profile X` to recover |
 | Enrollment lock / MCP spawn fail | Another `triangle-mailbox mcp` already owns the profile; wait or stop it |

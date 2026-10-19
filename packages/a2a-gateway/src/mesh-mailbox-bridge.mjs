@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { WorkloadAuthError } from "./workload-auth.mjs";
+
 const MAX_ID_BYTES = 180;
 const MAX_AGENT_ID_BYTES = 120;
 const MAX_TEXT_BYTES = 12 * 1024;
@@ -17,18 +19,22 @@ const MAX_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const PEER_TICKET = /^mesh_peer_[A-Za-z0-9._~-]+$/;
 const PUBLIC_UPSTREAM_ERRORS = new Set([
+  "agent_paused",
   "body_too_large",
   "idempotency_conflict",
   "insufficient_scope",
   "invalid_request",
   "peer_ticket_invalid",
+  "permission_denied",
   "quota_exceeded",
   "rate_limited",
   "recipient_not_accepting_direct_messages",
 ]);
 
+const AGENT_CREDENTIAL = Symbol("gateway workload credential");
+
 export class MeshMailboxBridgeError extends Error {
-  constructor(code, { status = 502 } = {}) {
+  constructor(code, { status = 502, permission } = {}) {
     super(code === "idempotency_conflict"
       ? "Idempotency identity refers to different content"
       : code === "task_not_found"
@@ -37,6 +43,10 @@ export class MeshMailboxBridgeError extends Error {
     this.name = "MeshMailboxBridgeError";
     this.code = code;
     this.status = status;
+    // §1.4: which permission refused the call (a catalog key, never free text).
+    if (code === "permission_denied" && typeof permission === "string" && /^[a-z]+(?:\.[a-z]+)+$/.test(permission)) {
+      this.permission = permission;
+    }
   }
 }
 
@@ -264,7 +274,7 @@ function upstreamError(response, payload) {
   const code = PUBLIC_UPSTREAM_ERRORS.has(payload?.error)
     ? payload.error
     : "mesh_request_rejected";
-  return new MeshMailboxBridgeError(code, { status: response.status });
+  return new MeshMailboxBridgeError(code, { status: response.status, permission: payload?.permission });
 }
 
 function validEvent(value, roomId, previousSequence) {
@@ -333,7 +343,7 @@ function replyMessage(correlation, events, recipientAgentId) {
 export function createMeshMailboxBridge({
   meshOrigin,
   recipientAgentId,
-  meshAgentToken,
+  meshAuth,
   fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 }) {
@@ -343,7 +353,10 @@ export function createMeshMailboxBridge({
     "recipientAgentId",
     MAX_AGENT_ID_BYTES,
   );
-  const agentToken = requiredText(meshAgentToken, "meshAgentToken", 2048);
+  // Agent-authenticated calls use the gateway's workload credential (WL +
+  // DPoP); peer-ticket calls carry the sender's ticket.
+  if (!meshAuth || typeof meshAuth.headers !== "function") throw new TypeError("meshAuth is required");
+  const agentToken = AGENT_CREDENTIAL;
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
   if (
     !Number.isSafeInteger(requestTimeoutMs) ||
@@ -384,22 +397,35 @@ export function createMeshMailboxBridge({
       }, remainingMs);
     });
     try {
-      const response = await Promise.race([fetchImpl(new Request(new URL(path, `${origin}/`), {
-        method,
-        redirect: "error",
-        signal: controller.signal,
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${token}`,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      })), deadline]);
-      const payload = await boundedJson(response, deadline);
-      if (!response.ok) throw upstreamError(response, payload);
-      return payload;
+      const url = new URL(path, `${origin}/`).toString();
+      for (let attempt = 0; ; attempt += 1) {
+        const auth = token === AGENT_CREDENTIAL
+          ? await Promise.race([meshAuth.headers(method, url, { refresh: attempt > 0, signal: controller.signal }), deadline])
+          : { authorization: `Bearer ${token}` };
+        const response = await Promise.race([fetchImpl(new Request(url, {
+          method,
+          redirect: "error",
+          signal: controller.signal,
+          headers: {
+            accept: "application/json",
+            ...auth,
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })), deadline]);
+        const payload = await boundedJson(response, deadline);
+        // An expired workload access token gets exactly one fresh exchange.
+        if (response.status === 401 && token === AGENT_CREDENTIAL && attempt === 0) continue;
+        if (!response.ok) throw upstreamError(response, payload);
+        return payload;
+      }
     } catch (error) {
       if (error instanceof MeshMailboxBridgeError) throw error;
+      // A refused token exchange is not an outage: keep the allowlisted cause.
+      if (error instanceof WorkloadAuthError) {
+        if (error.code === "agent_paused") throw new MeshMailboxBridgeError("agent_paused", { status: 403 });
+        throw new MeshMailboxBridgeError("mesh_auth_failed", { status: error.status });
+      }
       throw new MeshMailboxBridgeError("mesh_unavailable", { status: 503 });
     } finally {
       clearTimeout(timeoutId);

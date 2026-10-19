@@ -3,13 +3,24 @@ import test from "node:test";
 
 import { createOutboundA2AHandler } from "@the-triangle/a2a-gateway/outbound-a2a";
 
+// Permissions v1: a test workload credential that skips the token exchange.
+function testWorkloadAuth(token) {
+  return () => ({
+    async headers(method) { return { authorization: `Bearer ${token}`, dpop: `test-dpop.${method}` }; },
+    async agentId() { return null; },
+    secrets: [],
+  });
+}
+
 const env = {
   GATEWAY_INTERNAL_TOKEN: "codex-worker-secret-with-enough-entropy",
   MESH_ORIGIN: "https://mesh.example",
-  MESH_AGENT_TOKEN: "mesh_codex_production",
+  MESH_WORKLOAD_ID: "workload_77777777777777777777777777777777",
+  MESH_WORKLOAD_PRIVATE_KEY: "tp3KvIi_3AfW8VesrbbsiqcV3hE9Gu1UMd8DZ5Ma3QY",
 };
+const WL_TOKEN = "wl_codex_production";
 const hermes = {
-  id: "agent_hermes",
+  id: "agent_44444444444444444444444444444444",
   name: "Hermes",
   endpointUrl: "https://hermes.example/api/v1",
   protocolBinding: "JSONRPC",
@@ -38,6 +49,7 @@ test("outbound bridge rejects missing and incorrect worker authentication before
   let calls = 0;
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async () => {
       calls += 1;
       throw new Error("must not fetch");
@@ -60,11 +72,12 @@ test("send resolves a verified peer, renews a ticket, and sends standard A2A", a
   const requests = [];
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (request) => {
       requests.push(request);
       const url = new URL(request.url);
-      if (url.pathname === "/api/v1/agents") {
-        return json({ agents: [hermes] });
+      if (url.pathname === `/api/v1/agents/${hermes.id}`) {
+        return json({ agent: hermes });
       }
       if (url.pathname === "/api/v1/peer-tokens") {
         return json({ token: "mesh_peer_fresh", audience_agent_id: hermes.id }, 201);
@@ -109,7 +122,7 @@ test("send resolves a verified peer, renews a ticket, and sends standard A2A", a
   assert.equal(requests.length, 3);
   assert.equal(
     requests[1].headers.get("authorization"),
-    `Bearer ${env.MESH_AGENT_TOKEN}`,
+    `Bearer ${WL_TOKEN}`,
   );
   assert.deepEqual(await requests[1].json(), {
     recipient_agent_id: hermes.id,
@@ -149,10 +162,11 @@ test("get_task renews authorization and normalizes the standard task result", as
   };
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (request) => {
       requests.push(request);
       const path = new URL(request.url).pathname;
-      if (path === "/api/v1/agents") return json({ agents: [hermes] });
+      if (path === `/api/v1/agents/${hermes.id}`) return json({ agent: hermes });
       if (path === "/api/v1/peer-tokens") {
         return json({ token: "mesh_peer_renewed" }, 201);
       }
@@ -184,9 +198,10 @@ test("send accepts a standard message result and normalizes it as a completed ta
   };
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (request) => {
       const path = new URL(request.url).pathname;
-      if (path === "/api/v1/agents") return json({ agents: [hermes] });
+      if (path === `/api/v1/agents/${hermes.id}`) return json({ agent: hermes });
       if (path === "/api/v1/peer-tokens") {
         return json({ token: "mesh_peer_fresh" });
       }
@@ -229,9 +244,10 @@ test("bridge rejects unverified peers, arbitrary URLs, methods, and malformed in
   let directCalls = 0;
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (request) => {
-      if (new URL(request.url).pathname === "/api/v1/agents") {
-        return json({ agents: [peer] });
+      if (new URL(request.url).pathname.startsWith("/api/v1/agents/")) {
+        return json({ agent: peer });
       }
       directCalls += 1;
       throw new Error("must not call peer");
@@ -268,12 +284,13 @@ test("bridge rejects unverified peers, arbitrary URLs, methods, and malformed in
 test("bridge returns bounded safe errors for MESH and peer failures", async () => {
   const handler = createOutboundA2AHandler({
     env,
+    createWorkloadAuthImpl: testWorkloadAuth(WL_TOKEN),
     fetchImpl: async (request) => {
       const path = new URL(request.url).pathname;
-      if (path === "/api/v1/agents") return json({ agents: [hermes] });
+      if (path === `/api/v1/agents/${hermes.id}`) return json({ agent: hermes });
       if (path === "/api/v1/peer-tokens") {
         return json(
-          { error: "agent_auth_required", secret: env.MESH_AGENT_TOKEN },
+          { error: "agent_auth_required", secret: WL_TOKEN },
           401,
         );
       }
@@ -295,5 +312,5 @@ test("bridge returns bounded safe errors for MESH and peer failures", async () =
     upstream_status: 401,
     upstream_error: "agent_auth_required",
   });
-  assert.doesNotMatch(JSON.stringify(payload), /mesh_codex_production/);
+  assert.doesNotMatch(JSON.stringify(payload), /wl_codex_production/);
 });

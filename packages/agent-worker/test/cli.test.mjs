@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { resolveWorkerConfig } from "../src/cli.mjs";
+import { TEST_WORKLOAD } from "./support/test-workload.mjs";
+
+const AGENT = "agent_11111111111111111111111111111111";
+// A triangle custody layout in a temp dir: agents/<id>/{workload-key.json,agent.json}, 0600.
+function custody({ agentId = AGENT, keyMode = 0o600, agentJson = { agent_id: agentId, workload_id: TEST_WORKLOAD.workloadId } } = {}) {
+  const dir = path.join(mkdtempSync(path.join(os.tmpdir(), "worker-cli-")), "agents", agentId);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const keyFile = path.join(dir, "workload-key.json");
+  writeFileSync(keyFile, TEST_WORKLOAD.workloadPrivateKey, { mode: 0o600 });
+  chmodSync(keyFile, keyMode);
+  writeFileSync(path.join(dir, "agent.json"), JSON.stringify(agentJson), { mode: 0o600 });
+  return keyFile;
+}
 
 const raw = {
   meshUrlEnv: "MESH_URL",
-  meshTokenEnv: "MESH_TOKEN",
+  workloadKeyFileEnv: "TRIANGLE_WORKLOAD_KEY_FILE",
   agentIdEnv: "AGENT_ID",
   pollIntervalMs: 100,
   maxBackoffMs: 400,
@@ -16,17 +32,19 @@ const raw = {
 };
 const env = {
   MESH_URL: "https://mesh.example",
-  MESH_TOKEN: "mesh-secret",
-  AGENT_ID: "agent_11111111111111111111111111111111",
+  TRIANGLE_WORKLOAD_KEY_FILE: custody(),
+  AGENT_ID: AGENT,
 };
 
 test("worker configuration is mailbox-only and resolves exact selectors", () => {
   const config = resolveWorkerConfig(raw, "/tmp/config/worker.json", env);
   assert.deepEqual(config.mailbox, {
     meshUrl: "https://mesh.example",
-    meshToken: "mesh-secret",
-    recipientId: "agent_11111111111111111111111111111111",
+    recipientId: AGENT,
     pageLimit: 2,
+    workloadId: TEST_WORKLOAD.workloadId,
+    workloadPrivateKey: TEST_WORKLOAD.workloadPrivateKey,
+    workloadScopes: ["agent.read", "agent.write"],
   });
   assert.equal("transport" in config, false);
   assert.equal("gateway" in config, false);
@@ -49,7 +67,7 @@ test("worker configuration rejects deprecated selectors and every unknown key", 
 });
 
 test("worker configuration rejects missing selectors, secrets, URLs, identities, and bounds", () => {
-  for (const key of ["meshUrlEnv", "meshTokenEnv", "agentIdEnv"]) {
+  for (const key of ["meshUrlEnv", "workloadKeyFileEnv", "agentIdEnv"]) {
     const candidate = { ...raw };
     delete candidate[key];
     assert.throws(
@@ -58,7 +76,13 @@ test("worker configuration rejects missing selectors, secrets, URLs, identities,
     );
   }
   for (const [overrides, environment, pattern] of [
-    [{}, { ...env, MESH_TOKEN: " " }, /MESH_TOKEN is required/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: " " }, /TRIANGLE_WORKLOAD_KEY_FILE is required/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: "relative/key.json" }, /absolute path/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ keyMode: 0o644 }) }, /chmod 600/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentId: "agent_22222222222222222222222222222222" }) }, /different agent/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: custody({ agentJson: { agent_id: AGENT } }) }, /agent\.json is invalid/],
+    [{}, { ...env, TRIANGLE_WORKLOAD_KEY_FILE: (() => { const real = custody(); const link = `${real}.link`; symlinkSync(real, link); return link; })() }, /regular file/],
+    [{ meshTokenEnv: "MESH_AGENT_TOKEN" }, env, /meshTokenEnv is not supported/],
     [{}, { ...env, MESH_URL: "http://public.example" }, /meshUrl must use HTTPS/],
     [{}, { ...env, MESH_URL: "https://mesh.example/path" }, /meshUrl must use HTTPS/],
     [{}, { ...env, AGENT_ID: "agent_test" }, /agentId is invalid/],
@@ -91,4 +115,16 @@ test("package and CLI source contain no deprecated gateway transport", async () 
   ]);
   const source = await readFile(new URL("../src/cli.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /gateway-client|createGatewayClient|gatewayUrlEnv|gatewayTokenEnv|\/inbox|internal\/tasks\/update/);
+});
+
+test("worker requests the agent's registered bounds from agent.json (read-only agent)", () => {
+  const readOnly = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds: ["agent.read"] } });
+  const config = resolveWorkerConfig(raw, "/tmp/config/worker.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: readOnly });
+  assert.deepEqual(config.mailbox.workloadScopes, ["agent.read"]);
+  const both = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds: ["agent.write", "agent.read"] } });
+  assert.deepEqual(resolveWorkerConfig(raw, "/tmp/config/worker.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: both }).mailbox.workloadScopes, ["agent.read", "agent.write"]);
+  for (const bounds of [[], ["agent.admin"], "agent.read", ["agent.read", "agent.read"]]) {
+    const bad = custody({ agentJson: { agent_id: AGENT, workload_id: TEST_WORKLOAD.workloadId, bounds } });
+    assert.throws(() => resolveWorkerConfig(raw, "/tmp/config.json", { ...env, TRIANGLE_WORKLOAD_KEY_FILE: bad }), /agent\.json bounds are invalid/, JSON.stringify(bounds));
+  }
 });

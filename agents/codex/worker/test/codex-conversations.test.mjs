@@ -345,7 +345,7 @@ test("worker template declares mailbox selectors without exposing credentials to
   ]);
   for (const key of [
     "MESH_ORIGIN",
-    "MESH_AGENT_TOKEN",
+    "TRIANGLE_WORKLOAD_KEY_FILE",
     "CODEX_GATEWAY_URL",
     "CODEX_GATEWAY_INTERNAL_TOKEN",
     "CODEX_AGENT_ID",
@@ -355,7 +355,7 @@ test("worker template declares mailbox selectors without exposing credentials to
   }
   assert.doesNotMatch(
     source,
-    /MESH_AGENT_TOKEN|OPENAI|ANTHROPIC|GOOGLE_API_KEY|mesh_[A-Za-z0-9_-]{12,}/,
+    /MESH_AGENT_TOKEN|TRIANGLE_WORKLOAD_KEY_FILE|MESH_WORKLOAD|OPENAI|ANTHROPIC|GOOGLE_API_KEY|mesh_[A-Za-z0-9_-]{12,}/,
   );
   assert.match(
     JSON.parse(packageJson).scripts.worker,

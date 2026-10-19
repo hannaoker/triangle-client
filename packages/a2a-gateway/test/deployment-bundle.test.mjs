@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createConfiguredGatewayApp } from "../src/app-factory.mjs";
+import { TEST_WORKLOAD_ENV } from "./support/mesh-auth.mjs";
 
 const workspaceRoot = new URL("../../../", import.meta.url);
 
@@ -38,7 +39,7 @@ test("gateway builds have no obsolete LibSQL trace-verifier coupling", async () 
 function gatewayEnv(identityName, identity) {
   return {
     MESH_ORIGIN: "https://mesh.example",
-    MESH_AGENT_TOKEN: "mesh_agent_token",
+    ...TEST_WORKLOAD_ENV,
     MESH_REGISTRATION_NONCE: "nonce",
     AGENT_ORIGIN: "https://agent.example",
     [identityName]: identity,
