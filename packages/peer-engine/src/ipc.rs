@@ -270,9 +270,11 @@ async fn dispatch(engine: &PeerEngine, hello_ok: &mut bool, req: IpcRequest) -> 
                     "journal_records": journal_records,
                     "roster_size": engine.roster_size(),
                     "relay_online": engine.relay_online(),
+                    "transport_policy": engine.transport_policy(),
                 }),
             )
         }
+        "transport_diagnostics" => ok_resp(req.id, serde_json::json!({ "samples": engine.transport_diagnostics() })),
         "endpoint_addr" => match engine.endpoint_addr_json() {
             Ok(addr) => ok_resp(req.id, addr),
             Err(err) => err_resp(req.id, "internal", err.to_string()),
