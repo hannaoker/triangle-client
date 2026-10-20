@@ -14,6 +14,8 @@ function execute(command,args,{env,input='',signal,timeoutMs}){
   let bytes=0,done=false;const chunks=[];
   const cleanup=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort)};
   const fail=error=>{if(done)return;done=true;cleanup();try{process.kill(-child.pid,'SIGKILL')}catch{child.kill('SIGKILL')}reject(error)};
+  // Reap background tools even when Hermes itself exits successfully.
+  child.once('exit',()=>{if(Number.isSafeInteger(child.pid)&&child.pid>0){try{process.kill(-child.pid,'SIGKILL')}catch{}}});
   const abort=()=>fail(Object.assign(Error('Proof aborted'),{name:'AbortError'}));
   const timer=setTimeout(()=>fail(Error('Proof runner timed out; outcome unknown')),timeoutMs);
   signal?.addEventListener('abort',abort,{once:true});
