@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, globSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
@@ -60,6 +61,43 @@ function requirePlainComponents(homeInput, target, name, { create = false } = {}
 
 export const ANTIGRAVITY_STATE_DIRECTORIES = Object.freeze(["antigravity-cli", "config"]);
 
+export function hermesExecTarget(wrapper) {
+  const matches = [...wrapper.matchAll(/^exec\s+(?:"(\/[^"\n$`\\]+)"|(\/[A-Za-z0-9._+/@%:,=-]+))\s+"\$@"\s*$/gm)];
+  if (matches.length !== 1) return null;
+  const target = matches[0][1] || matches[0][2];
+  return target.includes("//") || /\/\.\.?\//.test(`${target}/`) ? null : target;
+}
+
+// Recognize PM's source-install layout without executing or interpreting shell code.
+export function managedHermesRuntime(entry, launcher) {
+  if (!launcher.startsWith("#!/bin/sh\n")) return null;
+  if (!entry.endsWith(`${path.sep}.hermes/bin/hermes`)) throw new Error("Unsupported Hermes shell entrypoint");
+  const python = launcher.match(/^exec (\/[A-Za-z0-9._+/@%:,=-]+) -I -c '/m)?.[1];
+  if (!python || !existsSync(python)) throw new Error("Hermes managed interpreter is unavailable");
+  const source = realpathSync(path.resolve(path.dirname(entry), "../.."));
+  const tools = path.join(path.dirname(source), "tools");
+  if (path.basename(python) !== "python3" || path.basename(path.dirname(python)) !== "bin" ||
+      path.dirname(path.dirname(path.dirname(python))) !== tools ||
+      realpathSync(path.dirname(python)) !== path.dirname(python) ||
+      path.dirname(realpathSync(python)) !== path.dirname(python) ||
+      !/^python3(?:\.\d+)?$/.test(path.basename(realpathSync(python)))) {
+    throw new Error("Hermes managed interpreter escapes its tool store");
+  }
+  const installKey = createHash("sha256").update(source).digest("hex").slice(0, 16);
+  const install = path.join(path.dirname(source), "installs", installKey);
+  const facts = JSON.parse(readFileSync(path.join(install, "facts.json"), "utf8"));
+  const selected = facts?.packages?.venv?.environment;
+  const environments = path.join(install, "environments");
+  if (typeof selected !== "string" || !path.isAbsolute(selected) || path.resolve(selected) !== selected ||
+      !selected.startsWith(`${environments}${path.sep}`) || path.basename(selected) !== "venv" ||
+      path.dirname(path.dirname(selected)) !== environments || realpathSync(selected) !== selected) {
+    throw new Error("Hermes selected environment escapes its installation");
+  }
+  const workspace = path.join(path.dirname(selected), "workspace");
+  if (realpathSync(workspace) !== workspace) throw new Error("Hermes workspace must not be a symlink");
+  return { source, venv: selected, workspace, python };
+}
+
 function runtimeFamilies(env, activeWorker) {
   const families = [path.dirname(realpathSync(process.execPath))];
   const aliases = [];
@@ -99,14 +137,17 @@ function runtimeFamilies(env, activeWorker) {
     }
     if (name !== "HERMES_CLI") continue;
     const wrapper = readFileSync(executable, "utf8");
-    const target = wrapper.match(/^exec\s+"([^"\n]+)"\s+"\$@"\s*$/m)?.[1];
+    const target = hermesExecTarget(wrapper);
     if (!target || !path.isAbsolute(target) || !existsSync(target)) throw new Error("Installed Hermes wrapper has an unsupported execution chain");
     const entry = realpathSync(target);
-    const interpreterPath = readFileSync(entry, "utf8").split(/\r?\n/, 1)[0]?.replace(/^#!/, "").split(/\s+/, 1)[0];
+    const launcher = readFileSync(entry, "utf8");
+    const managed = managedHermesRuntime(entry, launcher);
+    const interpreterPath = managed?.python || launcher.split(/\r?\n/, 1)[0]?.replace(/^#!/, "").split(/\s+/, 1)[0];
     if (!interpreterPath || !path.isAbsolute(interpreterPath) || !existsSync(interpreterPath)) throw new Error("Installed Hermes interpreter is unavailable");
-    const venv = path.dirname(path.dirname(entry));
+    const venv = managed?.venv || path.dirname(path.dirname(entry));
     const interpreterPrefix = path.dirname(path.dirname(resolveSymlinkChain(interpreterPath)));
-    const agentRoot = path.dirname(venv);
+    const agentRoot = managed?.source || path.dirname(venv);
+    if (managed) families.push(managed.workspace, path.join(path.dirname(path.dirname(path.dirname(managed.venv))), "facts.json"));
     families.push(venv, interpreterPrefix, agentRoot);
     // Pitfall 20: uv-managed Python keeps encodings under dirname(pyvenv.cfg home), not home/bin.
     const basePrefix = resolvePyvenvBasePrefix(venv, {
@@ -122,7 +163,7 @@ function runtimeFamilies(env, activeWorker) {
         const candidate = existsSync(match[1]) ? match[1] : (existsSync(`${match[1]}.py`) ? `${match[1]}.py` : null);
         if (!candidate) continue;
         const sourceRoot = realpathSync(candidate);
-        if (!sourceRoot.startsWith(`${agentRoot}${path.sep}`) || sourceRoot.startsWith(`${venv}${path.sep}`)) throw new Error("Hermes editable runtime escapes its installation root");
+        if (!(sourceRoot.startsWith(`${agentRoot}${path.sep}`) || (managed && sourceRoot.startsWith(`${managed.workspace}${path.sep}`))) || sourceRoot.startsWith(`${venv}${path.sep}`)) throw new Error("Hermes editable runtime escapes its installation root");
         families.push(sourceRoot);
       }
     }

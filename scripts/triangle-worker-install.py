@@ -261,6 +261,43 @@ def hermes_exec_target(wrapper):
     return target
 
 
+def managed_hermes_runtime(entry, launcher):
+    if not launcher.startswith("#!/bin/sh\n"):
+        return None
+    if not entry.endswith("/.hermes/bin/hermes"):
+        fail("unsupported Hermes shell entrypoint")
+    match = re.search(r"^exec (/[A-Za-z0-9._+/@%:,=-]+) -I -c '", launcher, re.MULTILINE)
+    if not match:
+        fail("Hermes managed interpreter is unavailable")
+    python = checked_file(os.path.realpath(match.group(1)), executable=True, owners={os.getuid(), 0})
+    source = os.path.realpath(os.path.join(os.path.dirname(entry), "../.."))
+    tools = os.path.join(os.path.dirname(source), "tools")
+    lexical_python = match.group(1)
+    if (os.path.basename(lexical_python) != "python3" or os.path.basename(os.path.dirname(lexical_python)) != "bin"
+            or os.path.dirname(os.path.dirname(os.path.dirname(lexical_python))) != tools
+            or os.path.realpath(os.path.dirname(lexical_python)) != os.path.dirname(lexical_python)
+            or os.path.dirname(python) != os.path.dirname(lexical_python)
+            or not re.fullmatch(r"python3(?:\.\d+)?", os.path.basename(python))):
+        fail("Hermes managed interpreter escapes its tool store")
+    install_key = hashlib.sha256(source.encode()).hexdigest()[:16]
+    install = os.path.join(os.path.dirname(source), "installs", install_key)
+    facts_path = checked_file(os.path.join(install, "facts.json"), owners={os.getuid(), 0})
+    facts = json.loads(open(facts_path, encoding="utf-8").read())
+    selected = facts.get("packages", {}).get("venv", {}).get("environment")
+    environments = os.path.join(install, "environments")
+    if (not isinstance(selected, str) or not os.path.isabs(selected)
+            or os.path.normpath(selected) != selected or os.path.basename(selected) != "venv"
+            or os.path.dirname(os.path.dirname(selected)) != environments
+            or os.path.realpath(selected) != selected):
+        fail("Hermes selected environment escapes its installation")
+    checked_dir(selected, safe_mode=True)
+    workspace = os.path.join(os.path.dirname(selected), "workspace")
+    if os.path.realpath(workspace) != workspace:
+        fail("Hermes workspace must not be a symlink")
+    checked_dir(workspace, safe_mode=True)
+    return source, selected, workspace, python
+
+
 def discover_runtime_roots(agent, cli):
     roots = [os.path.dirname(cli)]
     if agent == "hermes":
@@ -269,12 +306,16 @@ def discover_runtime_roots(agent, cli):
         if target is None:
             fail("unsupported Hermes execution chain")
         entry = checked_file(os.path.realpath(target), executable=True, owners={os.getuid(), 0})
-        first = open(entry, encoding="utf-8").readline().rstrip()
+        launcher = open(entry, encoding="utf-8").read()
+        first = launcher.splitlines()[0]
+        managed = managed_hermes_runtime(entry, launcher)
         if not first.startswith("#!/"):
             fail("Hermes entrypoint lacks an absolute interpreter")
-        interpreter = checked_file(os.path.realpath(first[2:].split()[0]), executable=True, owners={os.getuid(), 0})
-        venv = os.path.dirname(os.path.dirname(entry))
-        agent_root = os.path.dirname(venv)
+        interpreter = managed[3] if managed else checked_file(os.path.realpath(first[2:].split()[0]), executable=True, owners={os.getuid(), 0})
+        venv = managed[1] if managed else os.path.dirname(os.path.dirname(entry))
+        agent_root = managed[0] if managed else os.path.dirname(venv)
+        if managed:
+            roots.extend([managed[2], os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(venv))), "facts.json")])
         roots.extend([venv, os.path.dirname(os.path.dirname(interpreter)), agent_root])
         pyvenv_config = os.path.join(venv, "pyvenv.cfg")
         if os.path.exists(pyvenv_config):
@@ -298,7 +339,11 @@ def discover_runtime_roots(agent, cli):
                     for value in ast.literal_eval(node_value.value).values():
                         candidate = value if os.path.exists(value) else value + ".py"
                         if os.path.exists(candidate):
-                            roots.append(os.path.realpath(candidate))
+                            resolved = os.path.realpath(candidate)
+                            allowed = [agent_root] + ([managed[2]] if managed else [])
+                            if not any(resolved.startswith(root + os.sep) for root in allowed) or resolved.startswith(venv + os.sep):
+                                fail("Hermes editable runtime escapes its installation root")
+                            roots.append(resolved)
     elif agent == "antigravity":
         # agy state: signed-in session (antigravity-cli) and project config (config).
         for state_dir in ("antigravity-cli", "config"):

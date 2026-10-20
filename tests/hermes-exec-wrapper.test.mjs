@@ -51,3 +51,49 @@ test("Hermes wrapper rejects unsafe or ambiguous exec forms", () => {
     assert.equal(target(wrapper), null, wrapper);
   }
 });
+
+test("runtime and installer agree on Hermes wrapper syntax", async () => {
+  const { hermesExecTarget } = await import("../packages/agent-worker/runners/runner-common.mjs");
+  for (const wrapper of [
+    '#!/bin/sh\nexec /opt/hermes/.hermes/bin/hermes "$@"\n',
+    '#!/bin/sh\nexec "/opt/Hermes Agent/venv/bin/hermes" "$@"\n',
+    '#!/bin/sh\nexec "$HOME/hermes" "$@"\n',
+    '#!/bin/sh\nexec /opt/hermes "$@"\nexec /opt/other "$@"\n',
+  ]) assert.equal(hermesExecTarget(wrapper), target(wrapper));
+});
+
+test("managed Hermes resolves only selected installation generation", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { createHash } = await import("node:crypto");
+  const { managedHermesRuntime } = await import("../packages/agent-worker/runners/runner-common.mjs");
+  const base = realpathSync(mkdtempSync(path.join(tmpdir(), "hermes-managed-")));
+  try {
+    const source = path.join(base, "hermes-agent");
+    const entry = path.join(source, ".hermes/bin/hermes");
+    mkdirSync(path.dirname(entry), { recursive: true });
+    const key = createHash("sha256").update(source).digest("hex").slice(0, 16);
+    const install = path.join(base, "installs", key);
+    const venv = path.join(install, "environments", "generation", "venv");
+    const workspace = path.join(path.dirname(venv), "workspace");
+    mkdirSync(venv, { recursive: true }); mkdirSync(workspace);
+    const facts = path.join(install, "facts.json");
+    writeFileSync(facts, JSON.stringify({ packages: { venv: { environment: venv } } }));
+    const pinnedPython = path.join(base, "tools", "python-fixture", "bin", "python3");
+    mkdirSync(path.dirname(pinnedPython), { recursive: true });
+    const { chmodSync, symlinkSync } = await import("node:fs");
+    writeFileSync(`${pinnedPython}.14`, "fixture"); chmodSync(`${pinnedPython}.14`, 0o755);
+    symlinkSync("python3.14", pinnedPython);
+    const launcher = `#!/bin/sh\nexec ${pinnedPython} -I -c 'opaque bootstrap never evaluated' "$@"\n`;
+    assert.deepEqual(managedHermesRuntime(entry, launcher), { source, venv, workspace, python: pinnedPython });
+    const program = "import importlib.util,json,sys; s=importlib.util.spec_from_file_location('t',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.managed_hermes_runtime(sys.argv[2],sys.stdin.read())))";
+    const resolved = spawnSync(python, ["-c", program, installer, entry], { input: launcher, encoding: "utf8" });
+    assert.equal(resolved.status, 0, resolved.stderr);
+    assert.deepEqual(JSON.parse(resolved.stdout), [source, venv, workspace, `${pinnedPython}.14`]);
+    writeFileSync(facts, JSON.stringify({ packages: { venv: { environment: base } } }));
+    assert.throws(() => managedHermesRuntime(entry, launcher), /escapes/);
+    assert.notEqual(spawnSync(python, ["-c", program, installer, entry], { input: launcher, encoding: "utf8" }).status, 0);
+    assert.throws(() => managedHermesRuntime(entry, '#!/bin/sh\nexec /bin/sh "$@"\n'), /interpreter/);
+    assert.throws(() => managedHermesRuntime(entry, '#!/bin/sh\nexec /bin/sh -I -c \'opaque\' "$@"\n'), /tool store/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
