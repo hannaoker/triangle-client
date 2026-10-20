@@ -14,6 +14,6 @@ The adapter requires native macOS sandboxing and a Hermes CLI supporting `chat -
 
 ## Validation and boundaries
 
-The native fake-Hermes adapter tests passed (2 tests, no skips), including cancellation, limits and isolation. The worker package passed 629 tests with 2 skips. Launcher fixtures and broker regressions were checked separately. Independent review found no material issues in the adapter or launcher changes.
+The native fake-Hermes adapter tests passed (2 tests, no skips), including cancellation, limits and isolation. The worker package passed 629 tests with 2 skips. Five launcher fixture tests also passed. Independent review found no material issues in the adapter or launcher changes.
 
 This is a same-host, direct-only proof, not a cross-network NAT traversal result, production service rollout, or authorization for GitHub writes. The macOS adapter is proof-only; portable background-service integration remains separate work.
