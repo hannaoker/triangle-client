@@ -1,7 +1,7 @@
 //! iroh endpoint lifecycle, admission, accept loop, outbound retry, and
 //! message send/receive with verified receipts.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -89,6 +89,8 @@ impl RetryPolicy {
 pub struct EngineConfig {
     pub state_dir: PathBuf,
     pub relay: RelayPreference,
+    /// Disable IP transports using iroh transport configuration, forcing relay traffic.
+    pub relay_only: bool,
     /// Inbound admission roster. Empty = admit nobody (secure default).
     pub allowed_peers: Vec<EndpointId>,
     /// Max time `start` waits for a home relay before continuing degraded.
@@ -112,6 +114,7 @@ impl EngineConfig {
         Self {
             state_dir: state_dir.into(),
             relay: RelayPreference::default(),
+            relay_only: false,
             allowed_peers: Vec::new(),
             online_timeout: Duration::from_secs(10),
             retry: RetryPolicy::default(),
@@ -191,6 +194,8 @@ struct EngineInner {
     inbound_per_peer: std::sync::Mutex<std::collections::HashMap<EndpointId, usize>>,
     max_inbound_per_peer: usize,
     relay_enabled: bool,
+    relay_only: bool,
+    transport_samples: std::sync::Mutex<VecDeque<serde_json::Value>>,
     lock_file: std::sync::Mutex<Option<File>>,
 }
 
@@ -204,6 +209,7 @@ impl PeerEngine {
     /// Lock the state dir, load/create identity, open the journal, bind an
     /// iroh endpoint, and spawn the accept and retry loops.
     pub async fn start(config: EngineConfig) -> Result<Self> {
+        if config.relay_only && config.relay == RelayPreference::DirectOnly { bail!("relay-only conflicts with direct-only"); }
         let state_dir = config.state_dir;
         std::fs::create_dir_all(&state_dir)?;
         {
@@ -226,6 +232,7 @@ impl PeerEngine {
             RelayPreference::Custom(urls) => Endpoint::builder(presets::N0)
                 .relay_mode(RelayMode::Custom(urls.iter().cloned().collect())),
         };
+        if config.relay_only { builder = builder.clear_ip_transports(); }
         builder = builder
             .secret_key(identity.secret_key().clone())
             .alpns(vec![ALPN.to_vec()]);
@@ -263,6 +270,8 @@ impl PeerEngine {
                 max_inbound_per_peer: config.max_inbound_per_peer.max(1),
                 retry: config.retry,
                 relay_enabled,
+                relay_only: config.relay_only,
+                transport_samples: std::sync::Mutex::new(VecDeque::new()),
                 lock_file: std::sync::Mutex::new(Some(lock_file)),
             }),
         };
@@ -317,6 +326,33 @@ impl PeerEngine {
             let mut w = self.inner.endpoint.home_relay_status();
             Watcher::get(&mut w).iter().any(|s| s.is_connected())
         })
+    }
+
+    pub fn transport_policy(&self) -> &'static str {
+        if self.inner.relay_only { "relay_only" }
+        else if !self.inner.relay_enabled { "direct_only" }
+        else { "ip_and_relay" }
+    }
+
+    /// Last 128 actual connection-path snapshots; never inferred from endpoint advertisements.
+    /// Byte counters include QUIC/control traffic, not exclusively message payload bytes.
+    pub fn transport_diagnostics(&self) -> Vec<serde_json::Value> {
+        self.inner.transport_samples.lock().expect("transport samples").iter().cloned().collect()
+    }
+
+    fn sample_transport(&self, conn: &iroh::endpoint::Connection, message_id: &str, phase: &str) {
+        let paths: Vec<_> = conn.paths().iter().map(|p| {
+            let stats = p.stats();
+            serde_json::json!({"kind": if p.is_relay() { "relay" } else if p.is_ip() { "direct" } else { "custom" },
+                "selected": p.is_selected(), "remote_addr": p.remote_addr().to_string(),
+                "tx_bytes": stats.udp_tx.bytes, "rx_bytes": stats.udp_rx.bytes,
+                "rtt_us": p.rtt().as_micros().min(u64::MAX as u128) as u64})
+        }).collect();
+        let value = serde_json::json!({"peer_endpoint_id": conn.remote_id().to_string(),
+            "message_id": message_id, "phase": phase, "observed_at_unix_ms": now_unix_ms(), "paths": paths});
+        let mut samples = self.inner.transport_samples.lock().expect("transport samples");
+        if samples.len() == 128 { samples.pop_front(); }
+        samples.push_back(value);
     }
 
     // ------------------------------------------------------------------ roster
@@ -519,10 +555,12 @@ impl PeerEngine {
         if conn.remote_id() != expected {
             bail!("connected to unexpected endpoint {}", conn.remote_id());
         }
+        self.sample_transport(&conn, &message.message_id, "before_send");
         let (mut send, mut recv) = conn.open_bi().await.context("open bi stream")?;
         write_envelope(&mut send, &WireEnvelope::Message(message.clone())).await?;
         send.finish().context("finish send stream")?;
         let envelope = read_envelope(&mut recv).await;
+        self.sample_transport(&conn, &message.message_id, "response_received");
         conn.close(0u32.into(), b"done");
         envelope
     }
@@ -700,6 +738,7 @@ impl PeerEngine {
         };
         write_envelope(&mut send, &reply).await?;
         send.finish().context("finish reply stream")?;
+        self.sample_transport(&conn, &message.message_id, "response_sent");
         let _ = tokio::time::timeout(timeout, conn.closed()).await;
         Ok(())
     }
