@@ -293,6 +293,9 @@ export function sandboxCommand(command, args, env = process.env) {
     // Allow only the symlink objects for path-resolution compatibility.
     '(allow file-read* (literal "/etc"))',
     '(allow file-read* (literal "/var"))',
+    // /bin/sh reads this system-managed selector when launched by CLI hooks.
+    // Permit the link itself without opening the rest of /private/var/select.
+    '(allow file-read* (literal "/private/var/select/sh"))',
     ...runtimeAliases.map((entry) => `(allow file-read* (literal "${sandboxLiteral(entry)}"))`),
     ...readableRoots.map((entry) => `(allow file-read* (${lstatSync(entry).isDirectory() ? "subpath" : "literal"} "${sandboxLiteral(entry)}"))`),
     ...modelRoots.map((entry) => `(allow file-read* file-write* (subpath "${sandboxLiteral(entry)}"))`),

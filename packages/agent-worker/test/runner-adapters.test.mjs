@@ -106,6 +106,11 @@ test("runner common strips controller credentials before invoking a reasoning CL
       assert.equal(outcome.code, 0, `/usr/bin/true must run under the generated profile (${outcome.signal || smokeError})`);
     }
     assert.equal(await invoke(process.execPath, ["-e", "process.stdout.write('node-smoke')"]), "node-smoke");
+    if (process.platform === "darwin" && existsSync("/private/var/select/sh")) {
+      assert.equal(await invoke(process.execPath, ["-e", "require('node:fs').readlinkSync('/private/var/select/sh');process.stdout.write('shell-selection-readable')"]), "shell-selection-readable");
+      await assert.rejects(invoke(process.execPath, ["-e", "require('node:fs').readdirSync('/private/var/select')"]), /Agent CLI exited/);
+      assert.equal(await invoke(process.execPath, ["-e", "const r=require('node:child_process').spawnSync('sh',['-c','printf nested-shell-hook-smoke'],{encoding:'utf8'});if(r.status!==0)throw Error(r.stderr||String(r.error));process.stdout.write(r.stdout)"]), "nested-shell-hook-smoke");
+    }
     const childEnv = JSON.parse(await invoke(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.env))"]));
     for (const name of secretNames) assert.equal(childEnv[name], undefined, name);
     assert.equal(childEnv.PYTHONPATH, undefined);
