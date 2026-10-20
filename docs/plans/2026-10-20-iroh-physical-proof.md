@@ -1,9 +1,9 @@
 # Isolated iroh two-computer proof
 
-Approved scope: Mac Mini and MacBook Pro, separate internet connections, direct
-and forced-relay messaging, offline/restart duplicate recovery, and one real
-Codex peer-local request/reply. MESH and its installed lanes stay untouched.
-No production release or full signed-roster/hybrid claim.
+Approved scope: Mac Mini and MacBook Pro, direct and forced-relay messaging,
+offline/restart recovery, and one real Codex peer-local request/reply. MESH and
+its installed lanes stay untouched. No production release or full
+signed-roster/hybrid claim.
 
 ## Acceptance and safety
 
@@ -30,6 +30,29 @@ No production release or full signed-roster/hybrid claim.
 - Two processes/VMs on one computer do not meet the physical-machine gate. If the
   MacBook or separate network/SSH is unavailable, finish local preparation and
   name the precise remaining physical proof instead of claiming completion.
+
+## Physical run results (2026-10-20)
+
+- Both Macs were online on the same home Wi-Fi. SSH used Tailscale only for
+  private control and file setup; Iroh proof addresses excluded Tailscale IPs.
+- Direct-only delivery to the Mini's LAN address did not settle. The MBP Iroh
+  log recorded `No route to host` for its QUIC UDP send, while ping and a raw UDP
+  probe between those LAN addresses succeeded. Treat direct LAN / hole-punch
+  behavior as unresolved; this run does not establish a direct path.
+- Forced relay succeeded on both machines. Iroh diagnostics selected
+  `https://usw1-1.relay.n0.iroh.link./` for the real Codex request and its
+  linked reply. Codex returned `PEER_REAL_CODEX_RESULT 346` and ran once.
+- Offline recovery succeeded over the same relay path: the sender queued a test
+  message while the Mini was stopped, the MBP service restarted with the same
+  identity, then the Mini restarted with its same identity. The outbox settled
+  and the Mini observed one matching message before ACK.
+- This is a physical-machine relay proof on one network. Separate-network NAT
+  traversal/hole punching remains unverified; repeat with the MacBook on a
+  phone hotspot. Exact private evidence is under
+  `/private/tmp/triangle-peer-physical-20261020/` and is not included in Git.
+- The Codex request/reply was a clean fresh run. A prior resumed attempt also
+  delivered but its inbox contained a test-only untyped probe; that item was
+  explicitly ACKed by exact ID before the clean run. No MESH state was touched.
 
 ## Ownership
 
