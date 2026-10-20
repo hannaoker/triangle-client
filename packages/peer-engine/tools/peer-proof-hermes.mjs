@@ -35,33 +35,40 @@ function confirmLiveSocket(socketPath,signal){
   socket.once('connect',()=>finish());socket.once('error',()=>finish(Error('Probe requires a live peer socket')));signal?.addEventListener('abort',abort,{once:true});
  });
 }
-export function createProofHermesRunner({environment,timeoutMs=180000}={}){
- if(process.platform!=='darwin')throw Error('Hermes proof requires macOS native sandbox');
+export function createProofHermesRunner({environment,timeoutMs=180000,securityMode='sandboxed'}={}){
+ if(!['sandboxed','developer-unsandboxed'].includes(securityMode))throw Error('Invalid security mode');
+ const isolationEnabled=securityMode==='sandboxed';
+ if(!isolationEnabled)console.warn('Triangle Hermes developer mode: sandbox DISABLED; tasks run with your user filesystem and network permissions.');
+ if(isolationEnabled&&process.platform!=='darwin')throw Error('Hermes proof requires macOS native sandbox');
  const env=createRunnerEnvironment(environment);
  if(!env.HERMES_HOME||!env.HERMES_CLI)throw Error('Hermes proof requires isolated Hermes environment');
  if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1)throw Error('Invalid proof timeout');
  const sandbox=(command,args)=>{
+  if(!isolationEnabled)return {command,args,env:{}};
   const s=sandboxCommand(command,args,env);
   if(s.command!=='/usr/bin/sandbox-exec'||s.args[0]!=='-p'||!s.args[1].includes('(allow network*)'))throw Error('Proof native sandbox unavailable');
   const argsCopy=[...s.args];argsCopy[1]=argsCopy[1].replace('(allow network*)','(allow network-outbound (remote ip))\n(allow network-bind)\n(allow network-outbound (literal "/private/var/run/mDNSResponder"))');
   return {...s,args:argsCopy};
  };
- // Validate roots and mandatory native policy before any child is launched.
+ // Validate native policy by default; only an explicit local option bypasses it.
  sandbox(env.HERMES_CLI,[]);
  const launch=(command,args,options={})=>{const s=sandbox(command,args);return execute(s.command,s.args,{env:{...env,...s.env},timeoutMs,...options})};
  let help;
  async function probeHelp({signal}={}){const text=await launch(env.HERMES_CLI,['chat','--help'],{signal});if(!text.includes('--query-file'))throw Error('Hermes CLI lacks stdin query-file capability');return text}
  return {
+  securityMode,
+  isolationEnabled,
   probeHelp,
   async run(request,{signal}={}){
    if(typeof request?.text!=='string'||!request.text.trim()||Buffer.byteLength(request.text)>32768)throw Error('Invalid peer request');
    help??=await probeHelp({signal});
    const args=['chat','--query-file','-','--quiet'];
    for(const [flag,value] of [['--toolsets','terminal'],['--max-turns','3'],['--run-budget','60']])if(help.includes(flag))args.push(flag,value);
-   const text=await launch(env.HERMES_CLI,args,{input:'Review only the prefetched PR data below. The controller owns GitHub access. Do not access credentials, identity state, or communication controls.\n\n'+request.text+'\n',signal});
+   const text=await launch(env.HERMES_CLI,args,{input:(isolationEnabled?'Review only the prefetched PR data below.':'Complete the developer task below. Sandbox isolation is disabled by the local operator.')+' The controller owns GitHub access. Do not access credentials, identity state, or communication controls.\n\n'+request.text+'\n',signal});
    if(!text||Buffer.byteLength(text)>32768)throw Error('Invalid peer result');return {status:'completed',text};
   },
   async probe({socketPath,signal}={}){
+   if(!isolationEnabled)return {isolated:false,securityMode};
    if(typeof socketPath!=='string'||!path.isAbsolute(socketPath))throw Error('Probe requires a live peer socket');
    await confirmLiveSocket(socketPath,signal);
    const suffix=randomUUID();const canaries=[env.TRIANGLE_CREDENTIAL_ROOT,env.TRIANGLE_IDENTITY_ROOT].map(root=>path.join(root,`proof-${suffix}`));const projectWrite=path.join(env.TRIANGLE_PROJECT_ROOT,`proof-${suffix}`);

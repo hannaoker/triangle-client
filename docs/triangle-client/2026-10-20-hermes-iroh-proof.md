@@ -17,3 +17,22 @@ The adapter requires native macOS sandboxing and a Hermes CLI supporting `chat -
 The native fake-Hermes adapter tests passed (2 tests, no skips), including cancellation, limits and isolation. The worker package passed 629 tests with 2 skips. Five launcher fixture tests also passed. Independent review found no material issues in the adapter or launcher changes.
 
 This is a same-host, direct-only proof, not a cross-network NAT traversal result, production service rollout, or authorization for GitHub writes. The macOS adapter is proof-only; portable background-service integration remains separate work.
+
+## Explicit developer mode
+
+The proof adapter defaults to `securityMode: 'sandboxed'`. A local controller can deliberately disable the operating-system sandbox:
+
+```js
+const runner = createProofHermesRunner({
+  environment,
+  securityMode: 'developer-unsandboxed',
+});
+```
+
+This prints a warning and exposes `runner.securityMode` and `runner.isolationEnabled`. Its `probe()` returns `{isolated:false, securityMode:'developer-unsandboxed'}` rather than claiming isolation. Invalid modes are rejected; request text and environment variables cannot select this option.
+
+Developer mode runs Hermes with the controller user's filesystem/network permissions. Environment filtering, the separately configured Hermes home, stdin handling, execution/output limits and cancellation remain, but they are not filesystem isolation: Hermes may read files and credentials available to that user. Only the local controller configuration selects this mode. The mode does not change the installed service or enable writes through GitHub automatically.
+
+The native fixture verifies an actual project write succeeds in developer mode and fails with the default sandbox. Sandboxed behavior retains the live IPC/custody denial probes.
+
+Live developer-mode validation also passed over Iroh on the Mini: Hermes created a temporary file in the configured workspace, reported its directory and file listing, and the requester consumed the correlated reply. The controller independently confirmed the file exists. See `2026-10-20-hermes-developer-proof.json`. An earlier redirection/script attempt was blocked by Hermes's own command-approval rules and quarantined; those rules remain enabled and are distinct from Triangle's operating-system sandbox.

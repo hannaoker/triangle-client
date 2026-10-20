@@ -1,0 +1,12 @@
+{
+  "scope": "same Mini, two Iroh identities; explicit developer-unsandboxed Hermes CLI; isolated configured model home; filesystem write smoke test",
+  "requestId": "github-91907aba-ecaa-40a6-bcf4-c09d4e7a332d",
+  "messageId": "request-fc08880c-8bd0-456c-8702-fe9c5c1feef7",
+  "requesterId": "4c1e3b75a2ff1d1e2a082935c12a40d594f15be4bbf10dd7b5d391d83628f2ea",
+  "responderId": "fbb6cd974446e49950646bfba59f4632b536b249248e87dfabb628d7e74d9241",
+  "workerState": "acked",
+  "replyState": "reply_received",
+  "applicationConsumed": true,
+  "reply": "pwd output:\n/private/tmp/triangle-hermes-proof-active/workspace\n\nls -l hermes-developer-smoke.txt output:\n-rw-r--r--@ 1 zhenyuhou  wheel  0 Oct 20 16:44 hermes-developer-smoke.txt",
+  "fileVerifiedByController": true
+}
