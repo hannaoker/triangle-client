@@ -310,3 +310,107 @@ test("envelope bounds measure text bytes and allow worst-case JSON escaping", ()
     /invalid_envelope/,
   );
 });
+function receivedReplyFixture({ lostAck = false } = {}) {
+  const f = fixture(),
+    original = f.ipc.request;
+  const envelope = {
+    protocol: "triangle.peer-proof/1",
+    kind: "reply",
+    request_id: "our-request",
+    in_reply_to: "our-transport-input",
+    text: "application answer",
+  };
+  const content = JSON.stringify(envelope);
+  let present = true,
+    acks = 0;
+  f.ipc.request = async (method, p) => {
+    if (method === "inbox")
+      return {
+        items: present
+          ? [
+              {
+                seq: 1,
+                message_id: "remote-response",
+                from_endpoint_id: sender,
+                payload: content,
+                payload_hash: hash(content),
+              },
+            ]
+          : [],
+        has_more: false,
+      };
+    if (method === "ack") {
+      acks++;
+      const wasPresent = present;
+      present = false;
+      if (lostAck) {
+        lostAck = false;
+        throw Error("lost_reply_ack");
+      }
+      return {
+        acked: wasPresent ? 1 : 0,
+        already_acked: wasPresent ? 0 : 1,
+        unknown: [],
+      };
+    }
+    return original(method, p);
+  };
+  return { ...f, envelope, acks: () => acks };
+}
+test("incoming reply survives committed transport ACK with lost response and restart", async () => {
+  const f = receivedReplyFixture({ lostAck: true });
+  let b = createPeerProofBroker(f.options);
+  await assert.rejects(b.step(), /lost_reply_ack/);
+  b.close();
+  b = createPeerProofBroker(f.options);
+  assert.deepEqual(b.pendingReplies()[0].envelope, f.envelope);
+  assert.equal((await b.step()).state, "reply_received");
+  assert.equal(f.acks(), 2);
+  assert.equal(b.pendingReplies().length, 1);
+  b.consumeReply({ fromEndpointId: sender, messageId: "remote-response" });
+  assert.deepEqual(b.pendingReplies(), []);
+  assert.equal((await b.step()).state, "idle");
+  b.close();
+});
+test("post-ACK pre-observation crash replays until explicit durable application consumption", async () => {
+  const f = receivedReplyFixture();
+  let b = createPeerProofBroker({
+    ...f.options,
+    hook: async (p) => {
+      if (p === "reply_acked") throw Error("crash_before_observation");
+    },
+  });
+  await assert.rejects(b.step(), /crash_before_observation/);
+  assert.equal(b.status()[0].phase, "acked");
+  b.close();
+  b = createPeerProofBroker(f.options);
+  assert.equal((await b.step()).state, "reply_received");
+  assert.deepEqual(b.pendingReplies()[0].envelope, f.envelope);
+  assert.throws(
+    () => b.consumeReply({ fromEndpointId: sender, messageId: "wrong" }),
+    /reply_not_found/,
+  );
+  assert.deepEqual(
+    b.consumeReply({ fromEndpointId: sender, messageId: "remote-response" }),
+    { consumed: true },
+  );
+  b.close();
+  b = createPeerProofBroker(f.options);
+  assert.deepEqual(b.pendingReplies(), []);
+  assert.equal((await b.step()).state, "idle");
+  b.close();
+});
+test("explicit application consumption does not suppress unfinished transport ACK recovery", async () => {
+  const f = receivedReplyFixture({ lostAck: true });
+  let b = createPeerProofBroker(f.options);
+  await assert.rejects(b.step(), /lost_reply_ack/);
+  b.consumeReply({ fromEndpointId: sender, messageId: "remote-response" });
+  b.close();
+  b = createPeerProofBroker(f.options);
+  assert.deepEqual(b.pendingReplies(), []);
+  assert.equal((await b.step()).state, "acked");
+  assert.equal(f.acks(), 2);
+  assert.equal((await b.step()).state, "idle");
+  assert.equal(f.counts().runs, 0);
+  b.close();
+});

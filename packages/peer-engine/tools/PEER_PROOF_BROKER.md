@@ -17,6 +17,11 @@ const broker = createPeerProofBroker({
 });
 try {
   const result = await broker.step({signal});
+  for (const reply of broker.pendingReplies()) {
+    // Verify expected sender, request_id and in_reply_to; process durably.
+    await applicationAccept(reply);
+    broker.consumeReply({fromEndpointId: reply.fromEndpointId, messageId: reply.messageId});
+  }
   // Call step again from the trusted supervisor; it performs at most one turn.
 } finally { broker.close(); }
 ```
@@ -75,8 +80,23 @@ consumption. The engine owns outbox retry/expiry and its documented tombstone
 retention. Refusal, expiry, mismatch, or unresolved admission leaves the input
 unacked and the result available for inspection. Never reuse transport IDs.
 
-Typed replies are journaled and ACKed without invoking the runner or generating
-another reply. `step()` returns `reply_received` with the envelope, `acked`,
+Typed replies are journaled and transport-ACKed without invoking the runner or
+generating another reply. Transport ACK and application consumption are separate:
+`pendingReplies()` returns up to 200 unconsumed replies with authenticated sender,
+message ID, and envelope, even after a lost ACK response or a restart after ACK.
+The caller must verify its expected sender/request linkage, process the reply
+durably, then call `consumeReply({fromEndpointId,messageId})`. Consumption is an
+idempotent durable flag; it never sends a transport ACK. A crash before this call
+replays the reply, so application processing must tolerate replay. An ACK failure
+does not hide the stored reply from `pendingReplies()`. Recovery retries an
+unconfirmed transport ACK independently, including for an already consumed reply.
+Existing proof journals migrate automatically and their stored incoming replies
+become pending unless explicitly consumed through this API.
+
+When its engine inbox is empty, `step()` also replays the oldest pending reply;
+returning an envelope never consumes it. This protects a crash between ACK and
+caller observation. Repeated calls keep returning it until explicit consumption.
+ `step()` returns `reply_received` with the envelope, `acked`,
 `quarantined`, or `idle`; admission/IPC failures throw fixed codes. Unsupported
 or malformed inputs fail closed and remain unacked for inspection. A quarantined
 head input blocks later inbox work; there is no implicit discard/retry control.

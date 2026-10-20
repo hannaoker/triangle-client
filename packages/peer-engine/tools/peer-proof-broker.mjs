@@ -260,6 +260,15 @@ export function createPeerProofBroker({
     db.exec(
       "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS records(sender TEXT NOT NULL,message_id TEXT NOT NULL,input_hash TEXT NOT NULL,phase TEXT NOT NULL,reply_id TEXT,reply_payload TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY(sender,message_id));",
     );
+    if (
+      !db
+        .prepare("PRAGMA table_info(records)")
+        .all()
+        .some((column) => column.name === "application_consumed")
+    )
+      db.exec(
+        "ALTER TABLE records ADD COLUMN application_consumed INTEGER NOT NULL DEFAULT 0",
+      );
     chmodSync(path.join(stateRoot, "broker.sqlite"), 0o600);
     // Executing survived process death, so its inference outcome is unknown.
     db.prepare(
@@ -346,6 +355,25 @@ export function createPeerProofBroker({
     await hook?.("admitted");
     return ack(r, signal);
   }
+  const replyView = (r) => ({
+    state: "reply_received",
+    fromEndpointId: r.sender,
+    messageId: r.message_id,
+    envelope: parseEnvelope(r.reply_payload),
+  });
+  const pendingReplyRows = () =>
+    db
+      .prepare(
+        "SELECT * FROM records WHERE reply_id IS NULL AND reply_payload IS NOT NULL AND application_consumed=0 ORDER BY updated_at,sender,message_id LIMIT 200",
+      )
+      .all();
+  async function acknowledgeReply(r, signal) {
+    await ack(r, signal);
+    await hook?.("reply_acked");
+    return r.application_consumed
+      ? { state: "acked", messageId: r.message_id }
+      : replyView(r);
+  }
   const api = {
     async step({ signal } = {}) {
       if (closed) throw coded("broker_closed");
@@ -360,6 +388,13 @@ export function createPeerProofBroker({
           )
           .get();
         if (outstanding) return await deliver(outstanding, signal);
+        const unackedReply = db
+          .prepare(
+            "SELECT * FROM records WHERE phase='received_reply' ORDER BY updated_at LIMIT 1",
+          )
+          .get();
+        if (unackedReply) return await acknowledgeReply(unackedReply, signal);
+
         const page = await ipc.request(
           "inbox",
           { after_seq: 0, limit: 1 },
@@ -367,7 +402,10 @@ export function createPeerProofBroker({
         );
         if (!page || !Array.isArray(page.items) || page.items.length > 1)
           throw coded("invalid_inbox");
-        if (!page.items.length) return { state: "idle" };
+        if (!page.items.length) {
+          const pending = pendingReplyRows()[0];
+          return pending ? replyView(pending) : { state: "idle" };
+        }
         const item = page.items[0];
         if (
           !endpoint(item.from_endpoint_id) ||
@@ -385,15 +423,8 @@ export function createPeerProofBroker({
           if (r.phase === "quarantined")
             return { state: "quarantined", messageId: r.message_id };
           if (r.phase === "acked") return await ack(r, signal);
-          if (r.phase === "received_reply") {
-            await ack(r, signal);
-            return {
-              state: "reply_received",
-              fromEndpointId: r.sender,
-              messageId: r.message_id,
-              envelope: parseEnvelope(r.reply_payload),
-            };
-          }
+          if (r.phase === "received_reply")
+            return await acknowledgeReply(r, signal);
           return await deliver(r, signal);
         }
         if (db.prepare("SELECT count(*) AS n FROM records").get().n >= 10000)
@@ -410,13 +441,7 @@ export function createPeerProofBroker({
             now(),
           );
           r = row(item.from_endpoint_id, item.message_id);
-          await ack(r, signal);
-          return {
-            state: "reply_received",
-            fromEndpointId: r.sender,
-            messageId: r.message_id,
-            envelope: input,
-          };
+          return await acknowledgeReply(r, signal);
         }
         const route =
           routes instanceof Map
@@ -488,11 +513,33 @@ export function createPeerProofBroker({
         active = false;
       }
     },
+    pendingReplies() {
+      if (closed) throw coded("broker_closed");
+      return pendingReplyRows().map(replyView);
+    },
+    consumeReply({ fromEndpointId, messageId } = {}) {
+      if (closed) throw coded("broker_closed");
+      if (active) throw coded("broker_busy");
+      if (!endpoint(fromEndpointId) || !identifier(messageId))
+        throw coded("invalid_identity");
+      const r = row(fromEndpointId, messageId);
+      if (
+        !r ||
+        r.reply_id !== null ||
+        !r.reply_payload ||
+        parseEnvelope(r.reply_payload).kind !== "reply"
+      )
+        throw coded("reply_not_found");
+      db.prepare(
+        "UPDATE records SET application_consumed=1,updated_at=? WHERE sender=? AND message_id=?",
+      ).run(now(), fromEndpointId, messageId);
+      return { consumed: true };
+    },
     status() {
       if (closed) throw coded("broker_closed");
       return db
         .prepare(
-          "SELECT sender,message_id,phase,reply_id,updated_at FROM records ORDER BY updated_at",
+          "SELECT sender,message_id,phase,reply_id,updated_at,application_consumed FROM records ORDER BY updated_at",
         )
         .all();
     },
