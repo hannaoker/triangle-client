@@ -1,0 +1,13 @@
+{
+  "scope": "same Mini, two isolated Iroh identities, direct-only; sandboxed Hermes CLI; controller fetches PR data; no GitHub credentials in reasoning process",
+  "requestId": "github-076988bc-274d-4d53-9703-1b1d57aa9c48",
+  "messageId": "request-397ee9db-6c78-4eb7-96ba-99b2c4999ffb",
+  "requesterId": "a9798ac571b429e57eb8773c86f22f19806e6f9454aed699ca3bf0dbe9cb4326",
+  "responderId": "4824ba7a7708577a7f7e9b9785352cf22fde35488517a6394987979515e87d6c",
+  "workerState": "acked",
+  "replyState": "reply_received",
+  "applicationConsumed": true,
+  "reply": "Review for PR #101: Fix macOS shell selector access in worker sandbox\n\nFindings: No blocking findings.\n\nCorrectness:\nThe fix correctly allows read access to `/private/var/select/sh`, resolving macOS `/bin/sh` invocation failures when running inside the sandbox. The accompanying test adequately covers reading the symlink, verifying that reading the parent directory `/private/var/select` remains blocked, and validating nested shell invocation under Darwin.\n\nNarrowness:\nThe permission is strictly narrow. It uses `(allow file-read* (literal \"/private/var/select/sh\"))`, granting read-only access exclusively to that single path without opening the parent directory `/private/var/select` or granting write permissions.",
+  "reviewedPrHead": "89a2cd8b27471070dd5ae48a65baa40acf29349b",
+  "nativeIsolationProbe": "passed: custody reads, project write, live peer IPC denied"
+}

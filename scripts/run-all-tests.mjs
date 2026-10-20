@@ -82,6 +82,11 @@ const suites = [
     command: "npm",
     args: ["--prefix", "agents/hermes", "test"],
   },
+  {
+    name: "peer-proof-hermes",
+    command: "node",
+    args: ["--test", "tests/peer-proof-hermes.test.mjs"],
+  },
 ];
 
 const group = process.argv[2]; // optional: runtime | gateway | all
