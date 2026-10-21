@@ -443,8 +443,8 @@ export function createPeerLane({
       });
     },
 
-    // Refuses new work, waits for calls in flight, stops the drain loops, then closes every drain even if an
-    // interrupted runner is still running, so no owner lock outlives the lane (P7).
+    // Refuses new work, waits for calls in flight, stops the drain loops, then waits for actual runner termination
+    // before releasing each drain owner lock (P7).
     close() {
       closePromise ??= (async () => {
         closed = true;
@@ -453,7 +453,7 @@ export function createPeerLane({
           if (entry.drain) {
             try {
               await entry.drain.stop();
-              await entry.drain.close({ force: true });
+              await entry.drain.close({ wait: true });
             } catch (e) {
               logger.warn?.("triangle_client_peer_drain_close_failed", {
                 profile: entry.config.profile,

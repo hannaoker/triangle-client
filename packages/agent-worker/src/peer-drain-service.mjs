@@ -1388,24 +1388,16 @@ export function createPeerDrainService({
       await Promise.allSettled([...activeExecutions.values()]);
     },
 
-    // `force` closes while an interrupted runner is still running. That runner's late result is never written:
-    // executeRunnerTurn stops reading a runner once it has been interrupted (P7).
-    close({ wait = false, force = false } = {}) {
+    // Owner custody is retained until every runner has actually terminated.
+    close({ wait = false } = {}) {
       if (active) throw coded("drain_busy", "Cannot close drain while step is active");
       if (closed) return Promise.resolve();
-      if (activeExecutions.size > 0 && !force) {
+      if (activeExecutions.size > 0) {
         if (!wait) {
           throw coded("execution_still_active", "Cannot close drain while runner execution is active");
         }
         return Promise.allSettled([...activeExecutions.values()]).then(() => {
           return api.close({ wait: false });
-        });
-      }
-      if (activeExecutions.size > 0) {
-        logger.warn?.("triangle_peer_drain_closed_with_active_execution", {
-          profile,
-          profileInstanceId,
-          count: activeExecutions.size,
         });
       }
       closed = true;

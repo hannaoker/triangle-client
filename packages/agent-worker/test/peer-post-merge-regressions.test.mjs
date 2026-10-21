@@ -301,7 +301,7 @@ test("P6: a request interrupted by shutdown gets its held outcome on the next ru
   assert.equal(outcomes[0].state, "held");
 });
 
-test("P7: lane.close() releases the drain even while an interrupted runner is still running", async (t) => {
+test("P7: lane.close() retains ownership until an interrupted runner terminates", async (t) => {
   const stateRoot = tempRoot(t);
   let release;
   const stuck = new Promise((resolve) => { release = resolve; });
@@ -314,10 +314,18 @@ test("P7: lane.close() releases the drain even while an interrupted runner is st
   });
   const [result] = await lane.runOnce();
   assert.equal(result.outcome.state, "held");
-  await lane.close();
+  let closed = false;
+  const closing = lane.close().then(() => { closed = true; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(closed, false, "close must wait for the actual runner termination");
+    assert.throws(() => createPeerDrainService({ stateRoot, profile: "p", profileInstanceId: PROFILE_ID, ipc, runner: { run: async () => ({}) }, routes: routes(), logger: quiet }), { code: "drain_busy" });
+  } finally {
+    release();
+    await closing;
+  }
   const reopened = createPeerDrainService({ stateRoot, profile: "p", profileInstanceId: PROFILE_ID, ipc, runner: { run: async () => ({}) }, routes: routes(), logger: quiet });
-  reopened.close();
-  release();
+  await reopened.close();
 });
 
 test("P8: the quickstart names a reachable peer-supervisor entry point and describes acking accurately", () => {
