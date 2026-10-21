@@ -134,7 +134,7 @@ export function createLocalControlClient({
     return connectingPromise;
   }
 
-  async function callRpc(method, params = {}, { timeout = timeoutMs } = {}) {
+  async function callRpc(method, params = {}, { timeout = timeoutMs, credential = turnCredential } = {}) {
     if (isClosed) throw coded("client_closed", "Client is closed");
     const sock = await ensureConnection(timeout);
     const id = crypto.randomUUID();
@@ -152,7 +152,7 @@ export function createLocalControlClient({
         id,
         method,
         params,
-        credential: turnCredential,
+        credential,
         senderId,
       };
 

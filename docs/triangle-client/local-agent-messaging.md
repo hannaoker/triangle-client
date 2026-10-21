@@ -108,3 +108,7 @@ Antigravity authored this additive subsystem; Codex independently ran the tests 
 - Shared production journal/dispatcher, installed supervisor/bootstrap, runner credential injection, desktop thread binding, packaging and installed end-to-end test remain pending integration after the owner's #104 follow-up. The parallel slice is not the completed installed-messaging milestone.
 
 The dispatcher must provide an admission hook plus `start`/`recover` and `stop`/`wait`; success no-op defaults and the legacy optional admission fallback are not supported. Dispatcher hooks are trusted host dependencies, not agent-controlled commands.
+
+## Merge review follow-up (2026-10-21)
+
+Independent release review reproduced two additional failures despite the earlier 45 passes: fresh MCP credentials were validated but not sent over the socket, and failed dispatcher recovery left partial lifecycle state. Both now have real subsystem regression tests that failed before the fixes. The MCP adapter passes credentials per RPC without mutable shared credential state; startup rejects clients until recovery completes and rolls back partial dispatcher ownership on failure. The 47-test local suite passes; root runtime tests now include this suite. Installed integration gates above remain unchanged.

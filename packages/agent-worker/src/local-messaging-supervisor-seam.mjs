@@ -114,6 +114,7 @@ export function createLocalMessagingSubsystem({
   });
 
   let running = false;
+  let stopped = false;
 
   return {
     get socketPath() {
@@ -125,6 +126,7 @@ export function createLocalMessagingSubsystem({
     },
 
     async start() {
+      if (stopped) throw coded("subsystem_closed", "Subsystem was stopped");
       if (running) return;
       await server.start();
       running = true;
@@ -132,11 +134,12 @@ export function createLocalMessagingSubsystem({
     },
 
     async stop() {
-      if (!running) return;
+      if (stopped) return;
       // Close server first, awaiting in-flight executions before closing the journal
       await server.close();
       await activeJournal.close?.();
       running = false;
+      stopped = true;
       logger.info?.("Local messaging subsystem stopped");
     },
 

@@ -203,3 +203,54 @@ test("shutdown retains journal until a pending RPC persistence completes", { ski
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
 });
+
+test("failed dispatcher recovery rolls back and permits retry and cleanup", { skip: process.platform === "win32" }, async () => {
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "triangle-start-fail-"));
+  const journal = createTestMemoryJournal();
+  let attempts = 0;
+  let stops = 0;
+  const subsystem = createLocalMessagingSubsystem({
+    stateRoot, journal,
+    dispatcher: {
+      async start() { if (++attempts === 1) throw new Error("recovery failed"); },
+      async stop() { stops++; }, async notifyAdmission() {},
+    },
+  });
+  try {
+    await assert.rejects(subsystem.start(), /recovery failed/);
+    assert.equal(stops, 1, "failed recovery must release partial dispatcher custody");
+    await subsystem.start();
+    assert.equal(subsystem.running, true);
+    await subsystem.stop();
+    assert.equal(stops, 2);
+  } finally {
+    await subsystem.stop();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("MCP refresh uses the current credential on the real socket", { skip: process.platform === "win32" }, async () => {
+  const { createLocalMessagingMcpHandler } = await import("../src/local-messaging-mcp-adapter.mjs");
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "triangle-token-roll-"));
+  const journal = createTestMemoryJournal();
+  const subsystem = createLocalMessagingSubsystem({
+    stateRoot, journal, dispatcher: createTestRecoverableDispatcher({ journal }),
+    registry: ["sender", "recipient"], aclRules: { sender: ["recipient"] },
+  });
+  let client;
+  try {
+    await subsystem.start();
+    client = subsystem.createClient("sender", { ttlMs: 500 });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    const handler = createLocalMessagingMcpHandler({
+      client, senderId: "sender", turnCredentialProvider: () => subsystem.issueTurnCredential("sender"),
+    });
+    const reply = await handler.handleRequest({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "triangle_list_recipients"}});
+    assert.equal(reply.result.isError, false, JSON.stringify(reply));
+    assert.deepEqual(JSON.parse(reply.result.content[0].text).recipients, ["recipient"]);
+  } finally {
+    await client?.close();
+    await subsystem.stop();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});

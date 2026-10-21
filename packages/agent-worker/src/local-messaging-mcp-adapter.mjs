@@ -156,7 +156,7 @@ export function createLocalMessagingMcpHandler({
             };
 
           case "tools/call": {
-            await verifyTurnCredential();
+            const rpcOptions = { credential: await verifyTurnCredential() };
             const { name, arguments: args = {} } = params;
 
             if (!args || typeof args !== "object") {
@@ -172,7 +172,7 @@ export function createLocalMessagingMcpHandler({
 
             switch (name) {
               case "triangle_list_recipients": {
-                const recipients = await client.discoverRecipients();
+                const recipients = await client.discoverRecipients(rpcOptions);
                 resultData = { recipients };
                 break;
               }
@@ -184,13 +184,13 @@ export function createLocalMessagingMcpHandler({
                   messageId: args.messageId,
                   requestId: args.requestId,
                   inReplyTo: args.inReplyTo,
-                });
+                }, rpcOptions);
                 resultData = res;
                 break;
               }
 
               case "triangle_get_status": {
-                const res = await client.getMessageStatus({ messageId: args.messageId });
+                const res = await client.getMessageStatus({ messageId: args.messageId }, rpcOptions);
                 resultData = res;
                 break;
               }
@@ -199,19 +199,19 @@ export function createLocalMessagingMcpHandler({
                 const replies = await client.listReplies({
                   requestId: args.requestId,
                   inReplyTo: args.inReplyTo,
-                });
+                }, rpcOptions);
                 resultData = { replies };
                 break;
               }
 
               case "triangle_consume_reply": {
-                const res = await client.consumeReply({ messageId: args.messageId });
+                const res = await client.consumeReply({ messageId: args.messageId }, rpcOptions);
                 resultData = res;
                 break;
               }
 
               case "triangle_cancel_message": {
-                const res = await client.cancelMessage({ messageId: args.messageId });
+                const res = await client.cancelMessage({ messageId: args.messageId }, rpcOptions);
                 resultData = res;
                 break;
               }

@@ -81,6 +81,8 @@ export function createLocalControlServer({
   const inFlightExecutions = new Set();
   const inFlightRpcs = new Set();
   let isClosing = false;
+  let accepting = false;
+  let dispatcherActive = false;
 
   async function handleRpc(msg, socket, socketInFlight) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
@@ -369,7 +371,7 @@ export function createLocalControlServer({
       let createdServer = null;
       try {
         createdServer = net.createServer((socket) => {
-          if (isClosing) {
+          if (isClosing || !accepting) {
             socket.destroy();
             return;
           }
@@ -422,13 +424,28 @@ export function createLocalControlServer({
         server = createdServer;
         boundInode = getSocketInode(socketPath);
 
+        // No requests are accepted until recovery has established execution ownership.
+        dispatcherActive = true;
         // Host-owned recoverable dispatcher claims queued records upon start
         if (typeof activeDispatcher.start === "function") {
           await activeDispatcher.start({ journal });
         } else if (typeof activeDispatcher.recover === "function") {
           await activeDispatcher.recover({ journal });
         }
+        accepting = true;
       } catch (startupErr) {
+        accepting = false;
+        for (const socket of activeSockets) socket.destroy();
+        activeSockets.clear();
+        if (dispatcherActive) {
+          try {
+            const shutdown = activeDispatcher.stop || activeDispatcher.wait;
+            await shutdown.call(activeDispatcher);
+          } catch {}
+          dispatcherActive = false;
+        }
+        server = null;
+        boundInode = null;
         // Rollback on startup failure without unlinking another server's socket
         if (createdServer) {
           try {
@@ -441,6 +458,7 @@ export function createLocalControlServer({
 
     async close() {
       isClosing = true;
+      accepting = false;
       for (const sock of activeSockets) {
         try {
           sock.destroy();
@@ -460,10 +478,10 @@ export function createLocalControlServer({
       }
 
       // Safely wait for dispatcher to complete active executions before closing journal
-      if (typeof activeDispatcher.stop === "function") {
-        await activeDispatcher.stop();
-      } else if (typeof activeDispatcher.wait === "function") {
-        await activeDispatcher.wait();
+      if (dispatcherActive) {
+        const shutdown = activeDispatcher.stop || activeDispatcher.wait;
+        await shutdown.call(activeDispatcher);
+        dispatcherActive = false;
       }
 
       // Safely wait for all in-flight admissions before releasing resources
