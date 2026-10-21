@@ -129,6 +129,11 @@ test("runner common strips controller credentials before invoking a reasoning CL
       await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, "source.txt"))},'no')`]), /Agent CLI exited/);
       await assert.rejects(invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(projectRoot, ".git/config"))},'no')`]), /Agent CLI exited/);
       assert.equal(await invoke(process.execPath, ["-e", `require('node:fs').writeFileSync(${JSON.stringify(joinPath(modelRoot, "state"))},'ok');process.stdout.write('model-written')`]), "model-written");
+      const policyRoot=joinPath(dirname(modelBase),"runtime-policy");mkdirSync(policyRoot,{mode:0o700});
+      const policyFile=joinPath(policyRoot,instanceId+".json");writeFile(policyFile,JSON.stringify({securityMode:"sandboxed"}),{mode:0o600});
+      await assert.rejects(invoke(process.execPath,["-e",`require('node:fs').writeFileSync(${JSON.stringify(policyFile)},JSON.stringify({securityMode:'developer-unsandboxed'}))`]),/Agent CLI exited/);
+      await assert.rejects(invoke(process.execPath,["-e",`require('node:fs').renameSync(${JSON.stringify(joinPath(modelRoot,"state"))},${JSON.stringify(policyFile)})`]),/Agent CLI exited/);
+      assert.equal(JSON.parse(readFileSync(policyFile,'utf8')).securityMode,'sandboxed');
       await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(credentialFile)},'utf8'))`]), /Agent CLI exited/);
       await assert.rejects(invoke(process.execPath, ["-e", `process.stdout.write(require('node:fs').readFileSync(${JSON.stringify(projectEnv)},'utf8'))`]), /Agent CLI exited/);
       for (const denied of [joinPath(envDirectory, "secret"), joinPath(envLocalDirectory, "secret"), joinPath(envMetaDirectory, "secret"), joinPath(projectRoot, "env-alias")]) {
@@ -590,4 +595,21 @@ test("Antigravity sandbox approves agy state roots (~/.gemini/antigravity-cli, ~
     () => sandboxCommand(agy, ["--version"], { ...env, TRIANGLE_RUNTIME_ROOTS: [cliBin, agyState, agyConfig, arbitrary].join(":") }),
     /approved executable installation chain/,
   );
+});
+
+test('Antigravity model selection is explicit and instance-local', () => {
+  const root=mkdtempSync(join(tmpdir(),'triangle-agy-model-'));
+  const config=join(root,'triangle-antigravity-runtime.json');
+  try {
+    writeFileSync(config,JSON.stringify({model:'Gemini 3.8 Flash (High)'}),{mode:0o600});
+    const invocation=createAntigravityInvocation('request --model nope',{ANTIGRAVITY_HOME:root});
+    assert.deepEqual(invocation.args.slice(0,2),['--model','Gemini 3.8 Flash (High)']);
+    assert.ok(invocation.args.includes('request --model nope'));
+    writeFileSync(config,JSON.stringify({securityMode:'developer-unsandboxed'}));
+    assert.throws(()=>createAntigravityInvocation('request',{ANTIGRAVITY_HOME:root}),/runtime configuration/);
+    writeFileSync(config,JSON.stringify({model:'bad\nmodel'}));
+    assert.throws(()=>createAntigravityInvocation('request',{ANTIGRAVITY_HOME:root}),/runtime configuration/);
+    rmSync(config);symlinkSync('/etc/hosts',config);
+    assert.throws(()=>createAntigravityInvocation('request',{ANTIGRAVITY_HOME:root}),/runtime configuration/);
+  } finally {rmSync(root,{recursive:true,force:true})}
 });

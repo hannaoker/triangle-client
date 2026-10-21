@@ -320,6 +320,10 @@ test("listUnread skips unsupported events and processes later supported messages
         return json({ roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", items: filtered });
       }
     }
+    if (url.pathname === "/api/v1/mailbox/claim") {
+      const body = await request.json();
+      return json({ claimed: true, claimId: body.claim_id, claimedAt: "2026-08-07T00:00:00.000Z", idempotent: false });
+    }
     if (url.pathname === "/api/v1/mailbox/ack") {
       return json({ acknowledged: 1 });
     }
@@ -425,7 +429,11 @@ for (const scenario of [
           return json({ roomId: "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", items: filtered });
         }
       }
-      if (url.pathname === "/api/v1/mailbox/ack") {
+      if (url.pathname === "/api/v1/mailbox/claim") {
+      const body = calls.at(-1).body;
+      return json({ claimed: true, claimId: body.claim_id, claimedAt: "2026-08-07T00:00:00.000Z", idempotent: false });
+    }
+    if (url.pathname === "/api/v1/mailbox/ack") {
         return json({ acknowledged: 1 });
       }
       throw new Error(`Unexpected request ${method} ${url.pathname}`);
@@ -1969,9 +1977,12 @@ test("ack payloads include matching claims for owned deliveries (C1)", async () 
   });
 });
 
-test("unsupported deliveries still ack without claims", async () => {
+for (const scenario of ["normal", "ack-retry", "conflict"]) {
+test(`unsupported deliveries claim before ack: ${scenario}`, async () => {
   const roomId = "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const { fetchImpl, state } = createMailboxFetch({
+    claim: scenario === "conflict" ? () => json({error:"delivery_claim_conflict"},409) : undefined,
+    acknowledge: (_body, state) => scenario === "ack-retry" && state.acknowledgeCount === 1 ? json({error:"temporary_failure"},503) : {acknowledged:1},
     mailboxResponse: {
       items: [{
         deliveryId: 7,
@@ -1998,14 +2009,30 @@ test("unsupported deliveries still ack without claims", async () => {
     pageLimit: 1,
   }, { workloadTokens: testTokens("mesh-secret"), fetchImpl });
 
+  if (scenario === "ack-retry") await assert.rejects(client.listUnread(), /503/);
   assert.deepEqual(await client.listUnread(), []);
+  if (scenario === "conflict") {
+    assert.equal(state.acknowledgeCount, 0);
+    return;
+  }
+  if (scenario === "ack-retry") {
+    const claims = state.calls.filter(call => call.url.pathname === "/api/v1/mailbox/claim");
+    assert.equal(claims.length,2);
+    assert.equal(claims[0].body.claim_id,claims[1].body.claim_id);
+  }
   const ackBody = state.calls.find((call) => call.url.pathname === "/api/v1/mailbox/ack").body;
+  const claimCall = state.calls.find((call) => call.url.pathname === "/api/v1/mailbox/claim");
+  assert.ok(claimCall, "discarding a delivery still requires ownership");
+  assert.match(claimCall.body.claim_id, /^claim_[a-f0-9]{32}$/);
   assert.deepEqual(ackBody, {
     delivery_ids: [7],
     status: "processed",
+    claims: [{ delivery_id: 7, claim_id: claimCall.body.claim_id }],
   });
-  assert.equal(ackBody.claims, undefined);
+  assert.ok(state.calls.indexOf(claimCall) < state.calls.findIndex(call => call.url.pathname === "/api/v1/mailbox/ack"));
 });
+
+}
 
 test("poison delivery retries are capped and quarantined without blocking later work (C2)", async () => {
   const roomA = "room_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

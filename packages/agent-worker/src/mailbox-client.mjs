@@ -599,6 +599,7 @@ export function createMailboxClient(
   // memory-only: after a process crash the durable claim remains fail-closed and
   // is never released or exposed to a different worker automatically.
   const retryDeliveries = new Map();
+  const discardClaims = new Map();
   // Poison deliveries are held locally for operator inspection and are skipped
   // via the mailbox after-cursor so they cannot permanently head-of-line block.
   const quarantinedDeliveries = new Map();
@@ -874,7 +875,7 @@ export function createMailboxClient(
     return value;
   }
 
-  // Discard/unsupported paths may omit claims. Owned processing must bind claim_id.
+  // Every acknowledgement, including discarded events, binds its owned claim.
   async function ackDelivery(deliveryId, signal, claimId) {
     const body = {
       delivery_ids: [deliveryId],
@@ -1102,9 +1103,15 @@ export function createMailboxClient(
         listFailureCounts.delete(normalizedDelivery.id);
       } catch (error) {
         if (isSkipEventError(error)) {
-          // Unsupported/discarded deliveries may ack without a claim.
-          await ackDelivery(normalizedDelivery.id, signal);
-          advanceListCursor(normalizedDelivery.id);
+          // Permissions v1 requires ownership even when no model turn is needed.
+          // Retain the id across ambiguous claim/ack failures for idempotent retry.
+          const id = normalizedDelivery.id;
+          const claimId = discardClaims.get(id) ?? `claim_${crypto.randomBytes(16).toString("hex")}`;
+          discardClaims.set(id, claimId);
+          const claimed = await claimDelivery(id, claimId, signal);
+          if (claimed) await ackDelivery(id, signal, claimId);
+          discardClaims.delete(id);
+          advanceListCursor(id);
           continue;
         }
         const failures = (listFailureCounts.get(normalizedDelivery.id) ?? 0) + 1;
