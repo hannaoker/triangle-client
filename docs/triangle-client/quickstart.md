@@ -47,10 +47,17 @@ provide canonical authority and durable message delivery.
 
 ## Experimental macOS peer-engine mode (Iroh)
 
-An explicitly experimental macOS vertical slice allows `client-supervisor` to
-launch and manage a local Rust `peer-engine` daemon per configured agent profile
+An explicitly experimental macOS programmatic slice allows `peer-supervisor.mjs`
+to launch and manage a local Rust `peer-engine` daemon per configured agent profile
 under `peerWakes`.
 
+> [!NOTE]
+> This entry point is programmatic and experimental. Production `client-supervisor.mjs`
+> and installed background services do not bundle or start peer engines.
+
+- **Programmatic Entry Point:** Import `createPeerSupervisor` from
+  `@the-triangle/agent-worker/peer-supervisor`. It injects peer lane, engine manager,
+  and drain service dependencies into the supervisor.
 - **Scope & Boundaries:** Static allowlist only, gated behind `experimentalGate: true`.
   This mode is local/experimental; signed roster enrollment, Triangle identity ↔
   Iroh key binding, cross-network NAT verification on independent networks, and
@@ -60,21 +67,22 @@ under `peerWakes`.
   workload keys, and controller secrets.
 - **Durable Delivery & Execution:** Peer receipts represent remote durable receipt,
   never model execution. Admission is journaled prior to runner dispatch; unknown
-  inference outcomes are quarantined rather than re-executed. Inbound items are
+  inference outcomes are held in SQLite rather than re-executed. Inbound items are
   acknowledged only after deterministic reply admission is verified locally.
 - **Replies:** Replies received from peers are journaled before acknowledgement.
-  The owning supervisor exposes them through `pendingPeerReplies()` and removes
-  one from the pending list only after `consumePeerReply(...)` is called.
-- **Outbound Requests:** `sendPeerMessage({ profileInstanceId, toEndpointId,
-  text, requestId, messageId })` sends only to a peer that is both allowlisted
-  and has a configured route. It returns after the peer engine verifies
-  `queued_local` or `settled`; `queued_local` means durable local queuing, while
-  `settled` means the remote peer durably accepted the message. Neither state
-  claims the remote harness executed it. Use the returned `messageId` to match
-  a reply with `pendingPeerReplies({ profileInstanceId, inReplyTo: messageId })`.
-- **Bundle Packaging:** When packaging a macOS client, the `--peer-engine` flag
-  may be passed to `scripts/release/build-client-package.mjs` to bundle and codesign
-  the native `peer-engine` executable into `bin/peer-engine`.
+  The owning supervisor exposes them asynchronously through `await pendingPeerReplies()`
+  and removes one from the pending list only after `await consumePeerReply(...)` is called.
+- **Outbound Requests:** `sendPeerMessage({ profileInstanceId, toEndpointId, text,
+  requestId, messageId, signal })` requires an active `watch()` session and sends only to
+  a peer that is both allowlisted and has a configured route. It returns after the peer
+  engine verifies `queued_local` or `settled`; `queued_local` means durable local queuing,
+  while `settled` means the remote peer durably accepted the message. Neither state
+  claims the remote harness executed it. Use the returned `messageId` to match a reply
+  with `await pendingPeerReplies({ profileInstanceId, inReplyTo: messageId })`.
+- **Operator Recovery & Status:** Operators can inspect status with `await peerStatus()`,
+  which surfaces engine states, endpoint IDs, phase counts, and IDs/reasons for held,
+  reply-failed, and rejected items (without exposing message bodies). Recovery is
+  durably performed via `await resolvePeerRecord(...)`.
 
 ## Building a package
 

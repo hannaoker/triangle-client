@@ -154,6 +154,72 @@ Aligned with pivot plan §7 (peer subset):
 - Harness execution / settlement adapter RPCs (later M2)
 - MESH claim emulation
 
+## Process contract (supervisor ↔ peer-engine daemon)
+
+When managed as a child process by a supervisor (e.g. `packages/agent-worker`'s
+`peer-engine-manager.mjs`):
+
+1. **Spawn & Stdio:**
+   - The engine is spawned with `detached: false` and stdio `["ignore", "pipe", "pipe"]`.
+   - The supervisor must synchronously attach error and stream listeners before awaiting
+     any async initialization.
+2. **Readiness Signal:**
+   - The daemon writes its ready indicator to `stderr`:
+     `peer-engine ready endpoint_id=<64-hex> ipc=<path>`
+   - This line is emitted only after the daemon has successfully taken exclusive ownership
+     of `$STATE_DIR/engine.lock` and bound the IPC domain socket.
+   - The supervisor treats the engine as ready only when this stderr line has been
+     observed and a subsequent IPC `hello` request returns a matching `endpoint_id`.
+3. **Signals & Process Lifetime:**
+   - Graceful termination is requested via `SIGINT` (Ctrl-C). The daemon catches `SIGINT`,
+     flushes and commits pending journal operations, releases the lock, and terminates cleanly.
+   - The supervisor waits up to 5 seconds after `SIGINT` before sending `SIGKILL`.
+   - The IPC `shutdown` method terminates **only the active IPC session/connection**, not
+     the daemon process.
+4. **Continuous Stream Drainage:**
+   - The engine writes operational logging to stdout and stderr.
+   - The supervisor must continuously read and drain both stdout and stderr streams.
+     Failure to drain streams will block the daemon once OS pipe buffers (~64 KiB) fill.
+5. **Sole-Writer Guarantee & Pre-Flight Probe:**
+   - Before spawning, the supervisor probes `$STATE_DIR/ipc/peer-engine.sock`.
+   - If an existing socket answers a connection attempt, the supervisor refuses to spawn
+     with `engine_already_running` without adopting foreign or orphaned engines.
+
+## Node adapter review record (PR #104)
+
+Review of the experimental Node peer supervisor (`packages/agent-worker`) against the
+engine contract identified 15 primary findings and 7 hardening items addressed in #104:
+
+- **F1 / F4 / F10 / F14 (Drain state machine & correlation):** Replaced unbounded retention
+  and unverified redelivery with SQLite schema `PRAGMA user_version = 1`. Inbound runner
+  failures enter `held`, input payload is kept, and the inbound item is acknowledged so
+  the inbox advances. Unsolicited replies and late replies against closed outbound
+  correlation are rejected with `correlation_closed`. SQL-level indexed queries prevent
+  `LIMIT 200` starvation.
+- **F2 / D3 / D4 (Wire protocol validation & outcome delivery):** Inbound execution
+  failures emit best-effort terminal `outcome` frames. Size limits enforce maximum payload
+  (256 KiB) and wire frames (320 KiB).
+- **F3 (Poison items):** Malformed envelopes or unroutable frames are rejected and
+  acknowledged immediately without invoking the runner or jamming the inbox.
+- **F5 / F11 / F12 / X5 (Manager lifecycle):** Enforced binary path safety (regular file,
+  not symlinked, executable, secure ownership). Flags `--relay-only --relay-url <url>`
+  are passed together. Socket pre-probe rejects foreign engines without adopting. Stop
+  uses `SIGINT` directly with single-flight state machine.
+- **F6 / D1 (Supervisor isolation):** Reverted premature packaging additions to production
+  closure. Created experimental programmatic entry point `peer-supervisor.mjs` and verified
+  production bundle closure guard.
+- **F7 (Log stream drainage):** Output streams are continuously drained with line buffering,
+  ANSI stripping, and rate limits to prevent engine pipe backpressure deadlocks.
+- **F8 / X4 (Lane architecture):** Created `peer-lane.mjs` running one durable wake loop per
+  configured profile. Construction is lazy (X4); failure of one profile remains isolated
+  as that profile's status and never fails supervisor construction or other lanes.
+- **F9 (Context ID derivation):** Scoped runner context IDs deterministically from sender
+  and request ID digest.
+- **F13 (Path safety & capacity):** Shared `peer/private-path.mjs` and `peer/ipc-client.mjs`
+  enforce directory security. 10,000-record cap applies backpressure without dropped acks.
+- **F15 (Documentation integrity):** Documentation and quickstart restricted strictly to
+  reachable programmatic APIs.
+
 ## Compatibility
 
 While draft, shape changes update this document in the same PR. Once frozen,

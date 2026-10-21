@@ -14,11 +14,13 @@ direct-or-relayed peer links, owns a durable peer journal, and exposes a
   backoff and 7-day expiry, paginated inbox + `ack`, journal compaction, and a
   state-dir lock (single writer).
 - **Supervisor integration (experimental macOS slice):** `packages/agent-worker`
-  provides lifecycle management (`peer-engine-manager.mjs`) and drain execution
-  (`peer-drain-service.mjs`) for configured `peerWakes` behind `experimentalGate: true`.
+  provides lifecycle management (`peer-engine-manager.mjs`), drain execution
+  (`peer-drain-service.mjs`), and lane coordination (`peer-lane.mjs`) for configured
+  `peerWakes` behind `experimentalGate: true` through the experimental programmatic entry
+  point `peer-supervisor.mjs`.
   Executes runner harnesses, journals admission into SQLite before execution,
-  quarantines unrecovered inference, and ACKs inbound messages only after verified
-  local outbound admission.
+  quarantines unrecovered inference into a held state, binds replies to correlation records,
+  and ACKs inbound messages only after verified local outbound admission.
 - **Out of scope:** signed roster admission, Triangle identity ↔ Iroh binding,
   cross-network NAT proof on physical networks, Linux/Windows packaging, MESH/Iroh hybrid delivery.
 - **Never:** MESH bearers/credentials, workload keys, or MESH claim emulation. Peer
