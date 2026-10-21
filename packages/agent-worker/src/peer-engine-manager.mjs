@@ -78,6 +78,28 @@ export function validateEngineBinaryPath(specifiedPath) {
   return specifiedPath;
 }
 
+const RELAY_MODES = Object.freeze([undefined, null, false, "default", "direct-only", "relay-only"]);
+
+// Resolves the transport options into engine flags, rejecting the combinations the engine refuses or would
+// silently ignore, including through the legacy `relay` alias (P5).
+export function resolvePeerTransport({ relay = "default", relayOnly = false, directOnly = false, relayUrl = null } = {}) {
+  if (!RELAY_MODES.includes(relay)) {
+    throw coded("invalid_transport", `Unsupported relay mode: ${String(relay)}`);
+  }
+  const direct = Boolean(directOnly) || relay === "direct-only";
+  const relayOnlyMode = Boolean(relayOnly) || relay === "relay-only";
+  if (direct && relayOnlyMode) {
+    throw coded("invalid_transport", "direct-only conflicts with relay-only");
+  }
+  if (relayUrl != null && (typeof relayUrl !== "string" || !relayUrl.startsWith("https://"))) {
+    throw coded("invalid_transport", "relayUrl must be an https URL");
+  }
+  if (direct && relayUrl != null) {
+    throw coded("invalid_transport", "direct-only conflicts with relayUrl");
+  }
+  return Object.freeze({ directOnly: direct, relayOnly: relayOnlyMode, relayUrl: relayUrl ?? null });
+}
+
 export function createPeerEngineManager({
   stateRoot,
   allowedPeers = [],
@@ -89,8 +111,13 @@ export function createPeerEngineManager({
   logger = console,
   env = process.env,
   spawnImpl = spawn,
+  startTimeoutMs = 15000,
 } = {}) {
   assertSafeStateRoot(stateRoot, { create: true });
+  if (!Number.isSafeInteger(startTimeoutMs) || startTimeoutMs < 1 || startTimeoutMs > 120000) {
+    throw coded("invalid_options", "startTimeoutMs must be between 1 and 120000");
+  }
+  const transport = resolvePeerTransport({ relay, relayOnly, directOnly, relayUrl });
   const socketPath = path.join(stateRoot, "ipc/peer-engine.sock");
 
   let child = null;
@@ -99,19 +126,16 @@ export function createPeerEngineManager({
   let ipcClient = null;
   let startPromise = null;
   let stopPromise = null;
+  // Each start attempt gets a number; stop() advances it so a cancelled attempt's cleanup and late events
+  // cannot touch a newer engine (P2). cancelStart rejects the attempt that is still waiting for readiness.
+  let startAttempt = 0;
+  let cancelStart = null;
 
   function buildArgs() {
     const args = ["--state-dir", stateRoot];
-    if (directOnly || relay === "direct-only") {
-      args.push("--direct-only");
-    } else if (relayOnly || relay === "relay-only") {
-      args.push("--relay-only");
-      if (typeof relayUrl === "string" && relayUrl.startsWith("https://")) {
-        args.push("--relay-url", relayUrl);
-      }
-    } else if (typeof relayUrl === "string" && relayUrl.startsWith("https://")) {
-      args.push("--relay-url", relayUrl);
-    }
+    if (transport.directOnly) args.push("--direct-only");
+    if (transport.relayOnly) args.push("--relay-only");
+    if (transport.relayUrl) args.push("--relay-url", transport.relayUrl);
     for (const peer of allowedPeers) {
       if (typeof peer === "string" && /^[a-f0-9]{64}$/.test(peer)) {
         args.push("--allow-peer", peer);
@@ -175,12 +199,16 @@ export function createPeerEngineManager({
         assertSafeStateRoot(stateRoot, { create: true });
         const executable = validateEngineBinaryPath(binaryPath ?? "peer-engine");
 
+        const attempt = ++startAttempt;
         state = "starting";
         endpointId = null;
         ipcClient = null;
 
         const run = async () => {
           await probeExistingSocket();
+          if (attempt !== startAttempt) {
+            throw coded("engine_stopped", "peer-engine start was cancelled by stop()");
+          }
 
         return new Promise((resolve, reject) => {
           let settled = false;
@@ -198,6 +226,7 @@ export function createPeerEngineManager({
             if (settled) return;
             settled = true;
             cleanupTimers();
+            if (cancelStart === settleReject) cancelStart = null;
             state = "ready";
             startPromise = null;
             resolve(val);
@@ -206,9 +235,11 @@ export function createPeerEngineManager({
             if (settled) return;
             settled = true;
             cleanupTimers();
+            if (cancelStart === settleReject) cancelStart = null;
             startPromise = null;
             reject(err);
           };
+          cancelStart = settleReject;
 
           const args = buildArgs();
           const childEnv = filterPeerEngineEnvironment(env);
@@ -241,11 +272,11 @@ export function createPeerEngineManager({
           });
 
           proc.once("exit", (code, sig) => {
+            // stop() detaches the child before signalling it, so a stopped or superseded engine's exit is ignored.
+            if (child !== proc) return;
             if (state === "ready") {
               state = "exited";
               logger.warn?.("triangle_peer_engine_exited", { code, signal: sig });
-            } else if (state === "stopping") {
-              state = "stopped";
             } else {
               settleReject(coded("engine_crashed", `peer-engine exited unexpectedly with code ${code}`));
             }
@@ -275,6 +306,10 @@ export function createPeerEngineManager({
               buf += chunk.toString("utf8");
               const lines = buf.split(/\r?\n/);
               buf = lines.pop();
+              if (buf.length > 64 * 1024) {
+                buf = "";
+                droppedCount++;
+              }
 
               const nowTime = Date.now();
               if (nowTime > resetAt) {
@@ -287,21 +322,24 @@ export function createPeerEngineManager({
               }
 
               for (const rawLine of lines) {
-                lineCount++;
-                if (lineCount > 50) {
-                  droppedCount++;
-                  continue;
-                }
                 const line = rawLine.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 500);
                 if (!line) continue;
 
-                if (isStderr) {
+                // Detect the ready line before rate limiting, so a chatty startup cannot hide it (P3).
+                if (isStderr && !stderrReady) {
                   const match = line.match(/^peer-engine ready endpoint_id=([a-f0-9]{64}) ipc=(.*)$/);
                   if (match) {
                     endpointId = match[1];
                     stderrReady = true;
                     verifyHello();
+                    continue;
                   }
+                }
+
+                lineCount++;
+                if (lineCount > 50) {
+                  droppedCount++;
+                  continue;
                 }
 
                 if (line.includes("ERROR")) {
@@ -329,7 +367,7 @@ export function createPeerEngineManager({
 
           timer = setTimeout(() => {
             settleReject(coded("engine_timeout", "peer-engine startup timed out waiting for socket"));
-          }, 15000);
+          }, startTimeoutMs);
 
           onAbort = () => {
             settleReject(signal?.reason ?? coded("aborted", "peer-engine start aborted"));
@@ -339,7 +377,8 @@ export function createPeerEngineManager({
       };
 
       startPromise = run().catch(async (err) => {
-        await this.stop();
+        // Clean up only this attempt. If stop() cancelled it, stop() has already run; a newer engine must survive.
+        if (attempt === startAttempt) await stopEngine();
         throw err;
       });
 
@@ -350,53 +389,61 @@ export function createPeerEngineManager({
     }
   },
 
-    async stop() {
-      if (stopPromise) return stopPromise;
-      if ((state === "stopped" || state === "exited") && !child) {
-        state = "stopped";
-        return;
-      }
-      state = "stopping";
-      const proc = child;
-      child = null;
-
-      let resolveStop;
-      stopPromise = new Promise((resolve) => {
-        resolveStop = resolve;
-      });
-
-      try {
-        if (proc && proc.exitCode === null) {
-          await new Promise((resolve) => {
-            let timer = null;
-            const onExit = () => {
-              if (timer) clearTimeout(timer);
-              resolve();
-            };
-            proc.once("exit", onExit);
-
-            try {
-              proc.kill("SIGINT");
-            } catch {}
-
-            if (proc.exitCode !== null) {
-              proc.removeListener("exit", onExit);
-              return resolve();
-            }
-
-            timer = setTimeout(() => {
-              try {
-                proc.kill("SIGKILL");
-              } catch {}
-              resolve();
-            }, 5000);
-          });
-        }
-      } finally {
-        state = "stopped";
-        stopPromise = null;
-        resolveStop?.();
-      }
+    stop() {
+      return stopEngine();
     },
   });
+
+  async function stopEngine() {
+    if (stopPromise) return stopPromise;
+    startAttempt++;
+    const cancel = cancelStart;
+    cancelStart = null;
+    cancel?.(coded("engine_stopped", "peer-engine start was cancelled by stop()"));
+    if ((state === "stopped" || state === "exited") && !child) {
+      state = "stopped";
+      return;
+    }
+    state = "stopping";
+    const proc = child;
+    child = null;
+
+    let resolveStop;
+    stopPromise = new Promise((resolve) => {
+      resolveStop = resolve;
+    });
+
+    try {
+      if (proc && proc.exitCode === null) {
+        await new Promise((resolve) => {
+          let timer = null;
+          const onExit = () => {
+            if (timer) clearTimeout(timer);
+            resolve();
+          };
+          proc.once("exit", onExit);
+
+          try {
+            proc.kill("SIGINT");
+          } catch {}
+
+          if (proc.exitCode !== null) {
+            proc.removeListener("exit", onExit);
+            return resolve();
+          }
+
+          timer = setTimeout(() => {
+            try {
+              proc.kill("SIGKILL");
+            } catch {}
+            resolve();
+          }, 5000);
+        });
+      }
+    } finally {
+      state = "stopped";
+      stopPromise = null;
+      resolveStop?.();
+    }
+  }
 }

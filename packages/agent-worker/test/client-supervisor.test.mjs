@@ -1977,6 +1977,7 @@ test("supervisor rejects peerWakes without peer supervisor entry point or factor
         peerWakes: [
           {
             experimentalGate: true,
+            engineBinaryPath: "/trusted/peer-engine",
             profile: "peer-agent",
             profileInstanceId: id(80),
             stateRoot: "/tmp/state",
@@ -2011,6 +2012,7 @@ test("supervisor rejects peerWake instanceId collision with worker instance", ()
         peerWakes: [
           {
             experimentalGate: true,
+            engineBinaryPath: "/trusted/peer-engine",
             profile: "peer-agent",
             profileInstanceId: id(81),
             stateRoot: "/tmp/state",
@@ -2048,6 +2050,7 @@ test("supervisor runOnce executes peer drain step and populates peerInstances", 
     peerWakes: [
       {
         experimentalGate: true,
+        engineBinaryPath: "/trusted/peer-engine",
         profile: "peer-agent",
         profileInstanceId: id(82),
         stateRoot: "/tmp/peer-state",
@@ -2104,6 +2107,7 @@ test("supervisor watch starts peer engine manager, loops drain, and stops on abo
   let engineStopped = false;
   let drainSteps = 0;
   let drainClosed = false;
+  let drainStopped = false;
   const controller = new AbortController();
 
   const mockEngine = {
@@ -2129,6 +2133,9 @@ test("supervisor watch starts peer engine manager, loops drain, and stops on abo
       drainSteps++;
       return { state: "acked", messageId: "msg-002" };
     },
+    async stop() {
+      drainStopped = true;
+    },
     close() {
       drainClosed = true;
     },
@@ -2139,11 +2146,12 @@ test("supervisor watch starts peer engine manager, loops drain, and stops on abo
     peerWakes: [
       {
         experimentalGate: true,
+        engineBinaryPath: "/trusted/peer-engine",
         profile: "peer-agent",
         profileInstanceId: id(83),
         stateRoot: "/tmp/peer-state",
         allowedPeers: [],
-        pollIntervalMs: 10,
+        pollIntervalMs: 100,
         runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
         runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(83) },
       },
@@ -2159,13 +2167,17 @@ test("supervisor watch starts peer engine manager, loops drain, and stops on abo
 
   assert.equal(engineStarted, true);
   assert.equal(drainSteps >= 1, true);
-  assert.equal(drainClosed, true);
+  assert.equal(drainStopped, true);
   assert.equal(engineStopped, true);
+  // The lane keeps its drain open until the supervisor closes it.
+  assert.equal(drainClosed, false);
+  await supervisor.close();
+  assert.equal(drainClosed, true);
 });
 
 test("supervisor sends only to a configured allowed peer and preserves active engine ownership", async () => {
   const recipientId = "a".repeat(64);
-  const route = { id: recipientId, addrs: ["/ip4/127.0.0.1/udp/1234/quic-v1"] };
+  const route = { id: recipientId, addrs: [{ Ip: "127.0.0.1:1234" }] };
   const sent = [];
   let engineStarts = 0;
   let engineStops = 0;
@@ -2216,6 +2228,10 @@ test("supervisor sends only to a configured allowed peer and preserves active en
       });
     },
     consumeReply() { return { consumed: true }; },
+    async start({ signal }) {
+      while (!signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+    async stop() {},
     close() {},
   };
   assert.throws(
@@ -2224,6 +2240,7 @@ test("supervisor sends only to a configured allowed peer and preserves active en
       peerWakes: [
         {
           experimentalGate: true,
+          engineBinaryPath: "/trusted/peer-engine",
           profile: "peer-agent",
           profileInstanceId: id(84),
           stateRoot: "/tmp/peer-send-state",
@@ -2249,6 +2266,7 @@ test("supervisor sends only to a configured allowed peer and preserves active en
     peerWakes: [
       {
         experimentalGate: true,
+        engineBinaryPath: "/trusted/peer-engine",
         profile: "peer-agent",
         profileInstanceId: id(84),
         stateRoot: "/tmp/peer-send-state",
@@ -2284,7 +2302,10 @@ test("supervisor sends only to a configured allowed peer and preserves active en
   });
 
   // D2: runOnce fails with peer_lane_busy while watch() runs
-  await assert.rejects(supervisor.runOnce(), { code: "peer_lane_busy" });
+  // The MESH results still come back, with the peer lane reported as failed (P13).
+  const busy = await supervisor.runOnce();
+  assert.equal(busy.peerInstances[0].failed, true);
+  assert.equal(busy.peerInstances[0].code, "peer_lane_busy");
 
   const result = await supervisor.sendPeerMessage({
     profileInstanceId: id(84),

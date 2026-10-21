@@ -94,6 +94,10 @@ test("D2: engine ownership rules (send outside watch fails; runOnce while watchi
 
   const mockDrain = {
     async step() { return { state: "idle" }; },
+    async start({ signal }) {
+      while (!signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+    async stop() {},
     async sendRequest({ toEndpointId, text }) {
       return { state: "queued_local", toEndpointId, text };
     },
@@ -238,6 +242,13 @@ test("per-profile isolated loops: failing profile does not stop or restart healt
           }
           return { state: "idle" };
         },
+        async start({ signal }) {
+          while (!signal?.aborted) {
+            await this.step();
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        },
+        async stop() {},
         close() {},
       };
     },
@@ -423,11 +434,13 @@ test("close() closes drains and stops engine managers, then rejects operations",
 
   const mockEngine = {
     get state() { return "ready"; },
+    async start() {},
     async stop() { engineStopped = true; },
   };
 
   const mockDrain = {
     step: async () => ({ state: "idle" }),
+    async stop() {},
     async close() { drainClosed = true; },
   };
 

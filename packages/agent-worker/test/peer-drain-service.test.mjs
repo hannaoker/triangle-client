@@ -1049,10 +1049,11 @@ test("cap backpressure: at 10,000 records, pauses intake without acking or spinn
     const { DatabaseSync } = await import("node:sqlite");
     const rawDb = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
     rawDb.exec("BEGIN");
+    // Held records whose outcomes were already sent, so the outcome sweep has nothing to do.
     for (let i = 0; i < 10000; i++) {
       rawDb.prepare(`
-        INSERT INTO records(sender, message_id, input_hash, phase, created_at, updated_at)
-        VALUES(?, ?, 'h', 'held', 0, 0)
+        INSERT INTO records(sender, message_id, input_hash, phase, outcome_sent, created_at, updated_at)
+        VALUES(?, ?, 'h', 'held', 1, 0, 0)
       `).run(senderId, `cap-msg-${i}`);
     }
     rawDb.exec("COMMIT");

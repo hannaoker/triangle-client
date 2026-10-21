@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import net from "node:net";
 import path from "node:path";
-import { chmodSync, mkdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 
 const stateDir = process.argv[process.argv.indexOf("--state-dir") + 1];
 const ipcDir = path.join(stateDir, "ipc");
@@ -11,6 +11,10 @@ const sock = path.join(ipcDir, "peer-engine.sock");
 rmSync(sock, { force: true });
 const endpoint = "c".repeat(64);
 let written = 0;
+// Launches are counted per state directory, so a test can tell engine processes apart.
+const launchFile = path.join(stateDir, "launches");
+const launch = (existsSync(launchFile) ? Number(readFileSync(launchFile, "utf8")) : 0) + 1;
+writeFileSync(launchFile, String(launch));
 const server = net.createServer((conn) => {
   let buf = Buffer.alloc(0);
   conn.on("data", (chunk) => {
@@ -32,18 +36,28 @@ const server = net.createServer((conn) => {
     }
   });
 });
-server.listen(sock, () => {
-  chmodSync(sock, 0o600);
-  process.stderr.write(`peer-engine ready endpoint_id=${endpoint} ipc=${sock}\n`);
-  if (process.env.RUST_LOG === "flood") {
-    setInterval(() => {
-      writeSync(1, `INFO log line ${"x".repeat(4000)}\n`);
-      written += 4016;
-    }, 25);
-  }
-});
+// RUST_LOG=chatty logs 60 startup lines before the ready line; RUST_LOG=slowfirst never becomes ready
+// on its first launch in a state directory.
+if (process.env.RUST_LOG === "chatty") {
+  for (let i = 0; i < 60; i++) writeSync(1, `INFO iroh: startup detail ${i}\n`);
+}
+if (process.env.RUST_LOG === "slowfirst" && launch === 1) {
+  setInterval(() => {}, 1000);
+} else {
+  server.listen(sock, () => {
+    chmodSync(sock, 0o600);
+    process.stderr.write(`peer-engine ready endpoint_id=${endpoint} ipc=${sock}\n`);
+    if (process.env.RUST_LOG === "flood") {
+      setInterval(() => {
+        writeSync(1, `INFO log line ${"x".repeat(4000)}\n`);
+        written += 4016;
+      }, 25);
+    }
+  });
+}
 process.on("SIGINT", () => {
   writeFileSync(path.join(stateDir, "graceful-exit"), "ctrl_c handled\n");
+  writeFileSync(path.join(stateDir, `sigint-${launch}`), "ctrl_c handled\n");
   server.close();
   process.exit(0);
 });
