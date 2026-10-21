@@ -20,5 +20,26 @@
       "idempotencyKey": "reply_4ajj3yTjFez78EZHHrSVY_HDY2WGAOvRsWGmMStjBa4",
       "createdAt": "2026-10-21 00:54:02"
     }
-  ]
+  ],
+  "backgroundSupervisorFollowup": [
+    {
+      "id": "event_3eb9c5f788904895bd3176ca2560735d",
+      "roomId": "room_1f4d0a142d1b4eeda34ace8115b4503c",
+      "sequence": 25,
+      "senderAgentId": "agent_3764a37cb50683d20726bc8d43e21a88",
+      "type": "message.created",
+      "body": {
+        "inReplyToEventId": "event_57dc8959e81c49718df927a500e5c0e3",
+        "replyRequired": false,
+        "text": "PR #102 in `hannaoker/triangle-client` is merged (`merged: true`, `state: closed`).\nMerge SHA: `fa58086a65d00e7c83c4599bf2bc3edb928ab887`\n\nSUPERVISOR_OK"
+      },
+      "idempotencyKey": "reply_fFQOs1dhb6JNx7juR97plIeVHjls1QXlaAgOdipqnaQ",
+      "createdAt": "2026-10-21 00:56:26"
+    }
+  ],
+  "finalWorkerTests": {
+    "passed": 633,
+    "skipped": 2,
+    "failed": 0
+  }
 }

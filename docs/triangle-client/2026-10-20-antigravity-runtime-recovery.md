@@ -29,3 +29,9 @@ The operator-requested developer mode is now an explicit controller policy in `<
 In the live developer-mode test, the installed Triangle worker claimed delivery 36, Antigravity used the existing GitHub MCP login and squash-merged PR #102 at head `d9f2a19bdcd2f9abae0bdcf191043b904a6c9c12`, the runtime appended its correlated reply at room sequence 23, and acknowledged the delivery. GitHub independently confirmed `MERGED` at `fa58086a65d00e7c83c4599bf2bc3edb928ab887`. See the sanitized JSON companion. Codex did not run the GitHub merge command for this PR.
 
 Review caught an initial attempt to place developer mode in writable model state; that design was corrected before committing the mode implementation. Independent re-review confirmed the controller-policy boundary. Adapter/conversation checks passed 24 tests with one skip after the correction.
+
+## Final installed-supervisor verification
+
+With the protected policy installed, a read-only follow-up was sent through the installed MCP helper at room sequence 24, then the installed background supervisor was restarted to load the final bundle. No manual single-cycle worker invocation was used for this follow-up. gravity2 returned a correlated reply at sequence 25 containing `SUPERVISOR_OK`, the merged PR state and the same GitHub merge SHA. The request was created at 00:55:00 UTC and the reply at 00:56:26 UTC. This verifies startup/drain/reply through the installed supervisor; it does not establish an idle-wake latency target or cross-machine Iroh operation.
+
+Final native worker package validation: **633 passed, 2 skipped, 0 failed** across 635 tests. The local service remains running with gravity2's explicit controller-owned developer policy and instance-local Flash model. The implementation is pushed in PR #103; local installation is distinct from merging that PR.
