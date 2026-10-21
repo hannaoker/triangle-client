@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createClientSupervisor } from "../src/client-supervisor.mjs";
+import { createPeerSupervisor } from "../src/peer-supervisor.mjs";
 import { createConcurrencyGate } from "../src/concurrency-gate.mjs";
 import { createInstallWatchDispatcher } from "../src/install-watch-dispatcher.mjs";
 import { createAgentWorker } from "../src/runtime.mjs";
@@ -2042,7 +2043,7 @@ test("supervisor runOnce executes peer drain step and populates peerInstances", 
     close() {},
   };
 
-  const supervisor = createClientSupervisor({
+  const supervisor = createPeerSupervisor({
     instances: [],
     peerWakes: [
       {
@@ -2078,7 +2079,7 @@ test("supervisor runOnce executes peer drain step and populates peerInstances", 
   assert.equal(step.peerInstances[0].instanceId, id(82));
   assert.equal(step.peerInstances[0].profile, "peer-agent");
   assert.equal(step.peerInstances[0].outcome.state, "acked");
-  assert.deepEqual(supervisor.pendingPeerReplies(), [
+  assert.deepEqual(await supervisor.pendingPeerReplies(), [
     {
       profile: "peer-agent",
       profileInstanceId: id(82),
@@ -2089,7 +2090,7 @@ test("supervisor runOnce executes peer drain step and populates peerInstances", 
     },
   ]);
   assert.deepEqual(
-    supervisor.consumePeerReply({
+    await supervisor.consumePeerReply({
       profileInstanceId: id(82),
       fromEndpointId: id(90),
       messageId: "reply-1",
@@ -2133,7 +2134,7 @@ test("supervisor watch starts peer engine manager, loops drain, and stops on abo
     },
   };
 
-  const supervisor = createClientSupervisor({
+  const supervisor = createPeerSupervisor({
     instances: [],
     peerWakes: [
       {
@@ -2181,8 +2182,8 @@ test("supervisor sends only to a configured allowed peer and preserves active en
         attempts: 1,
       };
     },
-    pendingReplies() {
-      return [
+    pendingReplies({ inReplyTo, requestId } = {}) {
+      const all = [
         {
           state: "reply_received",
           fromEndpointId: recipientId,
@@ -2208,12 +2209,17 @@ test("supervisor sends only to a configured allowed peer and preserves active en
           },
         },
       ];
+      return all.filter((r) => {
+        if (inReplyTo !== undefined && r.envelope?.in_reply_to !== inReplyTo) return false;
+        if (requestId !== undefined && r.envelope?.request_id !== requestId) return false;
+        return true;
+      });
     },
     consumeReply() { return { consumed: true }; },
     close() {},
   };
   assert.throws(
-    () => createClientSupervisor({
+    () => createPeerSupervisor({
       instances: [],
       peerWakes: [
         {
@@ -2238,7 +2244,7 @@ test("supervisor sends only to a configured allowed peer and preserves active en
     /peerWake\.allowedPeers and routes must cover the exact same peer IDs/,
   );
 
-  const supervisor = createClientSupervisor({
+  const supervisor = createPeerSupervisor({
     instances: [],
     peerWakes: [
       {
@@ -2261,7 +2267,25 @@ test("supervisor sends only to a configured allowed peer and preserves active en
     createPeerDrain: () => peerDrain,
   });
 
+  // D2: sendPeerMessage requires watch()
+  await assert.rejects(
+    supervisor.sendPeerMessage({
+      profileInstanceId: id(84),
+      toEndpointId: recipientId,
+      text: "Hello",
+    }),
+    { code: "peer_lane_not_running" },
+  );
+
   const controller = new AbortController();
+  const watchPromise = supervisor.watch({
+    signal: controller.signal,
+    sleep: async () => {},
+  });
+
+  // D2: runOnce fails with peer_lane_busy while watch() runs
+  await assert.rejects(supervisor.runOnce(), { code: "peer_lane_busy" });
+
   const result = await supervisor.sendPeerMessage({
     profileInstanceId: id(84),
     toEndpointId: recipientId,
@@ -2282,9 +2306,9 @@ test("supervisor sends only to a configured allowed peer and preserves active en
     signal: controller.signal,
   }]);
 
-  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "outbound-1" }).length, 1);
-  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), requestId: "request-2" }).length, 1);
-  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "missing" }).length, 0);
+  assert.equal((await supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "outbound-1" })).length, 1);
+  assert.equal((await supervisor.pendingPeerReplies({ profileInstanceId: id(84), requestId: "request-2" })).length, 1);
+  assert.equal((await supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "missing" })).length, 0);
   await assert.rejects(supervisor.sendPeerMessage({
     profileInstanceId: id(84),
     toEndpointId: "c".repeat(64),
@@ -2297,4 +2321,8 @@ test("supervisor sends only to a configured allowed peer and preserves active en
   }), /Unknown peer profileInstanceId/);
   assert.equal(engineStarts, 1);
   assert.equal(engineStops, 0);
+
+  controller.abort();
+  await watchPromise;
+  assert.equal(engineStops, 1);
 });
