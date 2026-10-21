@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { constants, fstatSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 import {
   createAgentPrompt as createSharedAgentPrompt,
@@ -125,8 +125,28 @@ export function createAgentPrompt(request) {
  * after `-p` the next token is consumed as the prompt. The prompt is always a
  * single argv element (spawned with shell: false), never interpolated.
  */
+function instanceModel(env) {
+  const directory = resolveStoreDirectory(env);
+  if (!directory) return null;
+  let fd;
+  try {
+    fd = openSync(path.join(directory, "triangle-antigravity-runtime.json"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0 || info.size > 4096) throw new Error();
+    const config = JSON.parse(readFileSync(fd, "utf8"));
+    if (!config || typeof config !== "object" || Array.isArray(config) || Object.keys(config).join() !== "model"
+        || typeof config.model !== "string" || !config.model.trim() || config.model.length > 160 || /[\r\n\0]/.test(config.model)) throw new Error();
+    return config.model;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw new Error("Invalid Antigravity instance runtime configuration");
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
+
 export function createAntigravityInvocation(prompt, env = process.env, { conversationId = null } = {}) {
   const args = [];
+  const model = instanceModel(env);
+  if (model) args.push("--model", model);
   if (conversationId !== null && conversationId !== undefined) {
     if (!isValidConversationId(conversationId)) throw new Error("Antigravity conversation id is invalid");
     args.push("--conversation", conversationId);

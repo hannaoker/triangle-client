@@ -591,3 +591,18 @@ test("Antigravity sandbox approves agy state roots (~/.gemini/antigravity-cli, ~
     /approved executable installation chain/,
   );
 });
+
+test('Antigravity model selection is explicit and instance-local', () => {
+  const root=mkdtempSync(join(tmpdir(),'triangle-agy-model-'));
+  const config=join(root,'triangle-antigravity-runtime.json');
+  try {
+    writeFileSync(config,JSON.stringify({model:'Gemini 3.8 Flash (High)'}),{mode:0o600});
+    const invocation=createAntigravityInvocation('request --model nope',{ANTIGRAVITY_HOME:root});
+    assert.deepEqual(invocation.args.slice(0,2),['--model','Gemini 3.8 Flash (High)']);
+    assert.ok(invocation.args.includes('request --model nope'));
+    writeFileSync(config,JSON.stringify({model:'bad\nmodel'}));
+    assert.throws(()=>createAntigravityInvocation('request',{ANTIGRAVITY_HOME:root}),/runtime configuration/);
+    rmSync(config);symlinkSync('/etc/hosts',config);
+    assert.throws(()=>createAntigravityInvocation('request',{ANTIGRAVITY_HOME:root}),/runtime configuration/);
+  } finally {rmSync(root,{recursive:true,force:true})}
+});
