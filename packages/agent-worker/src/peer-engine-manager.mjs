@@ -1,8 +1,11 @@
 import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, rmSync } from "node:fs";
+import { privateDir } from "./peer/private-path.mjs";
+import { createIpcClient } from "./peer/ipc-client.mjs";
+
+export { createIpcClient };
 
 export const PEER_ENGINE_IPC_PROTOCOL_VERSION = 1;
 export const MAX_IPC_REQUEST_BYTES = 1024 * 1024;
@@ -30,7 +33,6 @@ export function filterPeerEngineEnvironment(sourceEnv = process.env) {
   for (const key of Object.keys(sourceEnv)) {
     const upper = key.toUpperCase();
     if (FORBIDDEN_ENV_SUBSTRINGS.some((sub) => upper.includes(sub))) {
-      // Strictly exclude any credential-bearing or MESH environment variables
       continue;
     }
     if (PEER_ENGINE_ALLOWED_ENV_KEYS.includes(key)) {
@@ -39,7 +41,6 @@ export function filterPeerEngineEnvironment(sourceEnv = process.env) {
       }
     }
   }
-  // Ensure basic safe defaults if missing
   filtered.PATH = filtered.PATH || "/usr/bin:/bin";
   filtered.LANG = filtered.LANG || "C";
   filtered.LC_ALL = filtered.LC_ALL || "C";
@@ -47,192 +48,34 @@ export function filterPeerEngineEnvironment(sourceEnv = process.env) {
 }
 
 export function assertSafeStateRoot(stateRoot, { create = false } = {}) {
-  if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot) || stateRoot.includes("\0")) {
-    throw coded("unsafe_state_root", "stateRoot must be an absolute path");
-  }
-  if (path.resolve(stateRoot) !== stateRoot) {
-    throw coded("unsafe_state_root", "stateRoot must be canonical");
-  }
-  if (create && !existsSync(stateRoot)) {
-    mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
-  }
-  if (realpathSync(stateRoot) !== stateRoot) {
-    throw coded("unsafe_state_root", "stateRoot must not contain symlinks");
-  }
-  const stat = lstatSync(stateRoot);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw coded("unsafe_state_root", "stateRoot must be a regular directory");
-  }
-  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-    throw coded("unsafe_state_root", "stateRoot must be owned by the current user");
-  }
-  if ((stat.mode & 0o077) !== 0) {
-    throw coded("unsafe_state_root", "stateRoot must have mode 0700");
+  try {
+    privateDir(stateRoot, { create });
+  } catch (err) {
+    throw coded("unsafe_state_root", err.message);
   }
 }
 
-export function createIpcClient({ socketPath, timeoutMs = 30000 }) {
-  if (
-    typeof socketPath !== "string" ||
-    !path.isAbsolute(socketPath) ||
-    !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 1 ||
-    timeoutMs > 120000
-  ) {
-    throw coded("invalid_ipc_options", "Invalid IPC options");
+export function validateEngineBinaryPath(specifiedPath) {
+  if (typeof specifiedPath !== "string" || !path.isAbsolute(specifiedPath)) {
+    throw coded("invalid_binary_path", "Engine binary path must be an absolute path");
   }
-
-  return Object.freeze({
-    async request(method, params = {}, { signal } = {}) {
-      signal?.throwIfAborted();
-      assertSafeStateRoot(path.dirname(socketPath));
-      const st = lstatSync(socketPath);
-      if (
-        !st.isSocket() ||
-        st.isSymbolicLink() ||
-        (typeof process.getuid === "function" && st.uid !== process.getuid()) ||
-        (st.mode & 0o077) !== 0
-      ) {
-        throw coded("unsafe_socket", "IPC socket has unsafe permissions or is not a socket");
-      }
-
-      const socket = net.createConnection({ path: socketPath });
-      let buffer = Buffer.alloc(0);
-      let pending = null;
-      let fatal = null;
-
-      const stop = (error) => {
-        fatal ??= error;
-        pending?.reject(fatal);
-        pending = null;
-        socket.destroy();
-      };
-
-      const timer = setTimeout(() => stop(coded("ipc_timeout", "IPC request timed out")), timeoutMs);
-      const abort = () => stop(coded("aborted", "IPC request aborted"));
-      signal?.addEventListener("abort", abort, { once: true });
-
-      socket.on("error", (err) => stop(coded("ipc_disconnected", err.message)));
-      socket.on("close", () => {
-        if (pending) stop(coded("ipc_disconnected", "IPC socket closed unexpectedly"));
-      });
-
-      socket.on("data", (chunk) => {
-        buffer = Buffer.concat([buffer, chunk]);
-        if (buffer.length > MAX_IPC_RESPONSE_BYTES + 4) {
-          return stop(coded("ipc_oversized", "IPC response exceeded maximum allowed bytes"));
-        }
-        while (buffer.length >= 4) {
-          const size = buffer.readUInt32BE(0);
-          if (size < 2 || size > MAX_IPC_RESPONSE_BYTES) {
-            return stop(coded("ipc_oversized", "IPC response frame invalid or oversized"));
-          }
-          if (buffer.length < 4 + size) return;
-          let value;
-          try {
-            value = JSON.parse(buffer.subarray(4, 4 + size).toString("utf8"));
-          } catch {
-            return stop(coded("ipc_invalid", "IPC response is not valid JSON"));
-          }
-          buffer = buffer.subarray(4 + size);
-          if (
-            !pending ||
-            value.protocol_version !== PEER_ENGINE_IPC_PROTOCOL_VERSION ||
-            value.id !== pending.id ||
-            (!Object.hasOwn(value, "result") && !value.error) ||
-            (value.error && Object.hasOwn(value, "result"))
-          ) {
-            return stop(coded("ipc_invalid", "Malformed IPC response"));
-          }
-          const p = pending;
-          pending = null;
-          if (value.error) {
-            const errCode =
-              typeof value.error.code === "string" && /^[a-z_]{1,64}$/.test(value.error.code)
-                ? value.error.code
-                : "ipc_error";
-            p.reject(coded(errCode, value.error.message || errCode));
-          } else {
-            p.resolve(value.result);
-          }
-        }
-      });
-
-      const call = (name, args) =>
-        new Promise((resolve, reject) => {
-          if (fatal) return reject(fatal);
-          const id = randomUUID();
-          const body = Buffer.from(
-            JSON.stringify({
-              protocol_version: PEER_ENGINE_IPC_PROTOCOL_VERSION,
-              id,
-              method: name,
-              params: args,
-            }),
-          );
-          if (body.length > MAX_IPC_REQUEST_BYTES) {
-            return reject(coded("ipc_oversized", "IPC request exceeds max bytes"));
-          }
-          pending = { id, resolve, reject };
-          const header = Buffer.alloc(4);
-          header.writeUInt32BE(body.length);
-          socket.write(Buffer.concat([header, body]));
-        });
-
-      try {
-        const hello = await call("hello", {});
-        if (
-          hello?.protocol_version !== PEER_ENGINE_IPC_PROTOCOL_VERSION ||
-          typeof hello?.endpoint_id !== "string" ||
-          !/^[a-f0-9]{64}$/.test(hello.endpoint_id)
-        ) {
-          throw coded("ipc_invalid_hello", "Peer engine returned invalid hello response");
-        }
-        signal?.throwIfAborted();
-        return await call(method, params);
-      } finally {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", abort);
-        socket.destroy();
-      }
-    },
-  });
-}
-
-function resolveBinaryPath(specifiedPath) {
-  if (specifiedPath) {
-    if (!path.isAbsolute(specifiedPath)) {
-      throw coded("invalid_binary_path", "Engine binary path must be absolute");
-    }
-    if (!existsSync(specifiedPath)) {
-      throw coded("binary_not_found", `Engine binary not found at ${specifiedPath}`);
-    }
-    return specifiedPath;
+  const stat = lstatSync(specifiedPath, { throwIfNoEntry: false });
+  if (!stat) {
+    throw coded("ENOENT", `Engine binary not found at ${specifiedPath}`);
   }
-
-  const projectRoot = process.env.TRIANGLE_PROJECT_ROOT;
-  const home = process.env.HOME;
-  const candidates = [
-    projectRoot ? path.join(projectRoot, "bin/peer-engine") : null,
-    home ? path.join(home, "Library/Application Support/The Triangle/bin/peer-engine") : null,
-    path.resolve(import.meta.dirname, "../../../peer-engine/target/release/peer-engine"),
-    path.resolve(import.meta.dirname, "../../../peer-engine/target/debug/peer-engine"),
-    "/usr/local/bin/peer-engine",
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      try {
-        const stat = lstatSync(candidate);
-        if (stat.isFile() && !stat.isSymbolicLink()) {
-          return candidate;
-        }
-      } catch {}
-    }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw coded("unsafe_file", `Engine binary must be a regular file: ${specifiedPath}`);
   }
-
-  // Fallback to searching PATH if available
-  return "peer-engine";
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid() && stat.uid !== 0) {
+    throw coded("unsafe_file", `Engine binary must be owned by the current user or root: ${specifiedPath}`);
+  }
+  if ((stat.mode & 0o022) !== 0) {
+    throw coded("unsafe_file", `Engine binary must not be group- or world-writable: ${specifiedPath}`);
+  }
+  if ((stat.mode & 0o111) === 0) {
+    throw coded("EACCES", `Engine binary is not executable: ${specifiedPath}`);
+  }
+  return specifiedPath;
 }
 
 export function createPeerEngineManager({
@@ -249,12 +92,12 @@ export function createPeerEngineManager({
 } = {}) {
   assertSafeStateRoot(stateRoot, { create: true });
   const socketPath = path.join(stateRoot, "ipc/peer-engine.sock");
+
   let child = null;
-  let running = false;
-  let stopping = false;
-  const exitListeners = new Set();
+  let state = "stopped"; // stopped | starting | ready | stopping | exited
   let endpointId = null;
   let ipcClient = null;
+  let startPromise = null;
 
   function buildArgs() {
     const args = ["--state-dir", stateRoot];
@@ -262,6 +105,9 @@ export function createPeerEngineManager({
       args.push("--direct-only");
     } else if (relayOnly || relay === "relay-only") {
       args.push("--relay-only");
+      if (typeof relayUrl === "string" && relayUrl.startsWith("https://")) {
+        args.push("--relay-url", relayUrl);
+      }
     } else if (typeof relayUrl === "string" && relayUrl.startsWith("https://")) {
       args.push("--relay-url", relayUrl);
     }
@@ -273,119 +119,266 @@ export function createPeerEngineManager({
     return args;
   }
 
-  async function waitForReady(timeoutMs = 15000, signal = null) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      signal?.throwIfAborted();
-      if (!child || child.exitCode !== null) {
-        throw coded("engine_crashed", "peer-engine process exited unexpectedly before ready");
-      }
-      if (existsSync(socketPath)) {
+  async function probeExistingSocket() {
+    if (!existsSync(socketPath)) return;
+    await new Promise((resolve, reject) => {
+      const conn = net.createConnection(socketPath);
+      conn.once("connect", () => {
+        conn.destroy();
+        reject(coded("engine_already_running", `Peer engine socket already listening at ${socketPath}`));
+      });
+      conn.once("error", () => {
+        conn.destroy();
         try {
-          const client = createIpcClient({ socketPath, timeoutMs: 2000 });
-          const status = await client.request("status", {}, { signal });
-          if (status?.endpoint_id) {
-            endpointId = status.endpoint_id;
-            return { endpointId, socketPath };
-          }
-        } catch {
-          // Socket might not be listening yet, retry
-        }
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw coded("engine_timeout", "peer-engine startup timed out waiting for socket");
+          rmSync(socketPath, { force: true });
+        } catch {}
+        resolve();
+      });
+    });
   }
 
   return Object.freeze({
     stateRoot,
     socketPath,
+    get state() {
+      return state;
+    },
     get endpointId() {
       return endpointId;
     },
     get isRunning() {
-      return running;
+      return state === "ready";
     },
+
     getIpcClient(timeoutMs = 30000) {
-      if (!running && !existsSync(socketPath)) {
-        throw coded("engine_not_running", "peer-engine is not running");
+      if (state !== "ready") {
+        throw coded("engine_not_ready", "peer-engine is not ready");
       }
       ipcClient ??= createIpcClient({ socketPath, timeoutMs });
       return ipcClient;
     },
-    async start({ signal } = {}) {
-      if (running) {
-        return { endpointId, socketPath };
-      }
-      signal?.throwIfAborted();
-      assertSafeStateRoot(stateRoot, { create: true });
-      const executable = resolveBinaryPath(binaryPath);
-      const args = buildArgs();
-      const childEnv = filterPeerEngineEnvironment(env);
 
-      logger.info?.("triangle_peer_engine_starting", {
-        stateRoot,
-        executable,
-        allowedPeersCount: allowedPeers.length,
-      });
-
-      child = spawnImpl(executable, args, {
-        cwd: stateRoot,
-        env: childEnv,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      running = true;
-      child.on("exit", (code, sig) => {
-        running = false;
-        logger.info?.("triangle_peer_engine_exited", { stateRoot, code, signal: sig });
-      });
-
-      child.stderr?.on("data", (chunk) => {
-        const text = chunk.toString("utf8");
-        if (text.includes("WARN") || text.includes("ERROR")) {
-          logger.warn?.("triangle_peer_engine_stderr", { message: text.trim().slice(0, 500) });
-        }
-      });
-
+    start({ signal } = {}) {
       try {
-        const ready = await waitForReady(15000, signal);
-        return ready;
-      } catch (err) {
+        if (state === "ready") {
+          return Promise.resolve({ endpointId, socketPath });
+        }
+        if (state === "starting" && startPromise) {
+          return startPromise;
+        }
+        if (state === "stopping") {
+          return Promise.reject(coded("engine_busy", "peer-engine is stopping"));
+        }
+
+        signal?.throwIfAborted();
+        assertSafeStateRoot(stateRoot, { create: true });
+        const executable = validateEngineBinaryPath(binaryPath ?? "peer-engine");
+
+        state = "starting";
+        endpointId = null;
+        ipcClient = null;
+
+        const run = async () => {
+          await probeExistingSocket();
+
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          let pollInterval = null;
+          let timer = null;
+          let onAbort = null;
+
+          const cleanupTimers = () => {
+            if (pollInterval) clearInterval(pollInterval);
+            if (timer) clearTimeout(timer);
+            if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+          };
+
+          const settleResolve = (val) => {
+            if (settled) return;
+            settled = true;
+            cleanupTimers();
+            state = "ready";
+            startPromise = null;
+            resolve(val);
+          };
+          const settleReject = (err) => {
+            if (settled) return;
+            settled = true;
+            cleanupTimers();
+            state = "stopped";
+            startPromise = null;
+            reject(err);
+          };
+
+          const args = buildArgs();
+          const childEnv = filterPeerEngineEnvironment(env);
+
+          logger.info?.("triangle_peer_engine_starting", {
+            stateRoot,
+            executable,
+            allowedPeersCount: allowedPeers.length,
+          });
+
+          try {
+            child = spawnImpl(executable, args, {
+              cwd: stateRoot,
+              env: childEnv,
+              detached: false,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+          } catch (err) {
+            return settleReject(coded(err.code ?? "spawn_failed", err.message));
+          }
+
+          const proc = child;
+
+          if (proc.exitCode !== null) {
+            return settleReject(coded("engine_crashed", `peer-engine exited unexpectedly with code ${proc.exitCode}`));
+          }
+
+          proc.once("error", (err) => {
+            settleReject(coded(err.code ?? "spawn_failed", err.message));
+          });
+
+          proc.once("exit", (code, sig) => {
+            if (state === "ready") {
+              state = "exited";
+              logger.warn?.("triangle_peer_engine_exited", { code, signal: sig });
+            } else if (state === "stopping") {
+              state = "stopped";
+            } else {
+              settleReject(coded("engine_crashed", `peer-engine exited unexpectedly with code ${code}`));
+            }
+          });
+
+          let stderrReady = false;
+          let lineCount = 0;
+          let droppedCount = 0;
+          let resetAt = Date.now() + 1000;
+
+          async function verifyHello() {
+            try {
+              const client = createIpcClient({ socketPath, timeoutMs: 2000 });
+              const hello = await client.request("hello", {}, { signal });
+              if (hello?.endpoint_id === endpointId) {
+                settleResolve({ endpointId, socketPath });
+              }
+            } catch {
+              // Keep waiting until timeout if socket not ready yet
+            }
+          }
+
+          function drainStream(stream, isStderr) {
+            if (!stream) return;
+            let buf = "";
+            stream.on("data", (chunk) => {
+              buf += chunk.toString("utf8");
+              const lines = buf.split(/\r?\n/);
+              buf = lines.pop();
+
+              const nowTime = Date.now();
+              if (nowTime > resetAt) {
+                if (droppedCount > 0) {
+                  logger.warn?.("triangle_peer_engine_lines_dropped", { droppedCount });
+                }
+                lineCount = 0;
+                droppedCount = 0;
+                resetAt = nowTime + 1000;
+              }
+
+              for (const rawLine of lines) {
+                lineCount++;
+                if (lineCount > 50) {
+                  droppedCount++;
+                  continue;
+                }
+                const line = rawLine.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 500);
+                if (!line) continue;
+
+                if (isStderr) {
+                  const match = line.match(/^peer-engine ready endpoint_id=([a-f0-9]{64}) ipc=(.*)$/);
+                  if (match) {
+                    endpointId = match[1];
+                    stderrReady = true;
+                    verifyHello();
+                  }
+                }
+
+                if (line.includes("ERROR")) {
+                  logger.error?.("triangle_peer_engine_log", { line });
+                } else if (line.includes("WARN")) {
+                  logger.warn?.("triangle_peer_engine_log", { line });
+                }
+              }
+            });
+          }
+
+          drainStream(proc.stdout, false);
+          drainStream(proc.stderr, true);
+
+          // Polling fallback if ready line was emitted before listener or hello needed retry
+          pollInterval = setInterval(() => {
+            if (settled) {
+              clearInterval(pollInterval);
+              return;
+            }
+            if (stderrReady && existsSync(socketPath)) {
+              verifyHello();
+            }
+          }, 100);
+
+          timer = setTimeout(() => {
+            settleReject(coded("engine_timeout", "peer-engine startup timed out waiting for socket"));
+          }, 15000);
+
+          onAbort = () => {
+            settleReject(signal?.reason ?? coded("aborted", "peer-engine start aborted"));
+          };
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+      };
+
+      startPromise = run().catch(async (err) => {
         await this.stop();
         throw err;
-      }
-    },
+      });
+
+      return startPromise;
+    } catch (err) {
+      state = "stopped";
+      return Promise.reject(err);
+    }
+  },
+
     async stop() {
-      if (!child && !running) return;
-      running = false;
+      if (state === "stopped" || state === "exited") {
+        state = "stopped";
+        return;
+      }
+      state = "stopping";
       const proc = child;
       child = null;
+
       if (proc && proc.exitCode === null) {
         try {
-          const client = createIpcClient({ socketPath, timeoutMs: 2000 });
-          await client.request("shutdown", {});
-        } catch {
-          // Fall through to process termination
-        }
+          proc.kill("SIGINT");
+        } catch {}
+
         await new Promise((resolve) => {
           const timer = setTimeout(() => {
             try {
-              if (process.platform !== "win32") {
-                process.kill(-proc.pid, "SIGKILL");
-              } else {
-                proc.kill("SIGKILL");
-              }
+              proc.kill("SIGKILL");
             } catch {}
             resolve();
-          }, 2000);
+          }, 5000);
+
           proc.once("exit", () => {
             clearTimeout(timer);
             resolve();
           });
         });
       }
+      state = "stopped";
     },
   });
 }

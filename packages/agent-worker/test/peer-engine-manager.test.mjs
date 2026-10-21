@@ -4,13 +4,14 @@ import path from "node:path";
 import os from "node:os";
 import net from "node:net";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 
 import {
   assertSafeStateRoot,
   createIpcClient,
   createPeerEngineManager,
   filterPeerEngineEnvironment,
+  validateEngineBinaryPath,
   PEER_ENGINE_ALLOWED_ENV_KEYS,
   PEER_ENGINE_IPC_PROTOCOL_VERSION,
 } from "../src/peer-engine-manager.mjs";
@@ -199,20 +200,32 @@ test("createPeerEngineManager handles spawn, ready negotiation, and clean stop",
     });
   });
 
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  chmodSync(socketPath, 0o600);
-
   // Fake child process that stays alive until stop()
   const fakeChild = new EventEmitter();
   fakeChild.pid = 12345;
   fakeChild.exitCode = null;
   fakeChild.stderr = new EventEmitter();
+  fakeChild.stdout = new EventEmitter();
+  fakeChild.kill = (sig) => {
+    fakeChild.emit(sig);
+    setTimeout(() => {
+      fakeChild.exitCode = 0;
+      fakeChild.emit("exit", 0, sig);
+    }, 10);
+  };
 
   let spawnedArgs = null;
   let spawnedEnv = null;
   const mockSpawn = (cmd, args, options) => {
     spawnedArgs = args;
     spawnedEnv = options.env;
+    server.listen(socketPath, () => {
+      chmodSync(socketPath, 0o600);
+      fakeChild.stderr.emit(
+        "data",
+        `peer-engine ready endpoint_id=${testEndpointId} ipc=${socketPath}\n`,
+      );
+    });
     return fakeChild;
   };
 
@@ -244,6 +257,113 @@ test("createPeerEngineManager handles spawn, ready negotiation, and clean stop",
     assert.equal(manager.isRunning, false);
   } finally {
     server.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("validateEngineBinaryPath enforces absolute path, regular file, not symlink, secure mode, executable", () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-bin-"));
+  try {
+    // Relative path
+    assert.throws(() => validateEngineBinaryPath("relative/peer-engine"), /invalid_binary_path/);
+
+    // Non-existent
+    assert.throws(() => validateEngineBinaryPath(path.join(tmp, "missing")), /ENOENT/);
+
+    // Regular file but not executable (0600)
+    const nonExec = path.join(tmp, "non-exec");
+    writeFileSync(nonExec, "#!/bin/sh\n", { mode: 0o600 });
+    assert.throws(() => validateEngineBinaryPath(nonExec), /EACCES/);
+
+    // Group-writable (0775)
+    const groupWritable = path.join(tmp, "group-writable");
+    writeFileSync(groupWritable, "#!/bin/sh\n");
+    chmodSync(groupWritable, 0o775);
+    assert.throws(() => validateEngineBinaryPath(groupWritable), /unsafe_file/);
+
+    // Symlink
+    const valid = path.join(tmp, "valid-bin");
+    writeFileSync(valid, "#!/bin/sh\n", { mode: 0o700 });
+    const symlink = path.join(tmp, "symlink-bin");
+    symlinkSync(valid, symlink);
+    assert.throws(() => validateEngineBinaryPath(symlink), /unsafe_file/);
+
+    // Valid executable
+    assert.equal(validateEngineBinaryPath(valid), valid);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("peer engine manager start is single-flight and getIpcClient throws when not ready", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-sf-"));
+  const stateRoot = path.join(tmp, "state");
+  mkdirSync(stateRoot, { mode: 0o700 });
+
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 999;
+  fakeChild.exitCode = null;
+  fakeChild.stderr = new EventEmitter();
+  fakeChild.stdout = new EventEmitter();
+  fakeChild.kill = (sig) => {
+    fakeChild.exitCode = 0;
+    fakeChild.emit("exit", 0, sig);
+  };
+
+  const manager = createPeerEngineManager({
+    stateRoot,
+    binaryPath: "/bin/echo",
+    spawnImpl: () => fakeChild,
+  });
+
+  try {
+    // Before start: getIpcClient throws engine_not_ready
+    assert.throws(() => manager.getIpcClient(), (err) => err.code === "engine_not_ready");
+
+    // Concurrent start calls share the same promise
+    const p1 = manager.start();
+    const p2 = manager.start();
+    assert.equal(p1, p2);
+
+    await new Promise((r) => setImmediate(r));
+
+    // Emit error to abort start
+    fakeChild.emit("error", Object.assign(new Error("spawn failed"), { code: "ENOENT" }));
+    await assert.rejects(p1, (err) => err.code === "ENOENT");
+    await assert.rejects(p2, (err) => err.code === "ENOENT");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("peer engine manager runs fake-peer-engine fixture, reads stderr ready, and stops via SIGINT", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-fake-"));
+  const stateRoot = path.join(tmp, "state");
+  mkdirSync(stateRoot, { mode: 0o700 });
+  const fakeFixture = path.resolve(import.meta.dirname, "fixtures/fake-peer-engine.mjs");
+
+  const manager = createPeerEngineManager({
+    stateRoot,
+    binaryPath: fakeFixture,
+    allowedPeers: ["f".repeat(64)],
+  });
+
+  try {
+    const ready = await manager.start();
+    assert.ok(ready.endpointId);
+    assert.equal(manager.isRunning, true);
+
+    const client = manager.getIpcClient();
+    const st = await client.request("status", {});
+    assert.equal(st.endpoint_id, ready.endpointId);
+
+    // Stop sends SIGINT
+    await manager.stop();
+    assert.equal(manager.isRunning, false);
+
+    // Graceful SIGINT creates graceful-exit file
+    assert.ok(existsSync(path.join(stateRoot, "graceful-exit")), "fake-peer-engine should handle SIGINT gracefully");
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
