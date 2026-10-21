@@ -1322,9 +1322,26 @@ export function createPeerDrainService({
       };
     },
 
-    close() {
+    get hasActiveExecutions() {
+      return activeExecutions.size > 0;
+    },
+
+    async waitForActiveExecutions() {
+      if (activeExecutions.size === 0) return;
+      await Promise.allSettled([...activeExecutions.values()]);
+    },
+
+    close({ wait = false } = {}) {
       if (active) throw coded("drain_busy", "Cannot close drain while step is active");
-      if (closed) return;
+      if (closed) return Promise.resolve();
+      if (activeExecutions.size > 0) {
+        if (!wait) {
+          throw coded("execution_still_active", "Cannot close drain while runner execution is active");
+        }
+        return Promise.allSettled([...activeExecutions.values()]).then(() => {
+          return api.close({ wait: false });
+        });
+      }
       closed = true;
       activeExecutions.clear();
       loopController?.abort();
@@ -1336,6 +1353,7 @@ export function createPeerDrainService({
         lock.close();
       } catch {}
       activeStateRoots.delete(stateRoot);
+      return Promise.resolve();
     },
   };
 

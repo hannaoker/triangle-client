@@ -360,41 +360,43 @@ export function createPeerEngineManager({
       const proc = child;
       child = null;
 
-      stopPromise = (async () => {
-        try {
-          if (proc && proc.exitCode === null) {
-            await new Promise((resolve) => {
-              let timer = null;
-              const onExit = () => {
-                if (timer) clearTimeout(timer);
-                resolve();
-              };
-              proc.once("exit", onExit);
+      let resolveStop;
+      stopPromise = new Promise((resolve) => {
+        resolveStop = resolve;
+      });
 
+      try {
+        if (proc && proc.exitCode === null) {
+          await new Promise((resolve) => {
+            let timer = null;
+            const onExit = () => {
+              if (timer) clearTimeout(timer);
+              resolve();
+            };
+            proc.once("exit", onExit);
+
+            try {
+              proc.kill("SIGINT");
+            } catch {}
+
+            if (proc.exitCode !== null) {
+              proc.removeListener("exit", onExit);
+              return resolve();
+            }
+
+            timer = setTimeout(() => {
               try {
-                proc.kill("SIGINT");
+                proc.kill("SIGKILL");
               } catch {}
-
-              if (proc.exitCode !== null) {
-                proc.removeListener("exit", onExit);
-                return resolve();
-              }
-
-              timer = setTimeout(() => {
-                try {
-                  proc.kill("SIGKILL");
-                } catch {}
-                resolve();
-              }, 5000);
-            });
-          }
-        } finally {
-          state = "stopped";
-          stopPromise = null;
+              resolve();
+            }, 5000);
+          });
         }
-      })();
-
-      return stopPromise;
+      } finally {
+        state = "stopped";
+        stopPromise = null;
+        resolveStop?.();
+      }
     },
   });
 }

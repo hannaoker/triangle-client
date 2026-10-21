@@ -1375,3 +1375,165 @@ test("original draft database schema migrates columns before indexes without err
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("closing drain retains ownership until active execution terminates and refuses premature close", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-reopen-active-"));
+  const senderId = "b".repeat(64);
+  let runnerResolve;
+  const runnerPromise = new Promise((resolve) => {
+    runnerResolve = resolve;
+  });
+
+  let runnerInvocations = 0;
+  const activeRunnerPids = new Set();
+  let sentPayload = null;
+
+  const payload = JSON.stringify({
+    protocol: PEER_ENVELOPE_PROTOCOL,
+    kind: "request",
+    request_id: "req-active-close-1",
+    text: "long runner operation",
+  });
+
+  const mockIpc = {
+    async request(m, p) {
+      if (m === "inbox") {
+        return {
+          items: [{
+            from_endpoint_id: senderId,
+            message_id: "msg-reopen-1",
+            payload_hash: digest(payload),
+            payload,
+          }],
+        };
+      }
+      if (m === "ack") {
+        return { acked: 1, already_acked: 0, unknown: [] };
+      }
+      if (m === "send") {
+        sentPayload = p.payload;
+        return { duplicate: false, status: "queued_local" };
+      }
+      if (m === "message_status") {
+        return {
+          message_id: p.message_id,
+          peer_endpoint_id: senderId,
+          payload_hash: digest(sentPayload),
+          state: "settled",
+        };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  const runner = {
+    async run() {
+      runnerInvocations++;
+      activeRunnerPids.add(runnerInvocations);
+      try {
+        return await runnerPromise;
+      } finally {
+        activeRunnerPids.delete(runnerInvocations);
+      }
+    },
+  };
+
+  const drain1 = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "reopen-active-test",
+    profileInstanceId: "b".repeat(64),
+    ipc: mockIpc,
+    runnerTimeoutMs: 25,
+    runner,
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const step1 = await drain1.step();
+    assert.equal(step1.state, "held");
+    assert.equal(step1.reason, "runner_timeout");
+    assert.equal(runnerInvocations, 1);
+    assert.equal(activeRunnerPids.size, 1, "First runner must still be active");
+
+    // 1. Premature close without wait refuses while execution is active
+    assert.throws(
+      () => drain1.close(),
+      (err) => err.code === "execution_still_active",
+      "close() must refuse while execution remains active",
+    );
+
+    // 2. Ownership is retained: reopening a new drain on same stateRoot is rejected with drain_busy
+    assert.throws(
+      () => createPeerDrainService({
+        stateRoot: tmp,
+        profile: "reopen-active-test-2",
+        profileInstanceId: "b".repeat(64),
+        ipc: mockIpc,
+        runner,
+      }),
+      (err) => err.code === "drain_busy",
+      "Reopening drain must fail with drain_busy while ownership is retained",
+    );
+
+    // 3. Close with wait: retains ownership until runner termination is confirmed
+    let closeSettled = false;
+    const closePromise = drain1.close({ wait: true }).then(() => {
+      closeSettled = true;
+    });
+
+    // While runner is still pending, closePromise has not settled and reopen is still rejected
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(closeSettled, false);
+    assert.throws(
+      () => createPeerDrainService({
+        stateRoot: tmp,
+        profile: "reopen-active-test-3",
+        profileInstanceId: "b".repeat(64),
+        ipc: mockIpc,
+        runner,
+      }),
+      (err) => err.code === "drain_busy",
+    );
+
+    // 4. Resolve the active runner
+    runnerResolve({ status: "completed", text: "done" });
+    await closePromise;
+    assert.equal(closeSettled, true);
+    assert.equal(activeRunnerPids.size, 0, "First runner must be terminated");
+
+    // 5. Reopening the drain now succeeds after first execution has terminated
+    const drain2 = createPeerDrainService({
+      stateRoot: tmp,
+      profile: "reopen-active-test-reopened",
+      profileInstanceId: "b".repeat(64),
+      ipc: mockIpc,
+      runner: {
+        async run() {
+          runnerInvocations++;
+          return { status: "completed", text: "second run" };
+        },
+      },
+      routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+    });
+
+    try {
+      drain2.resolvePeerRecord({
+        fromEndpointId: senderId,
+        messageId: "msg-reopen-1",
+        action: "retry",
+        operationId: "op-reopen-retry",
+      });
+
+      const step2 = await drain2.step();
+      assert.equal(step2.state, "acked");
+      assert.equal(runnerInvocations, 2, "Second runner executed after first terminated without overlap");
+    } finally {
+      drain2.close();
+    }
+  } finally {
+    try {
+      drain1.close({ wait: false });
+    } catch {}
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -405,3 +405,59 @@ test("startup abort terminates child process via SIGINT and cleans up child owne
 
   rmSync(tmp, { recursive: true, force: true });
 });
+
+test("engine cleanup terminates child on aborted startup following an earlier startup crash", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-reabort-"));
+  const stateRoot = path.join(tmp, "state");
+  mkdirSync(stateRoot, { mode: 0o700 });
+
+  let spawnCount = 0;
+  const child2KillSignals = [];
+
+  const manager = createPeerEngineManager({
+    stateRoot,
+    binaryPath: "/bin/echo",
+    spawnImpl: () => {
+      spawnCount++;
+      const child = new EventEmitter();
+      child.pid = 1000 + spawnCount;
+      child.stderr = new EventEmitter();
+      child.stdout = new EventEmitter();
+
+      if (spawnCount === 1) {
+        // First startup: child crashes immediately
+        child.exitCode = 1;
+        setImmediate(() => {
+          child.emit("exit", 1, null);
+        });
+      } else {
+        // Second startup: child runs until killed
+        child.exitCode = null;
+        child.kill = (sig) => {
+          child2KillSignals.push(sig);
+          child.exitCode = 0;
+          child.emit("exit", 0, sig);
+        };
+      }
+      return child;
+    },
+  });
+
+  // 1. First startup crashes
+  await assert.rejects(manager.start(), (err) => err.code === "engine_crashed");
+  assert.equal(manager.state, "stopped", "Manager should be stopped after first crash");
+  assert.equal(manager.isRunning, false);
+
+  // 2. Second startup is aborted before ready
+  const ac = new AbortController();
+  const start2Promise = manager.start({ signal: ac.signal });
+  await new Promise((r) => setImmediate(r));
+  ac.abort();
+
+  await assert.rejects(start2Promise, (err) => err.name === "AbortError" || err.code === "aborted");
+  assert.equal(manager.state, "stopped", "Manager state should be stopped, not starting");
+  assert.equal(manager.isRunning, false);
+  assert.deepEqual(child2KillSignals, ["SIGINT"], "Child from second startup must be sent termination signal");
+
+  rmSync(tmp, { recursive: true, force: true });
+});
