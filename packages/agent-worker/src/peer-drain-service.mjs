@@ -188,6 +188,7 @@ export function createPeerDrainService({
   logger = console,
   now = Date.now,
   runnerTimeoutMs = 180000,
+  pollIntervalMs = 500,
   hook = null,
 } = {}) {
   if (
@@ -258,6 +259,36 @@ export function createPeerDrainService({
       throw coded("journal_version_unsupported", `Unsupported peer drain journal version: ${userVersion}`);
     }
 
+    // Migration in-place if v0 existed with fewer columns: add missing columns before indexes are created (Defect 5)
+    if (userVersion === 0) {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='records'").all();
+      if (tables.length > 0) {
+        const cols = db.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
+        const neededCols = [
+          ["in_reply_to", "TEXT"],
+          ["request_id", "TEXT"],
+          ["reply_id", "TEXT"],
+          ["reply_payload", "TEXT"],
+          ["input_payload", "TEXT"],
+          ["result_payload", "TEXT"],
+          ["reason", "TEXT"],
+          ["execution_attempt", "INTEGER NOT NULL DEFAULT 1"],
+          ["resend_attempt", "INTEGER NOT NULL DEFAULT 0"],
+          ["revision", "INTEGER NOT NULL DEFAULT 1"],
+          ["terminal_at", "INTEGER"],
+          ["application_consumed", "INTEGER NOT NULL DEFAULT 0"],
+          ["input_acked", "INTEGER NOT NULL DEFAULT 0"],
+          ["created_at", "INTEGER NOT NULL DEFAULT 0"],
+          ["updated_at", "INTEGER NOT NULL DEFAULT 0"],
+        ];
+        for (const [colName, colDef] of neededCols) {
+          if (!cols.includes(colName)) {
+            db.exec(`ALTER TABLE records ADD COLUMN ${colName} ${colDef}`);
+          }
+        }
+      }
+    }
+
     // Schema v1
     db.exec(`
       CREATE TABLE IF NOT EXISTS records (
@@ -277,6 +308,7 @@ export function createPeerDrainService({
         revision INTEGER NOT NULL DEFAULT 1,
         terminal_at INTEGER,
         application_consumed INTEGER NOT NULL DEFAULT 0,
+        input_acked INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (sender, message_id)
@@ -309,27 +341,13 @@ export function createPeerDrainService({
       );
     `);
 
-    // Migration in-place if v0 existed with fewer columns
+    // Ensure input_acked exists even on existing v1 databases created before this fix
+    const cols = db.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
+    if (!cols.includes("input_acked")) {
+      db.exec("ALTER TABLE records ADD COLUMN input_acked INTEGER NOT NULL DEFAULT 0");
+    }
+
     if (userVersion === 0) {
-      const cols = db.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
-      const neededCols = [
-        ["in_reply_to", "TEXT"],
-        ["request_id", "TEXT"],
-        ["input_payload", "TEXT"],
-        ["result_payload", "TEXT"],
-        ["reason", "TEXT"],
-        ["execution_attempt", "INTEGER NOT NULL DEFAULT 1"],
-        ["resend_attempt", "INTEGER NOT NULL DEFAULT 0"],
-        ["revision", "INTEGER NOT NULL DEFAULT 1"],
-        ["terminal_at", "INTEGER"],
-        ["application_consumed", "INTEGER NOT NULL DEFAULT 0"],
-        ["created_at", "INTEGER NOT NULL DEFAULT 0"],
-      ];
-      for (const [colName, colDef] of neededCols) {
-        if (!cols.includes(colName)) {
-          db.exec(`ALTER TABLE records ADD COLUMN ${colName} ${colDef}`);
-        }
-      }
       db.exec("PRAGMA user_version = 1;");
     }
 
@@ -364,6 +382,8 @@ export function createPeerDrainService({
   let closed = false;
   let loopController = null;
   let runningLoopPromise = null;
+  const defaultPollIntervalMs = pollIntervalMs;
+  const activeExecutions = new Map();
 
   function resolveIpc() {
     if (ipc) return ipc;
@@ -400,6 +420,12 @@ export function createPeerDrainService({
   };
 
   async function ackItem(r, signal) {
+    if (r.sender && r.message_id) {
+      const row = getRow(r.sender, r.message_id);
+      if (row?.input_acked === 1) {
+        return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
+      }
+    }
     const client = resolveIpc();
     const result = await client.request(
       "ack",
@@ -415,6 +441,10 @@ export function createPeerDrainService({
       result.unknown.length > 0
     ) {
       throw coded("unverified_ack", "Peer engine returned unverified ack response");
+    }
+    if (r.sender && r.message_id) {
+      db.prepare("UPDATE records SET input_acked=1, updated_at=? WHERE sender=? AND message_id=?")
+        .run(now(), r.sender, r.message_id);
     }
     return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
   }
@@ -577,6 +607,7 @@ export function createPeerDrainService({
       : cancellation.signal;
     let onAbort;
 
+    const execKey = `${senderId}:${messageId}`;
     try {
       const interrupted = new Promise((_, reject) => {
         onAbort = () => reject(coded("runner_interrupted", "Runner was interrupted"));
@@ -592,17 +623,33 @@ export function createPeerDrainService({
         requestId: envelope?.request_id ?? itemData.request_id,
       };
 
+      const runnerPromise = Promise.resolve().then(() =>
+        runner.run(runnerRequest, { signal: runnerSignal })
+      );
+      activeExecutions.set(execKey, runnerPromise);
+      runnerPromise
+        .catch(() => {})
+        .finally(() => {
+          if (activeExecutions.get(execKey) === runnerPromise) {
+            activeExecutions.delete(execKey);
+          }
+        });
+
       result = await Promise.race([
-        runner.run(runnerRequest, { signal: runnerSignal }),
+        runnerPromise,
         interrupted,
       ]);
 
       runnerSignal.throwIfAborted();
-      if (result?.status !== "completed" || !isText(result.text)) {
+      if (
+        result?.status !== "completed" ||
+        typeof result?.text !== "string" ||
+        result.text.trim().length === 0
+      ) {
         throw coded("invalid_runner_result", "Runner did not return a valid completed result");
       }
     } catch (err) {
-      const reasonCode = err.code ?? (cancellation.signal.aborted ? "runner_timeout" : "runner_failed");
+      const reasonCode = cancellation.signal.aborted ? "runner_timeout" : (err.code ?? "runner_failed");
       db.prepare(
         "UPDATE records SET phase='held', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?"
       ).run(reasonCode, now(), now(), senderId, messageId);
@@ -641,6 +688,42 @@ export function createPeerDrainService({
       in_reply_to: messageId,
       text: result.text,
     });
+
+    const isOversized =
+      Buffer.byteLength(result.text, "utf8") > MAX_PAYLOAD_BYTES ||
+      !checkPayloadAndFrame(replyPayload, {
+        messageId: replyId,
+        senderEndpointId: senderId,
+        createdAtUnixMs: now(),
+      }).ok;
+
+    if (isOversized) {
+      db.prepare(`
+        UPDATE records
+        SET phase='reply_failed', reply_id=?, reply_payload=?, result_payload=?, reason='result_too_large', terminal_at=?, updated_at=?
+        WHERE sender=? AND message_id=?
+      `).run(replyId, replyPayload, result.text, now(), now(), senderId, messageId);
+
+      await ackItem({ sender: senderId, message_id: messageId }, signal);
+
+      // Best-effort outcome send (D3)
+      const rRoute = route ?? routesMap.get(senderId);
+      if (rRoute) {
+        await sendOutcomeBestEffort(
+          { sender: senderId, message_id: messageId },
+          {
+            state: "failed",
+            reason: "result_too_large",
+            requestId: envelope?.request_id ?? itemData.request_id,
+            inReplyTo: messageId,
+            route: rRoute,
+          },
+          signal,
+        );
+      }
+
+      return { state: "reply_failed", messageId, reason: "result_too_large" };
+    }
 
     db.prepare(`
       UPDATE records
@@ -926,6 +1009,10 @@ export function createPeerDrainService({
         let res;
         if (r.phase === "held") {
           if (action === "retry") {
+            const execKey = `${fromEndpointId}:${messageId}`;
+            if (activeExecutions.has(execKey)) {
+              throw coded("execution_still_active", "Previous runner execution is still active");
+            }
             db.prepare(`
               UPDATE records
               SET phase='retry_pending', execution_attempt=execution_attempt+1, revision=revision+1, updated_at=?
@@ -976,7 +1063,7 @@ export function createPeerDrainService({
       }
     },
 
-    async start({ runLoop = true, signal, pollIntervalMs = 500, sleep: customSleep } = {}) {
+    async start({ runLoop = true, signal, pollIntervalMs = defaultPollIntervalMs, sleep: customSleep } = {}) {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
       if (!runLoop) {
         return this.step({ signal });
@@ -1239,6 +1326,7 @@ export function createPeerDrainService({
       if (active) throw coded("drain_busy", "Cannot close drain while step is active");
       if (closed) return;
       closed = true;
+      activeExecutions.clear();
       loopController?.abort();
       try {
         db.close();

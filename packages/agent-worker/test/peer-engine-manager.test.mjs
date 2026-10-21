@@ -367,3 +367,41 @@ test("peer engine manager runs fake-peer-engine fixture, reads stderr ready, and
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("startup abort terminates child process via SIGINT and cleans up child ownership", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-abort-"));
+  const stateRoot = path.join(tmp, "state");
+  mkdirSync(stateRoot, { mode: 0o700 });
+
+  const fakeChild = new EventEmitter();
+  fakeChild.pid = 1234;
+  fakeChild.exitCode = null;
+  fakeChild.stderr = new EventEmitter();
+  fakeChild.stdout = new EventEmitter();
+  const killSignals = [];
+  fakeChild.kill = (sig) => {
+    killSignals.push(sig);
+    fakeChild.exitCode = 0;
+    fakeChild.emit("exit", 0, sig);
+  };
+
+  const manager = createPeerEngineManager({
+    stateRoot,
+    binaryPath: "/bin/echo",
+    spawnImpl: () => fakeChild,
+  });
+
+  const ac = new AbortController();
+  const startPromise = manager.start({ signal: ac.signal });
+
+  await new Promise((r) => setImmediate(r));
+
+  // Abort startup before ready line is received
+  ac.abort();
+
+  await assert.rejects(startPromise, (err) => err.name === "AbortError" || err.code === "aborted");
+  assert.equal(manager.isRunning, false);
+  assert.deepEqual(killSignals, ["SIGINT"], "Child should be terminated via SIGINT on startup abort");
+
+  rmSync(tmp, { recursive: true, force: true });
+});

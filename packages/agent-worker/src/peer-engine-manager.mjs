@@ -98,6 +98,7 @@ export function createPeerEngineManager({
   let endpointId = null;
   let ipcClient = null;
   let startPromise = null;
+  let stopPromise = null;
 
   function buildArgs() {
     const args = ["--state-dir", stateRoot];
@@ -205,7 +206,6 @@ export function createPeerEngineManager({
             if (settled) return;
             settled = true;
             cleanupTimers();
-            state = "stopped";
             startPromise = null;
             reject(err);
           };
@@ -351,7 +351,8 @@ export function createPeerEngineManager({
   },
 
     async stop() {
-      if (state === "stopped" || state === "exited") {
+      if (stopPromise) return stopPromise;
+      if ((state === "stopped" || state === "exited") && !child) {
         state = "stopped";
         return;
       }
@@ -359,26 +360,41 @@ export function createPeerEngineManager({
       const proc = child;
       child = null;
 
-      if (proc && proc.exitCode === null) {
+      stopPromise = (async () => {
         try {
-          proc.kill("SIGINT");
-        } catch {}
+          if (proc && proc.exitCode === null) {
+            await new Promise((resolve) => {
+              let timer = null;
+              const onExit = () => {
+                if (timer) clearTimeout(timer);
+                resolve();
+              };
+              proc.once("exit", onExit);
 
-        await new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            try {
-              proc.kill("SIGKILL");
-            } catch {}
-            resolve();
-          }, 5000);
+              try {
+                proc.kill("SIGINT");
+              } catch {}
 
-          proc.once("exit", () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-      }
-      state = "stopped";
+              if (proc.exitCode !== null) {
+                proc.removeListener("exit", onExit);
+                return resolve();
+              }
+
+              timer = setTimeout(() => {
+                try {
+                  proc.kill("SIGKILL");
+                } catch {}
+                resolve();
+              }, 5000);
+            });
+          }
+        } finally {
+          state = "stopped";
+          stopPromise = null;
+        }
+      })();
+
+      return stopPromise;
     },
   });
 }

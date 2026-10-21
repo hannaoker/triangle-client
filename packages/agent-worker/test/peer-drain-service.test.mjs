@@ -166,7 +166,6 @@ test("peer drain executes request, persists admission, verifies status, and ACKs
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("failed reply admission: terminal failure enters reply_failed and acks; transient failure retries without acking", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-reply-fail-")));
   const senderId = "4".repeat(64);
@@ -263,7 +262,6 @@ test("failed reply admission: terminal failure enters reply_failed and acks; tra
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("duplicate input is handled without re-executing; conflict is rejected", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-dedupe-")));
   const senderId = "6".repeat(64);
@@ -345,7 +343,6 @@ test("duplicate input is handled without re-executing; conflict is rejected", as
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("crash during execution recovers to held on restart and never re-runs", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-held-")));
   const senderId = "8".repeat(64);
@@ -511,7 +508,6 @@ test("received peer replies stay retrievable after ack and process restart until
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("outbound peer request verifies durable admission and preserves IDs across ambiguous send", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-outbound-")));
   const recipientId = "c".repeat(64);
@@ -596,7 +592,6 @@ test("outbound peer request verifies durable admission and preserves IDs across 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("outbound peer request rejects unverified admission and keeps the generated ID on the error", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-outbound-bad-")));
   const recipientId = "e".repeat(64);
@@ -639,7 +634,6 @@ test("outbound peer request rejects unverified admission and keeps the generated
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("outbound peer request exposes its stable message ID when status reconciliation is unavailable", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-outbound-unknown-")));
   const recipientId = "1".repeat(64);
@@ -676,7 +670,6 @@ test("outbound peer request exposes its stable message ID when status reconcilia
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("operator recovery resolvePeerRecord supports retry, resend, discard with idempotency and revision tracking", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-operator-")));
   const senderId = "3".repeat(64);
@@ -899,7 +892,6 @@ test("operator recovery resolvePeerRecord supports retry, resend, discard with i
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("retention compaction deletes records older than 8 days but preserves active custody", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-retention-")));
   const senderId = "5".repeat(64);
@@ -970,7 +962,6 @@ test("retention compaction deletes records older than 8 days but preserves activ
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("invariant 5: abort before runner start deletes executing record rather than holding it", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-abort-pre-")));
   const senderId = "7".repeat(64);
@@ -1030,7 +1021,6 @@ test("invariant 5: abort before runner start deletes executing record rather tha
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
 test("cap backpressure: at 10,000 records, pauses intake without acking or spinning", async () => {
   const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-cap-")));
   const senderId = "9".repeat(64);
@@ -1072,6 +1062,314 @@ test("cap backpressure: at 10,000 records, pauses intake without acking or spinn
     assert.equal(res.state, "journal_full");
     assert.equal(inboxPolled, false, "Inbox must NOT be polled when journal is at capacity");
     assert.equal(drain.status().journalFull, true);
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("operator retry rejects with execution_still_active while runner is still active", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-active-"));
+  const senderId = "a".repeat(64);
+  let runnerResolve;
+  const runnerPromise = new Promise((resolve) => {
+    runnerResolve = resolve;
+  });
+
+  const payload = JSON.stringify({
+    protocol: PEER_ENVELOPE_PROTOCOL,
+    kind: "request",
+    request_id: "req-slow-1",
+    text: "take your time",
+  });
+
+  let acks = 0;
+  const mockIpc = {
+    async request(m) {
+      if (m === "inbox") {
+        return {
+          items: [{
+            from_endpoint_id: senderId,
+            message_id: "slow-msg-1",
+            payload_hash: digest(payload),
+            payload,
+          }],
+        };
+      }
+      if (m === "ack") {
+        acks++;
+        return { acked: 1, already_acked: 0, unknown: [] };
+      }
+      if (m === "send") {
+        return { duplicate: false, status: "queued_local" };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "active-test",
+    profileInstanceId: "a".repeat(64),
+    ipc: mockIpc,
+    runnerTimeoutMs: 20,
+    runner: {
+      async run() {
+        return runnerPromise;
+      },
+    },
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const stepRes = await drain.step();
+    assert.equal(stepRes.state, "held");
+    assert.equal(stepRes.reason, "runner_timeout");
+
+    // While runnerPromise is still unresolved, retry must fail with execution_still_active
+    await assert.rejects(
+      async () => {
+        drain.resolvePeerRecord({
+          fromEndpointId: senderId,
+          messageId: "slow-msg-1",
+          action: "retry",
+          operationId: "op-retry-1",
+        });
+      },
+      (err) => err.code === "execution_still_active",
+    );
+
+    // Now complete the runner
+    runnerResolve({ status: "completed", text: "done finally" });
+    await new Promise((r) => setImmediate(r));
+
+    // Once runner is settled, retry must succeed
+    const retryRes = drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "slow-msg-1",
+      action: "retry",
+      operationId: "op-retry-2",
+    });
+    assert.equal(retryRes.state, "retry_pending");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("recovery after acknowledgement retention avoids duplicate engine ack and does not wedge", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-ack-ret-"));
+  const senderId = "a".repeat(64);
+  let tombstoneExpired = false;
+  let acks = 0;
+  let sentPayload = null;
+
+  const payload = JSON.stringify({
+    protocol: PEER_ENVELOPE_PROTOCOL,
+    kind: "request",
+    request_id: "req-tomb-1",
+    text: "will fail first",
+  });
+
+  const mockIpc = {
+    async request(m, p) {
+      if (m === "inbox") {
+        return {
+          items: [{
+            from_endpoint_id: senderId,
+            message_id: "tomb-msg-1",
+            payload_hash: digest(payload),
+            payload,
+          }],
+        };
+      }
+      if (m === "ack") {
+        acks++;
+        if (tombstoneExpired) {
+          // Emulate expired tombstone after 8 days
+          return { acked: 0, already_acked: 0, unknown: p.items };
+        }
+        return { acked: 1, already_acked: 0, unknown: [] };
+      }
+      if (m === "send") {
+        sentPayload = p.payload;
+        return { duplicate: false, status: "queued_local" };
+      }
+      if (m === "message_status") {
+        return {
+          message_id: p.message_id,
+          peer_endpoint_id: senderId,
+          payload_hash: digest(sentPayload),
+          state: "settled",
+          reason: null,
+        };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  let failFirst = true;
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "ack-ret-test",
+    profileInstanceId: "a".repeat(64),
+    ipc: mockIpc,
+    runner: {
+      async run() {
+        if (failFirst) {
+          throw new Error("inference failed initially");
+        }
+        return { status: "completed", text: "recovered reply text" };
+      },
+    },
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const step1 = await drain.step();
+    assert.equal(step1.state, "held");
+    assert.equal(acks, 1, "Initial failure must ack engine item");
+
+    // Emulate 9 days elapsed: engine tombstone expired
+    tombstoneExpired = true;
+    failFirst = false;
+
+    // Operator retries
+    drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "tomb-msg-1",
+      action: "retry",
+      operationId: "op-retry-tomb",
+    });
+
+    // Run drain step: should deliver reply and NOT call engine ack again (avoiding unverified_ack)
+    const step2 = await drain.step();
+    assert.equal(step2.state, "acked");
+    assert.equal(acks, 1, "Engine ack must NOT be repeated for already-acknowledged input");
+    assert.equal(drain.status().find((r) => r.message_id === "tomb-msg-1")?.phase, "acked");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("oversized successful results are retained with result_saved=1 as reply_failed(result_too_large)", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-oversized-"));
+  const senderId = "a".repeat(64);
+  let ackedItems = 0;
+
+  const hugeText = "A".repeat(300 * 1024); // 300 KiB > 256 KiB
+  const payload = JSON.stringify({
+    protocol: PEER_ENVELOPE_PROTOCOL,
+    kind: "request",
+    request_id: "req-over-1",
+    text: "give me huge output",
+  });
+
+  const mockIpc = {
+    async request(m, p) {
+      if (m === "inbox") {
+        return {
+          items: [{
+            from_endpoint_id: senderId,
+            message_id: "oversized-msg-1",
+            payload_hash: digest(payload),
+            payload,
+          }],
+        };
+      }
+      if (m === "ack") {
+        ackedItems += p.items?.length ?? 1;
+        return { acked: 1, already_acked: 0, unknown: [] };
+      }
+      if (m === "send") {
+        return { duplicate: false, status: "queued_local" };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "oversize-test",
+    profileInstanceId: "a".repeat(64),
+    ipc: mockIpc,
+    runner: {
+      async run() {
+        return { status: "completed", text: hugeText };
+      },
+    },
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const res = await drain.step();
+    assert.equal(res.state, "reply_failed");
+    assert.equal(res.reason, "result_too_large");
+
+    // Verify record in DB has result_payload saved
+    const { DatabaseSync } = await import("node:sqlite");
+    const rawDb = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
+    const row = rawDb.prepare("SELECT * FROM records WHERE message_id=?").get("oversized-msg-1");
+    rawDb.close();
+
+    assert.ok(row, "Record must exist in DB");
+    assert.equal(row.phase, "reply_failed");
+    assert.equal(row.reason, "result_too_large");
+    assert.equal(row.result_payload, hugeText, "Oversized result MUST be retained locally in result_payload");
+    assert.equal(ackedItems, 1, "Inbound item must be acknowledged");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("original draft database schema migrates columns before indexes without error", async () => {
+  const tmp = realpathSync(mkdtempSync("/tmp/p-mig-v0-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  const { chmodSync } = await import("node:fs");
+
+  // Create database in v0 draft schema (as in commit 5e255d4, without in_reply_to, request_id, etc.)
+  const dbPath = path.join(tmp, "peer-drain.sqlite");
+  const rawDb = new DatabaseSync(dbPath);
+  rawDb.exec(`
+    CREATE TABLE records (
+      sender TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      reply_id TEXT,
+      reply_payload TEXT,
+      PRIMARY KEY (sender, message_id)
+    );
+    CREATE INDEX idx_records_phase ON records(phase);
+    PRAGMA user_version = 0;
+  `);
+  rawDb.close();
+  chmodSync(dbPath, 0o600);
+
+  // Opening with createPeerDrainService must migrate columns before indexes and succeed without journal_unavailable
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "mig-test",
+    profileInstanceId: "a".repeat(64),
+    ipc: { async request() { return { items: [] }; } },
+    runner: { async run() {} },
+  });
+
+  try {
+    const status = drain.status();
+    assert.ok(Array.isArray(status));
+
+    // Verify user_version is now 1 and new columns exist
+    const checkDb = new DatabaseSync(dbPath);
+    const uv = checkDb.prepare("PRAGMA user_version").get().user_version;
+    assert.equal(uv, 1);
+    const cols = checkDb.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
+    assert.ok(cols.includes("in_reply_to"));
+    assert.ok(cols.includes("request_id"));
+    assert.ok(cols.includes("input_acked"));
+    checkDb.close();
   } finally {
     drain.close();
     rmSync(tmp, { recursive: true, force: true });

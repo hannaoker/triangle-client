@@ -88,6 +88,7 @@ export function createPeerLane({
         engineManager,
         runner,
         routes: entry.config.routes,
+        pollIntervalMs: entry.config.pollIntervalMs,
         runnerTimeoutMs: entry.config.runnerTimeoutMs,
         logger,
       });
@@ -175,7 +176,12 @@ export function createPeerLane({
               try {
                 await engineManager.start({ signal });
                 const drainPromise = typeof drain.start === "function"
-                  ? drain.start({ runLoop: true, signal, sleep })
+                  ? drain.start({
+                      runLoop: true,
+                      signal,
+                      sleep,
+                      pollIntervalMs: entry.config.pollIntervalMs,
+                    })
                   : drain.step({ signal });
                 await drainPromise;
                 if (!signal?.aborted) {

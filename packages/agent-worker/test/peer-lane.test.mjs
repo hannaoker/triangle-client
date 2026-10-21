@@ -453,3 +453,46 @@ test("close() closes drains and stops engine managers, then rejects operations",
   await assert.rejects(lane.consumePeerReply({ profileInstanceId: config.profileInstanceId }), { code: "peer_lane_closed" });
   await assert.rejects(lane.resolvePeerRecord({ profileInstanceId: config.profileInstanceId }), { code: "peer_lane_closed" });
 });
+
+test("configured pollIntervalMs is forwarded to createPeerDrain and drain.start", async () => {
+  const config = makePeerConfig(9, { pollIntervalMs: 37 });
+  let drainFactoryOptions = null;
+  let drainStartOptions = null;
+
+  const mockDrain = {
+    start: async (opts) => {
+      drainStartOptions = opts;
+      return { state: "stopped" };
+    },
+    step: async () => ({ state: "idle" }),
+    close: async () => {},
+  };
+
+  const lane = createPeerLane({
+    peerConfigs: [config],
+    createPeerEngine: () => ({
+      start: async () => {},
+      stop: async () => {},
+      get state() { return "ready"; },
+      getIpcClient: () => ({}),
+    }),
+    createPeerDrain: (opts) => {
+      drainFactoryOptions = opts;
+      return mockDrain;
+    },
+    createRunner: () => ({ run: async () => {} }),
+  });
+
+  const ac = new AbortController();
+  await lane.watch({
+    signal: ac.signal,
+    sleep: async () => {},
+    runDurableWakeLoop: async ({ start }) => {
+      ac.abort();
+      return start();
+    },
+  });
+
+  assert.equal(drainFactoryOptions?.pollIntervalMs, 37, "createPeerDrain received pollIntervalMs");
+  assert.equal(drainStartOptions?.pollIntervalMs, 37, "drain.start received pollIntervalMs");
+});
