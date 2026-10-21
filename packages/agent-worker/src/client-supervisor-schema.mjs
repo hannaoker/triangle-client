@@ -351,7 +351,6 @@ export function validateHeadlessWakes(headlessWakes) {
   }
   return Object.freeze(normalized);
 }
-
 export function validateCursorAcpWake(cursorAcpWake) {
   if (cursorAcpWake == null) return null;
   return normalizeCursorAcpWakeConfig(cursorAcpWake);
@@ -367,6 +366,193 @@ export function validateCursorAcpWakes(cursorAcpWakes) {
     if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate cursor-acp instanceId");
     if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate cursor-acp stateRoot");
     profiles.add(wake.profile); instanceIds.add(wake.profileInstanceId); stateRoots.add(wake.stateRoot);
+  }
+  return Object.freeze(normalized);
+}
+export const PEER_WAKE_REQUIRED_KEYS = Object.freeze([
+  "allowedPeers",
+  "experimentalGate",
+  "profile",
+  "profileInstanceId",
+  "runner",
+  "runnerEnvironment",
+  "stateRoot",
+]);
+
+export const PEER_WAKE_OPTIONAL_KEYS = Object.freeze([
+  "directOnly",
+  "engineBinaryPath",
+  "pollIntervalMs",
+  "relay",
+  "relayOnly",
+  "relayUrl",
+  "routes",
+  "runnerTimeoutMs",
+]);
+
+export const PEER_WAKE_KEYS = Object.freeze([
+  ...PEER_WAKE_REQUIRED_KEYS,
+  ...PEER_WAKE_OPTIONAL_KEYS,
+]);
+
+const PEER_PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const PEER_ENDPOINT_ID = /^[a-f0-9]{64}$/;
+
+export function validatePeerWake(peerWake) {
+  if (peerWake == null || typeof peerWake !== "object" || Array.isArray(peerWake)) {
+    throw new TypeError("peerWake must be an object");
+  }
+  if (peerWake.experimentalGate !== true) {
+    throw new TypeError(
+      "peerWake requires experimentalGate: true; peer-engine static allowlist is strictly experimental/local-only",
+    );
+  }
+  for (const key of Object.keys(peerWake)) {
+    if (!PEER_WAKE_KEYS.includes(key)) {
+      throw new TypeError(`peerWake.${key} is not supported`);
+    }
+  }
+  for (const required of PEER_WAKE_REQUIRED_KEYS) {
+    if (!Object.hasOwn(peerWake, required)) {
+      throw new TypeError(`peerWake.${required} is required`);
+    }
+  }
+  if (typeof peerWake.profile !== "string" || !PEER_PROFILE_NAME.test(peerWake.profile)) {
+    throw new TypeError("peerWake.profile is invalid");
+  }
+  if (typeof peerWake.profileInstanceId !== "string" || !INSTANCE_ID.test(peerWake.profileInstanceId)) {
+    throw new TypeError("peerWake.profileInstanceId is invalid");
+  }
+  if (typeof peerWake.stateRoot !== "string" || !peerWake.stateRoot.startsWith("/") || peerWake.stateRoot.includes("\0")) {
+    throw new TypeError("peerWake.stateRoot is invalid");
+  }
+  if (!Array.isArray(peerWake.allowedPeers)) {
+    throw new TypeError("peerWake.allowedPeers must be an array");
+  }
+  for (const peer of peerWake.allowedPeers) {
+    if (typeof peer !== "string" || !PEER_ENDPOINT_ID.test(peer)) {
+      throw new TypeError(`peerWake.allowedPeers contains invalid endpoint ID: ${peer}`);
+    }
+  }
+  const allowedSet = new Set(peerWake.allowedPeers);
+  if (allowedSet.size !== peerWake.allowedPeers.length) {
+    throw new TypeError("peerWake.allowedPeers contains duplicate endpoint IDs");
+  }
+
+  const runner = validateRunner({
+    instanceId: peerWake.profileInstanceId,
+    runner: peerWake.runner,
+    runnerEnvironment: peerWake.runnerEnvironment,
+  });
+
+  const routesMap = new Map();
+  if (peerWake.routes != null) {
+    let rawEntries;
+    if (peerWake.routes instanceof Map) {
+      rawEntries = peerWake.routes.entries();
+    } else if (typeof peerWake.routes === "object" && !Array.isArray(peerWake.routes)) {
+      rawEntries = Object.entries(peerWake.routes);
+    } else {
+      throw new TypeError("peerWake.routes must be a Map or object");
+    }
+    for (const [key, route] of rawEntries) {
+      if (!PEER_ENDPOINT_ID.test(key) || !route || route.id !== key) {
+        throw new TypeError(`peerWake.routes contains invalid route for ${key}`);
+      }
+      routesMap.set(key, Object.freeze({
+        id: route.id,
+        addrs: Object.freeze(Array.isArray(route.addrs) ? [...route.addrs] : []),
+      }));
+    }
+  }
+
+  if (allowedSet.size !== routesMap.size || ![...allowedSet].every((id) => routesMap.has(id))) {
+    throw new TypeError("peerWake.allowedPeers and routes must cover the exact same peer IDs");
+  }
+
+  const routes = new Map(routesMap);
+  routes.set = () => { throw new TypeError("routes Map is read-only"); };
+  routes.delete = () => { throw new TypeError("routes Map is read-only"); };
+  routes.clear = () => { throw new TypeError("routes Map is read-only"); };
+  Object.freeze(routes);
+
+  if (peerWake.engineBinaryPath != null) {
+    if (
+      typeof peerWake.engineBinaryPath !== "string" ||
+      !peerWake.engineBinaryPath.startsWith("/") ||
+      peerWake.engineBinaryPath.includes("\0")
+    ) {
+      throw new TypeError("peerWake.engineBinaryPath is invalid");
+    }
+  }
+
+  if (peerWake.pollIntervalMs != null) {
+    positiveInteger(peerWake.pollIntervalMs, "peerWake.pollIntervalMs");
+  }
+  if (peerWake.runnerTimeoutMs != null) {
+    positiveInteger(peerWake.runnerTimeoutMs, "peerWake.runnerTimeoutMs");
+    if (peerWake.runnerTimeoutMs < 1 || peerWake.runnerTimeoutMs > 600000) {
+      throw new TypeError("peerWake.runnerTimeoutMs must be between 1 and 600000 ms");
+    }
+  }
+  if (peerWake.directOnly != null && typeof peerWake.directOnly !== "boolean") {
+    throw new TypeError("peerWake.directOnly must be a boolean");
+  }
+  if (peerWake.relayOnly != null && typeof peerWake.relayOnly !== "boolean") {
+    throw new TypeError("peerWake.relayOnly must be a boolean");
+  }
+  if (peerWake.directOnly && peerWake.relayOnly) {
+    throw new TypeError("peerWake cannot specify both directOnly and relayOnly");
+  }
+  if (peerWake.directOnly && peerWake.relayUrl != null) {
+    throw new TypeError("peerWake cannot specify both directOnly and relayUrl");
+  }
+  if (peerWake.relayUrl != null) {
+    if (typeof peerWake.relayUrl !== "string" || !peerWake.relayUrl.startsWith("https://")) {
+      throw new TypeError("peerWake.relayUrl must be an https URL");
+    }
+  }
+
+  return Object.freeze({
+    profile: peerWake.profile,
+    profileInstanceId: peerWake.profileInstanceId,
+    stateRoot: peerWake.stateRoot,
+    experimentalGate: true,
+    allowedPeers: Object.freeze([...peerWake.allowedPeers]),
+    routes,
+    runner: Object.freeze({
+      command: peerWake.runner.command,
+      args: peerWake.runner.args,
+      timeoutMs: peerWake.runner.timeoutMs,
+    }),
+    runnerEnvironment: peerWake.runnerEnvironment,
+    runnerConfig: runner,
+    engineBinaryPath: peerWake.engineBinaryPath ?? null,
+    pollIntervalMs: peerWake.pollIntervalMs ?? 500,
+    runnerTimeoutMs: peerWake.runnerTimeoutMs ?? 180000,
+    directOnly: Boolean(peerWake.directOnly),
+    relayOnly: Boolean(peerWake.relayOnly),
+    relay: peerWake.relay ?? "default",
+    relayUrl: peerWake.relayUrl ?? null,
+  });
+}
+
+export function validatePeerWakes(peerWakes) {
+  const values = peerWakes ?? [];
+  if (!Array.isArray(values) || values.length > 100) {
+    throw new TypeError("peerWakes must contain between 0 and 100 entries");
+  }
+  const normalized = values.map(validatePeerWake).sort((a, b) => a.profile.localeCompare(b.profile));
+  const profiles = new Set();
+  const instanceIds = new Set();
+  const stateRoots = new Set();
+  for (const wake of normalized) {
+    if (profiles.has(wake.profile)) throw new TypeError("duplicate peer profile");
+    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate peer instanceId");
+    if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate peer stateRoot");
+    profiles.add(wake.profile);
+    instanceIds.add(wake.profileInstanceId);
+    stateRoots.add(wake.stateRoot);
   }
   return Object.freeze(normalized);
 }

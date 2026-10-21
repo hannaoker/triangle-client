@@ -107,3 +107,13 @@ test("Swift launcher marks both agy state directories writable (mirrors installe
   assert.match(swift, /for name in \["antigravity-cli", "config"\]/);
   assert.match(swift, /TRIANGLE_WRITABLE_RUNTIME_ROOTS"\] = writable\.joined\(separator: ":"\)/);
 });
+
+test("production supervisor closure contains no peer modules", () => {
+  const closure = importClosure("packages/agent-worker/src/client-supervisor-cli.mjs");
+  for (const relative of closure) {
+    assert.ok(
+      !path.basename(relative).startsWith("peer-") && !relative.split("/").includes("peer"),
+      `production supervisor closure must not include peer module: ${relative}`,
+    );
+  }
+});

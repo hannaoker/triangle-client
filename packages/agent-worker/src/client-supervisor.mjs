@@ -54,6 +54,7 @@ import {
   normalizeCursorAcpWakeConfig,
 } from "./cursor-acp-runtime/headless-drain-service.mjs";
 
+
 import {
   APP_SERVER_BINDING_KEYS,
   APP_SERVER_WAKE_KEYS,
@@ -63,6 +64,7 @@ import {
   INSTALLATION_ID,
   INSTANCE_ID,
   LEGACY_HEADLESS_WAKE_UNSET,
+  PEER_WAKE_KEYS,
   hasExactKeys,
   isRenewableWatchCredentialError,
   positiveInteger,
@@ -71,6 +73,7 @@ import {
   validateDrain,
   validateEventWake,
   validateHeadlessWakes,
+  validatePeerWakes,
   validateRunner,
 } from "./client-supervisor-schema.mjs";
 
@@ -80,6 +83,7 @@ export {
   GROK_BOT_BINDING_KEYS,
   GROK_BOT_WAKE_KEYS,
   HEADLESS_WAKE_KEYS,
+  PEER_WAKE_KEYS,
 } from "./client-supervisor-schema.mjs";
 
 /**
@@ -600,6 +604,7 @@ export function createClientSupervisor({
   grokBotWake = null,
   headlessWakes = null,
   cursorAcpWakes = null,
+  peerWakes = null,
   headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
@@ -619,6 +624,7 @@ export function createClientSupervisor({
   createCursorAcpDrain = createInstalledCursorAcpDrain,
   createCursorAcpClaimer = createCursorAcpClaimerGuard,
   createInstallDispatcher = createInstallWatchDispatcher,
+  createPeerLane = null,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -673,12 +679,14 @@ export function createClientSupervisor({
   const appServerConfig = validateAppServerWake(appServerWake);
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
   const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
+  const peerConfigs = validatePeerWakes(peerWakes);
   if (
     instances.length < 1
     && !wakeConfig
     && !appServerConfig
     && headlessConfigs.length === 0
     && cursorAcpConfigs.length === 0
+    && peerConfigs.length === 0
   ) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
@@ -848,6 +856,28 @@ export function createClientSupervisor({
     if (headlessConfigs.some((config) => config.profile === cursorAcpConfig.profile)) {
       throw new TypeError("cursorAcpWake profile collides with a headlessWake profile");
     }
+  }
+
+  for (const peerConfig of peerConfigs) {
+    if (seen.has(peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === peerConfig.profileInstanceId) {
+      throw new TypeError("peerWake instanceId collides with an appServerWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profileInstanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a headlessWake profile");
+    }
+    if (cursorAcpConfigs.some((config) => config.profileInstanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a cursorAcpWake profile");
+    }
+  }
+
+  if (peerConfigs.length > 0 && !createPeerLane) {
+    throw new TypeError("peerWakes requires the experimental peer-supervisor.mjs entry point");
   }
 
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;
@@ -1030,6 +1060,15 @@ export function createClientSupervisor({
     }
   }
 
+  const peerLane = createPeerLane && peerConfigs.length > 0
+    ? createPeerLane({
+        peerConfigs,
+        createRunner,
+        gate,
+        logger,
+      })
+    : null;
+
   let installDispatcher = null;
   if (installDispatcherEnabled && hasInstallDispatcherAnchor) {
     const dispatcherProfiles = [];
@@ -1151,11 +1190,54 @@ export function createClientSupervisor({
     grokBotInstanceId: null,
     headlessInstanceIds: Object.freeze(headlessConfigs.map((config) => config.profileInstanceId)),
     cursorAcpInstanceIds: Object.freeze(cursorAcpConfigs.map((config) => config.profileInstanceId)),
+    peerInstanceIds: Object.freeze(peerConfigs.map((config) => config.profileInstanceId)),
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
     grokBotWake: null,
     headlessWakes: headlessConfigs,
     cursorAcpWakes: cursorAcpConfigs,
+    peerWakes: peerConfigs,
+    pendingPeerReplies(options = {}) {
+      if (!peerLane) {
+        if (options?.profileInstanceId !== undefined) {
+          throw new TypeError("Unknown peer profileInstanceId");
+        }
+        return Promise.resolve([]);
+      }
+      return peerLane.pendingPeerReplies(options);
+    },
+    sendPeerMessage(options = {}) {
+      if (!peerLane) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      return peerLane.sendPeerMessage(options);
+    },
+    consumePeerReply(options = {}) {
+      if (!peerLane) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      return peerLane.consumePeerReply(options);
+    },
+    peerStatus(options = {}) {
+      if (!peerLane) {
+        if (options?.profileInstanceId !== undefined) {
+          throw new TypeError("Unknown peer profileInstanceId");
+        }
+        return Promise.resolve([]);
+      }
+      return peerLane.peerStatus(options);
+    },
+    resolvePeerRecord(options = {}) {
+      if (!peerLane) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      return peerLane.resolvePeerRecord(options);
+    },
+    async close() {
+      if (peerLane) {
+        await peerLane.close();
+      }
+    },
     headlessWakeSkipReasons: Object.freeze({ ...headlessWakeSkipReasons }),
     cursorAcpWakeSkipReasons: Object.freeze({ ...cursorAcpWakeSkipReasons }),
     installWatchDispatcherEnabled: installDispatcherEnabled,
@@ -1176,7 +1258,11 @@ export function createClientSupervisor({
           return { instanceId, found: null, processed: 0, failed: true };
         }
       }));
-      return { instances: results };
+      const out = { instances: results };
+      if (peerLane) {
+        out.peerInstances = await peerLane.runOnce({ signal });
+      }
+      return out;
     },
 
     async watch({ signal, sleep } = {}) {
@@ -1549,6 +1635,10 @@ export function createClientSupervisor({
             : [],
         );
 
+      const peerLoop = peerLane
+        ? peerLane.watch({ signal, sleep, runDurableWakeLoop })
+        : Promise.resolve([]);
+
       let settled;
       try {
         settled = await Promise.all([
@@ -1558,12 +1648,13 @@ export function createClientSupervisor({
           appServerLoop,
           headlessLoop,
           cursorAcpLoop,
+          peerLoop,
         ]);
       } finally {
         proactiveController.abort();
         await Promise.allSettled(proactiveRenewals);
       }
-      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult] = settled;
+      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult, peerResult] = settled;
       return {
         instances,
         eventWake: wakeResult,
@@ -1572,6 +1663,7 @@ export function createClientSupervisor({
         grokBotWake: null,
         headlessWakes: Array.isArray(headlessResult) ? headlessResult : [headlessResult].filter(Boolean),
         cursorAcpWakes: Array.isArray(cursorAcpResult) ? cursorAcpResult : [cursorAcpResult].filter(Boolean),
+        peerWakes: Array.isArray(peerResult) ? peerResult : [peerResult].filter(Boolean),
       };
     },
   });

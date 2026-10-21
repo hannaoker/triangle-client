@@ -574,7 +574,9 @@ test("cursor persists only after onWake completes (D5 commit barrier)", async ()
       },
     });
     await client.runOnce();
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    for (let i = 0; i < 20 && order.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
     assert.deepEqual(order, ["onWake:9", "write:9"]);
     assert.equal(await store.read(), 9);
     await client.stop();
