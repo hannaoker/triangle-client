@@ -55,8 +55,9 @@ under `peerWakes`.
 > This entry point is programmatic and experimental. Production `client-supervisor.mjs`
 > and installed background services do not bundle or start peer engines.
 
-- **Programmatic Entry Point:** Import `createPeerSupervisor` from
-  `@the-triangle/agent-worker/peer-supervisor`. It injects peer lane, engine manager,
+- **Programmatic Entry Point:** Import `createPeerSupervisor` from the source file
+  `packages/agent-worker/src/peer-supervisor.mjs` in a checkout. The package does not
+  export it, so installed builds cannot load it. It injects peer lane, engine manager,
   and drain service dependencies into the supervisor.
 - **Scope & Boundaries:** Static allowlist only, gated behind `experimentalGate: true`.
   This mode is local/experimental; signed roster enrollment, Triangle identity ↔
@@ -67,11 +68,14 @@ under `peerWakes`.
   workload keys, and controller secrets.
 - **Durable Delivery & Execution:** Peer receipts represent remote durable receipt,
   never model execution. Admission is journaled prior to runner dispatch; unknown
-  inference outcomes are held in SQLite rather than re-executed. Inbound items are
-  acknowledged only after deterministic reply admission is verified locally.
+  inference outcomes are held in SQLite rather than re-executed. An inbound item is
+  acknowledged only after its local record is durable: after the deterministic reply's
+  admission is verified, or after the item is recorded as held, rejected or reply-failed.
 - **Replies:** Replies received from peers are journaled before acknowledgement.
   The owning supervisor exposes them asynchronously through `await pendingPeerReplies()`
   and removes one from the pending list only after `await consumePeerReply(...)` is called.
+  Results come in arrival order, up to `limit` (default 200) per profile. To read the next
+  page, pass the last reply's `cursor` as `after`, together with its `profileInstanceId`.
 - **Outbound Requests:** `sendPeerMessage({ profileInstanceId, toEndpointId, text,
   requestId, messageId, signal })` requires an active `watch()` session and sends only to
   a peer that is both allowlisted and has a configured route. It returns after the peer

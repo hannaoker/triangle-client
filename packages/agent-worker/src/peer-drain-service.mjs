@@ -48,6 +48,29 @@ const isIdentifier = (s) => typeof s === "string" && /^[A-Za-z0-9._:-]{1,256}$/.
 const isText = (s) =>
   typeof s === "string" && s.trim().length > 0 && Buffer.byteLength(s, "utf8") <= MAX_PAYLOAD_BYTES;
 
+// An opaque position in arrival order for paging received replies.
+const encodeReplyCursor = (r) =>
+  Buffer.from(JSON.stringify([r.created_at, r.sender, r.message_id]), "utf8").toString("base64url");
+
+function decodeReplyCursor(cursor) {
+  let value = null;
+  try {
+    value = JSON.parse(Buffer.from(String(cursor), "base64url").toString("utf8"));
+  } catch {
+    // fall through to the shape check
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length !== 3 ||
+    !Number.isSafeInteger(value[0]) ||
+    !isEndpoint(value[1]) ||
+    !isIdentifier(value[2])
+  ) {
+    throw coded("invalid_params", "Invalid reply cursor");
+  }
+  return value;
+}
+
 export function deriveScopedContextId(senderEndpointId, requestId) {
   return "peer-" + digest(`${senderEndpointId}\0${requestId}`).slice(0, 40);
 }
@@ -309,6 +332,7 @@ export function createPeerDrainService({
         terminal_at INTEGER,
         application_consumed INTEGER NOT NULL DEFAULT 0,
         input_acked INTEGER NOT NULL DEFAULT 0,
+        outcome_sent INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (sender, message_id)
@@ -345,6 +369,12 @@ export function createPeerDrainService({
     const cols = db.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
     if (!cols.includes("input_acked")) {
       db.exec("ALTER TABLE records ADD COLUMN input_acked INTEGER NOT NULL DEFAULT 0");
+    }
+    // Rows that predate outcome tracking already had their chance at an outcome, so an upgrade sends no
+    // duplicates. Rows still executing are left owed: crash recovery below holds them.
+    if (!cols.includes("outcome_sent")) {
+      db.exec("ALTER TABLE records ADD COLUMN outcome_sent INTEGER NOT NULL DEFAULT 0");
+      db.exec("UPDATE records SET outcome_sent=1 WHERE phase != 'executing'");
     }
 
     if (userVersion === 0) {
@@ -416,6 +446,7 @@ export function createPeerDrainService({
       envelope,
       replyPayload: r.reply_payload,
       updatedAt: r.updated_at,
+      cursor: encodeReplyCursor(r),
     };
   };
 
@@ -449,26 +480,34 @@ export function createPeerDrainService({
     return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
   }
 
-  async function sendOutcomeBestEffort(r, { state, reason, requestId, inReplyTo, route }, signal) {
-    try {
-      const outcomePayload = JSON.stringify({
-        protocol: PEER_ENVELOPE_PROTOCOL,
-        kind: "outcome",
-        request_id: requestId,
-        in_reply_to: inReplyTo,
-        state,
-        reason,
-      });
-      const outcomeMsgId = "peer-outcome-" + digest(`${r.sender}\0${r.message_id}\0${state}`);
-      const client = resolveIpc();
-      await client.request("send", {
-        message_id: outcomeMsgId,
-        payload: outcomePayload,
-        peer_addr: route,
-      }, { signal });
-    } catch {
-      // Best-effort: outcome failures never block the drain
+  // Best-effort D3 outcome for an inbound request. The ID includes the execution attempt, so a request held
+  // again after an operator retry gets a new outcome instead of an engine conflict (P11). An aborted send
+  // stays owed for the sweep in step(); any other failure is dropped, because outcomes never block the drain.
+  async function sendOutcome(r, { state, reason }, signal) {
+    const route = routesMap.get(r.sender);
+    if (route && route.id === r.sender && isIdentifier(r.request_id)) {
+      try {
+        const outcomePayload = JSON.stringify({
+          protocol: PEER_ENVELOPE_PROTOCOL,
+          kind: "outcome",
+          request_id: r.request_id,
+          in_reply_to: r.message_id,
+          state,
+          reason: isIdentifier(reason) ? reason : "runner_failed",
+        });
+        const outcomeMsgId = "peer-outcome-" +
+          digest(`${r.sender}\0${r.message_id}\0${state}\0${r.execution_attempt ?? 1}`);
+        await resolveIpc().request("send", {
+          message_id: outcomeMsgId,
+          payload: outcomePayload,
+          peer_addr: route,
+        }, { signal });
+      } catch {
+        if (signal?.aborted) return false;
+      }
     }
+    db.prepare("UPDATE records SET outcome_sent=1 WHERE sender=? AND message_id=?").run(r.sender, r.message_id);
+    return true;
   }
 
   async function deliverReply(r, signal) {
@@ -559,7 +598,7 @@ export function createPeerDrainService({
     return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
   }
 
-  async function executeRunnerTurn(itemData, signal, { isNew = false, envelope, route } = {}) {
+  async function executeRunnerTurn(itemData, signal, { isNew = false, envelope } = {}) {
     const senderId = itemData.sender;
     const messageId = itemData.message_id;
     const inputHash = itemData.input_hash;
@@ -581,7 +620,7 @@ export function createPeerDrainService({
       );
     } else {
       db.prepare(
-        "UPDATE records SET phase='executing', updated_at=? WHERE sender=? AND message_id=?"
+        "UPDATE records SET phase='executing', outcome_sent=0, updated_at=? WHERE sender=? AND message_id=?"
       ).run(now(), senderId, messageId);
     }
 
@@ -600,12 +639,22 @@ export function createPeerDrainService({
     }
 
     let result;
-    let timeout;
+    let timeout = null;
     const cancellation = new AbortController();
     const runnerSignal = signal
       ? AbortSignal.any([signal, cancellation.signal])
       : cancellation.signal;
     let onAbort;
+    // A runner that reports admission (signalsStart) can wait behind other turns, e.g. in the shared reasoner
+    // gate, before it starts. Its timeout runs only from onStarted, and a turn that never started is not held (P1).
+    let started = runner.signalsStart !== true;
+    const armTimeout = () => {
+      timeout ??= setTimeout(() => cancellation.abort(), runnerTimeoutMs);
+    };
+    const onStarted = () => {
+      started = true;
+      armTimeout();
+    };
 
     const execKey = `${senderId}:${messageId}`;
     try {
@@ -613,7 +662,7 @@ export function createPeerDrainService({
         onAbort = () => reject(coded("runner_interrupted", "Runner was interrupted"));
         runnerSignal.addEventListener("abort", onAbort, { once: true });
       });
-      timeout = setTimeout(() => cancellation.abort(), runnerTimeoutMs);
+      if (started) armTimeout();
 
       const scopedContextId = deriveScopedContextId(senderId, envelope?.request_id ?? itemData.request_id);
       const runnerRequest = {
@@ -624,7 +673,7 @@ export function createPeerDrainService({
       };
 
       const runnerPromise = Promise.resolve().then(() =>
-        runner.run(runnerRequest, { signal: runnerSignal })
+        runner.run(runnerRequest, { signal: runnerSignal, onStarted })
       );
       activeExecutions.set(execKey, runnerPromise);
       runnerPromise
@@ -649,6 +698,19 @@ export function createPeerDrainService({
         throw coded("invalid_runner_result", "Runner did not return a valid completed result");
       }
     } catch (err) {
+      if (!started) {
+        // Invariant 5: the runner never started, so a new request is not held and its inbound item stays unacked.
+        if (isNew) {
+          db.prepare("DELETE FROM records WHERE sender=? AND message_id=? AND phase='executing'")
+            .run(senderId, messageId);
+        } else {
+          db.prepare("UPDATE records SET phase='held', updated_at=? WHERE sender=? AND message_id=? AND phase='executing'")
+            .run(now(), senderId, messageId);
+        }
+        throw signal?.aborted
+          ? (signal.reason ?? Object.assign(new Error("Aborted before runner start"), { name: "AbortError", code: "aborted" }))
+          : err;
+      }
       const reasonCode = cancellation.signal.aborted ? "runner_timeout" : (err.code ?? "runner_failed");
       db.prepare(
         "UPDATE records SET phase='held', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?"
@@ -658,20 +720,7 @@ export function createPeerDrainService({
       await ackItem({ sender: senderId, message_id: messageId }, signal);
 
       // Best-effort outcome send (D3)
-      const rRoute = route ?? routesMap.get(senderId);
-      if (rRoute) {
-        await sendOutcomeBestEffort(
-          { sender: senderId, message_id: messageId },
-          {
-            state: "held",
-            reason: reasonCode,
-            requestId: envelope?.request_id ?? itemData.request_id,
-            inReplyTo: messageId,
-            route: rRoute,
-          },
-          signal,
-        );
-      }
+      await sendOutcome(getRow(senderId, messageId), { state: "held", reason: reasonCode }, signal);
 
       return { state: "held", messageId, reason: reasonCode };
     } finally {
@@ -707,20 +756,7 @@ export function createPeerDrainService({
       await ackItem({ sender: senderId, message_id: messageId }, signal);
 
       // Best-effort outcome send (D3)
-      const rRoute = route ?? routesMap.get(senderId);
-      if (rRoute) {
-        await sendOutcomeBestEffort(
-          { sender: senderId, message_id: messageId },
-          {
-            state: "failed",
-            reason: "result_too_large",
-            requestId: envelope?.request_id ?? itemData.request_id,
-            inReplyTo: messageId,
-            route: rRoute,
-          },
-          signal,
-        );
-      }
+      await sendOutcome(getRow(senderId, messageId), { state: "failed", reason: "result_too_large" }, signal);
 
       return { state: "reply_failed", messageId, reason: "result_too_large" };
     }
@@ -786,13 +822,27 @@ export function createPeerDrainService({
           return await deliverReply(outstanding, signal);
         }
 
-        // 4. Check capacity cap (10k rows)
+        // 4. Send outcomes still owed, e.g. for requests held by crash recovery or an interrupted shutdown (P6)
+        const owed = db.prepare(`
+          SELECT * FROM records
+          WHERE outcome_sent=0 AND (phase='held' OR (phase='reply_failed' AND reason='result_too_large'))
+          ORDER BY updated_at LIMIT 1
+        `).get();
+        if (owed) {
+          const state = owed.phase === "held" ? "held" : "failed";
+          if (!(await sendOutcome(owed, { state, reason: owed.reason ?? state }, signal))) {
+            signal?.throwIfAborted();
+          }
+          return { state: "outcome_sent", messageId: owed.message_id, reason: owed.reason };
+        }
+
+        // 5. Check capacity cap (10k rows)
         const count = db.prepare("SELECT COUNT(*) as c FROM records").get().c;
         if (count >= MAX_RECORDS_CAP) {
           return { state: "journal_full", count };
         }
 
-        // 5. Poll engine inbox
+        // 6. Poll engine inbox
         const client = resolveIpc();
         const page = await client.request("inbox", { after_seq: 0, limit: 1 }, { signal });
         if (!page || !Array.isArray(page.items) || page.items.length > 1) {
@@ -916,14 +966,18 @@ export function createPeerDrainService({
           input_payload: item.payload,
           request_id: envelope.request_id,
           execution_attempt: 1,
-        }, signal, { isNew: true, envelope, route });
+        }, signal, { isNew: true, envelope });
       } finally {
         active = false;
       }
     },
 
-    pendingReplies({ inReplyTo, requestId, limit = 200 } = {}) {
+    // Pages in arrival order: pass the last reply's `cursor` as `after` to read the next page (P9).
+    pendingReplies({ inReplyTo, requestId, limit = 200, after } = {}) {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+        throw coded("invalid_params", "limit must be an integer from 1 to 1000");
+      }
       let query = `
         SELECT * FROM records
         WHERE phase='reply_received' AND application_consumed=0
@@ -937,14 +991,15 @@ export function createPeerDrainService({
         query += " AND request_id=?";
         params.push(requestId);
       }
-      query += " ORDER BY updated_at, sender, message_id LIMIT ?";
+      if (after !== undefined) {
+        const [createdAt, sender, messageId] = decodeReplyCursor(after);
+        query += " AND (created_at > ? OR (created_at = ? AND (sender > ? OR (sender = ? AND message_id > ?))))";
+        params.push(createdAt, createdAt, sender, sender, messageId);
+      }
+      query += " ORDER BY created_at, sender, message_id LIMIT ?";
       params.push(limit);
 
       return db.prepare(query).all(...params).map(replyView);
-    },
-
-    getPendingReplies(options) {
-      return this.pendingReplies(options);
     },
 
     consumeReply({ fromEndpointId, messageId } = {}) {
@@ -1091,7 +1146,7 @@ export function createPeerDrainService({
               code: err.code,
             });
             if (
-              err?.code === "engine_not_running" ||
+              err?.code === "engine_not_ready" ||
               err?.code === "ipc_unavailable" ||
               err?.code === "ipc_disconnected" ||
               consecutiveErrors >= 3
@@ -1202,7 +1257,9 @@ export function createPeerDrainService({
             { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
           );
         }
-        const anchorTime = existingOutbound.terminal_at ?? existingOutbound.created_at;
+        // The engine forgets a terminal ID seven days after its terminal transition, which is never earlier
+        // than first admission, so anchoring on first admission never outlives the engine's tombstone (P12).
+        const anchorTime = existingOutbound.created_at;
         if (now() - anchorTime > TOMBSTONE_WINDOW_MS) {
           throw attachOutboundContext(
             coded("retry_window_expired", "Transport idempotency window has expired for this message ID"),
@@ -1291,7 +1348,7 @@ export function createPeerDrainService({
       }
 
       if (status.state === "refused" || status.state === "expired") {
-        db.prepare("UPDATE outbound SET state=?, terminal_at=?, updated_at=? WHERE message_id=?")
+        db.prepare("UPDATE outbound SET state=?, terminal_at=COALESCE(terminal_at, ?), updated_at=? WHERE message_id=?")
           .run(status.state, now(), now(), resolvedMessageId);
         const err = coded(status.state, status.reason || `Outbound request ${status.state}`);
         err.state = status.state;
@@ -1331,15 +1388,24 @@ export function createPeerDrainService({
       await Promise.allSettled([...activeExecutions.values()]);
     },
 
-    close({ wait = false } = {}) {
+    // `force` closes while an interrupted runner is still running. That runner's late result is never written:
+    // executeRunnerTurn stops reading a runner once it has been interrupted (P7).
+    close({ wait = false, force = false } = {}) {
       if (active) throw coded("drain_busy", "Cannot close drain while step is active");
       if (closed) return Promise.resolve();
-      if (activeExecutions.size > 0) {
+      if (activeExecutions.size > 0 && !force) {
         if (!wait) {
           throw coded("execution_still_active", "Cannot close drain while runner execution is active");
         }
         return Promise.allSettled([...activeExecutions.values()]).then(() => {
           return api.close({ wait: false });
+        });
+      }
+      if (activeExecutions.size > 0) {
+        logger.warn?.("triangle_peer_drain_closed_with_active_execution", {
+          profile,
+          profileInstanceId,
+          count: activeExecutions.size,
         });
       }
       closed = true;

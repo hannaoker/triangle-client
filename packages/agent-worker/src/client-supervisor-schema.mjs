@@ -371,6 +371,7 @@ export function validateCursorAcpWakes(cursorAcpWakes) {
 }
 export const PEER_WAKE_REQUIRED_KEYS = Object.freeze([
   "allowedPeers",
+  "engineBinaryPath",
   "experimentalGate",
   "profile",
   "profileInstanceId",
@@ -381,7 +382,6 @@ export const PEER_WAKE_REQUIRED_KEYS = Object.freeze([
 
 export const PEER_WAKE_OPTIONAL_KEYS = Object.freeze([
   "directOnly",
-  "engineBinaryPath",
   "pollIntervalMs",
   "relay",
   "relayOnly",
@@ -397,6 +397,22 @@ export const PEER_WAKE_KEYS = Object.freeze([
 
 const PEER_PROFILE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 const PEER_ENDPOINT_ID = /^[a-f0-9]{64}$/;
+const PEER_RELAY_MODES = Object.freeze(["default", "direct-only", "relay-only"]);
+const PEER_ROUTE_ADDR_LIMIT = 16;
+const PEER_IP_ADDR = /^(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]{2,45}\]):\d{1,5}$/;
+
+// One address in the engine's EndpointAddr form: { Ip: "host:port" } or { Relay: "https://…" }.
+function isPeerRouteAddr(addr) {
+  if (!addr || typeof addr !== "object" || Array.isArray(addr)) return false;
+  const keys = Object.keys(addr);
+  if (keys.length !== 1) return false;
+  const value = addr[keys[0]];
+  if (keys[0] === "Ip") return typeof value === "string" && PEER_IP_ADDR.test(value);
+  if (keys[0] === "Relay") {
+    return typeof value === "string" && value.length <= 2048 && value.startsWith("https://");
+  }
+  return false;
+}
 
 export function validatePeerWake(peerWake) {
   if (peerWake == null || typeof peerWake !== "object" || Array.isArray(peerWake)) {
@@ -459,9 +475,13 @@ export function validatePeerWake(peerWake) {
       if (!PEER_ENDPOINT_ID.test(key) || !route || route.id !== key) {
         throw new TypeError(`peerWake.routes contains invalid route for ${key}`);
       }
+      const addrs = route.addrs ?? [];
+      if (!Array.isArray(addrs) || addrs.length > PEER_ROUTE_ADDR_LIMIT || !addrs.every(isPeerRouteAddr)) {
+        throw new TypeError(`peerWake.routes contains invalid addrs for ${key}`);
+      }
       routesMap.set(key, Object.freeze({
         id: route.id,
-        addrs: Object.freeze(Array.isArray(route.addrs) ? [...route.addrs] : []),
+        addrs: Object.freeze(addrs.map((addr) => Object.freeze({ ...addr }))),
       }));
     }
   }
@@ -476,18 +496,19 @@ export function validatePeerWake(peerWake) {
   routes.clear = () => { throw new TypeError("routes Map is read-only"); };
   Object.freeze(routes);
 
-  if (peerWake.engineBinaryPath != null) {
-    if (
-      typeof peerWake.engineBinaryPath !== "string" ||
-      !peerWake.engineBinaryPath.startsWith("/") ||
-      peerWake.engineBinaryPath.includes("\0")
-    ) {
-      throw new TypeError("peerWake.engineBinaryPath is invalid");
-    }
+  if (
+    typeof peerWake.engineBinaryPath !== "string" ||
+    !peerWake.engineBinaryPath.startsWith("/") ||
+    peerWake.engineBinaryPath.includes("\0")
+  ) {
+    throw new TypeError("peerWake.engineBinaryPath must be an absolute path");
   }
 
   if (peerWake.pollIntervalMs != null) {
     positiveInteger(peerWake.pollIntervalMs, "peerWake.pollIntervalMs");
+    if (peerWake.pollIntervalMs < 100 || peerWake.pollIntervalMs > 60000) {
+      throw new TypeError("peerWake.pollIntervalMs must be between 100 and 60000 ms");
+    }
   }
   if (peerWake.runnerTimeoutMs != null) {
     positiveInteger(peerWake.runnerTimeoutMs, "peerWake.runnerTimeoutMs");
@@ -501,10 +522,16 @@ export function validatePeerWake(peerWake) {
   if (peerWake.relayOnly != null && typeof peerWake.relayOnly !== "boolean") {
     throw new TypeError("peerWake.relayOnly must be a boolean");
   }
-  if (peerWake.directOnly && peerWake.relayOnly) {
+  // `relay` is an alias for the two booleans, so the combination checks apply to the effective mode (P5).
+  if (peerWake.relay != null && !PEER_RELAY_MODES.includes(peerWake.relay)) {
+    throw new TypeError(`peerWake.relay must be one of ${PEER_RELAY_MODES.join(", ")}`);
+  }
+  const directOnly = Boolean(peerWake.directOnly) || peerWake.relay === "direct-only";
+  const relayOnly = Boolean(peerWake.relayOnly) || peerWake.relay === "relay-only";
+  if (directOnly && relayOnly) {
     throw new TypeError("peerWake cannot specify both directOnly and relayOnly");
   }
-  if (peerWake.directOnly && peerWake.relayUrl != null) {
+  if (directOnly && peerWake.relayUrl != null) {
     throw new TypeError("peerWake cannot specify both directOnly and relayUrl");
   }
   if (peerWake.relayUrl != null) {
@@ -527,12 +554,12 @@ export function validatePeerWake(peerWake) {
     }),
     runnerEnvironment: peerWake.runnerEnvironment,
     runnerConfig: runner,
-    engineBinaryPath: peerWake.engineBinaryPath ?? null,
+    engineBinaryPath: peerWake.engineBinaryPath,
     pollIntervalMs: peerWake.pollIntervalMs ?? 500,
     runnerTimeoutMs: peerWake.runnerTimeoutMs ?? 180000,
-    directOnly: Boolean(peerWake.directOnly),
-    relayOnly: Boolean(peerWake.relayOnly),
-    relay: peerWake.relay ?? "default",
+    directOnly,
+    relayOnly,
+    relay: directOnly ? "direct-only" : relayOnly ? "relay-only" : "default",
     relayUrl: peerWake.relayUrl ?? null,
   });
 }

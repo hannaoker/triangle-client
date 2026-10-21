@@ -1260,7 +1260,20 @@ export function createClientSupervisor({
       }));
       const out = { instances: results };
       if (peerLane) {
-        out.peerInstances = await peerLane.runOnce({ signal });
+        try {
+          out.peerInstances = await peerLane.runOnce({ signal });
+        } catch (error) {
+          if (signal?.aborted || error?.name === "AbortError") throw error;
+          // Report a lane failure per peer instance, like a failed worker instance, so the MESH results
+          // above still reach the caller (P13).
+          out.peerInstances = peerConfigs.map((config) => ({
+            profile: config.profile,
+            profileInstanceId: config.profileInstanceId,
+            instanceId: config.profileInstanceId,
+            failed: true,
+            code: typeof error?.code === "string" ? error.code : "peer_lane_failed",
+          }));
+        }
       }
       return out;
     },

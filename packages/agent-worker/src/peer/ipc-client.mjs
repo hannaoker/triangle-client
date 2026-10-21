@@ -22,8 +22,15 @@ export function createIpcClient({ socketPath, timeoutMs = 30000 }) {
   return Object.freeze({
     async request(method, params = {}, { signal } = {}) {
       signal?.throwIfAborted();
-      privateDir(path.dirname(socketPath));
-      const st = lstatSync(socketPath);
+      let st;
+      try {
+        privateDir(path.dirname(socketPath));
+        st = lstatSync(socketPath);
+      } catch (error) {
+        // A missing socket or IPC directory means no engine is listening; callers fail fast on this code (P10).
+        if (error?.code === "ENOENT") throw coded("ipc_unavailable");
+        throw error;
+      }
       if (
         !st.isSocket() ||
         st.isSymbolicLink() ||

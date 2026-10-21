@@ -40,6 +40,14 @@ export function createPeerLane({
 
   let isWatching = false;
   let closed = false;
+  let closePromise = null;
+  // Calls that use a drain outside the watch loop; close() waits for them before closing drains (P7).
+  const inFlight = new Set();
+  const track = (promise) => {
+    inFlight.add(promise);
+    promise.then(() => inFlight.delete(promise), () => inFlight.delete(promise));
+    return promise;
+  };
 
   function ensureEntry(entry) {
     if (closed) {
@@ -48,9 +56,7 @@ export function createPeerLane({
     if (entry.drain && entry.engineManager) {
       return { engineManager: entry.engineManager, drain: entry.drain };
     }
-    if (entry.initError) {
-      throw entry.initError;
-    }
+    // A failed initialization is retried on the next use, because lock conflicts and SQLITE_BUSY pass (P4).
     try {
       const context = Object.freeze({
         instanceId: entry.config.profileInstanceId,
@@ -60,10 +66,16 @@ export function createPeerLane({
       if (!adapterRunner || typeof adapterRunner.run !== "function") {
         throw new TypeError("createRunner must return a runner");
       }
+      // The shared gate can queue a turn behind other lanes' work, so the wrapper reports when the turn really
+      // starts; the drain counts its timeout and held handling only from there (P1).
       const runner = Object.freeze({
+        signalsStart: true,
         run(request, options = {}) {
           return gate.run(
-            () => adapterRunner.run(request, options),
+            () => {
+              options.onStarted?.();
+              return adapterRunner.run(request, { signal: options.signal });
+            },
             { signal: options.signal },
           );
         },
@@ -97,6 +109,8 @@ export function createPeerLane({
       }
       entry.engineManager = engineManager;
       entry.drain = drain;
+      if (entry.initError && entry.lastError === entry.initError) entry.lastError = null;
+      entry.initError = null;
       return { engineManager, drain };
     } catch (error) {
       entry.initError = error;
@@ -115,7 +129,7 @@ export function createPeerLane({
       if (isWatching) {
         throw coded("peer_lane_busy", "runOnce cannot run while watch() is active");
       }
-      return Promise.all(
+      return track(Promise.all(
         entries.map(async (entry) => {
           const { config } = entry;
           try {
@@ -156,7 +170,7 @@ export function createPeerLane({
             };
           }
         }),
-      );
+      ));
     },
 
     async watch({ signal, sleep, runDurableWakeLoop } = {}) {
@@ -175,15 +189,12 @@ export function createPeerLane({
               const { engineManager, drain } = ensureEntry(entry);
               try {
                 await engineManager.start({ signal });
-                const drainPromise = typeof drain.start === "function"
-                  ? drain.start({
-                      runLoop: true,
-                      signal,
-                      sleep,
-                      pollIntervalMs: entry.config.pollIntervalMs,
-                    })
-                  : drain.step({ signal });
-                await drainPromise;
+                await drain.start({
+                  runLoop: true,
+                  signal,
+                  sleep,
+                  pollIntervalMs: entry.config.pollIntervalMs,
+                });
                 if (!signal?.aborted) {
                   await waitForAbort(signal);
                 }
@@ -197,11 +208,7 @@ export function createPeerLane({
                 throw err;
               } finally {
                 try {
-                  if (typeof drain.stop === "function") {
-                    await drain.stop();
-                  } else if (typeof drain.close === "function") {
-                    await drain.close();
-                  }
+                  await drain.stop();
                 } catch {}
                 try {
                   await engineManager.stop();
@@ -210,13 +217,7 @@ export function createPeerLane({
             },
             stop: async () => {
               try {
-                if (entry.drain) {
-                  if (typeof entry.drain.stop === "function") {
-                    await entry.drain.stop();
-                  } else if (typeof entry.drain.close === "function") {
-                    await entry.drain.close();
-                  }
-                }
+                await entry.drain?.stop();
               } catch {}
               try {
                 if (entry.engineManager) {
@@ -272,9 +273,7 @@ export function createPeerLane({
         err.code = "recipient_not_allowed";
         throw err;
       }
-      const route = entry.config.routes instanceof Map
-        ? entry.config.routes.get(toEndpointId)
-        : entry.config.routes?.[toEndpointId];
+      const route = entry.config.routes.get(toEndpointId);
       if (!route || route.id !== toEndpointId) {
         const err = new TypeError("No configured route for recipient");
         err.code = "route_unavailable";
@@ -286,17 +285,20 @@ export function createPeerLane({
         throw new TypeError("Peer drain does not support sendRequest");
       }
 
-      return await drain.sendRequest({
+      return await track(drain.sendRequest({
         toEndpointId,
         text,
         requestId,
         messageId,
         signal,
-      });
+      }));
     },
 
-    async pendingPeerReplies({ profileInstanceId, inReplyTo, requestId, limit } = {}) {
+    async pendingPeerReplies({ profileInstanceId, inReplyTo, requestId, limit, after } = {}) {
       if (closed) throw coded("peer_lane_closed", "Peer lane is closed");
+      if (after !== undefined && profileInstanceId === undefined) {
+        throw new TypeError("Paging with `after` requires a profileInstanceId");
+      }
       const selected = profileInstanceId === undefined
         ? entries
         : entries.filter((entry) => entry.config.profileInstanceId === profileInstanceId);
@@ -311,7 +313,7 @@ export function createPeerLane({
         } catch {
           continue;
         }
-        const replies = await (drain.pendingReplies?.({ inReplyTo, requestId, limit }) ?? []);
+        const replies = await drain.pendingReplies({ inReplyTo, requestId, limit, after });
         for (const reply of replies) {
           results.push({
             profile: entry.config.profile,
@@ -441,27 +443,33 @@ export function createPeerLane({
       });
     },
 
-    async close() {
-      if (closed) return;
-      closed = true;
-      for (const entry of entries) {
-        if (entry.drain) {
-          try {
-            await (entry.drain.close?.() ?? entry.drain.stop?.());
-          } catch (e) {
-            logger.warn?.("triangle_client_peer_drain_close_failed", {
-              profile: entry.config.profile,
-              profileInstanceId: entry.config.profileInstanceId,
-              error: e?.message,
-            });
+    // Refuses new work, waits for calls in flight, stops the drain loops, then closes every drain even if an
+    // interrupted runner is still running, so no owner lock outlives the lane (P7).
+    close() {
+      closePromise ??= (async () => {
+        closed = true;
+        await Promise.allSettled([...inFlight]);
+        for (const entry of entries) {
+          if (entry.drain) {
+            try {
+              await entry.drain.stop();
+              await entry.drain.close({ force: true });
+            } catch (e) {
+              logger.warn?.("triangle_client_peer_drain_close_failed", {
+                profile: entry.config.profile,
+                profileInstanceId: entry.config.profileInstanceId,
+                error: e?.message,
+              });
+            }
+          }
+          if (entry.engineManager) {
+            try {
+              await entry.engineManager.stop();
+            } catch {}
           }
         }
-        if (entry.engineManager) {
-          try {
-            await entry.engineManager.stop();
-          } catch {}
-        }
-      }
+      })();
+      return closePromise;
     },
   });
 }
