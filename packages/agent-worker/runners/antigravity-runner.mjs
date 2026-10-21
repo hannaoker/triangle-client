@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { constants, fstatSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { constants, fstatSync, lstatSync, realpathSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 import {
   createAgentPrompt as createSharedAgentPrompt,
@@ -125,33 +125,57 @@ export function createAgentPrompt(request) {
  * after `-p` the next token is consumed as the prompt. The prompt is always a
  * single argv element (spawned with shell: false), never interpolated.
  */
-function instanceModel(env) {
+function instanceRuntimeSettings(env) {
   const directory = resolveStoreDirectory(env);
-  if (!directory) return null;
+  if (!directory) return {};
   let fd;
   try {
     fd = openSync(path.join(directory, "triangle-antigravity-runtime.json"), constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = fstatSync(fd);
     if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0 || info.size > 4096) throw new Error();
     const config = JSON.parse(readFileSync(fd, "utf8"));
-    if (!config || typeof config !== "object" || Array.isArray(config) || Object.keys(config).join() !== "model"
-        || typeof config.model !== "string" || !config.model.trim() || config.model.length > 160 || /[\r\n\0]/.test(config.model)) throw new Error();
-    return config.model;
+    if (!config || typeof config !== "object" || Array.isArray(config)
+        || Object.keys(config).some(key => key !== "model")
+        || (config.model !== undefined && (typeof config.model !== "string" || !config.model.trim() || config.model.length > 160 || /[\r\n\0]/.test(config.model)))) throw new Error();
+    return config;
   } catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (error.code === "ENOENT") return {};
     throw new Error("Invalid Antigravity instance runtime configuration");
+  } finally { if (fd !== undefined) closeSync(fd); }
+}
+
+function localSecurityMode(env) {
+  if (!env.TRIANGLE_MODEL_STATE_BASE || !env.TRIANGLE_INSTANCE_ID) return "sandboxed";
+  if (!path.isAbsolute(env.TRIANGLE_MODEL_STATE_BASE) || !/^[a-f0-9]{64}$/.test(env.TRIANGLE_INSTANCE_ID)) throw new Error("Invalid Antigravity controller policy");
+  const directory = path.join(path.dirname(realpathSync(env.TRIANGLE_MODEL_STATE_BASE)), "runtime-policy");
+  let fd;
+  try {
+    const parent = lstatSync(directory);
+    if (!parent.isDirectory() || parent.uid !== process.getuid() || (parent.mode & 0o077) !== 0 || realpathSync(directory) !== directory) throw new Error();
+    fd = openSync(path.join(directory, env.TRIANGLE_INSTANCE_ID + ".json"), constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0 || info.size > 4096) throw new Error();
+    const config = JSON.parse(readFileSync(fd, "utf8"));
+    if (!config || typeof config !== "object" || Array.isArray(config) || Object.keys(config).join() !== "securityMode"
+        || !["sandboxed", "developer-unsandboxed"].includes(config.securityMode)) throw new Error();
+    return config.securityMode;
+  } catch (error) {
+    if (error.code === "ENOENT") return "sandboxed";
+    throw new Error("Invalid Antigravity controller policy");
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function createAntigravityInvocation(prompt, env = process.env, { conversationId = null } = {}) {
   const args = [];
-  const model = instanceModel(env);
-  if (model) args.push("--model", model);
+  const settings = instanceRuntimeSettings(env);
+  const securityMode = localSecurityMode(env);
+  if (settings.model) args.push("--model", settings.model);
   if (conversationId !== null && conversationId !== undefined) {
     if (!isValidConversationId(conversationId)) throw new Error("Antigravity conversation id is invalid");
     args.push("--conversation", conversationId);
   }
-  args.push("-p", prompt, "--output-format", "json", "--sandbox");
+  args.push("-p", prompt, "--output-format", "json");
+  if (securityMode === "sandboxed") args.push("--sandbox");
   const tempRoot = env.TRIANGLE_INSTANCE_TEMP_ROOT;
   if (typeof tempRoot === "string" && path.isAbsolute(tempRoot)) {
     args.push("--log-file", path.join(tempRoot, "antigravity-cli.log"));
@@ -159,6 +183,7 @@ export function createAntigravityInvocation(prompt, env = process.env, { convers
   return {
     command: env.ANTIGRAVITY_CLI || env.AGY_CLI || "agy",
     args,
+    securityMode,
   };
 }
 
@@ -207,7 +232,12 @@ export async function runAntigravityTurn(request, env = process.env, { invoke = 
 
   const attempt = async (conversationId) => {
     const invocation = createAntigravityInvocation(prompt, env, { conversationId });
-    const parsed = parseAntigravityOutput(await invoke(invocation.command, invocation.args, { env }));
+    const options = { env };
+    if (invocation.securityMode === "developer-unsandboxed") {
+      console.warn("Triangle Antigravity developer mode: sandbox DISABLED; tasks run with your user filesystem and network permissions.");
+      options.sandbox = (command, args) => ({ command, args, env: {} });
+    }
+    const parsed = parseAntigravityOutput(await invoke(invocation.command, invocation.args, options));
     if (turnFailed(parsed)) {
       throw new Error(`Antigravity turn failed${parsed.status ? ` (${parsed.status})` : ""}${parsed.error ? `: ${parsed.error.slice(0, 300)}` : ""}`);
     }

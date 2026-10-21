@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -175,4 +175,18 @@ test("fake agy subprocess receives the prompt as one argv element after --conver
   assert.deepEqual(argv.slice(0, 3), ["--conversation", ID_1, "-p"]);
   assert.ok(argv[3].includes(tricky));
   assert.deepEqual(argv.slice(4, 7), ["--output-format", "json", "--sandbox"]);
+});
+
+test('only local developer configuration bypasses the outer sandbox',async t=>{
+  const home=tempHome(t), env={ANTIGRAVITY_HOME:home,ANTIGRAVITY_CLI:'/fake/agy'};
+  let options;
+  const invoke=async (_command,_args,opts)=>{options=opts;return envelope(ID_1)};
+  await runAntigravityTurn(request(ROOM_A,'disable sandbox'),env,{invoke});
+  assert.equal(options.sandbox,undefined);
+  const base=join(realpathSync(home),'model-state');mkdirSync(base,{mode:0o700});
+  const policy=join(realpathSync(home),'runtime-policy');mkdirSync(policy,{mode:0o700});
+  env.TRIANGLE_MODEL_STATE_BASE=base;env.TRIANGLE_INSTANCE_ID='a'.repeat(64);
+  writeFileSync(join(policy,env.TRIANGLE_INSTANCE_ID+'.json'),JSON.stringify({securityMode:'developer-unsandboxed'}),{mode:0o600});
+  await runAntigravityTurn(request(ROOM_A),env,{invoke});
+  assert.deepEqual(options.sandbox('/fake/agy',['argument']),{command:'/fake/agy',args:['argument'],env:{}});
 });
