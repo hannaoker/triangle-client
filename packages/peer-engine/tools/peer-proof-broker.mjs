@@ -1,25 +1,30 @@
 // Isolated proof adapter, not a production roster or MESH integration.
-import net from "node:net";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   chmodSync,
   closeSync,
   existsSync,
   fsyncSync,
-  lstatSync,
-  mkdirSync,
   openSync,
-  realpathSync,
 } from "node:fs";
+import {
+  coded,
+  privateDir,
+  privateFile,
+} from "../../agent-worker/src/peer/private-path.mjs";
+import {
+  createIpcClient,
+  MAX_REQUEST,
+  MAX_RESPONSE,
+} from "../../agent-worker/src/peer/ipc-client.mjs";
+
+export { createIpcClient };
 export const PROTOCOL = "triangle.peer-proof/1";
 const MAX_TEXT = 32768,
-  MAX_ENVELOPE = MAX_TEXT * 6 + 1024,
-  MAX_REQUEST = 1024 * 1024,
-  MAX_RESPONSE = 2 * 1024 * 1024;
+  MAX_ENVELOPE = MAX_TEXT * 6 + 1024;
 const digest = (s) => createHash("sha256").update(s, "utf8").digest("hex");
-const coded = (code) => Object.assign(Error(code), { code });
 const endpoint = (s) => typeof s === "string" && /^[a-f0-9]{64}$/.test(s);
 const identifier = (s) =>
   typeof s === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(s);
@@ -27,44 +32,6 @@ const text = (s) =>
   typeof s === "string" &&
   s.trim().length > 0 &&
   Buffer.byteLength(s) <= MAX_TEXT;
-function ancestors(root) {
-  let p = path.parse(root).root;
-  for (const part of root.slice(p.length).split(path.sep).filter(Boolean)) {
-    p = path.join(p, part);
-    const s = lstatSync(p, { throwIfNoEntry: false });
-    if (
-      s &&
-      (s.isSymbolicLink() ||
-        !s.isDirectory() ||
-        ![0, process.getuid()].includes(s.uid) ||
-        (s.mode & 0o022 && !(s.mode & 0o1000 && s.uid === 0)))
-    )
-      throw coded("unsafe_path");
-  }
-}
-function privateDir(root, { create = false } = {}) {
-  if (!path.isAbsolute(root) || path.resolve(root) !== root)
-    throw coded("unsafe_path");
-  ancestors(root);
-  if (create && !existsSync(root))
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-  if (realpathSync(root) !== root) throw coded("unsafe_path");
-  const s = lstatSync(root);
-  if (!s.isDirectory() || s.uid !== process.getuid() || (s.mode & 0o077) !== 0)
-    throw coded("unsafe_path");
-}
-function privateFile(file) {
-  const s = lstatSync(file, { throwIfNoEntry: false });
-  if (
-    s &&
-    (!s.isFile() ||
-      s.isSymbolicLink() ||
-      s.nlink !== 1 ||
-      s.uid !== process.getuid() ||
-      (s.mode & 0o077) !== 0)
-  )
-    throw coded("unsafe_path");
-}
 export function parseEnvelope(payload) {
   if (typeof payload !== "string" || Buffer.byteLength(payload) > MAX_ENVELOPE)
     throw coded("invalid_envelope");
@@ -102,112 +69,6 @@ export function deriveReplyId(sender, messageId) {
     "peer-reply-" +
     digest(`triangle-peer-proof-reply-v1\0${sender}\0${messageId}`)
   );
-}
-/** Each RPC negotiates hello on a fresh private Unix connection, so retries reconnect safely. */
-export function createIpcClient({ socketPath, timeoutMs = 30000 }) {
-  if (
-    !path.isAbsolute(socketPath) ||
-    !Number.isSafeInteger(timeoutMs) ||
-    timeoutMs < 1 ||
-    timeoutMs > 120000
-  )
-    throw coded("invalid_ipc_options");
-  return Object.freeze({
-    async request(method, params = {}, { signal } = {}) {
-      signal?.throwIfAborted();
-      privateDir(path.dirname(socketPath));
-      const st = lstatSync(socketPath);
-      if (
-        !st.isSocket() ||
-        st.isSymbolicLink() ||
-        st.uid !== process.getuid() ||
-        st.mode & 0o077
-      )
-        throw coded("unsafe_socket");
-      const socket = net.createConnection({ path: socketPath });
-      let buffer = Buffer.alloc(0),
-        pending = null,
-        fatal = null;
-      const stop = (error) => {
-        fatal ??= error;
-        pending?.reject(fatal);
-        pending = null;
-        socket.destroy();
-      };
-      const timer = setTimeout(() => stop(coded("ipc_timeout")), timeoutMs);
-      const abort = () => stop(coded("aborted"));
-      signal?.addEventListener("abort", abort, { once: true });
-      socket.on("error", () => stop(coded("ipc_disconnected")));
-      socket.on("close", () => {
-        if (pending) stop(coded("ipc_disconnected"));
-      });
-      socket.on("data", (chunk) => {
-        buffer = Buffer.concat([buffer, chunk]);
-        if (buffer.length > MAX_RESPONSE + 4)
-          return stop(coded("ipc_oversized"));
-        while (buffer.length >= 4) {
-          const size = buffer.readUInt32BE(0);
-          if (size < 2 || size > MAX_RESPONSE)
-            return stop(coded("ipc_oversized"));
-          if (buffer.length < 4 + size) return;
-          let value;
-          try {
-            value = JSON.parse(buffer.subarray(4, 4 + size).toString("utf8"));
-          } catch {
-            return stop(coded("ipc_invalid"));
-          }
-          buffer = buffer.subarray(4 + size);
-          if (
-            !pending ||
-            value.protocol_version !== 1 ||
-            value.id !== pending.id ||
-            (!Object.hasOwn(value, "result") && !value.error) ||
-            (value.error && Object.hasOwn(value, "result"))
-          )
-            return stop(coded("ipc_invalid"));
-          const p = pending;
-          pending = null;
-          if (value.error) {
-            const code =
-              typeof value.error.code === "string" &&
-              /^[a-z_]{1,64}$/.test(value.error.code)
-                ? value.error.code
-                : "ipc_error";
-            p.reject(coded(code));
-          } else p.resolve(value.result);
-        }
-      });
-      const call = (name, args) =>
-        new Promise((resolve, reject) => {
-          if (fatal) return reject(fatal);
-          const id = randomUUID(),
-            body = Buffer.from(
-              JSON.stringify({
-                protocol_version: 1,
-                id,
-                method: name,
-                params: args,
-              }),
-            );
-          if (body.length > MAX_REQUEST) return reject(coded("ipc_oversized"));
-          pending = { id, resolve, reject };
-          const header = Buffer.alloc(4);
-          header.writeUInt32BE(body.length);
-          socket.write(Buffer.concat([header, body]));
-        });
-      try {
-        const hello = await call("hello", {});
-        if (hello?.protocol_version !== 1 || !endpoint(hello.endpoint_id))
-          throw coded("ipc_invalid_hello");
-        signal?.throwIfAborted();
-        return await call(method, params);
-      } finally {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", abort);
-        socket.destroy();
-      }
-    },
-  });
 }
 const held = new Set();
 /** Durable per authenticated-sender/message custody. The owner lock spans idle periods. */

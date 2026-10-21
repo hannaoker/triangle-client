@@ -434,27 +434,47 @@ export function validatePeerWake(peerWake) {
       throw new TypeError(`peerWake.allowedPeers contains invalid endpoint ID: ${peer}`);
     }
   }
+  const allowedSet = new Set(peerWake.allowedPeers);
+  if (allowedSet.size !== peerWake.allowedPeers.length) {
+    throw new TypeError("peerWake.allowedPeers contains duplicate endpoint IDs");
+  }
+
   const runner = validateRunner({
     instanceId: peerWake.profileInstanceId,
     runner: peerWake.runner,
     runnerEnvironment: peerWake.runnerEnvironment,
   });
 
-  let routes = new Map();
+  const routesMap = new Map();
   if (peerWake.routes != null) {
+    let rawEntries;
     if (peerWake.routes instanceof Map) {
-      routes = peerWake.routes;
+      rawEntries = peerWake.routes.entries();
     } else if (typeof peerWake.routes === "object" && !Array.isArray(peerWake.routes)) {
-      routes = new Map(Object.entries(peerWake.routes));
+      rawEntries = Object.entries(peerWake.routes);
     } else {
       throw new TypeError("peerWake.routes must be a Map or object");
     }
-    for (const [key, route] of routes.entries()) {
+    for (const [key, route] of rawEntries) {
       if (!PEER_ENDPOINT_ID.test(key) || !route || route.id !== key) {
         throw new TypeError(`peerWake.routes contains invalid route for ${key}`);
       }
+      routesMap.set(key, Object.freeze({
+        id: route.id,
+        addrs: Object.freeze(Array.isArray(route.addrs) ? [...route.addrs] : []),
+      }));
     }
   }
+
+  if (allowedSet.size !== routesMap.size || ![...allowedSet].every((id) => routesMap.has(id))) {
+    throw new TypeError("peerWake.allowedPeers and routes must cover the exact same peer IDs");
+  }
+
+  const routes = new Map(routesMap);
+  routes.set = () => { throw new TypeError("routes Map is read-only"); };
+  routes.delete = () => { throw new TypeError("routes Map is read-only"); };
+  routes.clear = () => { throw new TypeError("routes Map is read-only"); };
+  Object.freeze(routes);
 
   if (peerWake.engineBinaryPath != null) {
     if (
@@ -471,12 +491,21 @@ export function validatePeerWake(peerWake) {
   }
   if (peerWake.runnerTimeoutMs != null) {
     positiveInteger(peerWake.runnerTimeoutMs, "peerWake.runnerTimeoutMs");
+    if (peerWake.runnerTimeoutMs < 1 || peerWake.runnerTimeoutMs > 600000) {
+      throw new TypeError("peerWake.runnerTimeoutMs must be between 1 and 600000 ms");
+    }
   }
   if (peerWake.directOnly != null && typeof peerWake.directOnly !== "boolean") {
     throw new TypeError("peerWake.directOnly must be a boolean");
   }
   if (peerWake.relayOnly != null && typeof peerWake.relayOnly !== "boolean") {
     throw new TypeError("peerWake.relayOnly must be a boolean");
+  }
+  if (peerWake.directOnly && peerWake.relayOnly) {
+    throw new TypeError("peerWake cannot specify both directOnly and relayOnly");
+  }
+  if (peerWake.directOnly && peerWake.relayUrl != null) {
+    throw new TypeError("peerWake cannot specify both directOnly and relayUrl");
   }
   if (peerWake.relayUrl != null) {
     if (typeof peerWake.relayUrl !== "string" || !peerWake.relayUrl.startsWith("https://")) {

@@ -2212,6 +2212,32 @@ test("supervisor sends only to a configured allowed peer and preserves active en
     consumeReply() { return { consumed: true }; },
     close() {},
   };
+  assert.throws(
+    () => createClientSupervisor({
+      instances: [],
+      peerWakes: [
+        {
+          experimentalGate: true,
+          profile: "peer-agent",
+          profileInstanceId: id(84),
+          stateRoot: "/tmp/peer-send-state",
+          allowedPeers: [recipientId, "b".repeat(64)],
+          routes: new Map([[recipientId, route]]),
+          runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+          runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(84) },
+        },
+      ],
+      createPeerEngine: () => ({
+        get isRunning() { return engineStarts > engineStops; },
+        async start() { engineStarts++; },
+        async stop() { engineStops++; },
+        getIpcClient() { return {}; },
+      }),
+      createPeerDrain: () => peerDrain,
+    }),
+    /peerWake\.allowedPeers and routes must cover the exact same peer IDs/,
+  );
+
   const supervisor = createClientSupervisor({
     instances: [],
     peerWakes: [
@@ -2220,7 +2246,7 @@ test("supervisor sends only to a configured allowed peer and preserves active en
         profile: "peer-agent",
         profileInstanceId: id(84),
         stateRoot: "/tmp/peer-send-state",
-        allowedPeers: [recipientId, "b".repeat(64)],
+        allowedPeers: [recipientId],
         routes: new Map([[recipientId, route]]),
         runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
         runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(84) },
@@ -2259,11 +2285,6 @@ test("supervisor sends only to a configured allowed peer and preserves active en
   assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "outbound-1" }).length, 1);
   assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), requestId: "request-2" }).length, 1);
   assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "missing" }).length, 0);
-  await assert.rejects(supervisor.sendPeerMessage({
-    profileInstanceId: id(84),
-    toEndpointId: "b".repeat(64),
-    text: "Missing route",
-  }), { code: "route_unavailable" });
   await assert.rejects(supervisor.sendPeerMessage({
     profileInstanceId: id(84),
     toEndpointId: "c".repeat(64),

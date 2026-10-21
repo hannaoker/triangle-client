@@ -6,47 +6,81 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
-  lstatSync,
   openSync,
 } from "node:fs";
-import { assertSafeStateRoot } from "./peer-engine-manager.mjs";
+import { privateDir, privateFile } from "./peer/private-path.mjs";
 
 export const PEER_ENVELOPE_PROTOCOL = "triangle.peer/1";
-const MAX_TEXT_BYTES = 32768;
-const MAX_ENVELOPE_BYTES = MAX_TEXT_BYTES * 6 + 1024;
+export const MAX_PAYLOAD_BYTES = 256 * 1024;
+export const MAX_FRAME_BYTES = 320 * 1024;
+const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+const TOMBSTONE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_RECORDS_CAP = 10000;
+
+export const TERMINAL_PHASES = Object.freeze([
+  "acked",
+  "held",
+  "rejected",
+  "reply_failed",
+  "reply_received",
+  "discarded",
+]);
 
 const digest = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 const coded = (code, message = code) =>
   Object.assign(new Error(message === code ? code : `${code}: ${message}`), { code });
-const attachOutboundContext = (err, { messageId, requestId, toEndpointId } = {}) => {
-  if (err && typeof err === "object") {
-    if (messageId !== undefined) err.messageId = messageId;
-    if (requestId !== undefined) err.requestId = requestId;
-    if (toEndpointId !== undefined) err.toEndpointId = toEndpointId;
-  }
-  return err;
-};
+
+export function attachOutboundContext(err, { messageId, requestId, toEndpointId } = {}) {
+  const original = err instanceof Error ? err : new Error(String(err));
+  const wrapped = Object.assign(new Error(original.message, { cause: original }), {
+    name: original.name,
+    code: original.code ?? (original.name === "AbortError" ? "aborted" : undefined),
+    messageId,
+    requestId,
+    toEndpointId,
+  });
+  if (original.state) wrapped.state = original.state;
+  return wrapped;
+}
 
 const isEndpoint = (s) => typeof s === "string" && /^[a-f0-9]{64}$/.test(s);
 const isIdentifier = (s) => typeof s === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(s);
 const isText = (s) =>
-  typeof s === "string" && s.trim().length > 0 && Buffer.byteLength(s) <= MAX_TEXT_BYTES;
+  typeof s === "string" && s.trim().length > 0 && Buffer.byteLength(s, "utf8") <= MAX_PAYLOAD_BYTES;
 
-function privateFile(file) {
-  const s = lstatSync(file, { throwIfNoEntry: false });
-  if (
-    s &&
-    (!s.isFile() ||
-      s.isSymbolicLink() ||
-      (typeof process.getuid === "function" && s.uid !== process.getuid()) ||
-      (s.mode & 0o077) !== 0)
-  ) {
-    throw coded("unsafe_file", `Unsafe file permissions or symlink for ${file}`);
+export function deriveScopedContextId(senderEndpointId, requestId) {
+  return "peer-" + digest(`${senderEndpointId}\0${requestId}`).slice(0, 40);
+}
+
+export function estimateWireFrameLen({ messageId, payload, senderEndpointId, createdAtUnixMs = 0 }) {
+  const hash = digest(payload);
+  const frameObj = {
+    type: "message",
+    message_id: messageId,
+    payload_hash: hash,
+    payload,
+    sender_endpoint_id: senderEndpointId,
+    created_at_unix_ms: createdAtUnixMs,
+  };
+  return Buffer.byteLength(JSON.stringify(frameObj), "utf8");
+}
+
+export function checkPayloadAndFrame(payload, { messageId, senderEndpointId, createdAtUnixMs = 0 } = {}) {
+  const payloadBytes = Buffer.byteLength(payload, "utf8");
+  if (payloadBytes > MAX_PAYLOAD_BYTES) {
+    return { ok: false, reason: "payload_too_large", error: `Payload ${payloadBytes} exceeds MAX_PAYLOAD_BYTES` };
   }
+  if (messageId && senderEndpointId) {
+    const frameBytes = estimateWireFrameLen({ messageId, payload, senderEndpointId, createdAtUnixMs });
+    if (frameBytes > MAX_FRAME_BYTES) {
+      return { ok: false, reason: "payload_too_large", error: `Encoded wire frame ${frameBytes} exceeds MAX_FRAME_BYTES` };
+    }
+  }
+  return { ok: true };
 }
 
 export function parsePeerEnvelope(payload) {
-  if (typeof payload !== "string" || Buffer.byteLength(payload) > MAX_ENVELOPE_BYTES) {
+  if (typeof payload !== "string" || Buffer.byteLength(payload, "utf8") > MAX_PAYLOAD_BYTES) {
     throw coded("invalid_envelope", "Payload exceeds maximum envelope size or is not a string");
   }
   let e;
@@ -55,28 +89,51 @@ export function parsePeerEnvelope(payload) {
   } catch {
     throw coded("invalid_envelope", "Payload is not valid JSON");
   }
-  if (
-    !e ||
-    Array.isArray(e) ||
-    e.protocol !== PEER_ENVELOPE_PROTOCOL ||
-    !isIdentifier(e.request_id) ||
-    !isText(e.text)
-  ) {
+  if (!e || typeof e !== "object" || Array.isArray(e) || e.protocol !== PEER_ENVELOPE_PROTOCOL) {
     throw coded("invalid_envelope", "Envelope has invalid structure or fields");
   }
-  const keys =
-    e.kind === "request"
-      ? ["protocol", "kind", "request_id", "text"]
-      : e.kind === "reply"
-        ? ["protocol", "kind", "request_id", "in_reply_to", "text"]
-        : [];
-  if (
-    Object.keys(e).sort().join() !== keys.sort().join() ||
-    (e.kind === "reply" && !isIdentifier(e.in_reply_to))
-  ) {
-    throw coded("invalid_envelope", "Envelope has unrecognized or missing keys");
+  if (!isIdentifier(e.request_id)) {
+    throw coded("invalid_envelope", "Invalid request_id");
   }
-  return e;
+
+  if (e.kind === "request") {
+    if (!isText(e.text)) {
+      throw coded("invalid_envelope", "Invalid request text");
+    }
+    const expected = ["kind", "protocol", "request_id", "text"];
+    if (Object.keys(e).sort().join() !== expected.join()) {
+      throw coded("invalid_envelope", "Envelope has unrecognized or missing keys");
+    }
+    return e;
+  }
+
+  if (e.kind === "reply") {
+    if (!isIdentifier(e.in_reply_to) || !isText(e.text)) {
+      throw coded("invalid_envelope", "Invalid reply in_reply_to or text");
+    }
+    const expected = ["in_reply_to", "kind", "protocol", "request_id", "text"];
+    if (Object.keys(e).sort().join() !== expected.join()) {
+      throw coded("invalid_envelope", "Envelope has unrecognized or missing keys");
+    }
+    return e;
+  }
+
+  if (e.kind === "outcome") {
+    if (
+      !isIdentifier(e.in_reply_to) ||
+      !["held", "rejected", "failed"].includes(e.state) ||
+      !isIdentifier(e.reason)
+    ) {
+      throw coded("invalid_envelope", "Invalid outcome in_reply_to, state, or reason");
+    }
+    const expected = ["in_reply_to", "kind", "protocol", "reason", "request_id", "state"];
+    if (Object.keys(e).sort().join() !== expected.join()) {
+      throw coded("invalid_envelope", "Envelope has unrecognized or missing keys");
+    }
+    return e;
+  }
+
+  throw coded("invalid_envelope", `Unknown envelope kind: ${e.kind}`);
 }
 
 export function derivePeerReplyId(senderEndpointId, messageId) {
@@ -84,6 +141,38 @@ export function derivePeerReplyId(senderEndpointId, messageId) {
     throw coded("invalid_identity", "Invalid sender endpoint ID or message ID for reply ID derivation");
   }
   return "peer-reply-" + digest(`triangle-peer-reply-v1\0${senderEndpointId}\0${messageId}`);
+}
+
+export async function delay(ms, signal, customSleep) {
+  if (signal?.aborted) return;
+  if (typeof customSleep === "function") {
+    const sleepPromise = customSleep(ms);
+    if (!signal) return sleepPromise;
+    let onAbort;
+    const abortPromise = new Promise((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([sleepPromise, abortPromise]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+    return;
+  }
+  return new Promise((resolve) => {
+    let t;
+    const onAbort = () => {
+      if (t) clearTimeout(t);
+      resolve();
+    };
+    if (signal?.aborted) return resolve();
+    t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 const activeStateRoots = new Set();
@@ -114,9 +203,21 @@ export function createPeerDrainService({
     throw coded("invalid_drain_options", "Invalid peer drain service options");
   }
 
-  assertSafeStateRoot(stateRoot, { create: true });
+  privateDir(stateRoot, { create: true });
   if (activeStateRoots.has(stateRoot)) {
     throw coded("drain_busy", "Another peer drain service is active on this state directory");
+  }
+
+  // Defensive deep clone of routes
+  const routesMap = new Map();
+  if (routes instanceof Map) {
+    for (const [k, v] of routes.entries()) {
+      routesMap.set(k, Object.freeze({ id: v.id, addrs: Object.freeze([...(v.addrs ?? [])]) }));
+    }
+  } else if (routes && typeof routes === "object") {
+    for (const [k, v] of Object.entries(routes)) {
+      routesMap.set(k, Object.freeze({ id: v.id, addrs: Object.freeze([...(v.addrs ?? [])]) }));
+    }
   }
 
   const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
@@ -150,31 +251,101 @@ export function createPeerDrainService({
   let db;
   try {
     db = new DatabaseSync(path.join(stateRoot, "peer-drain.sqlite"));
-    db.exec(
-      "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS records(sender TEXT NOT NULL, message_id TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, reply_id TEXT, reply_payload TEXT, updated_at INTEGER NOT NULL, application_consumed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(sender, message_id));",
-    );
-    if (
-      !db
-        .prepare("PRAGMA table_info(records)")
-        .all()
-        .some((column) => column.name === "application_consumed")
-    ) {
-      db.exec(
-        "ALTER TABLE records ADD COLUMN application_consumed INTEGER NOT NULL DEFAULT 0",
-      );
+    db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
+
+    const userVersion = db.prepare("PRAGMA user_version").get().user_version;
+    if (userVersion > 1) {
+      throw coded("journal_version_unsupported", `Unsupported peer drain journal version: ${userVersion}`);
     }
+
+    // Schema v1
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS records (
+        sender TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        in_reply_to TEXT,
+        request_id TEXT,
+        reply_id TEXT,
+        reply_payload TEXT,
+        input_payload TEXT,
+        result_payload TEXT,
+        reason TEXT,
+        execution_attempt INTEGER NOT NULL DEFAULT 1,
+        resend_attempt INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 1,
+        terminal_at INTEGER,
+        application_consumed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (sender, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_records_phase ON records(phase);
+      CREATE INDEX IF NOT EXISTS idx_records_in_reply_to ON records(in_reply_to);
+      CREATE INDEX IF NOT EXISTS idx_records_request_id ON records(request_id);
+
+      CREATE TABLE IF NOT EXISTS outbound (
+        message_id TEXT NOT NULL PRIMARY KEY,
+        to_endpoint_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        terminal_at INTEGER,
+        closed_at INTEGER,
+        close_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_outbound_to_req ON outbound(to_endpoint_id, request_id);
+
+      CREATE TABLE IF NOT EXISTS operations (
+        operation_id TEXT NOT NULL PRIMARY KEY,
+        sender TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    // Migration in-place if v0 existed with fewer columns
+    if (userVersion === 0) {
+      const cols = db.prepare("PRAGMA table_info(records)").all().map((c) => c.name);
+      const neededCols = [
+        ["in_reply_to", "TEXT"],
+        ["request_id", "TEXT"],
+        ["input_payload", "TEXT"],
+        ["result_payload", "TEXT"],
+        ["reason", "TEXT"],
+        ["execution_attempt", "INTEGER NOT NULL DEFAULT 1"],
+        ["resend_attempt", "INTEGER NOT NULL DEFAULT 0"],
+        ["revision", "INTEGER NOT NULL DEFAULT 1"],
+        ["terminal_at", "INTEGER"],
+        ["application_consumed", "INTEGER NOT NULL DEFAULT 0"],
+        ["created_at", "INTEGER NOT NULL DEFAULT 0"],
+      ];
+      for (const [colName, colDef] of neededCols) {
+        if (!cols.includes(colName)) {
+          db.exec(`ALTER TABLE records ADD COLUMN ${colName} ${colDef}`);
+        }
+      }
+      db.exec("PRAGMA user_version = 1;");
+    }
+
     chmodSync(path.join(stateRoot, "peer-drain.sqlite"), 0o600);
 
-    // INVARIANT 6: If execution was in progress when process died, inference outcome is unknown.
-    // Quarantine and require explicit recovery; NEVER rerun automatically.
-    const quarantined = db
-      .prepare("UPDATE records SET phase='quarantined', updated_at=? WHERE phase='executing'")
-      .run(now());
-    if (quarantined.changes > 0) {
-      logger.warn?.("triangle_peer_drain_quarantined_on_recovery", {
+    // Startup recovery (F2, §3):
+    // If execution was in progress when process died, inference outcome is unknown.
+    // Transition to 'held' with reason 'crash_recovery'; NEVER rerun automatically.
+    const heldOnRecovery = db
+      .prepare("UPDATE records SET phase='held', reason='crash_recovery', terminal_at=?, updated_at=? WHERE phase='executing'")
+      .run(now(), now());
+    if (heldOnRecovery.changes > 0) {
+      logger.warn?.("triangle_peer_drain_held_on_recovery", {
         profile,
         profileInstanceId,
-        count: quarantined.changes,
+        count: heldOnRecovery.changes,
       });
     }
   } catch (error) {
@@ -192,6 +363,7 @@ export function createPeerDrainService({
   let active = false;
   let closed = false;
   let loopController = null;
+  let runningLoopPromise = null;
 
   function resolveIpc() {
     if (ipc) return ipc;
@@ -212,7 +384,7 @@ export function createPeerDrainService({
     let text = null;
     try {
       envelope = parsePeerEnvelope(r.reply_payload);
-      text = envelope.text;
+      text = envelope.text ?? null;
     } catch {
       // ignore
     }
@@ -226,13 +398,6 @@ export function createPeerDrainService({
       updatedAt: r.updated_at,
     };
   };
-
-  const pendingReplyRows = () =>
-    db
-      .prepare(
-        "SELECT * FROM records WHERE reply_id IS NULL AND reply_payload IS NOT NULL AND application_consumed=0 ORDER BY updated_at, sender, message_id LIMIT 200",
-      )
-      .all();
 
   async function ackItem(r, signal) {
     const client = resolveIpc();
@@ -251,22 +416,50 @@ export function createPeerDrainService({
     ) {
       throw coded("unverified_ack", "Peer engine returned unverified ack response");
     }
-    updatePhase(r, "acked");
     return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
   }
 
-  async function acknowledgeReply(r, signal) {
-    const ackRes = await ackItem(r, signal);
-    await hook?.("reply_acked");
-    return r.application_consumed
-      ? ackRes
-      : replyView(r);
+  async function sendOutcomeBestEffort(r, { state, reason, requestId, inReplyTo, route }, signal) {
+    try {
+      const outcomePayload = JSON.stringify({
+        protocol: PEER_ENVELOPE_PROTOCOL,
+        kind: "outcome",
+        request_id: requestId,
+        in_reply_to: inReplyTo,
+        state,
+        reason,
+      });
+      const outcomeMsgId = "peer-outcome-" + digest(`${r.sender}\0${r.message_id}\0${state}`);
+      const client = resolveIpc();
+      await client.request("send", {
+        message_id: outcomeMsgId,
+        payload: outcomePayload,
+        peer_addr: route,
+      }, { signal });
+    } catch {
+      // Best-effort: outcome failures never block the drain
+    }
   }
 
   async function deliverReply(r, signal) {
-    const route = routes instanceof Map ? routes.get(r.sender) : routes?.[r.sender];
+    const route = routesMap.get(r.sender);
     if (!route || route.id !== r.sender) {
-      throw coded("route_unavailable", `No dialable route known for peer ${r.sender}`);
+      db.prepare("UPDATE records SET phase='reply_failed', reason='route_unavailable', terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason: "route_unavailable" };
+    }
+
+    const sizeCheck = checkPayloadAndFrame(r.reply_payload, {
+      messageId: r.reply_id,
+      senderEndpointId: r.sender,
+      createdAtUnixMs: now(),
+    });
+    if (!sizeCheck.ok) {
+      db.prepare("UPDATE records SET phase='reply_failed', reason='result_too_large', terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason: "result_too_large" };
     }
 
     const client = resolveIpc();
@@ -282,31 +475,182 @@ export function createPeerDrainService({
     }
 
     signal?.throwIfAborted();
+
+    if (sendError?.code === "outbox_full") {
+      throw coded("outbox_full", "Peer engine outbox full");
+    }
+    if (["conflict", "invalid_params"].includes(sendError?.code)) {
+      db.prepare("UPDATE records SET phase='reply_failed', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(sendError.code, now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason: sendError.code };
+    }
+
     let status;
     try {
       status = await client.request("message_status", { message_id: r.reply_id }, { signal });
     } catch {
-      throw coded(
-        sendError?.code === "outbox_full" ? "outbox_full" : "admission_unresolved",
-        "Could not verify outbound reply admission",
-      );
+      throw coded("admission_unresolved", "Could not verify outbound reply admission");
     }
 
-    // INVARIANT 6: ACK only after send + message_status verifies durable outbound
-    // queued_local or settled state and matching peer/hash.
     if (
-      status?.message_id !== r.reply_id ||
+      !status ||
+      status.message_id !== r.reply_id ||
       status.peer_endpoint_id !== r.sender ||
-      status.payload_hash !== digest(r.reply_payload) ||
-      !["queued_local", "settled"].includes(status.state)
+      status.payload_hash !== digest(r.reply_payload)
     ) {
-      throw coded("admission_unverified", "Outbound reply admission could not be verified");
+      db.prepare("UPDATE records SET phase='reply_failed', reason='admission_mismatch', terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason: "admission_mismatch" };
+    }
+
+    if (status.state === "expired" || status.state === "refused") {
+      const reason = status.reason || status.state;
+      db.prepare("UPDATE records SET phase='reply_failed', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(reason, now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason };
+    }
+
+    if (!["queued_local", "settled"].includes(status.state)) {
+      db.prepare("UPDATE records SET phase='reply_failed', reason='admission_unverified', terminal_at=?, updated_at=? WHERE sender=? AND message_id=?")
+        .run(now(), now(), r.sender, r.message_id);
+      await ackItem(r, signal);
+      return { state: "reply_failed", messageId: r.message_id, reason: "admission_unverified" };
     }
 
     updatePhase(r, "admitted");
     await hook?.("admitted");
 
-    return ackItem(r, signal);
+    await ackItem(r, signal);
+    updatePhase(r, "acked");
+    db.prepare("UPDATE records SET terminal_at=? WHERE sender=? AND message_id=?").run(now(), r.sender, r.message_id);
+    return { state: "acked", messageId: r.message_id, replyId: r.reply_id };
+  }
+
+  async function executeRunnerTurn(itemData, signal, { isNew = false, envelope, route } = {}) {
+    const senderId = itemData.sender;
+    const messageId = itemData.message_id;
+    const inputHash = itemData.input_hash;
+    const inputPayload = itemData.input_payload;
+
+    if (isNew) {
+      db.prepare(`
+        INSERT INTO records(sender, message_id, input_hash, phase, request_id, input_payload, execution_attempt, revision, created_at, updated_at)
+        VALUES(?, ?, ?, 'executing', ?, ?, ?, 1, ?, ?)
+      `).run(
+        senderId,
+        messageId,
+        inputHash,
+        envelope.request_id,
+        inputPayload,
+        itemData.execution_attempt ?? 1,
+        now(),
+        now(),
+      );
+    } else {
+      db.prepare(
+        "UPDATE records SET phase='executing', updated_at=? WHERE sender=? AND message_id=?"
+      ).run(now(), senderId, messageId);
+    }
+
+    await hook?.("executing");
+
+    // Invariant 5 (X6): Not started is not held: an abort before the runner starts deletes executing record
+    if (signal?.aborted) {
+      if (isNew) {
+        db.prepare("DELETE FROM records WHERE sender=? AND message_id=? AND phase='executing'")
+          .run(senderId, messageId);
+      } else {
+        db.prepare("UPDATE records SET phase='held', updated_at=? WHERE sender=? AND message_id=? AND phase='executing'")
+          .run(now(), senderId, messageId);
+      }
+      throw signal.reason ?? Object.assign(new Error("Aborted before runner start"), { name: "AbortError", code: "aborted" });
+    }
+
+    let result;
+    let timeout;
+    const cancellation = new AbortController();
+    const runnerSignal = signal
+      ? AbortSignal.any([signal, cancellation.signal])
+      : cancellation.signal;
+    let onAbort;
+
+    try {
+      const interrupted = new Promise((_, reject) => {
+        onAbort = () => reject(coded("runner_interrupted", "Runner was interrupted"));
+        runnerSignal.addEventListener("abort", onAbort, { once: true });
+      });
+      timeout = setTimeout(() => cancellation.abort(), runnerTimeoutMs);
+
+      const scopedContextId = deriveScopedContextId(senderId, envelope?.request_id ?? itemData.request_id);
+      const runnerRequest = {
+        text: envelope?.text ?? parsePeerEnvelope(inputPayload).text,
+        senderId,
+        contextId: scopedContextId,
+        requestId: envelope?.request_id ?? itemData.request_id,
+      };
+
+      result = await Promise.race([
+        runner.run(runnerRequest, { signal: runnerSignal }),
+        interrupted,
+      ]);
+
+      runnerSignal.throwIfAborted();
+      if (result?.status !== "completed" || !isText(result.text)) {
+        throw coded("invalid_runner_result", "Runner did not return a valid completed result");
+      }
+    } catch (err) {
+      const reasonCode = err.code ?? (cancellation.signal.aborted ? "runner_timeout" : "runner_failed");
+      db.prepare(
+        "UPDATE records SET phase='held', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?"
+      ).run(reasonCode, now(), now(), senderId, messageId);
+
+      // Ack engine item (F2)
+      await ackItem({ sender: senderId, message_id: messageId }, signal);
+
+      // Best-effort outcome send (D3)
+      const rRoute = route ?? routesMap.get(senderId);
+      if (rRoute) {
+        await sendOutcomeBestEffort(
+          { sender: senderId, message_id: messageId },
+          {
+            state: "held",
+            reason: reasonCode,
+            requestId: envelope?.request_id ?? itemData.request_id,
+            inReplyTo: messageId,
+            route: rRoute,
+          },
+          signal,
+        );
+      }
+
+      return { state: "held", messageId, reason: reasonCode };
+    } finally {
+      clearTimeout(timeout);
+      if (onAbort) runnerSignal.removeEventListener("abort", onAbort);
+      cancellation.abort();
+    }
+
+    const replyId = derivePeerReplyId(senderId, messageId);
+    const replyPayload = JSON.stringify({
+      protocol: PEER_ENVELOPE_PROTOCOL,
+      kind: "reply",
+      request_id: envelope?.request_id ?? itemData.request_id,
+      in_reply_to: messageId,
+      text: result.text,
+    });
+
+    db.prepare(`
+      UPDATE records
+      SET phase='result', reply_id=?, reply_payload=?, result_payload=?, updated_at=?
+      WHERE sender=? AND message_id=?
+    `).run(replyId, replyPayload, result.text, now(), senderId, messageId);
+
+    await hook?.("result");
+
+    return await deliverReply(getRow(senderId, messageId), signal);
   }
 
   const api = {
@@ -321,27 +665,51 @@ export function createPeerDrainService({
       try {
         signal?.throwIfAborted();
 
-        // 1. Recover unacknowledged received replies before consuming new inputs.
-        const unackedReply = db
-          .prepare(
-            "SELECT * FROM records WHERE phase='received_reply' ORDER BY updated_at LIMIT 1",
-          )
-          .get();
-        if (unackedReply) {
-          return await acknowledgeReply(unackedReply, signal);
+        // 0. Retention compaction (§3)
+        const retentionCutoff = now() - RETENTION_MS;
+        db.prepare(`
+          DELETE FROM records
+          WHERE ((phase IN ('acked', 'rejected', 'discarded') AND terminal_at IS NOT NULL AND terminal_at <= ?)
+             OR (phase = 'reply_received' AND application_consumed = 1 AND terminal_at IS NOT NULL AND terminal_at <= ?))
+        `).run(retentionCutoff, retentionCutoff);
+        db.prepare(`
+          DELETE FROM outbound
+          WHERE closed_at IS NOT NULL AND closed_at <= ?
+        `).run(retentionCutoff);
+
+        // 1. Recover operator resend_pending records
+        const resendPending = db.prepare(
+          "SELECT * FROM records WHERE phase='resend_pending' ORDER BY updated_at LIMIT 1"
+        ).get();
+        if (resendPending) {
+          db.prepare("UPDATE records SET phase='result', updated_at=? WHERE sender=? AND message_id=?")
+            .run(now(), resendPending.sender, resendPending.message_id);
+          return await deliverReply(getRow(resendPending.sender, resendPending.message_id), signal);
         }
 
-        // 2. Deliver any persisted outbound replies before consuming new inputs.
-        const outstanding = db
-          .prepare(
-            "SELECT * FROM records WHERE phase IN ('result', 'admitted') ORDER BY updated_at LIMIT 1",
-          )
-          .get();
+        // 2. Recover operator retry_pending records
+        const retryPending = db.prepare(
+          "SELECT * FROM records WHERE phase='retry_pending' ORDER BY updated_at LIMIT 1"
+        ).get();
+        if (retryPending) {
+          return await executeRunnerTurn(retryPending, signal);
+        }
+
+        // 3. Deliver any persisted outbound replies
+        const outstanding = db.prepare(
+          "SELECT * FROM records WHERE phase IN ('result', 'admitted') ORDER BY updated_at LIMIT 1"
+        ).get();
         if (outstanding) {
           return await deliverReply(outstanding, signal);
         }
 
-        // 2. Poll inbox for next unconsumed message.
+        // 4. Check capacity cap (10k rows)
+        const count = db.prepare("SELECT COUNT(*) as c FROM records").get().c;
+        if (count >= MAX_RECORDS_CAP) {
+          return { state: "journal_full", count };
+        }
+
+        // 5. Poll engine inbox
         const client = resolveIpc();
         const page = await client.request("inbox", { after_seq: 0, limit: 1 }, { signal });
         if (!page || !Array.isArray(page.items) || page.items.length > 1) {
@@ -352,169 +720,263 @@ export function createPeerDrainService({
         }
 
         const item = page.items[0];
-        if (
-          !isEndpoint(item.from_endpoint_id) ||
-          !isIdentifier(item.message_id) ||
-          typeof item.payload !== "string" ||
-          Buffer.byteLength(item.payload) > MAX_ENVELOPE_BYTES ||
-          item.payload_hash !== digest(item.payload)
-        ) {
-          throw coded("invalid_inbox", "Invalid inbox item fields or checksum");
+
+        let r = null;
+        if (isEndpoint(item.from_endpoint_id) && isIdentifier(item.message_id)) {
+          r = getRow(item.from_endpoint_id, item.message_id);
         }
 
-        const envelope = parsePeerEnvelope(item.payload);
-        let r = getRow(item.from_endpoint_id, item.message_id);
-
-        if (r && r.input_hash !== item.payload_hash) {
-          throw coded("input_conflict", "Message ID reused with different payload");
+        // Invariant 1: If item is already recorded in a terminal phase, re-ack idempotently and skip
+        if (r && TERMINAL_PHASES.includes(r.phase)) {
+          await ackItem(r, signal);
+          return { state: r.phase, messageId: r.message_id, reason: r.reason };
         }
-
-        if (r) {
-          if (r.phase === "quarantined") {
-            return { state: "quarantined", messageId: r.message_id };
-          }
-          if (r.phase === "acked") {
-            return await ackItem(r, signal);
-          }
-          if (r.phase === "received_reply") {
-            return await acknowledgeReply(r, signal);
-          }
+        if (r && (r.phase === "result" || r.phase === "admitted")) {
           return await deliverReply(r, signal);
         }
 
-        if (envelope.kind === "reply") {
-          db.prepare(
-            "INSERT INTO records(sender, message_id, input_hash, phase, reply_payload, updated_at, application_consumed) VALUES(?, ?, ?, 'received_reply', ?, ?, 0)",
-          ).run(item.from_endpoint_id, item.message_id, item.payload_hash, item.payload, now());
-          r = getRow(item.from_endpoint_id, item.message_id);
-          return await acknowledgeReply(r, signal);
-        }
-
-        // Validate route exists for sender before executing
-        const route = routes instanceof Map ? routes.get(item.from_endpoint_id) : routes?.[item.from_endpoint_id];
-        if (!route || route.id !== item.from_endpoint_id) {
-          throw coded("route_unavailable", `No dialable route known for peer ${item.from_endpoint_id}`);
-        }
-
-        // INVARIANT 6: Persist execution admission before invoking runner.
-        db.prepare(
-          "INSERT INTO records(sender, message_id, input_hash, phase, updated_at) VALUES(?, ?, ?, 'executing', ?)",
-        ).run(item.from_endpoint_id, item.message_id, item.payload_hash, now());
-        r = getRow(item.from_endpoint_id, item.message_id);
-        await hook?.("executing");
-
-        let result;
-        let timeout;
-        const cancellation = new AbortController();
-        const runnerSignal = signal
-          ? AbortSignal.any([signal, cancellation.signal])
-          : cancellation.signal;
-        let onAbort;
-
-        try {
-          runnerSignal.throwIfAborted();
-          const interrupted = new Promise((_, reject) => {
-            onAbort = () => reject(coded("runner_interrupted", "Runner was interrupted"));
-            runnerSignal.addEventListener("abort", onAbort, { once: true });
-          });
-          timeout = setTimeout(() => cancellation.abort(), runnerTimeoutMs);
-
-          const runnerRequest = {
-            text: envelope.text,
-            senderId: item.from_endpoint_id,
-            contextId: envelope.request_id,
-            requestId: envelope.request_id,
-          };
-
-          result = await Promise.race([
-            runner.run(runnerRequest, { signal: runnerSignal }),
-            interrupted,
-          ]);
-
-          runnerSignal.throwIfAborted();
-          if (result?.status !== "completed" || !isText(result.text)) {
-            throw coded("invalid_runner_result", "Runner did not return a valid completed result");
+        const rejectAndAck = async (reason) => {
+          if (r) {
+            db.prepare(
+              "UPDATE records SET phase='rejected', reason=?, terminal_at=?, updated_at=? WHERE sender=? AND message_id=?"
+            ).run(reason, now(), now(), item.from_endpoint_id, item.message_id);
+          } else if (isEndpoint(item.from_endpoint_id) && isIdentifier(item.message_id)) {
+            db.prepare(`
+              INSERT INTO records(sender, message_id, input_hash, phase, reason, terminal_at, created_at, updated_at)
+              VALUES(?, ?, ?, 'rejected', ?, ?, ?, ?)
+            `).run(
+              item.from_endpoint_id,
+              item.message_id,
+              typeof item.payload_hash === "string" ? item.payload_hash : "",
+              reason,
+              now(),
+              now(),
+              now(),
+            );
           }
-        } catch {
-          // If runner failed or timed out: quarantine and do NOT retry automatically
-          updatePhase(r, "quarantined");
-          return { state: "quarantined", messageId: r.message_id };
-        } finally {
-          clearTimeout(timeout);
-          if (onAbort) runnerSignal.removeEventListener("abort", onAbort);
-          cancellation.abort();
+          await ackItem({ sender: item.from_endpoint_id, message_id: item.message_id }, signal);
+          return { state: "rejected", messageId: item.message_id, reason };
+        };
+
+        if (!isEndpoint(item.from_endpoint_id) || !isIdentifier(item.message_id) || typeof item.payload !== "string") {
+          return await rejectAndAck("invalid_envelope");
         }
 
-        // Derive deterministic reply ID and payload
-        const replyId = derivePeerReplyId(r.sender, r.message_id);
-        const replyPayload = JSON.stringify({
-          protocol: envelope.protocol,
-          kind: "reply",
-          request_id: envelope.request_id,
-          in_reply_to: r.message_id,
-          text: result.text,
+        if (item.payload_hash !== digest(item.payload)) {
+          return await rejectAndAck("hash_mismatch");
+        }
+
+        const sizeCheck = checkPayloadAndFrame(item.payload, {
+          messageId: item.message_id,
+          senderEndpointId: item.from_endpoint_id,
+          createdAtUnixMs: now(),
         });
+        if (!sizeCheck.ok) {
+          return await rejectAndAck("payload_too_large");
+        }
 
-        // Persist deterministic reply before sending
-        db.prepare(
-          "UPDATE records SET phase='result', reply_id=?, reply_payload=?, updated_at=? WHERE sender=? AND message_id=?",
-        ).run(replyId, replyPayload, now(), r.sender, r.message_id);
-        await hook?.("result");
+        let envelope;
+        try {
+          envelope = parsePeerEnvelope(item.payload);
+        } catch {
+          return await rejectAndAck("invalid_envelope");
+        }
 
-        return await deliverReply(getRow(r.sender, r.message_id), signal);
+        const route = routesMap.get(item.from_endpoint_id);
+        if (!route || route.id !== item.from_endpoint_id) {
+          return await rejectAndAck("unroutable_sender");
+        }
+
+        if (r && r.input_hash !== item.payload_hash) {
+          return await rejectAndAck("input_conflict");
+        }
+
+        if (envelope.kind === "reply" || envelope.kind === "outcome") {
+          const outbound = db.prepare("SELECT * FROM outbound WHERE message_id=?").get(envelope.in_reply_to);
+          if (!outbound || outbound.to_endpoint_id !== item.from_endpoint_id || outbound.request_id !== envelope.request_id) {
+            return await rejectAndAck("unsolicited_reply");
+          }
+          if (outbound.closed_at !== null) {
+            return await rejectAndAck("correlation_closed");
+          }
+
+          if (envelope.kind === "reply") {
+            db.prepare("UPDATE outbound SET closed_at=?, close_reason='reply_received', updated_at=? WHERE message_id=?")
+              .run(now(), now(), outbound.message_id);
+          }
+
+          db.prepare(`
+            INSERT INTO records(sender, message_id, input_hash, phase, in_reply_to, request_id, reply_payload, input_payload, created_at, updated_at)
+            VALUES(?, ?, ?, 'reply_received', ?, ?, ?, ?, ?, ?)
+          `).run(
+            item.from_endpoint_id,
+            item.message_id,
+            item.payload_hash,
+            envelope.in_reply_to,
+            envelope.request_id,
+            item.payload,
+            item.payload,
+            now(),
+            now(),
+          );
+
+          r = getRow(item.from_endpoint_id, item.message_id);
+          await ackItem(r, signal);
+          await hook?.("reply_acked");
+          return replyView(r);
+        }
+
+        return await executeRunnerTurn({
+          sender: item.from_endpoint_id,
+          message_id: item.message_id,
+          input_hash: item.payload_hash,
+          input_payload: item.payload,
+          request_id: envelope.request_id,
+          execution_attempt: 1,
+        }, signal, { isNew: true, envelope, route });
       } finally {
         active = false;
       }
     },
 
-    /**
-     * Retrieve pending received replies stored durably in SQLite.
-     * Guaranteed to persist across ack and process restarts until consumed.
-     * Optionally filtered by inReplyTo and/or requestId.
-     * Returns Array<{ state: "reply_received", fromEndpointId, messageId, text, envelope, replyPayload, updatedAt }>.
-     */
-    pendingReplies({ inReplyTo, requestId } = {}) {
+    pendingReplies({ inReplyTo, requestId, limit = 200 } = {}) {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
-      let replies = pendingReplyRows().map(replyView);
+      let query = `
+        SELECT * FROM records
+        WHERE phase='reply_received' AND application_consumed=0
+      `;
+      const params = [];
       if (inReplyTo !== undefined) {
-        replies = replies.filter((reply) => reply.envelope?.in_reply_to === inReplyTo);
+        query += " AND in_reply_to=?";
+        params.push(inReplyTo);
       }
       if (requestId !== undefined) {
-        replies = replies.filter((reply) => reply.envelope?.request_id === requestId);
+        query += " AND request_id=?";
+        params.push(requestId);
       }
-      return replies;
+      query += " ORDER BY updated_at, sender, message_id LIMIT ?";
+      params.push(limit);
+
+      return db.prepare(query).all(...params).map(replyView);
     },
 
     getPendingReplies(options) {
       return this.pendingReplies(options);
     },
 
-    /**
-     * Mark a received reply as consumed by the application/profile.
-     * Consumed replies no longer appear in pendingReplies().
-     */
     consumeReply({ fromEndpointId, messageId } = {}) {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
-      if (active) throw coded("drain_busy", "Cannot consume reply while step is active");
       if (!isEndpoint(fromEndpointId) || !isIdentifier(messageId)) {
         throw coded("invalid_identity", "Invalid fromEndpointId or messageId");
       }
       const r = getRow(fromEndpointId, messageId);
-      if (
-        !r ||
-        r.reply_id !== null ||
-        !r.reply_payload ||
-        parsePeerEnvelope(r.reply_payload).kind !== "reply"
-      ) {
+      if (!r || r.phase !== "reply_received") {
         throw coded("reply_not_found", "No received reply found for endpoint and messageId");
       }
-      db.prepare(
-        "UPDATE records SET application_consumed=1, updated_at=? WHERE sender=? AND message_id=?",
-      ).run(now(), fromEndpointId, messageId);
+      db.prepare(`
+        UPDATE records
+        SET application_consumed=1, terminal_at=?, updated_at=?
+        WHERE sender=? AND message_id=?
+      `).run(now(), now(), fromEndpointId, messageId);
       return { consumed: true };
     },
 
-    async start({ runLoop = true, signal, pollIntervalMs = 500 } = {}) {
+    resolvePeerRecord({
+      fromEndpointId,
+      messageId,
+      action,
+      operationId,
+      expectedRevision,
+    } = {}) {
+      if (closed) throw coded("drain_closed", "Peer drain service is closed");
+      if (!isEndpoint(fromEndpointId) || !isIdentifier(messageId) || !isIdentifier(operationId)) {
+        throw coded("invalid_params", "Invalid endpoint, messageId, or operationId");
+      }
+
+      db.exec("BEGIN");
+      try {
+        const existingOp = db.prepare("SELECT * FROM operations WHERE operation_id=?").get(operationId);
+        if (existingOp) {
+          if (existingOp.sender === fromEndpointId && existingOp.message_id === messageId && existingOp.action === action) {
+            db.exec("COMMIT");
+            return JSON.parse(existingOp.result);
+          }
+          throw coded("operation_conflict", "Operation ID already used for a different operation");
+        }
+
+        if (action === "close_outbound") {
+          const outbound = db.prepare("SELECT * FROM outbound WHERE message_id=?").get(messageId);
+          if (!outbound) throw coded("record_not_found", "Outbound record not found");
+          db.prepare("UPDATE outbound SET closed_at=?, close_reason='operator_closed', updated_at=? WHERE message_id=?")
+            .run(now(), now(), messageId);
+          const res = { operationId, action, state: "closed", messageId };
+          db.prepare("INSERT INTO operations(operation_id, sender, message_id, action, result, created_at) VALUES(?, ?, ?, ?, ?, ?)")
+            .run(operationId, fromEndpointId, messageId, action, JSON.stringify(res), now());
+          db.exec("COMMIT");
+          return res;
+        }
+
+        const r = getRow(fromEndpointId, messageId);
+        if (!r) throw coded("record_not_found", "Record not found");
+
+        if (expectedRevision !== undefined && r.revision !== expectedRevision) {
+          throw coded("revision_conflict", `Revision mismatch: expected ${expectedRevision}, got ${r.revision}`);
+        }
+
+        let res;
+        if (r.phase === "held") {
+          if (action === "retry") {
+            db.prepare(`
+              UPDATE records
+              SET phase='retry_pending', execution_attempt=execution_attempt+1, revision=revision+1, updated_at=?
+              WHERE sender=? AND message_id=?
+            `).run(now(), fromEndpointId, messageId);
+            res = { operationId, action, state: "retry_pending", messageId, revision: r.revision + 1 };
+          } else if (action === "discard") {
+            db.prepare(`
+              UPDATE records
+              SET phase='discarded', revision=revision+1, terminal_at=?, updated_at=?
+              WHERE sender=? AND message_id=?
+            `).run(now(), now(), fromEndpointId, messageId);
+            res = { operationId, action, state: "discarded", messageId, revision: r.revision + 1 };
+          } else {
+            throw coded("invalid_action", `Action ${action} is invalid for phase ${r.phase}`);
+          }
+        } else if (r.phase === "reply_failed") {
+          if (action === "resend") {
+            const nextAttempt = r.resend_attempt + 1;
+            const newReplyId = `${derivePeerReplyId(fromEndpointId, messageId)}-resend-${nextAttempt}`;
+            db.prepare(`
+              UPDATE records
+              SET phase='resend_pending', reply_id=?, resend_attempt=?, revision=revision+1, updated_at=?
+              WHERE sender=? AND message_id=?
+            `).run(newReplyId, nextAttempt, now(), fromEndpointId, messageId);
+            res = { operationId, action, state: "resend_pending", messageId, replyId: newReplyId, revision: r.revision + 1 };
+          } else if (action === "discard") {
+            db.prepare(`
+              UPDATE records
+              SET phase='discarded', revision=revision+1, terminal_at=?, updated_at=?
+              WHERE sender=? AND message_id=?
+            `).run(now(), now(), fromEndpointId, messageId);
+            res = { operationId, action, state: "discarded", messageId, revision: r.revision + 1 };
+          } else {
+            throw coded("invalid_action", `Action ${action} is invalid for phase ${r.phase}`);
+          }
+        } else {
+          throw coded("invalid_phase", `Cannot resolve record in phase ${r.phase}`);
+        }
+
+        db.prepare("INSERT INTO operations(operation_id, sender, message_id, action, result, created_at) VALUES(?, ?, ?, ?, ?, ?)")
+          .run(operationId, fromEndpointId, messageId, action, JSON.stringify(res), now());
+        db.exec("COMMIT");
+        return res;
+      } catch (err) {
+        try { db.exec("ROLLBACK"); } catch {}
+        throw err;
+      }
+    },
+
+    async start({ runLoop = true, signal, pollIntervalMs = 500, sleep: customSleep } = {}) {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
       if (!runLoop) {
         return this.step({ signal });
@@ -523,49 +985,61 @@ export function createPeerDrainService({
       const runSignal = signal
         ? AbortSignal.any([signal, loopController.signal])
         : loopController.signal;
-      let consecutiveErrors = 0;
-      while (!runSignal.aborted) {
-        try {
-          const res = await this.step({ signal: runSignal });
-          consecutiveErrors = 0;
-          if (res?.state === "idle") {
-            await new Promise((resolve) => {
-              const t = setTimeout(resolve, pollIntervalMs);
-              runSignal.addEventListener("abort", () => clearTimeout(t), { once: true });
+
+      runningLoopPromise = (async () => {
+        let consecutiveErrors = 0;
+        while (!runSignal.aborted) {
+          try {
+            const res = await this.step({ signal: runSignal });
+            consecutiveErrors = 0;
+            if (res?.state === "idle" || res?.state === "journal_full" || res?.state === "held") {
+              await delay(pollIntervalMs, runSignal, customSleep);
+            }
+          } catch (err) {
+            if (runSignal.aborted || err?.name === "AbortError" || err?.code === "aborted") break;
+            consecutiveErrors++;
+            logger.error?.("triangle_peer_drain_step_failed", {
+              profile,
+              error: err.message,
+              code: err.code,
             });
+            if (
+              err?.code === "engine_not_running" ||
+              err?.code === "ipc_unavailable" ||
+              err?.code === "ipc_disconnected" ||
+              consecutiveErrors >= 3
+            ) {
+              throw err;
+            }
+            await delay(1000, runSignal, customSleep);
           }
-        } catch (err) {
-          if (runSignal.aborted || err?.name === "AbortError") break;
-          consecutiveErrors++;
-          logger.error?.("triangle_peer_drain_step_failed", {
-            profile,
-            error: err.message,
-            code: err.code,
-          });
-          if (
-            err?.code === "engine_not_running" ||
-            err?.code === "ipc_unavailable" ||
-            err?.code === "ipc_disconnected" ||
-            consecutiveErrors >= 3
-          ) {
-            throw err;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 1000));
         }
-      }
+      })();
+
+      return runningLoopPromise;
     },
 
     async stop() {
       loopController?.abort();
+      if (runningLoopPromise) {
+        try {
+          await runningLoopPromise;
+        } catch {}
+      }
     },
 
     status() {
       if (closed) throw coded("drain_closed", "Peer drain service is closed");
-      return db
+      const count = db.prepare("SELECT COUNT(*) as c FROM records").get().c;
+      const records = db
         .prepare(
-          "SELECT sender, message_id, phase, reply_id, updated_at, application_consumed FROM records ORDER BY updated_at",
+          "SELECT sender, message_id, phase, reason, reply_id, updated_at, application_consumed FROM records ORDER BY updated_at",
         )
         .all();
+      return Object.assign(records, {
+        journalFull: count >= MAX_RECORDS_CAP,
+        totalRecords: count,
+      });
     },
 
     async sendRequest({
@@ -598,7 +1072,7 @@ export function createPeerDrainService({
         ? messageId
         : randomUUID();
 
-      const route = routes instanceof Map ? routes.get(toEndpointId) : routes?.[toEndpointId];
+      const route = routesMap.get(toEndpointId);
       if (!route || route.id !== toEndpointId) {
         throw attachOutboundContext(
           coded("route_unavailable", `No dialable route known for peer ${toEndpointId}`),
@@ -612,7 +1086,48 @@ export function createPeerDrainService({
         request_id: resolvedRequestId,
         text,
       });
+
+      const sizeCheck = checkPayloadAndFrame(requestPayload, {
+        messageId: resolvedMessageId,
+        senderEndpointId: toEndpointId,
+        createdAtUnixMs: now(),
+      });
+      if (!sizeCheck.ok) {
+        throw attachOutboundContext(
+          coded("invalid_params", sizeCheck.error),
+          { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+        );
+      }
+
       const payloadHash = digest(requestPayload);
+
+      const existingOutbound = db.prepare("SELECT * FROM outbound WHERE message_id=?").get(resolvedMessageId);
+      if (existingOutbound) {
+        if (existingOutbound.to_endpoint_id !== toEndpointId || existingOutbound.payload_hash !== payloadHash) {
+          throw attachOutboundContext(
+            coded("conflict", "Message ID reused with different recipient or payload"),
+            { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+          );
+        }
+        if (existingOutbound.closed_at !== null) {
+          throw attachOutboundContext(
+            coded("correlation_closed", "Outbound correlation is already closed"),
+            { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+          );
+        }
+        const anchorTime = existingOutbound.terminal_at ?? existingOutbound.created_at;
+        if (now() - anchorTime > TOMBSTONE_WINDOW_MS) {
+          throw attachOutboundContext(
+            coded("retry_window_expired", "Transport idempotency window has expired for this message ID"),
+            { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+          );
+        }
+      } else {
+        db.prepare(`
+          INSERT INTO outbound(message_id, to_endpoint_id, request_id, payload_hash, state, created_at, updated_at)
+          VALUES(?, ?, ?, ?, 'pending', ?, ?)
+        `).run(resolvedMessageId, toEndpointId, resolvedRequestId, payloadHash, now(), now());
+      }
 
       const client = resolveIpc();
       let sendError = null;
@@ -635,6 +1150,21 @@ export function createPeerDrainService({
         });
       }
 
+      if (sendError?.code === "outbox_full") {
+        throw attachOutboundContext(
+          coded("outbox_full", "Peer engine outbox full"),
+          { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+        );
+      }
+      if (sendError?.code === "conflict" || sendError?.code === "invalid_params") {
+        db.prepare("UPDATE outbound SET state=?, updated_at=? WHERE message_id=?")
+          .run(sendError.code, now(), resolvedMessageId);
+        throw attachOutboundContext(
+          coded(sendError.code, sendError.message),
+          { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+        );
+      }
+
       let status;
       try {
         status = await client.request(
@@ -651,17 +1181,8 @@ export function createPeerDrainService({
             toEndpointId,
           });
         }
-        const code = sendError?.code === "outbox_full"
-          ? "outbox_full"
-          : sendError?.code === "conflict"
-            ? "conflict"
-            : "admission_unresolved";
-        const err = coded(
-          code,
-          statusErr?.message
-            ? `Could not verify outbound request admission: ${statusErr.message}`
-            : "Could not verify outbound request admission",
-        );
+        const code = "admission_unresolved";
+        const err = coded(code, statusErr?.message ? `Could not verify outbound request admission: ${statusErr.message}` : "Could not verify outbound request admission");
         if (sendError) err.cause = sendError;
         throw attachOutboundContext(err, {
           messageId: resolvedMessageId,
@@ -674,32 +1195,35 @@ export function createPeerDrainService({
         !status ||
         status.message_id !== resolvedMessageId ||
         status.peer_endpoint_id !== toEndpointId ||
-        status.payload_hash !== payloadHash ||
-        !["queued_local", "settled"].includes(status.state)
+        status.payload_hash !== payloadHash
       ) {
-        let code = "admission_unverified";
-        let message = "Outbound request admission could not be verified";
-        if (status?.state === "refused") {
-          code = "refused";
-          message = status.reason || "Outbound request refused by peer";
-        } else if (status?.state === "expired") {
-          code = "expired";
-          message = status.reason || "Outbound request expired";
-        } else if (status && status.message_id !== resolvedMessageId) {
-          message = `Status message ID mismatch: expected ${resolvedMessageId}, got ${status.message_id}`;
-        } else if (status && status.peer_endpoint_id !== toEndpointId) {
-          message = `Status peer endpoint ID mismatch: expected ${toEndpointId}, got ${status.peer_endpoint_id}`;
-        } else if (status && status.payload_hash !== payloadHash) {
-          message = `Status payload hash mismatch: expected ${payloadHash}, got ${status.payload_hash}`;
-        }
-        const err = coded(code, message);
-        if (status?.state) err.state = status.state;
+        throw attachOutboundContext(
+          coded("admission_unverified", "Outbound request admission mismatch"),
+          { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+        );
+      }
+
+      if (status.state === "refused" || status.state === "expired") {
+        db.prepare("UPDATE outbound SET state=?, terminal_at=?, updated_at=? WHERE message_id=?")
+          .run(status.state, now(), now(), resolvedMessageId);
+        const err = coded(status.state, status.reason || `Outbound request ${status.state}`);
+        err.state = status.state;
         throw attachOutboundContext(err, {
           messageId: resolvedMessageId,
           requestId: resolvedRequestId,
           toEndpointId,
         });
       }
+
+      if (!["queued_local", "settled"].includes(status.state)) {
+        throw attachOutboundContext(
+          coded("admission_unverified", `Unexpected message status: ${status.state}`),
+          { messageId: resolvedMessageId, requestId: resolvedRequestId, toEndpointId },
+        );
+      }
+
+      db.prepare("UPDATE outbound SET state=?, updated_at=? WHERE message_id=?")
+        .run(status.state, now(), resolvedMessageId);
 
       return {
         messageId: resolvedMessageId,

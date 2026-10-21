@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import {
   createPeerDrainService,
   derivePeerReplyId,
+  deriveScopedContextId,
   parsePeerEnvelope,
   PEER_ENVELOPE_PROTOCOL,
 } from "../src/peer-drain-service.mjs";
@@ -133,7 +134,8 @@ test("peer drain executes request, persists admission, verifies status, and ACKs
       runnerCalled++;
       assert.equal(req.text, "Calculate 2 + 2");
       assert.equal(req.senderId, senderId);
-      assert.equal(req.contextId, "req-001");
+      assert.equal(req.contextId, deriveScopedContextId(senderId, "req-001"));
+      assert.equal(req.requestId, "req-001");
       return { status: "completed", text: "Result is 4" };
     },
   };
@@ -165,8 +167,8 @@ test("peer drain executes request, persists admission, verifies status, and ACKs
   }
 });
 
-test("failed reply admission does NOT ack inbound item", async () => {
-  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-no-ack-")));
+test("failed reply admission: terminal failure enters reply_failed and acks; transient failure retries without acking", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-reply-fail-")));
   const senderId = "4".repeat(64);
   const messageId = "msg-inbound-002";
   const requestPayload = JSON.stringify({
@@ -177,6 +179,7 @@ test("failed reply admission does NOT ack inbound item", async () => {
   });
 
   let ackCalled = false;
+  let statusState = "expired";
   const mockIpc = {
     async request(method, params) {
       if (method === "inbox") {
@@ -194,15 +197,20 @@ test("failed reply admission does NOT ack inbound item", async () => {
         };
       }
       if (method === "send") {
-        return { status: "refused" };
+        if (statusState === "outbox_full") {
+          const err = new Error("outbox full");
+          err.code = "outbox_full";
+          throw err;
+        }
+        return {};
       }
       if (method === "message_status") {
-        // Return unverified state (e.g. refused or expired)
         return {
           message_id: params.message_id,
           peer_endpoint_id: senderId,
           payload_hash: "wrong_hash",
-          state: "refused",
+          state: statusState,
+          reason: "terminal reason",
         };
       }
       if (method === "ack") {
@@ -213,12 +221,6 @@ test("failed reply admission does NOT ack inbound item", async () => {
     },
   };
 
-  const mockRunner = {
-    async run() {
-      return { status: "completed", text: "Unadmitted result" };
-    },
-  };
-
   const routes = new Map([[senderId, { id: senderId, addrs: [] }]]);
 
   const drain = createPeerDrainService({
@@ -226,14 +228,36 @@ test("failed reply admission does NOT ack inbound item", async () => {
     profile: "test-agent",
     profileInstanceId: "5".repeat(64),
     ipc: mockIpc,
-    runner: mockRunner,
+    runner: { async run() { return { status: "completed", text: "Unadmitted result" }; } },
     routes,
   });
 
   try {
-    await assert.rejects(drain.step(), /admission_unverified/);
-    // INVARIANT 6: ACK must NOT be sent if outbound admission failed verification
-    assert.equal(ackCalled, false);
+    // 1. Terminal failure (expired/admission_mismatch) enters reply_failed, ACKs the inbound item
+    const outcome = await drain.step();
+    assert.equal(outcome.state, "reply_failed");
+    assert.equal(ackCalled, true);
+    assert.equal(drain.status().find((r) => r.message_id === messageId).phase, "reply_failed");
+
+    // 2. Transient failure (outbox_full) does NOT ack and throws
+    ackCalled = false;
+    statusState = "outbox_full";
+    const tmp2 = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-transient-")));
+    const drain2 = createPeerDrainService({
+      stateRoot: tmp2,
+      profile: "test-agent",
+      profileInstanceId: "6".repeat(64),
+      ipc: mockIpc,
+      runner: { async run() { return { status: "completed", text: "Transient result" }; } },
+      routes,
+    });
+    try {
+      await assert.rejects(drain2.step(), (err) => err.code === "outbox_full");
+      assert.equal(ackCalled, false);
+    } finally {
+      drain2.close();
+      rmSync(tmp2, { recursive: true, force: true });
+    }
   } finally {
     drain.close();
     rmSync(tmp, { recursive: true, force: true });
@@ -322,8 +346,8 @@ test("duplicate input is handled without re-executing; conflict is rejected", as
   }
 });
 
-test("crash during execution recovers to quarantined on restart and never re-runs", async () => {
-  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-quarantine-")));
+test("crash during execution recovers to held on restart and never re-runs", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-held-")));
   const senderId = "8".repeat(64);
   const messageId = "msg-inbound-004";
   const requestPayload = JSON.stringify({
@@ -350,6 +374,9 @@ test("crash during execution recovers to quarantined on restart and never re-run
           ],
         };
       }
+      if (method === "ack") {
+        return { acked: 1, already_acked: 0, unknown: [] };
+      }
       return {};
     },
   };
@@ -372,13 +399,13 @@ test("crash during execution recovers to quarantined on restart and never re-run
   });
 
   const outcome1 = await drain1.step();
-  assert.equal(outcome1.state, "quarantined");
+  assert.equal(outcome1.state, "held");
   assert.equal(runnerCalls, 1);
   drain1.close();
 
   // Second session (restart recovery):
-  // Opening the DB recovers any lingering 'executing' to 'quarantined',
-  // and subsequent delivery of the same message stays quarantined!
+  // Opening the DB recovers any lingering 'executing' to 'held',
+  // and subsequent delivery of the same message stays held!
   const drain2 = createPeerDrainService({
     stateRoot: tmp,
     profile: "test-agent",
@@ -395,7 +422,7 @@ test("crash during execution recovers to quarantined on restart and never re-run
 
   try {
     const outcome2 = await drain2.step();
-    assert.equal(outcome2.state, "quarantined");
+    assert.equal(outcome2.state, "held");
     assert.equal(runnerCalls, 1); // Not called again!
   } finally {
     drain2.close();
@@ -417,6 +444,20 @@ test("received peer replies stay retrievable after ack and process restart until
   let acked = false;
   const ipc = {
     async request(method, params) {
+      if (method === "send") return {};
+      if (method === "message_status") {
+        return {
+          message_id: params.message_id,
+          peer_endpoint_id: senderId,
+          payload_hash: digest(JSON.stringify({
+            protocol: PEER_ENVELOPE_PROTOCOL,
+            kind: "request",
+            request_id: "req-001",
+            text: "initial",
+          })),
+          state: "queued_local",
+        };
+      }
       if (method === "inbox") {
         return {
           items: acked
@@ -444,11 +485,13 @@ test("received peer replies stay retrievable after ack and process restart until
     profile: "test-agent",
     profileInstanceId: "b".repeat(64),
     ipc,
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
     runner: { async run() { throw new Error("reply must not invoke the runner"); } },
   };
 
   let drain = createPeerDrainService(options);
   try {
+    await drain.sendRequest({ toEndpointId: senderId, text: "initial", requestId: "req-001", messageId: "msg-outbound-001" });
     const result = await drain.step();
     assert.equal(result.state, "reply_received");
     assert.equal(result.text, "The remote agent says hello.");
@@ -525,7 +568,7 @@ test("outbound peer request verifies durable admission and preserves IDs across 
     });
     assert.equal(sent.length, 1);
     assert.equal(sent[0].message_id, "message-001");
-    assert.equal(sent[0].peer_addr, route);
+    assert.deepEqual(sent[0].peer_addr, route);
     assert.deepEqual(JSON.parse(sent[0].payload), {
       protocol: PEER_ENVELOPE_PROTOCOL,
       kind: "request",
@@ -628,6 +671,407 @@ test("outbound peer request exposes its stable message ID when status reconcilia
         && error.messageId === sentMessageId
         && typeof error.requestId === "string",
     );
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("operator recovery resolvePeerRecord supports retry, resend, discard with idempotency and revision tracking", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-operator-")));
+  const senderId = "3".repeat(64);
+  const route = { id: senderId, addrs: [] };
+  let runnerCalls = 0;
+  let sentPayload = null;
+
+  const mockIpc = {
+    async request(method, params) {
+      if (method === "inbox") return { items: [] };
+      if (method === "send") {
+        sentPayload = params.payload;
+        return {};
+      }
+      if (method === "message_status") {
+        return {
+          message_id: params.message_id,
+          peer_endpoint_id: senderId,
+          payload_hash: digest(sentPayload),
+          state: "queued_local",
+        };
+      }
+      if (method === "ack") return { acked: 1, already_acked: 0, unknown: [] };
+      throw new Error(`Unhandled mock method: ${method}`);
+    },
+  };
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "operator-test",
+    profileInstanceId: "4".repeat(64),
+    ipc: mockIpc,
+    runner: {
+      async run() {
+        runnerCalls++;
+        if (runnerCalls === 1) throw new Error("first attempt crashes");
+        return { status: "completed", text: "second attempt succeeds" };
+      },
+    },
+    routes: new Map([[senderId, route]]),
+  });
+
+  try {
+    // 1. Initial turn fails -> enters 'held', acked
+    const reqPayload = JSON.stringify({
+      protocol: PEER_ENVELOPE_PROTOCOL,
+      kind: "request",
+      request_id: "req-held-1",
+      text: "Task that crashes",
+    });
+    // Inject into inbox for step 1
+    let inboxItem = {
+      seq: 1,
+      from_endpoint_id: senderId,
+      message_id: "msg-held-1",
+      payload: reqPayload,
+      payload_hash: digest(reqPayload),
+      ts_unix_ms: Date.now(),
+    };
+    mockIpc.request = async (method, params) => {
+      if (method === "inbox") {
+        const items = inboxItem ? [inboxItem] : [];
+        inboxItem = null;
+        return { items };
+      }
+      if (method === "send") {
+        sentPayload = params.payload;
+        return {};
+      }
+      if (method === "message_status") {
+        return {
+          message_id: params.message_id,
+          peer_endpoint_id: senderId,
+          payload_hash: digest(sentPayload),
+          state: "queued_local",
+        };
+      }
+      if (method === "ack") return { acked: 1, already_acked: 0, unknown: [] };
+      throw new Error(`Unhandled method: ${method}`);
+    };
+
+    const first = await drain.step();
+    assert.equal(first.state, "held");
+    assert.equal(runnerCalls, 1);
+    let st = drain.status().find((r) => r.message_id === "msg-held-1");
+    assert.equal(st.phase, "held");
+
+    // 2. Conflicting operation ID fails
+    await assert.rejects(
+      async () => {
+        drain.resolvePeerRecord({
+          fromEndpointId: senderId,
+          messageId: "msg-held-1",
+          action: "invalid_action",
+          operationId: "op-1",
+          expectedRevision: 1,
+        });
+      },
+      (err) => err.code === "invalid_action",
+    );
+
+    // 3. Stale revision fails
+    assert.throws(
+      () => drain.resolvePeerRecord({
+        fromEndpointId: senderId,
+        messageId: "msg-held-1",
+        action: "retry",
+        operationId: "op-1",
+        expectedRevision: 99,
+      }),
+      (err) => err.code === "revision_conflict",
+    );
+
+    // 4. Operator admits retry -> enters retry_pending, incrementing revision and attempt
+    const opResult = drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "msg-held-1",
+      action: "retry",
+      operationId: "op-1",
+      expectedRevision: 1,
+    });
+    assert.deepEqual(opResult, {
+      operationId: "op-1",
+      action: "retry",
+      state: "retry_pending",
+      messageId: "msg-held-1",
+      revision: 2,
+    });
+
+    // Idempotent re-submission returns identical result
+    const idempResult = drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "msg-held-1",
+      action: "retry",
+      operationId: "op-1",
+      expectedRevision: 1,
+    });
+    assert.deepEqual(idempResult, opResult);
+
+    // Same op ID with different action throws conflict
+    assert.throws(
+      () => drain.resolvePeerRecord({
+        fromEndpointId: senderId,
+        messageId: "msg-held-1",
+        action: "discard",
+        operationId: "op-1",
+      }),
+      (err) => err.code === "operation_conflict",
+    );
+
+    // 5. Next step() services retry_pending without inbox item
+    const retryOutcome = await drain.step();
+    assert.equal(retryOutcome.state, "acked");
+    assert.equal(runnerCalls, 2);
+    st = drain.status().find((r) => r.message_id === "msg-held-1");
+    assert.equal(st.phase, "acked");
+
+    // 6. Test operator resend for reply_failed
+    // Inject a reply_failed record
+    const { DatabaseSync } = await import("node:sqlite");
+    const rawDb = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
+    rawDb.prepare(`
+      INSERT INTO records(sender, message_id, input_hash, phase, reply_id, reply_payload, result_payload, revision, terminal_at, created_at, updated_at)
+      VALUES(?, 'msg-fail-1', 'h1', 'reply_failed', 'reply-fail-1', '{"protocol":"triangle.peer/1","kind":"reply","request_id":"r1","in_reply_to":"msg-fail-1","text":"saved answer"}', 'saved answer', 1, ?, ?, ?)
+    `).run(senderId, Date.now(), Date.now(), Date.now());
+    rawDb.close();
+
+    const resendOp = drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "msg-fail-1",
+      action: "resend",
+      operationId: "op-resend-1",
+      expectedRevision: 1,
+    });
+    assert.equal(resendOp.state, "resend_pending");
+    assert.ok(resendOp.replyId.includes("-resend-1"));
+
+    // Servicing resend_pending never invokes runner!
+    const runnerCallsBeforeResend = runnerCalls;
+    const resendOutcome = await drain.step();
+    assert.equal(resendOutcome.state, "acked");
+    assert.equal(runnerCalls, runnerCallsBeforeResend); // Runner was NOT rerun!
+
+    // 7. Explicit outbound closure
+    await drain.sendRequest({ toEndpointId: senderId, text: "Req for close", requestId: "req-close", messageId: "msg-close" });
+    const closeOp = drain.resolvePeerRecord({
+      fromEndpointId: senderId,
+      messageId: "msg-close",
+      action: "close_outbound",
+      operationId: "op-close-1",
+    });
+    assert.equal(closeOp.state, "closed");
+
+    // Late reply against closed outbound correlation is rejected
+    inboxItem = {
+      seq: 2,
+      from_endpoint_id: senderId,
+      message_id: "reply-late-1",
+      payload: JSON.stringify({
+        protocol: PEER_ENVELOPE_PROTOCOL,
+        kind: "reply",
+        request_id: "req-close",
+        in_reply_to: "msg-close",
+        text: "too late",
+      }),
+      payload_hash: digest(JSON.stringify({
+        protocol: PEER_ENVELOPE_PROTOCOL,
+        kind: "reply",
+        request_id: "req-close",
+        in_reply_to: "msg-close",
+        text: "too late",
+      })),
+      ts_unix_ms: Date.now(),
+    };
+    const lateReplyOutcome = await drain.step();
+    assert.equal(lateReplyOutcome.state, "rejected");
+    assert.equal(lateReplyOutcome.reason, "correlation_closed");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("retention compaction deletes records older than 8 days but preserves active custody", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-retention-")));
+  const senderId = "5".repeat(64);
+  const nowMs = 1700000000000;
+  const oldMs = nowMs - (9 * 24 * 60 * 60 * 1000); // 9 days old
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "retention-test",
+    profileInstanceId: "6".repeat(64),
+    ipc: { async request(m) { if (m === "inbox") return { items: [] }; throw new Error(m); } },
+    runner: { async run() {} },
+    now: () => nowMs,
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const rawDb = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
+
+    // Insert old terminal record (acked) -> should be deleted
+    rawDb.prepare(`
+      INSERT INTO records(sender, message_id, input_hash, phase, terminal_at, created_at, updated_at)
+      VALUES(?, 'msg-old-acked', 'h1', 'acked', ?, ?, ?)
+    `).run(senderId, oldMs, oldMs, oldMs);
+
+    // Insert old held record -> MUST BE PRESERVED
+    rawDb.prepare(`
+      INSERT INTO records(sender, message_id, input_hash, phase, terminal_at, created_at, updated_at)
+      VALUES(?, 'msg-old-held', 'h2', 'held', ?, ?, ?)
+    `).run(senderId, oldMs, oldMs, oldMs);
+
+    // Insert old reply_failed record -> MUST BE PRESERVED
+    rawDb.prepare(`
+      INSERT INTO records(sender, message_id, input_hash, phase, terminal_at, created_at, updated_at)
+      VALUES(?, 'msg-old-failed', 'h3', 'reply_failed', ?, ?, ?)
+    `).run(senderId, oldMs, oldMs, oldMs);
+
+    // Insert old closed outbound -> should be deleted
+    rawDb.prepare(`
+      INSERT INTO outbound(message_id, to_endpoint_id, request_id, payload_hash, state, created_at, updated_at, closed_at)
+      VALUES('out-old-closed', ?, 'r1', 'h4', 'settled', ?, ?, ?)
+    `).run(senderId, oldMs, oldMs, oldMs);
+
+    // Insert old unclosed outbound -> MUST BE PRESERVED
+    rawDb.prepare(`
+      INSERT INTO outbound(message_id, to_endpoint_id, request_id, payload_hash, state, created_at, updated_at)
+      VALUES('out-old-open', ?, 'r2', 'h5', 'settled', ?, ?)
+    `).run(senderId, oldMs, oldMs);
+
+    rawDb.close();
+
+    // Trigger step() which runs retention compaction
+    await drain.step();
+
+    const remaining = drain.status().map((r) => r.message_id);
+    assert.ok(!remaining.includes("msg-old-acked"), "Old acked record should be compacted");
+    assert.ok(remaining.includes("msg-old-held"), "Old held record MUST be preserved");
+    assert.ok(remaining.includes("msg-old-failed"), "Old reply_failed record MUST be preserved");
+
+    const rawDbCheck = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
+    const remainingOutbound = rawDbCheck.prepare("SELECT message_id FROM outbound").all().map((r) => r.message_id);
+    rawDbCheck.close();
+    assert.ok(!remainingOutbound.includes("out-old-closed"), "Old closed outbound record should be compacted");
+    assert.ok(remainingOutbound.includes("out-old-open"), "Old unclosed outbound record MUST be preserved");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("invariant 5: abort before runner start deletes executing record rather than holding it", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-abort-pre-")));
+  const senderId = "7".repeat(64);
+  const messageId = "msg-pre-abort";
+  const reqPayload = JSON.stringify({
+    protocol: PEER_ENVELOPE_PROTOCOL,
+    kind: "request",
+    request_id: "req-abort-1",
+    text: "Will be aborted before run",
+  });
+
+  const mockIpc = {
+    async request(m) {
+      if (m === "inbox") {
+        return {
+          items: [{
+            seq: 1,
+            from_endpoint_id: senderId,
+            message_id: messageId,
+            payload: reqPayload,
+            payload_hash: digest(reqPayload),
+            ts_unix_ms: Date.now(),
+          }],
+        };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "abort-test",
+    profileInstanceId: "8".repeat(64),
+    ipc: mockIpc,
+    runner: {
+      async run() {
+        throw new Error("Runner should never be called when aborted");
+      },
+    },
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const ac = new AbortController();
+    ac.abort(); // already aborted
+
+    await assert.rejects(
+      drain.step({ signal: ac.signal }),
+      (err) => err.code === "aborted" || err.name === "AbortError",
+    );
+
+    // Record MUST NOT exist in records (deleted, not held)
+    const st = drain.status().find((r) => r.message_id === messageId);
+    assert.equal(st, undefined, "Executing admission should be deleted on pre-runner abort");
+  } finally {
+    drain.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("cap backpressure: at 10,000 records, pauses intake without acking or spinning", async () => {
+  const tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "peer-drain-cap-")));
+  const senderId = "9".repeat(64);
+
+  let inboxPolled = false;
+  const mockIpc = {
+    async request(m) {
+      if (m === "inbox") {
+        inboxPolled = true;
+        return { items: [] };
+      }
+      throw new Error(`Unexpected IPC: ${m}`);
+    },
+  };
+
+  const drain = createPeerDrainService({
+    stateRoot: tmp,
+    profile: "cap-test",
+    profileInstanceId: "a".repeat(64),
+    ipc: mockIpc,
+    runner: { async run() {} },
+    routes: new Map([[senderId, { id: senderId, addrs: [] }]]),
+  });
+
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const rawDb = new DatabaseSync(path.join(tmp, "peer-drain.sqlite"));
+    rawDb.exec("BEGIN");
+    for (let i = 0; i < 10000; i++) {
+      rawDb.prepare(`
+        INSERT INTO records(sender, message_id, input_hash, phase, created_at, updated_at)
+        VALUES(?, ?, 'h', 'held', 0, 0)
+      `).run(senderId, `cap-msg-${i}`);
+    }
+    rawDb.exec("COMMIT");
+    rawDb.close();
+
+    const res = await drain.step();
+    assert.equal(res.state, "journal_full");
+    assert.equal(inboxPolled, false, "Inbox must NOT be polled when journal is at capacity");
+    assert.equal(drain.status().journalFull, true);
   } finally {
     drain.close();
     rmSync(tmp, { recursive: true, force: true });
