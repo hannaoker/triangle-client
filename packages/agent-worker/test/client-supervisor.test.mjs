@@ -734,7 +734,8 @@ test("supervisor bootstraps opt-in appServerWake beside workers", async () => {
         bridgeStarted = true;
         return { status: "stopped", cycles: 1 };
       },
-      async stop() {},
+      async stop() {
+      },
     }),
     logger: { error() {} },
   });
@@ -1945,4 +1946,313 @@ test("supervisor enforces cooldown backoff when grant renewal receives HTTP 402"
   assert.equal(renewals, 2);
   assert.equal(sleeps.length, 1);
   assert.equal(sleeps[0] >= 15 * 60_000, true);
+});
+
+test("supervisor rejects peerWake without experimentalGate: true", () => {
+  assert.throws(
+    () =>
+      createClientSupervisor({
+        instances: [],
+        peerWakes: [
+          {
+            profile: "peer-agent",
+            profileInstanceId: id(80),
+            stateRoot: "/tmp/state",
+            allowedPeers: [],
+            runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+            runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(80) },
+          },
+        ],
+      }),
+    /experimentalGate: true/,
+  );
+});
+
+test("supervisor rejects peerWake instanceId collision with worker instance", () => {
+  const instance = {
+    instanceId: id(81),
+    mailbox: {
+      meshUrl: "https://mesh.example",
+      workloadId: TEST_WORKLOAD.workloadId,
+      workloadPrivateKey: testKey(`mesh_${"f".repeat(64)}`),
+      recipientId: `agent_${"f".repeat(32)}`,
+      pageLimit: 1,
+    },
+    runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+    runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(81) },
+  };
+
+  assert.throws(
+    () =>
+      createClientSupervisor({
+        instances: [instance],
+        peerWakes: [
+          {
+            experimentalGate: true,
+            profile: "peer-agent",
+            profileInstanceId: id(81),
+            stateRoot: "/tmp/state",
+            allowedPeers: [],
+            runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+            runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(81) },
+          },
+        ],
+      }),
+    /peerWake instanceId collides with a worker instance/,
+  );
+});
+
+test("supervisor runOnce executes peer drain step and populates peerInstances", async () => {
+  let drainStepCalls = 0;
+  let engineStartCalls = 0;
+  let engineStopCalls = 0;
+
+  const mockDrain = {
+    async step() {
+      drainStepCalls++;
+      return { state: "acked", messageId: "msg-001" };
+    },
+    pendingReplies() {
+      return [{ state: "reply_received", fromEndpointId: id(90), messageId: "reply-1", text: "hello" }];
+    },
+    consumeReply(reply) {
+      return { consumed: true, ...reply };
+    },
+    close() {},
+  };
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    peerWakes: [
+      {
+        experimentalGate: true,
+        profile: "peer-agent",
+        profileInstanceId: id(82),
+        stateRoot: "/tmp/peer-state",
+        allowedPeers: [],
+        runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+        runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(82) },
+      },
+    ],
+    createPeerEngine: () => ({
+      async start() {
+        engineStartCalls++;
+        return { endpointId: "e".repeat(64), socketPath: "/tmp/sock" };
+      },
+      getIpcClient() {
+        return {};
+      },
+      async stop() {
+        engineStopCalls++;
+      },
+    }),
+    createPeerDrain: () => mockDrain,
+  });
+
+  const step = await supervisor.runOnce();
+  assert.equal(drainStepCalls, 1);
+  assert.equal(engineStartCalls, 1);
+  assert.equal(engineStopCalls, 1);
+  assert.equal(step.peerInstances.length, 1);
+  assert.equal(step.peerInstances[0].instanceId, id(82));
+  assert.equal(step.peerInstances[0].profile, "peer-agent");
+  assert.equal(step.peerInstances[0].outcome.state, "acked");
+  assert.deepEqual(supervisor.pendingPeerReplies(), [
+    {
+      profile: "peer-agent",
+      profileInstanceId: id(82),
+      state: "reply_received",
+      fromEndpointId: id(90),
+      messageId: "reply-1",
+      text: "hello",
+    },
+  ]);
+  assert.deepEqual(
+    supervisor.consumePeerReply({
+      profileInstanceId: id(82),
+      fromEndpointId: id(90),
+      messageId: "reply-1",
+    }),
+    { consumed: true, profileInstanceId: id(82), fromEndpointId: id(90), messageId: "reply-1" },
+  );
+});
+
+test("supervisor watch starts peer engine manager, loops drain, and stops on abort", async () => {
+  let engineStarted = false;
+  let engineStopped = false;
+  let drainSteps = 0;
+  let drainClosed = false;
+  const controller = new AbortController();
+
+  const mockEngine = {
+    async start() {
+      engineStarted = true;
+      return { endpointId: "e".repeat(64), socketPath: "/tmp/sock" };
+    },
+    getIpcClient() {
+      return {};
+    },
+    async stop() {
+      engineStopped = true;
+    },
+  };
+
+  const mockDrain = {
+    async start() {
+      drainSteps++;
+      controller.abort();
+      return { state: "acked", messageId: "msg-002" };
+    },
+    async step() {
+      drainSteps++;
+      return { state: "acked", messageId: "msg-002" };
+    },
+    close() {
+      drainClosed = true;
+    },
+  };
+
+  const supervisor = createClientSupervisor({
+    instances: [],
+    peerWakes: [
+      {
+        experimentalGate: true,
+        profile: "peer-agent",
+        profileInstanceId: id(83),
+        stateRoot: "/tmp/peer-state",
+        allowedPeers: [],
+        pollIntervalMs: 10,
+        runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+        runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(83) },
+      },
+    ],
+    createPeerEngine: () => mockEngine,
+    createPeerDrain: () => mockDrain,
+  });
+
+  await supervisor.watch({
+    signal: controller.signal,
+    sleep: async () => {},
+  });
+
+  assert.equal(engineStarted, true);
+  assert.equal(drainSteps >= 1, true);
+  assert.equal(drainClosed, true);
+  assert.equal(engineStopped, true);
+});
+
+test("supervisor sends only to a configured allowed peer and preserves active engine ownership", async () => {
+  const recipientId = "a".repeat(64);
+  const route = { id: recipientId, addrs: ["/ip4/127.0.0.1/udp/1234/quic-v1"] };
+  const sent = [];
+  let engineStarts = 0;
+  let engineStops = 0;
+  const peerDrain = {
+    async step() { return { state: "idle" }; },
+    async sendRequest(request) {
+      sent.push(request);
+      return {
+        messageId: request.messageId ?? "generated-message-id",
+        requestId: request.requestId ?? "generated-request-id",
+        toEndpointId: request.toEndpointId,
+        state: "queued_local",
+        settled: false,
+        attempts: 1,
+      };
+    },
+    pendingReplies() {
+      return [
+        {
+          state: "reply_received",
+          fromEndpointId: recipientId,
+          messageId: "reply-1",
+          envelope: {
+            protocol: "triangle.peer/1",
+            kind: "reply",
+            request_id: "request-1",
+            in_reply_to: "outbound-1",
+            text: "hello",
+          },
+        },
+        {
+          state: "reply_received",
+          fromEndpointId: recipientId,
+          messageId: "reply-2",
+          envelope: {
+            protocol: "triangle.peer/1",
+            kind: "reply",
+            request_id: "request-2",
+            in_reply_to: "outbound-2",
+            text: "world",
+          },
+        },
+      ];
+    },
+    consumeReply() { return { consumed: true }; },
+    close() {},
+  };
+  const supervisor = createClientSupervisor({
+    instances: [],
+    peerWakes: [
+      {
+        experimentalGate: true,
+        profile: "peer-agent",
+        profileInstanceId: id(84),
+        stateRoot: "/tmp/peer-send-state",
+        allowedPeers: [recipientId, "b".repeat(64)],
+        routes: new Map([[recipientId, route]]),
+        runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+        runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(84) },
+      },
+    ],
+    createPeerEngine: () => ({
+      get isRunning() { return engineStarts > engineStops; },
+      async start() { engineStarts++; },
+      async stop() { engineStops++; },
+      getIpcClient() { return {}; },
+    }),
+    createPeerDrain: () => peerDrain,
+  });
+
+  const controller = new AbortController();
+  const result = await supervisor.sendPeerMessage({
+    profileInstanceId: id(84),
+    toEndpointId: recipientId,
+    text: "Hello",
+    requestId: "request-1",
+    messageId: "outbound-1",
+    signal: controller.signal,
+  });
+  assert.equal(result.state, "queued_local");
+  assert.equal(result.settled, false);
+  assert.equal(engineStarts, 1);
+  assert.equal(engineStops, 0);
+  assert.deepEqual(sent, [{
+    toEndpointId: recipientId,
+    text: "Hello",
+    requestId: "request-1",
+    messageId: "outbound-1",
+    signal: controller.signal,
+  }]);
+
+  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "outbound-1" }).length, 1);
+  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), requestId: "request-2" }).length, 1);
+  assert.equal(supervisor.pendingPeerReplies({ profileInstanceId: id(84), inReplyTo: "missing" }).length, 0);
+  await assert.rejects(supervisor.sendPeerMessage({
+    profileInstanceId: id(84),
+    toEndpointId: "b".repeat(64),
+    text: "Missing route",
+  }), { code: "route_unavailable" });
+  await assert.rejects(supervisor.sendPeerMessage({
+    profileInstanceId: id(84),
+    toEndpointId: "c".repeat(64),
+    text: "Not allowlisted",
+  }), { code: "recipient_not_allowed" });
+  await assert.rejects(supervisor.sendPeerMessage({
+    profileInstanceId: id(999),
+    toEndpointId: recipientId,
+    text: "Unknown profile",
+  }), /Unknown peer profileInstanceId/);
+  assert.equal(engineStarts, 1);
+  assert.equal(engineStops, 0);
 });

@@ -13,11 +13,16 @@ direct-or-relayed peer links, owns a durable peer journal, and exposes a
   per-peer quotas, verified receipts, bounded outbound retry with exponential
   backoff and 7-day expiry, paginated inbox + `ack`, journal compaction, and a
   state-dir lock (single writer).
-- **Out of scope (this PR):** real harness execution via the peer-local
-  settlement adapter, macOS/Linux packaging, *signed* roster admission,
-  cross-network NAT proof on two physical machines.
-- **Never:** MESH bearers/credentials, workload keys, MESH claim emulation, or
-  launching existing runtime drains / `client-supervisor.mjs`.
+- **Supervisor integration (experimental macOS slice):** `packages/agent-worker`
+  provides lifecycle management (`peer-engine-manager.mjs`) and drain execution
+  (`peer-drain-service.mjs`) for configured `peerWakes` behind `experimentalGate: true`.
+  Executes runner harnesses, journals admission into SQLite before execution,
+  quarantines unrecovered inference, and ACKs inbound messages only after verified
+  local outbound admission.
+- **Out of scope:** signed roster admission, Triangle identity ↔ Iroh binding,
+  cross-network NAT proof on physical networks, Linux/Windows packaging, MESH/Iroh hybrid delivery.
+- **Never:** MESH bearers/credentials, workload keys, or MESH claim emulation. Peer
+  engine runs with a strictly filtered child environment excluding MESH secrets.
 
 See [docs/IPC_CONTRACT.md](docs/IPC_CONTRACT.md) (draft merge point) and
 [docs/IROH_AND_PROVENANCE.md](docs/IROH_AND_PROVENANCE.md).
@@ -107,10 +112,11 @@ Integration tests under `tests/exchange_and_recovery.rs` and
 8. Startup does not hang on an unreachable relay.
 9. Retry with backoff after admission; expiry is terminal and durable.
 
-## Still unverified
+## Still unverified / future boundaries
 
-- Separate residential/cellular networks and NAT traversal
+- Separate residential/cellular networks and NAT traversal across physical machines
 - Forced relay when direct UDP is blocked
 - Self-hosted relay configuration
-- Signed roster / directory binding (only a static allowlist exists)
-- Real harness request/reply without MESH/Swift helper
+- Signed roster / directory binding and Triangle identity ↔ Iroh key enrollment
+- Hybrid MESH / Iroh routing
+- Linux / Windows service packaging and supervisor integration

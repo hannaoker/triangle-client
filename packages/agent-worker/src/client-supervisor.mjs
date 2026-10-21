@@ -53,6 +53,8 @@ import {
   createInstalledCursorAcpDrain,
   normalizeCursorAcpWakeConfig,
 } from "./cursor-acp-runtime/headless-drain-service.mjs";
+import { createPeerEngineManager } from "./peer-engine-manager.mjs";
+import { createPeerDrainService } from "./peer-drain-service.mjs";
 
 import {
   APP_SERVER_BINDING_KEYS,
@@ -63,6 +65,7 @@ import {
   INSTALLATION_ID,
   INSTANCE_ID,
   LEGACY_HEADLESS_WAKE_UNSET,
+  PEER_WAKE_KEYS,
   hasExactKeys,
   isRenewableWatchCredentialError,
   positiveInteger,
@@ -71,6 +74,7 @@ import {
   validateDrain,
   validateEventWake,
   validateHeadlessWakes,
+  validatePeerWakes,
   validateRunner,
 } from "./client-supervisor-schema.mjs";
 
@@ -80,6 +84,7 @@ export {
   GROK_BOT_BINDING_KEYS,
   GROK_BOT_WAKE_KEYS,
   HEADLESS_WAKE_KEYS,
+  PEER_WAKE_KEYS,
 } from "./client-supervisor-schema.mjs";
 
 /**
@@ -600,6 +605,7 @@ export function createClientSupervisor({
   grokBotWake = null,
   headlessWakes = null,
   cursorAcpWakes = null,
+  peerWakes = null,
   headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
@@ -619,6 +625,8 @@ export function createClientSupervisor({
   createCursorAcpDrain = createInstalledCursorAcpDrain,
   createCursorAcpClaimer = createCursorAcpClaimerGuard,
   createInstallDispatcher = createInstallWatchDispatcher,
+  createPeerEngine = createPeerEngineManager,
+  createPeerDrain = createPeerDrainService,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -673,12 +681,14 @@ export function createClientSupervisor({
   const appServerConfig = validateAppServerWake(appServerWake);
   const headlessConfigs = validateHeadlessWakes(headlessWakes);
   const cursorAcpConfigs = validateCursorAcpWakes(cursorAcpWakes);
+  const peerConfigs = validatePeerWakes(peerWakes);
   if (
     instances.length < 1
     && !wakeConfig
     && !appServerConfig
     && headlessConfigs.length === 0
     && cursorAcpConfigs.length === 0
+    && peerConfigs.length === 0
   ) {
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
@@ -847,6 +857,24 @@ export function createClientSupervisor({
     }
     if (headlessConfigs.some((config) => config.profile === cursorAcpConfig.profile)) {
       throw new TypeError("cursorAcpWake profile collides with a headlessWake profile");
+    }
+  }
+
+  for (const peerConfig of peerConfigs) {
+    if (seen.has(peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a worker instance");
+    }
+    if (wakeConfig?.profiles.some((profile) => profile.instanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with an eventWake profile");
+    }
+    if (appServerConfig?.binding.instanceId === peerConfig.profileInstanceId) {
+      throw new TypeError("peerWake instanceId collides with an appServerWake profile");
+    }
+    if (headlessConfigs.some((config) => config.profileInstanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a headlessWake profile");
+    }
+    if (cursorAcpConfigs.some((config) => config.profileInstanceId === peerConfig.profileInstanceId)) {
+      throw new TypeError("peerWake instanceId collides with a cursorAcpWake profile");
     }
   }
 
@@ -1030,6 +1058,94 @@ export function createClientSupervisor({
     }
   }
 
+  const peerEntries = [];
+  for (const peerConfig of peerConfigs) {
+    const context = Object.freeze({
+      instanceId: peerConfig.profileInstanceId,
+      peerProfile: peerConfig.profile,
+    });
+    const adapterRunner = createRunner(peerConfig.runnerConfig, context);
+    if (!adapterRunner || typeof adapterRunner.run !== "function") {
+      throw new TypeError("createRunner must return a runner");
+    }
+    const runner = Object.freeze({
+      run(request, options = {}) {
+        return gate.run(
+          () => adapterRunner.run(request, options),
+          { signal: options.signal },
+        );
+      },
+    });
+    const engineManager = createPeerEngine({
+      stateRoot: peerConfig.stateRoot,
+      allowedPeers: peerConfig.allowedPeers,
+      routes: peerConfig.routes,
+      relay: peerConfig.relay,
+      relayOnly: peerConfig.relayOnly,
+      directOnly: peerConfig.directOnly,
+      relayUrl: peerConfig.relayUrl,
+      binaryPath: peerConfig.engineBinaryPath,
+      logger,
+    });
+    const drain = createPeerDrain({
+      stateRoot: peerConfig.stateRoot,
+      profile: peerConfig.profile,
+      profileInstanceId: peerConfig.profileInstanceId,
+      engineManager,
+      runner,
+      routes: peerConfig.routes,
+      runnerTimeoutMs: peerConfig.runnerTimeoutMs,
+      logger,
+    });
+    if (!drain || typeof drain.step !== "function") {
+      throw new TypeError("createPeerDrain must return a drain service");
+    }
+    peerEntries.push(Object.freeze({ config: peerConfig, engineManager, drain }));
+  }
+
+  const peerEngineStarting = new WeakMap();
+  const peerEngineStarted = new WeakSet();
+
+  async function ensurePeerEngine(entry, signal) {
+    signal?.throwIfAborted();
+    if (entry.engineManager.isRunning === true || peerEngineStarted.has(entry)) return;
+    let promise = peerEngineStarting.get(entry);
+    if (!promise) {
+      promise = (async () => {
+        try {
+          await entry.engineManager.start({ signal });
+          peerEngineStarted.add(entry);
+        } finally {
+          peerEngineStarting.delete(entry);
+        }
+      })();
+      peerEngineStarting.set(entry, promise);
+    }
+    if (signal) {
+      await new Promise((resolve, reject) => {
+        const cleanup = () => signal.removeEventListener("abort", onAbort);
+        const onAbort = () => {
+          cleanup();
+          reject(signal.reason ?? Object.assign(new Error("Aborted"), { name: "AbortError" }));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        promise.then(
+          (value) => {
+            cleanup();
+            resolve(value);
+          },
+          (error) => {
+            cleanup();
+            reject(error);
+          },
+        );
+        if (signal.aborted) onAbort();
+      });
+    } else {
+      await promise;
+    }
+  }
+
   let installDispatcher = null;
   if (installDispatcherEnabled && hasInstallDispatcherAnchor) {
     const dispatcherProfiles = [];
@@ -1151,11 +1267,97 @@ export function createClientSupervisor({
     grokBotInstanceId: null,
     headlessInstanceIds: Object.freeze(headlessConfigs.map((config) => config.profileInstanceId)),
     cursorAcpInstanceIds: Object.freeze(cursorAcpConfigs.map((config) => config.profileInstanceId)),
+    peerInstanceIds: Object.freeze(peerConfigs.map((config) => config.profileInstanceId)),
     eventWake: wakeConfig,
     appServerWake: appServerConfig,
     grokBotWake: null,
     headlessWakes: headlessConfigs,
     cursorAcpWakes: cursorAcpConfigs,
+    peerWakes: peerConfigs,
+    pendingPeerReplies({ profileInstanceId, inReplyTo, requestId } = {}) {
+      const selected = profileInstanceId === undefined
+        ? peerEntries
+        : peerEntries.filter((entry) => entry.config.profileInstanceId === profileInstanceId);
+      if (profileInstanceId !== undefined && selected.length === 0) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      return selected.flatMap(({ config, drain }) => {
+        let replies = drain.pendingReplies?.({ inReplyTo, requestId }) ?? [];
+        if (inReplyTo !== undefined) {
+          replies = replies.filter((reply) => reply.envelope?.in_reply_to === inReplyTo);
+        }
+        if (requestId !== undefined) {
+          replies = replies.filter((reply) => reply.envelope?.request_id === requestId);
+        }
+        return replies.map((reply) => ({
+          profile: config.profile,
+          profileInstanceId: config.profileInstanceId,
+          ...reply,
+        }));
+      });
+    },
+    async sendPeerMessage({
+      profileInstanceId,
+      toEndpointId,
+      text,
+      requestId,
+      messageId,
+      signal,
+    } = {}) {
+      signal?.throwIfAborted();
+      if (typeof profileInstanceId !== "string" || profileInstanceId.length === 0) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      const entry = peerEntries.find(
+        (candidate) => candidate.config.profileInstanceId === profileInstanceId,
+      );
+      if (!entry) {
+        throw new TypeError("Unknown peer profileInstanceId");
+      }
+      if (
+        typeof toEndpointId !== "string" ||
+        !entry.config.allowedPeers.includes(toEndpointId)
+      ) {
+        const err = new TypeError("Recipient is not in allowedPeers");
+        err.code = "recipient_not_allowed";
+        throw err;
+      }
+      const route = entry.config.routes instanceof Map
+        ? entry.config.routes.get(toEndpointId)
+        : entry.config.routes?.[toEndpointId];
+      if (!route || route.id !== toEndpointId) {
+        const err = new TypeError("No configured route for recipient");
+        err.code = "route_unavailable";
+        throw err;
+      }
+
+      await ensurePeerEngine(entry, signal);
+
+      if (typeof entry.drain.sendRequest !== "function") {
+        throw new TypeError("Peer drain does not support sendRequest");
+      }
+
+      return await entry.drain.sendRequest({
+        toEndpointId,
+        text,
+        requestId,
+        messageId,
+        signal,
+      });
+    },
+    consumePeerReply({ profileInstanceId, fromEndpointId, messageId } = {}) {
+      const entry = peerEntries.find(
+        (candidate) => candidate.config.profileInstanceId === profileInstanceId,
+      );
+      if (!entry) throw new TypeError("Unknown peer profileInstanceId");
+      if (typeof entry.drain.consumeReply !== "function") {
+        throw new TypeError("Peer drain does not support received-reply consumption");
+      }
+      return {
+        profileInstanceId,
+        ...entry.drain.consumeReply({ fromEndpointId, messageId }),
+      };
+    },
     headlessWakeSkipReasons: Object.freeze({ ...headlessWakeSkipReasons }),
     cursorAcpWakeSkipReasons: Object.freeze({ ...cursorAcpWakeSkipReasons }),
     installWatchDispatcherEnabled: installDispatcherEnabled,
@@ -1176,7 +1378,48 @@ export function createClientSupervisor({
           return { instanceId, found: null, processed: 0, failed: true };
         }
       }));
-      return { instances: results };
+      const out = { instances: results };
+      if (peerEntries.length > 0) {
+        const peerResults = await Promise.all(peerEntries.map(async (entry) => {
+          const { config, engineManager, drain } = entry;
+          try {
+            await engineManager.start({ signal });
+            peerEngineStarted.add(entry);
+            return {
+              profile: config.profile,
+              profileInstanceId: config.profileInstanceId,
+              instanceId: config.profileInstanceId,
+              outcome: await drain.step({ signal }),
+            };
+          } catch (error) {
+            if (signal?.aborted || error?.name === "AbortError") throw error;
+            logger.error?.("triangle_client_peer_instance_failed", {
+              profile: config.profile,
+              profileInstanceId: config.profileInstanceId,
+              error: "Peer instance cycle failed",
+            });
+            return {
+              profile: config.profile,
+              profileInstanceId: config.profileInstanceId,
+              instanceId: config.profileInstanceId,
+              failed: true,
+            };
+          } finally {
+            peerEngineStarted.delete(entry);
+            try {
+              await engineManager.stop();
+            } catch (error) {
+              logger.warn?.("triangle_client_peer_engine_stop_failed", {
+                profile: config.profile,
+                profileInstanceId: config.profileInstanceId,
+                error: "Peer engine could not be stopped after one-shot drain",
+              });
+            }
+          }
+        }));
+        out.peerInstances = peerResults;
+      }
+      return out;
     },
 
     async watch({ signal, sleep } = {}) {
@@ -1549,6 +1792,55 @@ export function createClientSupervisor({
             : [],
         );
 
+      const peerLoop = peerEntries.length
+        ? runDurableWakeLoop({
+          start: async () => {
+            try {
+              for (const entry of peerEntries) {
+                await entry.engineManager.start({ signal });
+                peerEngineStarted.add(entry);
+              }
+              const starts = peerEntries.map((entry) =>
+                (typeof entry.drain.start === "function"
+                  ? entry.drain.start({ runLoop: true, signal })
+                  : entry.drain.step({ signal }))
+              );
+              try {
+                await Promise.all(starts);
+              } catch (error) {
+                await Promise.allSettled(starts);
+                throw error;
+              }
+              await waitForAbort(signal);
+              return peerEntries.map(({ config }) => ({
+                status: "stopped",
+                skipped: false,
+                profileInstanceId: config.profileInstanceId,
+              }));
+            } finally {
+              for (const entry of [...peerEntries].reverse()) {
+                try { await (entry.drain.stop?.() ?? entry.drain.close?.()); } catch {}
+              }
+              for (const entry of [...peerEntries].reverse()) {
+                peerEngineStarted.delete(entry);
+                try { await entry.engineManager.stop(); } catch {}
+              }
+            }
+          },
+          stop: async () => {
+            for (const entry of [...peerEntries].reverse()) {
+              try { await (entry.drain.stop?.() ?? entry.drain.close?.()); } catch {}
+            }
+            for (const entry of [...peerEntries].reverse()) {
+              peerEngineStarted.delete(entry);
+              try { await entry.engineManager.stop(); } catch {}
+            }
+          },
+          logEvent: "triangle_client_peer_wake_failed",
+          logMessage: "Peer engine drain failed",
+        })
+        : Promise.resolve([]);
+
       let settled;
       try {
         settled = await Promise.all([
@@ -1558,12 +1850,13 @@ export function createClientSupervisor({
           appServerLoop,
           headlessLoop,
           cursorAcpLoop,
+          peerLoop,
         ]);
       } finally {
         proactiveController.abort();
         await Promise.allSettled(proactiveRenewals);
       }
-      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult] = settled;
+      const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult, peerResult] = settled;
       return {
         instances,
         eventWake: wakeResult,
@@ -1572,6 +1865,7 @@ export function createClientSupervisor({
         grokBotWake: null,
         headlessWakes: Array.isArray(headlessResult) ? headlessResult : [headlessResult].filter(Boolean),
         cursorAcpWakes: Array.isArray(cursorAcpResult) ? cursorAcpResult : [cursorAcpResult].filter(Boolean),
+        peerWakes: Array.isArray(peerResult) ? peerResult : [peerResult].filter(Boolean),
       };
     },
   });

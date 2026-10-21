@@ -61,6 +61,8 @@ COMMON_ARTIFACTS = LEGACY_COMMON_ARTIFACTS + SUPERVISOR_ARTIFACTS
 # Permissions v1 (manifest v8): workers authenticate with the agent's workload
 # key through the shared triangle-cli protocol core (one JWS/DPoP implementation).
 WORKLOAD_CORE_ARTIFACTS = [
+    "packages/agent-worker/src/peer-drain-service.mjs",
+    "packages/agent-worker/src/peer-engine-manager.mjs",
     "packages/agent-worker/src/workload-credential.mjs",
     "packages/triangle-cli/src/canonical.mjs",
     "packages/triangle-cli/src/errors.mjs",
