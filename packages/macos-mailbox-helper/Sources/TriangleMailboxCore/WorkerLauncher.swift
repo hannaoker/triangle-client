@@ -205,8 +205,6 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             // shared triangle-cli protocol core the mailbox client imports.
             if manifestVersion == 8 {
                 artifacts.formUnion([
-                    "packages/agent-worker/src/peer-drain-service.mjs",
-                    "packages/agent-worker/src/peer-engine-manager.mjs",
                     "packages/agent-worker/src/workload-credential.mjs",
                     "packages/triangle-cli/src/canonical.mjs",
                     "packages/triangle-cli/src/errors.mjs",

@@ -53,8 +53,7 @@ import {
   createInstalledCursorAcpDrain,
   normalizeCursorAcpWakeConfig,
 } from "./cursor-acp-runtime/headless-drain-service.mjs";
-import { createPeerEngineManager } from "./peer-engine-manager.mjs";
-import { createPeerDrainService } from "./peer-drain-service.mjs";
+
 
 import {
   APP_SERVER_BINDING_KEYS,
@@ -625,8 +624,9 @@ export function createClientSupervisor({
   createCursorAcpDrain = createInstalledCursorAcpDrain,
   createCursorAcpClaimer = createCursorAcpClaimerGuard,
   createInstallDispatcher = createInstallWatchDispatcher,
-  createPeerEngine = createPeerEngineManager,
-  createPeerDrain = createPeerDrainService,
+  createPeerEngine = null,
+  createPeerDrain = null,
+  createPeerLane = null,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -876,6 +876,10 @@ export function createClientSupervisor({
     if (cursorAcpConfigs.some((config) => config.profileInstanceId === peerConfig.profileInstanceId)) {
       throw new TypeError("peerWake instanceId collides with a cursorAcpWake profile");
     }
+  }
+
+  if (peerConfigs.length > 0 && !createPeerLane && (!createPeerEngine || !createPeerDrain)) {
+    throw new TypeError("peerWakes requires the experimental peer-supervisor.mjs entry point");
   }
 
   const harness = wakeConfig ? createHarness({ clients, runners, logger }) : null;

@@ -606,16 +606,7 @@ private final class ResolverFixture {
             ]
         }
         if manifestVersion == 8 {
-            artifactNames += [
-                "packages/agent-worker/src/peer-drain-service.mjs",
-                "packages/agent-worker/src/peer-engine-manager.mjs",
-                "packages/agent-worker/src/workload-credential.mjs",
-                "packages/triangle-cli/src/canonical.mjs",
-                "packages/triangle-cli/src/errors.mjs",
-                "packages/triangle-cli/src/keys.mjs",
-                "packages/triangle-cli/src/protocol.mjs",
-                "packages/triangle-cli/src/workload.mjs",
-            ]
+            artifactNames += ["packages/agent-worker/src/workload-credential.mjs", "packages/triangle-cli/src/canonical.mjs", "packages/triangle-cli/src/errors.mjs", "packages/triangle-cli/src/keys.mjs", "packages/triangle-cli/src/protocol.mjs", "packages/triangle-cli/src/workload.mjs"]
         }
         if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]

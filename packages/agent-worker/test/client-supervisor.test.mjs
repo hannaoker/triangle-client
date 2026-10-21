@@ -1968,6 +1968,27 @@ test("supervisor rejects peerWake without experimentalGate: true", () => {
   );
 });
 
+test("supervisor rejects peerWakes without peer supervisor entry point or factories", () => {
+  assert.throws(
+    () =>
+      createClientSupervisor({
+        instances: [],
+        peerWakes: [
+          {
+            experimentalGate: true,
+            profile: "peer-agent",
+            profileInstanceId: id(80),
+            stateRoot: "/tmp/state",
+            allowedPeers: [],
+            runner: { command: "/trusted/runner", args: [], timeoutMs: 1_000 },
+            runnerEnvironment: { PATH: "/usr/bin", TRIANGLE_INSTANCE_ID: id(80) },
+          },
+        ],
+      }),
+    /peerWakes requires the experimental peer-supervisor\.mjs entry point/,
+  );
+});
+
 test("supervisor rejects peerWake instanceId collision with worker instance", () => {
   const instance = {
     instanceId: id(81),

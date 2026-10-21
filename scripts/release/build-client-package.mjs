@@ -44,13 +44,11 @@ function main() {
         "--version",
         "--helper",
         "--client",
-        "--peer-engine",
         "--node",
         "--output",
         "--test-root",
         "--helper-metadata",
         "--client-metadata",
-        "--peer-engine-metadata",
         "--node-license",
       ].includes(args[i]) ||
       !args[i + 1]
@@ -160,9 +158,6 @@ function main() {
       "triangle-mailbox": helper,
       "triangle-client": client,
     };
-    if (options["peer-engine"]) {
-      binaries["peer-engine"] = options["peer-engine"];
-    }
     mkdirSync(join(stage, "bin"), { mode: 0o700 });
     for (const [name, path] of Object.entries(binaries)) {
       const source = realpathSync(path);
@@ -175,9 +170,7 @@ function main() {
             options[
               name === "triangle-mailbox"
                 ? "helper-metadata"
-                : name === "peer-engine"
-                  ? "peer-engine-metadata"
-                  : "client-metadata"
+                : "client-metadata"
             ] ??
             join(
               dirname(source),
@@ -199,7 +192,7 @@ function main() {
           "--sign",
           "-",
           "--identifier",
-          name === "peer-engine" ? "dev.thetriangle.peer-engine" : "dev.thetriangle.mailbox",
+          "dev.thetriangle.mailbox",
           join(stage, "bin", name),
         ]);
         execFileSync("/usr/bin/codesign", [
