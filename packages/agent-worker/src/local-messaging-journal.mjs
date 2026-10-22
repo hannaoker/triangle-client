@@ -42,6 +42,8 @@ function mapMessageRow(row) {
     phase: row.phase,
     reason: row.reason ?? null,
     runtimeError: row.runtime_error ?? null,
+    // Only the presence: the late text is for owner inspection via getLateResult.
+    hasLateResult: Boolean(row.late_result_text),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -123,6 +125,12 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     CREATE INDEX IF NOT EXISTS idx_local_replies_req ON local_replies(request_id);
     CREATE INDEX IF NOT EXISTS idx_local_replies_reply ON local_replies(in_reply_to);
   `);
+
+  // Additive migrations only: journals written by earlier versions hold live data.
+  const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
+  if (!messageColumns.includes("late_result_text")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
+  }
 
   // Crash recovery on startup: any in-flight execution is held immediately
   const uncertainOnStartup = db
@@ -344,14 +352,21 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     return row ? mapMessageRow(row) : null;
   }
 
-  async function holdExecution(messageId, reason = "held") {
+  async function holdExecution(messageId, reason = "held", { lateResultText } = {}) {
     assertNotClosed();
     const now = Date.now();
+    // A result that arrives after the deadline is kept for the owner, never delivered.
     db.prepare(
-      "UPDATE local_messages SET phase = 'held', reason = ?, updated_at = ? WHERE message_id = ?"
-    ).run(reason, now, messageId);
+      "UPDATE local_messages SET phase = 'held', reason = ?, late_result_text = COALESCE(?, late_result_text), updated_at = ? WHERE message_id = ?"
+    ).run(reason, typeof lateResultText === "string" ? lateResultText : null, now, messageId);
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
     return row ? mapMessageRow(row) : null;
+  }
+
+  async function getLateResult(messageId) {
+    assertNotClosed();
+    const row = db.prepare("SELECT message_id, late_result_text FROM local_messages WHERE message_id = ?").get(messageId);
+    return row?.late_result_text ? { messageId: row.message_id, text: row.late_result_text } : null;
   }
 
   async function recordExecutionFailure({ messageId, reason = "execution_failed", runtimeError = null } = {}) {
@@ -403,6 +418,7 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     claimExecution,
     completeExecution,
     holdExecution,
+    getLateResult,
     status,
     close,
   };

@@ -38,3 +38,24 @@ test('private JSON rejects symlinks, hard links and public permissions',()=>{
   fs.chmodSync(file,0o644);assert.throws(()=>readPrivateJson(file));
  } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
+test('broker authenticates the secret before reporting any owner-side state and issues only after verification',()=>{
+ const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'triangle-broker-'));
+ try {
+  const bindingPath=path.join(root,'binding.json'), integrationPath=path.join(root,'integration.json');
+  const data={version:1,bindingId:'desktop',senderId:'sender',threadId:'thread-current',secret:'a'.repeat(64)};
+  writePrivateJson(bindingPath,{instanceId:'sender',threadId:'thread-current',enabled:false});
+  writePrivateJson(integrationPath,data);
+  let issued=0;
+  const broker=createDesktopCredentialBroker({bindingPath,integrationPath,recipients:['recipient'],issue:()=>({credential:'c'+(++issued)})});
+  broker.verify(data);assert.equal(issued,0,'verification never issues');
+  assert.throws(()=>broker.verify({...data,secret:'bad'}),{code:'unauthorized'});
+  assert.equal(broker.issue().credential,'c1');
+  assert.equal(broker.exchange(data).credential,'c2','exchange is verification plus issuance');
+  // After the owner moves the integration, an unauthenticated caller only ever sees unauthorized.
+  writePrivateJson(integrationPath,{...data,threadId:'moved'});
+  assert.throws(()=>broker.verify({...data,secret:'bad'}),{code:'unauthorized'});
+  assert.throws(()=>broker.verify(data),{code:'unauthorized'});
+  assert.throws(()=>broker.verify({...data,threadId:'moved'}),{code:'binding_changed'});
+  assert.equal(issued,2);
+ } finally {fs.rmSync(root,{recursive:true,force:true});}
+});

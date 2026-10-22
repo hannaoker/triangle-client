@@ -25,7 +25,9 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  const recipientIds=config.recipients.map(r=>r.instanceId);
  const registry=[integration.senderId,...recipientIds];
  const aclRules=Object.fromEntries([[integration.senderId,recipientIds],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
+ // Verified exchanges and failed attempts use separate buckets, so a failing caller cannot lock out the desktop.
  const brokerLimit=createPerSenderRateLimiter({maxRequestsPerWindow:120,windowMs:60000});
+ const brokerFailureLimit=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  let subsystem=null,journal=null,dispatcher=null,startPromise=null,closed=false;
  const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:recipientIds,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
  function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients};}
@@ -44,8 +46,10 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      return gate.run(()=>{options.signal?.throwIfAborted();options.onStarted?.();return runner.run(request,{...options,timeoutMs:config.runnerTimeoutMs??3600000});},{signal:options.signal,instanceId:job.recipient});
     }});
     subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,aclRules,logger,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status()}),credentialBroker:params=>{
+     try {broker.verify(params);}
+     catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
-     return {credential:broker.exchange(params),senderId:broker.senderId,threadId:broker.threadId};
+     return {credential:broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
     }});
     await subsystem.start();
    } catch(error){

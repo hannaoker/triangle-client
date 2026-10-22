@@ -462,3 +462,43 @@ test('failed schema initialization releases journal ownership for repair',async(
   assert.throws(()=>createLocalMessagingJournal({stateRoot:root}),e=>e.code==='ERR_SQLITE_ERROR');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test("the late-result column is added to an existing journal without touching rows and is idempotent", async () => {
+  const stateRoot = createIsolatedStateRoot();
+  const { DatabaseSync } = await import("node:sqlite");
+  const columns = (file) => {
+    const db = new DatabaseSync(file);
+    try { return db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name); } finally { db.close(); }
+  };
+  try {
+    const first = createLocalMessagingJournal({ stateRoot });
+    await first.recordSend({ sender: "alice", recipient: "bob", messageId: "msg-old-1", requestId: "req-1", text: "queued work", metadata: { _loopDepth: 3 } });
+    await first.recordSend({ sender: "alice", recipient: "bob", messageId: "msg-old-2", requestId: "req-2", text: "held work" });
+    await first.holdExecution("msg-old-2", "operator_hold");
+    await first.close();
+    const dbFile = path.join(stateRoot, fs.readdirSync(stateRoot).find((name) => name.endsWith(".sqlite") && !name.includes("owner")));
+    // Recreate a journal written before the column existed.
+    const raw = new DatabaseSync(dbFile);
+    raw.exec("ALTER TABLE local_messages DROP COLUMN late_result_text");
+    raw.close();
+    assert.ok(!columns(dbFile).includes("late_result_text"));
+
+    const second = createLocalMessagingJournal({ stateRoot });
+    assert.ok(columns(dbFile).includes("late_result_text"));
+    const queued = await second.getRecord("msg-old-1");
+    assert.equal(queued.text, "queued work");assert.equal(queued.phase, "queued_local");assert.equal(queued.metadata._loopDepth, 3);assert.equal(queued.hasLateResult, false);
+    const held = await second.getRecord("msg-old-2");
+    assert.equal(held.phase, "held");assert.equal(held.reason, "operator_hold");assert.equal(held.hasLateResult, false);
+    await second.holdExecution("msg-old-1", "runner_timeout", { lateResultText: "late text" });
+    await second.close();
+
+    const third = createLocalMessagingJournal({ stateRoot });
+    assert.deepEqual(columns(dbFile).filter((name) => name === "late_result_text"), ["late_result_text"], "migration is idempotent");
+    assert.equal((await third.getRecord("msg-old-1")).hasLateResult, true);
+    assert.equal((await third.getLateResult("msg-old-1")).text, "late text");
+    assert.deepEqual((await third.status()).held, 2);
+    await third.close();
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});

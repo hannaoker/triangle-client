@@ -9,6 +9,8 @@ import {setupLocalMessaging} from '../src/local-messaging-cli.mjs';
 import {writePrivateJson,readPrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost,loadLocalMessagingConfig} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
+import {createLocalControlClient} from '../src/local-messaging-client.mjs';
+import {resolveLocalSocketAddress} from '../src/local-messaging-address.mjs';
 const exec=promisify(execFile),cli=fileURLToPath(new URL('../src/local-messaging-cli.mjs',import.meta.url));
 test('production host executes via registered runner and preserves replies across restart',async()=>{
  const root=fs.mkdtempSync('/private/tmp/tri-host-');let host,calls=0;
@@ -71,4 +73,25 @@ test('the shared app-server host moving its own thread binding never breaks the 
   await host.stop();host=createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,{run:async()=>({status:'completed',text:'ok'})}]]),gate:createProfiledReasonerGate()});await host.start();
   assert.equal((await run(['status'])).running,true);
  }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('unauthenticated exchanges cannot exhaust the desktop bucket; only verified exchanges are charged to it',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-limit-');let host,client;
+ const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+ try{
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'thread-current',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'thread-current',recipients:['gravity2']});
+  const config=readPrivateJson(configPath),integration=readPrivateJson(config.integrationPath),recipient=config.recipients[0].instanceId;
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,{run:async()=>({status:'completed',text:'ok'})}]]),gate:createProfiledReasonerGate()});await host.start();
+  client=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId:integration.senderId});
+  const good={bindingId:integration.bindingId,threadId:integration.threadId,secret:integration.secret};
+  // A flood of failing attempts is throttled in its own bucket.
+  const codes=[];
+  for(let i=0;i<150;i++)await client.exchangeTurnBinding({...good,secret:'0'.repeat(64)}).catch(error=>codes.push(error.code));
+  assert.ok(codes.includes('unauthorized'));assert.ok(codes.includes('rate_limit_exceeded'),'failed attempts are rate limited');
+  assert.deepEqual([...new Set(codes)].sort(),['rate_limit_exceeded','unauthorized']);
+  // ...so the real desktop is not locked out, and its own successful exchanges use its own bucket.
+  let granted=0,limited=null;
+  for(let i=0;i<130&&!limited;i++){try{assert.equal(typeof (await client.exchangeTurnBinding(good)).credential,'string');granted++;}catch(error){limited=error.code;}}
+  assert.equal(granted,120);assert.equal(limited,'rate_limit_exceeded');
+ }finally{await client?.close();await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });

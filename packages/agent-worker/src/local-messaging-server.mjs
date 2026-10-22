@@ -310,6 +310,8 @@ export function createLocalControlServer({
               phase: record.phase,
               reason: record.reason || null,
               runtimeError: safeRuntimeError,
+              // Presence only: a result that arrived after a timeout is for the owner, not the sender.
+              hasLateResult: record.hasLateResult === true,
             },
             PROTOCOL_VERSION,
           );

@@ -594,3 +594,20 @@ test('stop with nothing running resolves immediately and later admissions stay q
   assert.equal(dispatcher.status().queued,0);
  }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
+
+test('a late success after the deadline stays held, is stored for the owner, and never becomes a reply',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
+ const dispatcher=createLocalMessagingDispatcher({journal,runnerTimeoutMs:5,runRecipient:async(job,{onStarted})=>{onStarted();await new Promise(r=>setTimeout(r,40));return {status:'completed',text:'late answer'};}});
+ try{
+  await journal.recordSend({sender:'a',recipient:'b',messageId:'late-kept',requestId:'late-kept-req',text:'work'});
+  await journal.recordSend({sender:'a',recipient:'b2',messageId:'plain',requestId:'plain-req',text:'work'});
+  await journal.holdExecution('plain','operator_hold');
+  await dispatcher.start();await waitFor(async()=>(await journal.getRecord('late-kept')).phase==='held',{message:'timeout hold'});await dispatcher.stop();
+  const record=await journal.getRecord('late-kept');
+  assert.equal(record.reason,'runner_timeout');assert.equal(record.hasLateResult,true);
+  assert.ok(!JSON.stringify(record).includes('late answer'),'record never carries the late text');
+  assert.deepEqual(await journal.listReplies({requester:'a'}),[]);
+  assert.deepEqual(await journal.getLateResult('late-kept'),{messageId:'late-kept',text:'late answer'});
+  assert.equal((await journal.getRecord('plain')).hasLateResult,false);assert.equal(await journal.getLateResult('plain'),null);
+ }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});

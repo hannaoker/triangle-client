@@ -7,6 +7,7 @@ import net from "node:net";
 import { createLocalControlServer } from "../src/local-messaging-server.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
 import { createTestMemoryJournal, createTestRecoverableDispatcher, createTestSqliteJournal } from "./local-messaging-fixtures.mjs";
+import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import { createOwnerAcl } from "../src/local-messaging-acl.mjs";
 import {
   createTurnCapabilityIssuer,
@@ -760,6 +761,44 @@ test("an oversized reply is listed truncated, waited for and consumed, and its f
     await client.close();
   } finally {
     await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("per-message status exposes only the presence of a late result, never its text", { skip: process.platform === "win32" }, async () => {
+  const env = setupEnvironment();
+  const journal = createLocalMessagingJournal({ stateRoot: env.tmpDir });
+  const server = createLocalControlServer({
+    socketPath: env.socketPath,
+    journal,
+    acl: env.acl,
+    credentialValidator: env.validator,
+    dispatcher: createTestRecoverableDispatcher({ journal }),
+  });
+  try {
+    await server.start();
+    const client = createLocalControlClient({
+      socketPath: env.socketPath,
+      turnCredential: env.issuer.issue({ senderId: "desktop-codex" }),
+      senderId: "desktop-codex",
+    });
+    for (const id of ["with-late", "without-late"]) {
+      await journal.recordSend({ sender: "desktop-codex", recipient: "gravity2", messageId: id, requestId: `r-${id}`, text: "job" });
+    }
+    await journal.holdExecution("with-late", "runner_timeout", { lateResultText: "SENSITIVE late output" });
+    await journal.holdExecution("without-late", "runner_timeout");
+
+    const withLate = await client.getMessageStatus({ messageId: "with-late" });
+    assert.equal(withLate.phase, "held");
+    assert.equal(withLate.reason, "runner_timeout");
+    assert.equal(withLate.hasLateResult, true);
+    assert.ok(!JSON.stringify(withLate).includes("SENSITIVE"));
+    assert.equal((await client.getMessageStatus({ messageId: "without-late" })).hasLateResult, false);
+    assert.deepEqual(await client.listReplies({}), [], "a late result is never listed as a reply");
+    await client.close();
+  } finally {
+    await server.close();
+    await journal.close();
     fs.rmSync(env.tmpDir, { recursive: true, force: true });
   }
 });

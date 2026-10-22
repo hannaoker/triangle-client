@@ -39,14 +39,17 @@ export function createDesktopCredentialBroker({bindingPath,integrationPath,recip
   if(binding.instanceId!==integration.senderId)throw coded('binding_changed','Desktop identity changed; run explicit owner binding setup');
  };
  validate();
+ // The secret is checked first, so an unauthenticated caller learns nothing about owner-side state.
+ const verify=request=>{
+  const current=readPrivateJson(integrationPath);
+  if(!request||request.bindingId!==current.bindingId||request.threadId!==current.threadId||!equalSecret(request.secret,current.secret))throw coded('unauthorized','Invalid desktop integration credential');
+  if(current.senderId!==integration.senderId||current.threadId!==integration.threadId||current.bindingId!==integration.bindingId)throw coded('binding_changed','Desktop integration changed');
+  validate();
+ };
+ const issueCredential=()=>issue(integration.senderId,{turnId:randomUUID(),ttlMs:300000,allowedRecipients:[...recipients],conversationId:integration.threadId,loopDepth:1});
  return Object.freeze({
   senderId:integration.senderId, threadId:integration.threadId,
-  exchange(request) {
-   const current=readPrivateJson(integrationPath);
-   if(current.senderId!==integration.senderId||current.threadId!==integration.threadId||current.bindingId!==integration.bindingId)throw coded('binding_changed','Desktop integration changed');
-   if(!request||request.bindingId!==current.bindingId||request.threadId!==current.threadId||!equalSecret(request.secret,current.secret))throw coded('unauthorized','Invalid desktop integration credential');
-   validate();
-   return issue(integration.senderId,{turnId:randomUUID(),ttlMs:300000,allowedRecipients:[...recipients],conversationId:integration.threadId,loopDepth:1});
-  },
+  verify, issue:issueCredential,
+  exchange(request) {verify(request);return issueCredential();},
  });
 }

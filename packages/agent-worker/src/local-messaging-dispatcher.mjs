@@ -132,7 +132,10 @@ export function createLocalMessagingDispatcher({
 
     try {
       if (timedOut) {
-        await activeJournal.holdExecution(fullJob.messageId, "runner_timeout");
+        // Late output is evidence for the owner, never a reply: keep it, hold the record.
+        await activeJournal.holdExecution(fullJob.messageId, "runner_timeout", {
+          lateResultText: result?.status === "completed" && typeof result.text === "string" ? result.text : undefined,
+        });
         return;
       }
       if (result && result.status === "completed") {
