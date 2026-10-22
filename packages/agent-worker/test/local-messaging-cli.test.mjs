@@ -85,3 +85,23 @@ test('setup keeps the desktop thread only in the integration file and never writ
   assert.deepEqual(fs.readFileSync(bindingPath),before);assert.equal(fs.statSync(bindingPath).mtimeMs,beforeMtime);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+test('setup migrates cleanly to dedicated desktop-binding.json when app-server-binding is removed',()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-ded-');
+ try{
+  const configPath=path.join(root,'local.json');
+  const stateRoot=path.join(root,'local');
+  const desktopBindingPath=path.join(root,'desktop-binding.json');
+  // Scenario 1: dedicated desktop-binding.json exists with senderId or instanceId
+  writePrivateJson(desktopBindingPath,{version:1,senderId:'d'.repeat(64)});
+  const result1=setupLocalMessaging({config:configPath,'thread-id':'thread-one',recipients:['gravity2']});
+  assert.equal(result1.senderId,'d'.repeat(64));
+  assert.equal(readPrivateJson(configPath).bindingPath,desktopBindingPath);
+  // Scenario 2: app-server-binding was removed, desktop-binding is missing, but integration exists
+  fs.unlinkSync(desktopBindingPath);
+  assert.equal(fs.existsSync(desktopBindingPath),false);
+  const result2=setupLocalMessaging({config:configPath,'thread-id':'thread-one',recipients:['gravity2']});
+  assert.equal(result2.senderId,'d'.repeat(64));
+  assert.equal(fs.existsSync(desktopBindingPath),true);
+  assert.equal(readPrivateJson(desktopBindingPath).instanceId,'d'.repeat(64));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});

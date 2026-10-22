@@ -36,7 +36,8 @@ export function createDesktopCredentialBroker({bindingPath,integrationPath,recip
  // Only the identity is checked: the thread is fixed by the integration file, so the app-server host may move its own binding.
  const validate=()=>{
   const binding=readPrivateJson(bindingPath);
-  if(binding.instanceId!==integration.senderId)throw coded('binding_changed','Desktop identity changed; run explicit owner binding setup');
+  const expected=binding.instanceId??binding.senderId;
+  if(expected!==integration.senderId)throw coded('binding_changed','Desktop identity changed; run explicit owner binding setup');
  };
  validate();
  // The secret is checked first, so an unauthenticated caller learns nothing about owner-side state.
