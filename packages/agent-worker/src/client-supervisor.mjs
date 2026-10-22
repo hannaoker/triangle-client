@@ -1066,9 +1066,42 @@ export function createClientSupervisor({
     }
   }
 
-  const localHost = localMessaging ? createLocalMessagingHost({
-    configPath: localMessaging.configPath, runners: localRunners, gate, logger,
-  }) : null;
+  // Local messaging is optional. Its failures stay inside the local route: the
+  // MESH, headless and ACP lanes keep running while watch() retries the host
+  // and localStatus() reports the failure code.
+  let localHost = null;
+  let localFailure = null;
+  let localClosed = false;
+  let pendingLocalError = null;
+  function openLocalHost() {
+    localHost = createLocalMessagingHost({
+      configPath: localMessaging.configPath, runners: localRunners, gate, logger,
+    });
+    return localHost;
+  }
+  function recordLocalFailure(error) {
+    const code = typeof error?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code)
+      ? error.code
+      : "local_messaging_failed";
+    localFailure = { code, at: now(), attempts: (localFailure?.attempts ?? 0) + 1 };
+  }
+  async function stopLocalHost() {
+    const host = localHost;
+    localHost = null;
+    try {
+      await host?.stop();
+    } catch {
+      logger.error?.("triangle_client_local_messaging_stop_failed", { error: "Local messaging host stop failed" });
+    }
+  }
+  if (localMessaging) {
+    try {
+      openLocalHost();
+    } catch (error) {
+      pendingLocalError = error;
+      recordLocalFailure(error);
+    }
+  }
 
   const peerLane = createPeerLane && peerConfigs.length > 0
     ? createPeerLane({
@@ -1243,9 +1276,25 @@ export function createClientSupervisor({
       }
       return peerLane.resolvePeerRecord(options);
     },
-    localStatus() { return localHost?.status() ?? {enabled:false,route:"same-device"}; },
+    localStatus() {
+      if (!localMessaging) return { enabled: false, route: "same-device" };
+      let hostStatus = null;
+      try {
+        hostStatus = localHost?.status() ?? null;
+      } catch {
+        hostStatus = null;
+      }
+      // Healthy only when the host says it runs and no failure is outstanding.
+      const status = { route: "same-device", ...hostStatus, enabled: true };
+      if (localFailure) {
+        return { ...status, running: false, state: "failed", failure: { ...localFailure } };
+      }
+      const running = !localClosed && hostStatus?.running === true;
+      return { ...status, running, state: localClosed ? "stopped" : running ? "running" : "starting" };
+    },
     async close() {
-      await localHost?.stop();
+      localClosed = true;
+      await stopLocalHost();
       if (peerLane) {
         await peerLane.close();
       }
@@ -1664,7 +1713,29 @@ export function createClientSupervisor({
         ? peerLane.watch({ signal, sleep, runDurableWakeLoop })
         : Promise.resolve([]);
 
-      const localLoop = localHost ? localHost.watch({signal}) : Promise.resolve(null);
+      const localLoop = localMessaging
+        ? runDurableWakeLoop({
+          start: async () => {
+            // A construction failure was recorded when the supervisor was built.
+            if (pendingLocalError) {
+              const error = pendingLocalError;
+              pendingLocalError = null;
+              throw error;
+            }
+            try {
+              const host = localHost ?? openLocalHost();
+              return await host.watch({ signal, onStarted: () => { localFailure = null; } });
+            } catch (error) {
+              if (!signal?.aborted) recordLocalFailure(error);
+              throw error;
+            }
+          },
+          // Each retry rebuilds the host so it rereads repaired owner files.
+          stop: stopLocalHost,
+          logEvent: "triangle_client_local_messaging_failed",
+          logMessage: "Local messaging host failed",
+        })
+        : Promise.resolve(null);
       let settled;
       try {
         settled = await Promise.all([
@@ -1680,7 +1751,8 @@ export function createClientSupervisor({
       } finally {
         proactiveController.abort();
         await Promise.allSettled(proactiveRenewals);
-        await localHost?.stop();
+        localClosed = true;
+        await stopLocalHost();
       }
       const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult, peerResult] = settled;
       return {

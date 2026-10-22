@@ -673,3 +673,17 @@ export function createTestRecoverableDispatcher({
     },
   };
 }
+
+/**
+ * Polls until the predicate is truthy. Dispatcher tests use this instead of
+ * stop(), which no longer drains queued work.
+ */
+export async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 5, message = "condition" } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await predicate();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${message}`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}

@@ -31,6 +31,8 @@ Local coding execution defaults to 60 minutes, configurable from one second thro
 
 Timeout starts when the runner actually acquires the reasoner gate. A late success after timeout stays held instead of becoming a normal reply. Shutdown retains journal ownership until underlying execution settles. Status exposes queue, executing, completed, held, pending-reply and dispatcher counts. MESH or provider authentication failures remain distinct from local route health.
 
+Local route failures never stop the supervisor's MESH, headless or ACP lanes. A bad owner configuration, a missing recipient lane, a changed desktop identity, or a busy journal or socket disables only the local route. The supervisor logs the failure code, retries the host with exponential backoff (rebuilding it so repaired owner files are reread), and its `localStatus()` reports `state: "failed"` with that code, never secrets, until a start succeeds. An existing but unsafe or invalid `local-messaging.json` keeps its strict validation but is omitted from the helper bootstrap and recorded as a `local_messaging_invalid` omission instead of failing the whole bootstrap; the supervisor preflight does not count it as a MESH failure. The owner can still see the cause with `triangle-local status`, which rereads and validates the same file.
+
 ## Scope and limits
 
 The CLI is an installed supported path. The MCP stdio entry uses the same socket API and passes subprocess protocol tests, but adding it to an already running Codex conversation may require a host reload. Do not claim native Triangle tools are available until that host actually exposes them.
