@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import net from "node:net";
+import { privateDir, ancestors } from "./delivery-private-path.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
 export function resolveLocalSocketAddress({ stateRoot, name = "local-control.sock" }) {
@@ -31,21 +32,23 @@ export function resolveLocalSocketAddress({ stateRoot, name = "local-control.soc
   };
 }
 
-export function validateSafeAncestors(targetDir) {
-  let curr = path.resolve(targetDir);
-  while (curr !== path.dirname(curr)) {
-    if (fs.existsSync(curr)) {
-      const st = fs.lstatSync(curr);
-      if (st.isSymbolicLink()) {
-        throw coded("unsafe_path", `Ancestor directory ${curr} is a symbolic link`);
-      }
-      // World-writable directory without sticky bit is unsafe
-      if ((st.mode & 0o002) !== 0 && (st.mode & 0o1000) === 0) {
-        throw coded("unsafe_path", `Ancestor directory ${curr} is world-writable without sticky bit`);
-      }
-    }
-    curr = path.dirname(curr);
+// Path safety is the shared delivery-private-path implementation (symlinks, ownership, group- and
+// world-writable ancestors); this wraps its failures in the error type callers of this module expect.
+function asUnsafePath(check, message) {
+  try {
+    check();
+  } catch (error) {
+    if (error?.code === "unsafe_path") throw coded("unsafe_path", message);
+    if (error?.code === "ENOENT") throw coded("unsafe_path", "Directory does not exist");
+    throw error;
   }
+}
+
+export function validateSafeAncestors(targetDir) {
+  asUnsafePath(
+    () => ancestors(path.resolve(targetDir)),
+    `Unsafe ancestor of ${targetDir}: symbolic link, foreign owner, or group- or world-writable directory`,
+  );
 }
 
 export function validatePrivateDirectory(dir, { create = false } = {}) {
@@ -60,34 +63,10 @@ export function validatePrivateDirectory(dir, { create = false } = {}) {
     throw coded("unsafe_path", "Directory path must be absolute");
   }
 
-  validateSafeAncestors(dir);
-
-  if (create && !fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-
-  if (!fs.existsSync(dir)) {
-    throw coded("unsafe_path", `Directory does not exist: ${dir}`);
-  }
-
-  const real = fs.realpathSync(dir);
-  if (real !== dir) {
-    throw coded("unsafe_path", "Symlinks in directory path are disallowed");
-  }
-
-  const st = fs.lstatSync(dir);
-  if (st.isSymbolicLink()) {
-    throw coded("unsafe_path", "Directory cannot be a symbolic link");
-  }
-  if (!st.isDirectory()) {
-    throw coded("unsafe_path", "Target path is not a directory");
-  }
-  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
-    throw coded("unsafe_path", "Directory must be owned by current user");
-  }
-  if ((st.mode & 0o077) !== 0) {
-    throw coded("unsafe_path", "Directory must be 0700 owned by current user");
-  }
+  asUnsafePath(
+    () => privateDir(dir, { create }),
+    `Directory ${dir} must be a canonical 0700 directory owned by the current user, with no symlink, foreign-owned or group- or world-writable ancestor`,
+  );
 }
 
 export function validatePrivateSocket(socketPath) {
@@ -149,32 +128,35 @@ export async function cleanupStaleSocket(socketPath) {
     throw coded("unsafe_socket", "Cannot clean up socket owned by another user");
   }
 
-  // Attempt connection to test if process is actively listening
-  const isActive = await new Promise((resolve) => {
+  // Only a refused (or already vanished) connection proves nobody is listening. Any other
+  // outcome (EAGAIN from a full backlog, EACCES, a timeout...) cannot prove the socket is dead,
+  // and unlinking a live server's socket would silently strand it.
+  const outcome = await new Promise((resolve) => {
     const conn = net.createConnection({ path: socketPath });
-    let resolved = false;
-    conn.on("connect", () => {
-      if (!resolved) {
-        resolved = true;
-        conn.destroy();
-        resolve(true);
-      }
-    });
-    conn.on("error", () => {
-      if (!resolved) {
-        resolved = true;
-        resolve(false);
-      }
-    });
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      conn.destroy();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish("unverified"), 2000);
+    conn.on("connect", () => finish("active"));
+    conn.on("error", (err) => finish(err.code === "ECONNREFUSED" || err.code === "ENOENT" ? "stale" : "unverified"));
   });
 
-  if (isActive) {
+  if (outcome === "active") {
     throw coded("socket_busy", "Active server already listening on socket path");
+  }
+  if (outcome !== "stale") {
+    throw coded("socket_busy", "Cannot verify that the socket is stale; leaving it in place");
   }
 
   // Re-verify it is still a socket before unlinking
   const verifySt = fs.lstatSync(socketPath, { throwIfNoEntry: false });
-  if (!verifySt || !verifySt.isSocket() || verifySt.isSymbolicLink()) {
+  if (!verifySt) return true; // already gone
+  if (!verifySt.isSocket() || verifySt.isSymbolicLink()) {
     throw coded("unsafe_socket", "Socket changed unexpectedly during stale cleanup");
   }
 

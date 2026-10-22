@@ -247,12 +247,8 @@ export function createLocalMessagingDispatcher({
 
   return {
     start,
-    recover: start,
     notifyAdmission,
-    admitExecution: notifyAdmission,
-    dispatch: notifyAdmission,
     stop,
-    wait: stop,
     status,
   };
 }

@@ -598,11 +598,11 @@ export function createTestSqliteJournal({ dbPath }) {
  * Test fixture demonstrating host-owned recoverable dispatcher contract.
  *
  * Implements:
- * - start/recover: recovers queued records on start; uncertain executions are held, not rerun.
- * - notifyAdmission/admitExecution: dedupes notifications, prevents concurrent overlap, and
+ * - start: recovers queued records on start; uncertain executions are held, not rerun.
+ * - notifyAdmission: dedupes notifications, prevents concurrent overlap, and
  *   claims each message in the journal first, so claimed, finished or held work never runs
  *   again, including after a restart. Finished work is marked completed.
- * - stop/wait: awaits active executions to complete before shutdown.
+ * - stop: awaits active executions to complete before shutdown.
  */
 export function createTestRecoverableDispatcher({
   execute = async () => {},
@@ -688,31 +688,13 @@ export function createTestRecoverableDispatcher({
       }
     },
 
-    async recover(options = {}) {
-      return this.start(options);
-    },
-
     async notifyAdmission(job) {
       if (isClosing) return;
       return runJob(job);
     },
 
-    async admitExecution(job) {
-      return this.notifyAdmission(job);
-    },
-
-    async dispatch(job) {
-      return this.notifyAdmission(job);
-    },
-
     async stop() {
       isClosing = true;
-      if (running.size > 0) {
-        await Promise.allSettled(Array.from(running.values()));
-      }
-    },
-
-    async wait() {
       if (running.size > 0) {
         await Promise.allSettled(Array.from(running.values()));
       }

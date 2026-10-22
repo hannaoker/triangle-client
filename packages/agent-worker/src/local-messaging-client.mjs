@@ -184,7 +184,6 @@ export function createLocalControlClient({
       requestId = crypto.randomUUID(),
       inReplyTo = null,
       metadata = {},
-      loopCount = null,
     }, options = {}) {
       return await callRpc("send_message", {
         to,
@@ -193,7 +192,6 @@ export function createLocalControlClient({
         requestId,
         inReplyTo,
         metadata,
-        loopCount,
       }, options);
     },
 

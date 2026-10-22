@@ -635,3 +635,8 @@ test('the dispatcher compacts finished records at start and at most hourly, and 
   await dispatcher.stop();
  }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
+
+test('the dispatcher exposes exactly one name per hook: start, stop, notifyAdmission (plus status)',()=>{
+ const dispatcher=createLocalMessagingDispatcher({journal:{},runRecipient:async()=>{}});
+ assert.deepEqual(Object.keys(dispatcher).sort(),['notifyAdmission','start','status','stop']);
+});

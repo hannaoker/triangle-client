@@ -60,22 +60,10 @@ export function createLocalMessagingSubsystem({
     );
   }
 
-  if (
-    !(typeof activeDispatcher.start === "function" || typeof activeDispatcher.recover === "function") ||
-    !(typeof activeDispatcher.stop === "function" || typeof activeDispatcher.wait === "function")
-  ) {
-    throw coded("invalid_dispatcher", "Dispatcher requires recovery and shutdown hooks");
-  }
-
-  const dispatchHook =
-    activeDispatcher.notifyAdmission ||
-    activeDispatcher.admitExecution ||
-    activeDispatcher.dispatch;
-  if (typeof dispatchHook !== "function") {
-    throw coded(
-      "invalid_dispatcher",
-      "Dispatcher must implement notifyAdmission, admitExecution, or dispatch hook",
-    );
+  for (const hook of ["start", "stop", "notifyAdmission"]) {
+    if (typeof activeDispatcher[hook] !== "function") {
+      throw coded("invalid_dispatcher", `Dispatcher must implement ${hook}`);
+    }
   }
 
   const { socketPath } = resolveLocalSocketAddress({ stateRoot, name: socketName });

@@ -137,7 +137,7 @@ test("supervisor seam requires explicit dispatcher dependency and refuses constr
       (err) => err instanceof LocalMessagingError && err.code === "dispatcher_required",
     );
 
-    // 2. admitExecution without mandatory recover hook
+    // 2. A stray admitExecution option is not a dispatcher
     assert.throws(
       () => createLocalMessagingSubsystem({
         stateRoot,
@@ -430,6 +430,31 @@ test("an empty or missing registry issues no credentials", { skip: process.platf
       assert.throws(() => subsystem.issueTurnCredential("anyone-at-all"), (err) => err instanceof LocalMessagingError && err.code === "unknown_profile");
       assert.throws(() => subsystem.createClient("anyone-at-all"), (err) => err.code === "unknown_profile");
       assert.deepEqual(subsystem.status().registeredProfiles, []);
+    }
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("the seam and the fixture dispatcher use one name per hook: start, stop, notifyAdmission", () => {
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-hooks-"));
+  const journal = createTestMemoryJournal();
+  try {
+    const fixture = createTestRecoverableDispatcher({ journal });
+    for (const alias of ["recover", "wait", "admitExecution", "dispatch"]) {
+      assert.equal(alias in fixture, false, `fixture dispatcher must not expose the ${alias} alias`);
+    }
+    for (const hook of ["start", "stop", "notifyAdmission"]) assert.equal(typeof fixture[hook], "function");
+    const build = (dispatcher) => () => createLocalMessagingSubsystem({ stateRoot, journal, dispatcher });
+    assert.doesNotThrow(build(fixture));
+    for (const aliasOnly of [
+      { recover: async () => {}, wait: async () => {}, admitExecution: async () => {} },
+      { recover: async () => {}, wait: async () => {}, dispatch: async () => {} },
+      { start: async () => {}, stop: async () => {}, admitExecution: async () => {} },
+      { start: async () => {}, wait: async () => {}, notifyAdmission: async () => {} },
+      { recover: async () => {}, stop: async () => {}, notifyAdmission: async () => {} },
+    ]) {
+      assert.throws(build(aliasOnly), (err) => err instanceof LocalMessagingError && err.code === "invalid_dispatcher", JSON.stringify(Object.keys(aliasOnly)));
     }
   } finally {
     fs.rmSync(stateRoot, { recursive: true, force: true });

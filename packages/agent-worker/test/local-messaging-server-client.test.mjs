@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
+import crypto from "node:crypto";
 import { createLocalControlServer } from "../src/local-messaging-server.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
 import { createTestMemoryJournal, createTestRecoverableDispatcher, createTestSqliteJournal } from "./local-messaging-fixtures.mjs";
@@ -20,6 +21,7 @@ import {
 import {
   encodeFrame,
   createMessageParser,
+  createSuccessResponse,
 } from "../src/local-messaging-protocol.mjs";
 import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
 
@@ -83,7 +85,7 @@ test("server requires credentialValidator and ACL (no auth-optional fallback)", 
         (err) => err.code === "invalid_dispatcher",
       );
     }
-    // admitExecution without recover hook
+    // A stray admitExecution option is not a dispatcher
     assert.throws(
       () => createLocalControlServer({ socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator, admitExecution: async () => {} }),
       (err) => err instanceof LocalMessagingError && err.code === "dispatcher_required",
@@ -652,7 +654,7 @@ test("recoverable dispatcher: persistent queued records recovered once, uncertai
     const initialDispatchedCount = dispatchedJobs.length;
 
     // Trigger recovery again: must NOT rerun
-    await dispatcher.recover({ journal });
+    await dispatcher.start({ journal });
     assert.equal(dispatchedJobs.length, initialDispatchedCount, "Queued record must only be dispatched once");
 
     // 2. Uncertain started records must NEVER be rerun
@@ -800,5 +802,199 @@ test("per-message status exposes only the presence of a late result, never its t
     await server.close();
     await journal.close();
     fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function rawConnection(socketPath) {
+  const sock = net.createConnection({ path: socketPath });
+  await new Promise((resolve) => sock.on("connect", resolve));
+  const frames = [];
+  const parser = createMessageParser({ onMessage: (message) => frames.push(message) });
+  sock.on("data", (chunk) => parser.feed(chunk));
+  return { sock, frames };
+}
+
+test("a connection cannot bypass the in-flight cap by reusing one request id", { skip: process.platform === "win32" }, async () => {
+  const env = setupEnvironment();
+  let release;
+  let gate = new Promise((resolve) => { release = resolve; });
+  let statusCalls = 0;
+  const server = createLocalControlServer({
+    socketPath: env.socketPath,
+    journal: env.journal,
+    acl: env.acl,
+    credentialValidator: env.validator,
+    dispatcher: env.dispatcher,
+    statusProvider: async () => { statusCalls++; await gate; return { route: "same-device" }; },
+  });
+  let connection;
+  try {
+    await server.start();
+    const token = env.issuer.issue({ senderId: "desktop-codex" });
+    connection = await rawConnection(env.socketPath);
+    const send = (id) => connection.sock.write(encodeFrame({ protocol_version: 1, id, method: "local_status", credential: token, senderId: "desktop-codex" }));
+
+    // The same id sixty times: only one may be in flight, the others are refused immediately.
+    for (let i = 0; i < 60; i++) send("same-id");
+    await sleep(100);
+    assert.equal(statusCalls, 1, "a reused id must not multiply concurrent work");
+    const refused = connection.frames.filter((frame) => frame.error);
+    assert.equal(refused.length, 59);
+    assert.ok(refused.every((frame) => frame.error.code === "invalid_request"));
+    release();
+    await sleep(50);
+    assert.equal(connection.frames.filter((frame) => frame.result).length, 1);
+
+    // Distinct ids are still capped per connection, and the count recovers when requests finish.
+    for (const round of [0, 1]) {
+      connection.frames.length = 0;
+      statusCalls = 0;
+      gate = new Promise((resolve) => { release = resolve; });
+      for (let i = 0; i < 60; i++) send(`distinct-${round}-${i}`);
+      await sleep(100);
+      assert.equal(statusCalls, 50, `round ${round}: exactly the cap is in flight`);
+      assert.equal(connection.frames.filter((frame) => frame.error?.code === "too_many_requests").length, 10);
+      release();
+      await sleep(100);
+      assert.equal(connection.frames.filter((frame) => frame.result).length, 50);
+    }
+    // An id may be reused once its request has finished.
+    connection.frames.length = 0;
+    gate = Promise.resolve();
+    send("same-id");
+    await sleep(50);
+    assert.equal(connection.frames.filter((frame) => frame.result).length, 1);
+  } finally {
+    release?.();
+    connection?.sock.destroy();
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("message identifiers must be bounded identifier strings; existing ID shapes keep working", { skip: process.platform === "win32" }, async () => {
+  const env = setupEnvironment();
+  const instanceId = "ab".repeat(32);
+  const acl = createOwnerAcl({ rules: { "desktop-codex": ["gravity2", instanceId], gravity2: ["desktop-codex"] } });
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal: env.journal, acl, credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter, loopTracker: env.loopTracker, dispatcher: env.dispatcher,
+  });
+  try {
+    await server.start();
+    const client = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
+    const invalid = async (promise, label) => assert.rejects(promise, (err) => err instanceof LocalMessagingError && err.code === "invalid_request", label);
+    const hostile = ["has space", "x".repeat(257), "../../etc/passwd", "line\nbreak", "semi;colon", "quote\"", "\u0000nul", "\u00e9"];
+    for (const bad of hostile) {
+      await invalid(client.sendMessage({ to: "gravity2", text: "t", messageId: bad }), `messageId ${JSON.stringify(bad)}`);
+      await invalid(client.sendMessage({ to: "gravity2", text: "t", messageId: "ok-id", requestId: bad }), `requestId ${JSON.stringify(bad)}`);
+      await invalid(client.sendMessage({ to: "gravity2", text: "t", messageId: "ok-id", inReplyTo: bad }), `inReplyTo ${JSON.stringify(bad)}`);
+      await invalid(client.sendMessage({ to: bad, text: "t", messageId: "ok-id" }), `to ${JSON.stringify(bad)}`);
+      await invalid(client.getMessageStatus({ messageId: bad }), `status ${JSON.stringify(bad)}`);
+      await invalid(client.consumeReply({ messageId: bad }), `consume ${JSON.stringify(bad)}`);
+      await invalid(client.listReplies({ requestId: bad }), `list requestId ${JSON.stringify(bad)}`);
+      await invalid(client.listReplies({ inReplyTo: bad }), `list inReplyTo ${JSON.stringify(bad)}`);
+    }
+    for (const notAString of [5, true, {}, ["a"]]) {
+      await invalid(client.sendMessage({ to: "gravity2", text: "t", messageId: notAString }), `messageId ${JSON.stringify(notAString)}`);
+    }
+    assert.equal(await env.journal.getRecord("ok-id"), null, "nothing malformed was admitted");
+
+    // UUIDs, rep-<uuid> reply IDs, 64-hex instance IDs and dotted/colon/underscore IDs all still work.
+    const uuid = crypto.randomUUID();
+    for (const messageId of [uuid, `rep-${uuid}`, "msg.v1:alpha_beta-1", "a".repeat(256)]) {
+      assert.equal((await client.sendMessage({ to: "gravity2", text: "t", messageId, requestId: uuid })).accepted, true, messageId);
+    }
+    assert.equal((await client.sendMessage({ to: instanceId, text: "t", messageId: "to-instance" })).accepted, true);
+    assert.equal((await client.getMessageStatus({ messageId: uuid })).messageId, uuid);
+    assert.deepEqual(await client.listReplies({ requestId: uuid, inReplyTo: null }), []);
+    await client.close();
+  } finally {
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("the server decides with the signed claims' sender, not the client's senderId string", { skip: process.platform === "win32" }, async () => {
+  const env = setupEnvironment();
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter, loopTracker: env.loopTracker, dispatcher: env.dispatcher,
+  });
+  try {
+    await server.start();
+    // The signed token is for "desktop-codex"; the caller pads the claimed sender with whitespace.
+    const client = createLocalControlClient({
+      socketPath: env.socketPath,
+      turnCredential: env.issuer.issue({ senderId: "desktop-codex" }),
+      senderId: "  desktop-codex  ",
+    });
+    assert.deepEqual(await client.discoverRecipients(), ["gravity2"], "ACL lookups use the signed sender");
+    const receipt = await client.sendMessage({ to: "gravity2", text: "padded sender", messageId: "claims-sender" });
+    assert.equal(receipt.accepted, true);
+    assert.equal((await env.journal.getRecord("claims-sender")).sender, "desktop-codex", "the journal records the signed sender");
+    assert.equal((await client.getMessageStatus({ messageId: "claims-sender" })).phase !== undefined, true, "ownership uses the signed sender");
+    await env.journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "claims-reply", requestId: receipt.requestId, inReplyTo: "claims-sender", text: "ok" });
+    assert.deepEqual((await client.listReplies({})).map((reply) => reply.messageId), ["claims-reply"]);
+    assert.equal((await client.consumeReply({ messageId: "claims-reply" })).consumed, true);
+    await client.close();
+
+    // A genuinely different sender is still refused.
+    const impostor = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "gravity2" });
+    await assert.rejects(impostor.discoverRecipients(), (err) => err.code === "unauthorized");
+    await impostor.close();
+  } finally {
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("the dispatcher contract is exactly start, stop and notifyAdmission", () => {
+  const env = setupEnvironment();
+  try {
+    const hooks = { start: async () => {}, stop: async () => {}, notifyAdmission: async () => {} };
+    const build = (dispatcher) => () => createLocalControlServer({ socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator, dispatcher });
+    assert.doesNotThrow(build(hooks));
+    for (const aliasOnly of [
+      { recover: async () => {}, wait: async () => {}, admitExecution: async () => {} },
+      { recover: async () => {}, wait: async () => {}, dispatch: async () => {} },
+      { start: async () => {}, wait: async () => {}, notifyAdmission: async () => {} },
+      { recover: async () => {}, stop: async () => {}, notifyAdmission: async () => {} },
+      { start: async () => {}, stop: async () => {}, admitExecution: async () => {} },
+      { start: async () => {}, stop: async () => {}, dispatch: async () => {} },
+    ]) {
+      assert.throws(build(aliasOnly), (err) => err instanceof LocalMessagingError && err.code === "invalid_dispatcher", JSON.stringify(Object.keys(aliasOnly)));
+    }
+  } finally {
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("sendMessage forwards exactly its documented fields (no dead loopCount)", async () => {
+  const realTmp = fs.realpathSync(os.tmpdir());
+  const tmpDir = fs.mkdtempSync(path.join(realTmp, "triangle-client-fields-"));
+  fs.chmodSync(tmpDir, 0o700);
+  const socketPath = path.join(tmpDir, "fields.sock");
+  let seen;
+  const fake = net.createServer((socket) => {
+    const parser = createMessageParser({
+      onMessage: (message) => {
+        seen = message.params;
+        socket.write(encodeFrame(createSuccessResponse(message.id, { accepted: true })));
+      },
+    });
+    socket.on("data", (chunk) => parser.feed(chunk));
+  });
+  await new Promise((resolve) => fake.listen(socketPath, resolve));
+  const client = createLocalControlClient({ socketPath, turnCredential: "t", senderId: "desktop-codex" });
+  try {
+    await client.sendMessage({ to: "gravity2", text: "hi", messageId: "m", requestId: "r", loopCount: 3 });
+    assert.deepEqual(Object.keys(seen).sort(), ["inReplyTo", "messageId", "metadata", "requestId", "text", "to"]);
+  } finally {
+    await client.close();
+    await new Promise((resolve) => fake.close(resolve));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
