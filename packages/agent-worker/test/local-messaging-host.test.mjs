@@ -35,3 +35,22 @@ test('production host executes via registered runner and preserves replies acros
   await new Promise(r=>setTimeout(r,30));assert.equal(calls,1,'reconnect retry does not execute twice');
  }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });
+test('an oversized reply is retrievable through the installed CLI, truncated and explicitly flagged, and can be consumed',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-big-');let host;
+ const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+ try{
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'thread-current',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'thread-current',recipients:['gravity2']});
+  const recipient=readPrivateJson(configPath).recipients[0].instanceId;
+  const runner={run:async()=>({status:'completed',text:'x'.repeat(300*1024)})};
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,runner]]),gate:createProfiledReasonerGate()});await host.start();
+  const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
+  const sent=await run(['send','--to','gravity2','--text','write a long report','--message-id','big-1','--request-id','big-req','--wait-ms','3000']);
+  assert.equal(sent.waiting,undefined,'the wait receives the reply');
+  assert.equal(sent.replies[0].truncated,true);assert.equal(sent.replies[0].originalTextBytes,300*1024);
+  assert.equal((await run(['status','--message-id','big-1'])).phase,'completed');
+  const listed=await run(['replies','--request-id','big-req']);assert.equal(listed.replies.length,1);
+  await run(['consume','--message-id',sent.replies[0].messageId]);
+  assert.deepEqual((await run(['replies','--request-id','big-req'])).replies,[]);
+ }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});

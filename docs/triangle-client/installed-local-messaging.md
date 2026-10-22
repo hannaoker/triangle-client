@@ -27,6 +27,10 @@ Setup writes private owner configuration and a capability binding to one sender,
 
 Admission means the immutable envelope was durably stored, not that the agent succeeded. Requests are claimed once; exact retries retain their original IDs. Queued requests recover after restart, while uncertain executing requests become held and are not automatically replayed. Replies are correlated, non-consuming on retrieval, and persisted independently of the client connection. Agent assessments remain free-form and must be independently checked.
 
+Shutdown waits only for executions that already started (bounded by the runner timeout) and never starts queued work; queued messages stay `queued_local` and run after the next start.
+
+A listing always returns at least one pending reply. One response carries about 255 KB, so a reply larger than that is returned cut to fit with `truncated: true` and `originalTextBytes` (the full text stays in the journal, never silently dropped) and can still be consumed. Replies that merely overflow the page wait whole for the next listing, so consume what you have read.
+
 Local coding execution defaults to 60 minutes, configurable from one second through 24 hours in `runnerTimeoutMs`. The host forwards this budget to the subprocess runner so an earlier profile deadline cannot cut local tasks short. MESH profile execution deadlines remain unchanged. Caller waits and authentication token lifetimes remain separate from execution time.
 
 Timeout starts when the runner actually acquires the reasoner gate. A late success after timeout stays held instead of becoming a normal reply. Shutdown retains journal ownership until underlying execution settles. Status exposes queue, executing, completed, held, pending-reply and dispatcher counts. MESH or provider authentication failures remain distinct from local route health.

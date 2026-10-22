@@ -37,7 +37,7 @@ export function createLocalMessagingDispatcher({
   }
 
   function checkDrain() {
-    if (stopping && pendingQueue.length === 0 && activeExecutions.size === 0) {
+    if (stopping && activeExecutions.size === 0) {
       const resolvers = drainResolvers;
       drainResolvers = [];
       for (const resolve of resolvers) {
@@ -47,6 +47,11 @@ export function createLocalMessagingDispatcher({
   }
 
   function pump() {
+    // Shutdown starts nothing new: unclaimed jobs stay queued_local for the next start.
+    if (stopping) {
+      checkDrain();
+      return;
+    }
     while (activeExecutions.size < maxConcurrent) {
       const nextIndex = pendingQueue.findIndex(
         (job) => !activeRecipients.has(job.recipient),
@@ -197,12 +202,16 @@ export function createLocalMessagingDispatcher({
 
   async function stop() {
     stopping = true;
-    if (pendingQueue.length === 0 && activeExecutions.size === 0) {
+    // Only executions that already started are awaited. Queued jobs were never
+    // claimed, so the journal still holds them for recovery.
+    for (const job of pendingQueue.splice(0)) {
+      inFlightMessageIds.delete(job.messageId);
+    }
+    if (activeExecutions.size === 0) {
       return;
     }
     return new Promise((resolve) => {
       drainResolvers.push(resolve);
-      schedulePump();
     });
   }
 

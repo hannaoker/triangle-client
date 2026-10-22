@@ -707,3 +707,59 @@ test("recoverable dispatcher: persistent queued records recovered once, uncertai
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("an oversized reply is listed truncated, waited for and consumed, and its full text stays journaled", { skip: process.platform === "win32" }, async () => {
+  const env = setupEnvironment();
+  const server = createLocalControlServer({
+    socketPath: env.socketPath,
+    journal: env.journal,
+    acl: env.acl,
+    credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter,
+    loopTracker: env.loopTracker,
+    dispatcher: env.dispatcher,
+  });
+
+  try {
+    await server.start();
+    const client = createLocalControlClient({
+      socketPath: env.socketPath,
+      turnCredential: env.issuer.issue({ senderId: "desktop-codex" }),
+      senderId: "desktop-codex",
+    });
+    const bigText = "x".repeat(300 * 1024);
+    for (const [name, text] of [["big", bigText], ["small", "done"]]) {
+      await env.journal.recordSend({ sender: "desktop-codex", recipient: "gravity2", messageId: `m-${name}`, requestId: `r-${name}`, text: "job" });
+      await env.journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: `rep-${name}`, requestId: `r-${name}`, inReplyTo: `m-${name}`, text });
+    }
+
+    // Unfiltered listings always make progress: the oversized reply comes first, truncated.
+    const all = await client.listReplies({});
+    assert.deepEqual(all.map((r) => r.messageId), ["rep-big"]);
+    assert.equal(all[0].truncated, true);
+    assert.equal(all[0].originalTextBytes, bigText.length);
+    assert.ok(bigText.startsWith(all[0].text));
+
+    // It can be found by its own request and waited for, which never worked before.
+    const byRequest = await client.listReplies({ requestId: "r-big" });
+    assert.equal(byRequest.length, 1);
+    assert.equal(byRequest[0].truncated, true);
+    const waited = await client.waitForReply({ requestId: "r-big", timeoutMs: 1000, pollIntervalMs: 20 });
+    assert.equal(waited.messageId, "rep-big");
+
+    // The full text is untouched in the journal.
+    const [stored] = await env.journal.listReplies({ requester: "desktop-codex", requestId: "r-big" });
+    assert.equal(stored.text.length, bigText.length);
+    assert.equal(stored.truncated, undefined);
+
+    // It is consumable, and consuming it exposes the next reply.
+    assert.equal((await client.consumeReply({ messageId: "rep-big" })).consumed, true);
+    const rest = await client.listReplies({});
+    assert.deepEqual(rest.map((r) => r.messageId), ["rep-small"]);
+    assert.equal(rest[0].truncated, undefined);
+    await client.close();
+  } finally {
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});

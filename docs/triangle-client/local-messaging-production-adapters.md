@@ -24,4 +24,4 @@ This document details the production storage and execution dispatcher adapters f
 - **Startup & Recovery**: `start()` calls `journal.recoverQueued()`, enqueues queued records without blocking on model execution turns, and ignores held/uncertain executions.
 - **Per-Recipient Serialization & Concurrency**: Serializes execution per recipient to avoid concurrent harness overlap, while allowing parallel dispatch across distinct recipients up to `maxConcurrent`.
 - **Safe Timeout & Execution Custody**: Execution timeout begins strictly when the runner invokes `onStarted()`, ignoring shared gate wait times. Abort and shutdown (`stop()`) retain journal ownership until the underlying runner has completely terminated.
-- **Ordered Drain & Shutdown**: Dispatcher shutdown gracefully drains pending admitted requests while refusing new admissions.
+- **Shutdown**: `stop()` refuses new admissions, starts nothing new and waits only for executions that already started, so an hour-long turn can delay shutdown but a long queue cannot. Unclaimed messages stay `queued_local` in the journal and the next `start()` recovers them.
