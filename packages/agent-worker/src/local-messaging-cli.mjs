@@ -19,12 +19,25 @@ function parse(argv){
 }
 export function setupLocalMessaging(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env);
- const bindingPath=options['desktop-binding']||path.join(path.dirname(configPath),'app-server-binding.json');
- // The production app-server binding is only read, for the sender identity: its host owns and rewrites that file.
- const binding=readPrivateJson(bindingPath),threadId=options['thread-id'];
- if(typeof threadId!=='string'||!/^[A-Za-z0-9._:-]{8,120}$/.test(threadId)||!/^[a-f0-9]{64}$/.test(binding.instanceId))throw coded('invalid_binding','An existing sender identity and explicit thread are required');
- const stateRoot=options['state-root']||path.join(path.dirname(configPath),'local');
+ const configDir=path.dirname(configPath);
+ const defaultBindingPath=fs.existsSync(path.join(configDir,'desktop-binding.json'))
+  ? path.join(configDir,'desktop-binding.json')
+  : (fs.existsSync(path.join(configDir,'app-server-binding.json'))
+     ? path.join(configDir,'app-server-binding.json')
+     : path.join(configDir,'desktop-binding.json'));
+ const bindingPath=options['desktop-binding']||defaultBindingPath;
+ const stateRoot=options['state-root']||path.join(configDir,'local');
  const integrationPath=path.join(stateRoot,'desktop-integration.json');
+ if(!fs.existsSync(bindingPath)&&fs.existsSync(integrationPath)){
+  const existing=readPrivateJson(integrationPath);
+  if(existing.senderId&&/^[a-f0-9]{64}$/.test(existing.senderId)){
+   writePrivateJson(bindingPath,{version:1,instanceId:existing.senderId});
+  }
+ }
+ // Dedicated desktop-sender binding is only read for sender identity; host owns and rewrites that file.
+ const binding=readPrivateJson(bindingPath),threadId=options['thread-id'];
+ const senderId=binding.instanceId??binding.senderId;
+ if(typeof threadId!=='string'||!/^[A-Za-z0-9._:-]{8,120}$/.test(threadId)||!/^[a-f0-9]{64}$/.test(senderId))throw coded('invalid_binding','An existing sender identity and explicit thread are required');
  const profiles=options.recipients||['gravity2'];
  if(profiles.length>32||new Set(profiles).size!==profiles.length||profiles.some(p=>!/^[A-Za-z0-9._-]{1,64}$/.test(p)))throw coded('invalid_recipient','Invalid recipient profiles');
  const recipients=profiles.map(profile=>({profile,instanceId:createHash('sha256').update('triangle-client-instance-v1\0'+profile).digest('hex')}));
@@ -33,11 +46,11 @@ export function setupLocalMessaging(options,env=process.env){
   const existing=readPrivateJson(integrationPath);
   // The desktop thread lives only in the integration file; moving it is an explicit owner action that rotates the capability.
   if(existing.threadId!==threadId&&!options.rebind)throw coded('binding_changed','Explicit --rebind-thread is required to change the desktop thread');
-  if(existing.senderId===binding.instanceId&&existing.threadId===threadId)secret=existing.secret;
+  if(existing.senderId===senderId&&existing.threadId===threadId)secret=existing.secret;
  }
- writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(binding.instanceId+'\0'+threadId).digest('hex').slice(0,32),senderId:binding.instanceId,threadId,secret});
+ writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
- return {configPath,senderId:binding.instanceId,threadId,recipients,requiresServiceRestart:true};
+ return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);

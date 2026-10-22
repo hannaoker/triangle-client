@@ -27,6 +27,9 @@ test('desktop broker authenticates a fixed binding and refuses stale thread or i
   writePrivateJson(bindingPath,{instanceId:'someone-else',threadId:'thread-current',enabled:false});
   assert.throws(()=>broker.exchange({...data,secret:'b'.repeat(64)}),{code:'binding_changed'});
   assert.equal(readPrivateJson(bindingPath).enabled,false);
+  // Dedicated desktop-sender binding supports senderId as well as instanceId.
+  writePrivateJson(bindingPath,{version:1,senderId:'sender'});
+  assert.equal(broker.exchange({...data,secret:'b'.repeat(64)}).sender,'sender');
  } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
 test('private JSON rejects symlinks, hard links and public permissions',()=>{
