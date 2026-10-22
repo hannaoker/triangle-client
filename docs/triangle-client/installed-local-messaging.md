@@ -11,6 +11,7 @@ The installed entry is `~/Library/Application Support/The Triangle/bin/triangle-
 ```text
 triangle-local setup --thread-id CURRENT_THREAD --recipient gravity2
 triangle-local status
+triangle-local status --message-id STABLE_ID
 triangle-local discover
 triangle-local send --to gravity2 --text "Task" --message-id STABLE_ID --request-id STABLE_REQUEST
 triangle-local replies --request-id STABLE_REQUEST
