@@ -63,3 +63,18 @@ export function createConcurrencyGate({ limit = 2 } = {}) {
     },
   });
 }
+
+// Profile admission precedes global admission on every route. A busy profile
+// must not reserve global capacity while another profile is runnable.
+export function createProfiledReasonerGate({limit=2}={}) {
+  const global=createConcurrencyGate({limit});
+  const profiles=new Map();
+  return Object.freeze({
+    run(operation,{signal,instanceId}={}) {
+      if(!instanceId)return global.run(operation,{signal});
+      let profile=profiles.get(instanceId);
+      if(!profile){profile=createConcurrencyGate({limit:1});profiles.set(instanceId,profile);}
+      return profile.run(()=>global.run(operation,{signal}),{signal});
+    },
+  });
+}

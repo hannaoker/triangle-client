@@ -9,6 +9,7 @@ import {
   openSync,
 } from "node:fs";
 import { privateDir, privateFile } from "./peer/private-path.mjs";
+import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
 
 export const PEER_ENVELOPE_PROTOCOL = "triangle.peer/1";
 export const MAX_PAYLOAD_BYTES = 256 * 1024;
@@ -198,7 +199,6 @@ export async function delay(ms, signal, customSleep) {
   });
 }
 
-const activeStateRoots = new Set();
 
 export function createPeerDrainService({
   stateRoot,
@@ -244,38 +244,22 @@ export function createPeerDrainService({
     }
   }
 
-  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
-
-  for (const name of ["peer-drain-owner.sqlite-journal", "peer-drain.sqlite-journal"]) {
-    privateFile(path.join(stateRoot, name));
-  }
-  for (const name of ["peer-drain-owner.sqlite", "peer-drain.sqlite"]) {
-    const file = path.join(stateRoot, name);
-    privateFile(file);
-    if (!existsSync(file)) {
-      closeSync(openSync(file, "wx", 0o600));
-      const fd = openSync(stateRoot, "r");
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+  let deliveryJournal;
+  try {
+    deliveryJournal = openDeliveryJournal({
+      stateRoot,
+      dbName: "peer-drain.sqlite",
+      ownerDbName: "peer-drain-owner.sqlite",
+      busyCode: "drain_busy",
+    });
+  } catch (error) {
+    if (error.code === "drain_busy" || error.code === "unsafe_path") {
+      throw error;
     }
+    throw coded("journal_unavailable", error.message);
   }
-
-  const lock = new DatabaseSync(path.join(stateRoot, "peer-drain-owner.sqlite"));
+  const { db, lock } = deliveryJournal;
   try {
-    lock.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
-  } catch {
-    lock.close();
-    throw coded("drain_busy", "Failed to acquire exclusive lock on peer-drain-owner.sqlite");
-  }
-
-  activeStateRoots.add(stateRoot);
-  let db;
-  try {
-    db = new DatabaseSync(path.join(stateRoot, "peer-drain.sqlite"));
-    db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
 
     const userVersion = db.prepare("PRAGMA user_version").get().user_version;
     if (userVersion > 1) {
@@ -397,14 +381,7 @@ export function createPeerDrainService({
       });
     }
   } catch (error) {
-    activeStateRoots.delete(stateRoot);
-    try {
-      db?.close();
-    } catch {}
-    try {
-      lock.exec("ROLLBACK");
-      lock.close();
-    } catch {}
+    deliveryJournal?.close();
     throw coded("journal_unavailable", error.message);
   }
 
@@ -1403,14 +1380,7 @@ export function createPeerDrainService({
       closed = true;
       activeExecutions.clear();
       loopController?.abort();
-      try {
-        db.close();
-      } catch {}
-      try {
-        lock.exec("ROLLBACK");
-        lock.close();
-      } catch {}
-      activeStateRoots.delete(stateRoot);
+      deliveryJournal?.close();
       return Promise.resolve();
     },
   };

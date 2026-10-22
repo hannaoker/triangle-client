@@ -10,6 +10,7 @@ public enum ClientSupervisorContractCases {
     }
 
     public static let all: [ContractCase] = [
+        .init(name: "local messaging bootstrap is opt-in private path only", run: localMessagingBootstrap),
         .init(name: "supervisor pairs each profile with its exact verified identity", run: exactPairing),
         .init(name: "durable ten-agent lifecycle drives exact coordinator bootstraps", run: durableTenAgentLifecycle),
         .init(name: "supervisor preflight proves eligibility without launching", run: eligibilityPreflight),
@@ -196,6 +197,36 @@ public enum ClientSupervisorContractCases {
         try await fixture.supervisor.preflight()
         try expect(fixture.process.request == nil, "preflight launched the coordinator")
         try expect(fixture.credentials.readCount == 1, "preflight did not verify the exact credential")
+    }
+
+    public static func localMessagingBootstrap() async throws {
+        let fixture = try SupervisorFixture(specifications: [.init(profile: "local-bootstrap", adapter: .codex, digit: "4")])
+        let config = fixture.helperRoot.appendingPathComponent("local-messaging.json")
+        func bootstrap() async throws -> [String: Any] {
+            try await fixture.supervisor.run()
+            let data = try require(fixture.process.standardInput, "missing bootstrap")
+            return try require(JSONSerialization.jsonObject(with: data) as? [String: Any], "missing bootstrap")
+        }
+        let absent = try await bootstrap()
+        try expect(absent["localMessaging"] == nil, "missing owner configuration enabled route")
+        try Data(#"{"enabled":false,"brokerSecret":"never-forward-this"}"#.utf8).write(to: config)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+        let disabled = try await bootstrap()
+        try expect(disabled["localMessaging"] == nil, "disabled owner configuration enabled route")
+        try Data(#"{"enabled":true,"brokerSecret":"never-forward-this"}"#.utf8).write(to: config)
+        let document = try await bootstrap()
+        let local = try require(document["localMessaging"] as? [String: Any], "enabled owner configuration omitted")
+        try expect(local.count == 1 && local["configPath"] as? String == config.path, "bootstrap exposed configuration beyond path")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: config.path)
+        do { _ = try await bootstrap(); throw SupervisorContractFailure("public owner configuration accepted") }
+        catch is ClientSupervisorError {}
+        try FileManager.default.removeItem(at: config)
+        let target = fixture.helperRoot.appendingPathComponent("actual-local.json")
+        try Data(#"{"enabled":true}"#.utf8).write(to: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+        try FileManager.default.createSymbolicLink(at: config, withDestinationURL: target)
+        do { _ = try await bootstrap(); throw SupervisorContractFailure("symlink owner configuration accepted") }
+        catch is ClientSupervisorError {}
     }
 
     public static func resolveBeforeCredential() async throws {
@@ -1265,6 +1296,7 @@ private final class SupervisorFixture: @unchecked Sendable {
             isDedicatedHeadlessDrainLoaded: { profile in
                 dedicatedHeadlessDrainLoaded || dedicatedHeadlessDrainLoadedProfiles.contains(profile)
             },
+            localMessagingConfigURL: helperRoot.appendingPathComponent("local-messaging.json"),
             parentEnvironment: parentEnvironment
         )
     }

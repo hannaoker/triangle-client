@@ -25,7 +25,7 @@ const INSTANCE_ID = /^[a-f0-9]{64}$/;
 const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const INSTALLATION_ID = /^inst_[A-Za-z0-9_-]{10,75}$/;
 const REQUIRED_TOP_LEVEL_KEYS = ["version", "maxConcurrentReasoners", "instances"];
-const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "headlessWakes", "cursorAcpWakes"]);
+const OPTIONAL_TOP_LEVEL_KEYS = new Set(["eventWake", "appServerWake", "headlessWakes", "cursorAcpWakes", "localMessaging"]);
 const EXACT_INSTANCE_KEYS = ["instanceId", "mailbox", "runner", "runnerEnvironment"];
 const EXACT_RUNNER_KEYS = ["command", "args", "timeoutMs"];
 const EXACT_EVENT_WAKE_KEYS = [
@@ -602,6 +602,11 @@ export function parseClientSupervisorBootstrap(text) {
     ) {
       throw invalidBootstrap();
     }
+    if (Object.hasOwn(bootstrap, "localMessaging")) {
+      const local = bootstrap.localMessaging;
+      if (!local || typeof local !== "object" || Array.isArray(local) || Object.keys(local).join(",") !== "configPath" || typeof local.configPath !== "string" || !path.isAbsolute(local.configPath) || /[\0\r\n]/.test(local.configPath)) throw invalidBootstrap();
+      Object.freeze(local);
+    }
     const seen = new Set();
     for (const instance of bootstrap.instances) validateInstance(instance, seen);
     if (Object.hasOwn(bootstrap, "eventWake")) {
@@ -886,6 +891,7 @@ export async function runClientSupervisorCLI({
       }
       const supervisor = createSupervisor({
         instances: bootstrap.instances,
+        localMessaging: bootstrap.localMessaging ?? null,
         eventWake: bootstrap.eventWake ?? null,
         appServerWake: bootstrap.appServerWake ?? null,
         grokBotWake: bootstrap.grokBotWake ?? null,

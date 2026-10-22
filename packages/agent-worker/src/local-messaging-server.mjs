@@ -25,6 +25,8 @@ export function createLocalControlServer({
   journal,
   acl,
   credentialValidator,
+  credentialBroker = null,
+  statusProvider = null,
   rateLimiter,
   loopTracker,
   dispatcher,
@@ -117,7 +119,7 @@ export function createLocalControlServer({
 
       // Methods requiring authentication (all except hello)
       let claims = null;
-      if (method !== "hello") {
+      if (method !== "hello" && method !== "issue_turn") {
         if (!senderId || typeof senderId !== "string" || !senderId.trim()) {
           throw coded("unauthorized", "senderId is required");
         }
@@ -125,6 +127,17 @@ export function createLocalControlServer({
       }
 
       switch (method) {
+        case "local_status": {
+          if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
+          socket.write(encodeFrame(createSuccessResponse(id, await statusProvider())));
+          break;
+        }
+        case "issue_turn": {
+          if (typeof credentialBroker !== "function") throw coded("unsupported", "No desktop credential broker configured");
+          const grant = await credentialBroker(params);
+          socket.write(encodeFrame(createSuccessResponse(id, grant)));
+          break;
+        }
         case "hello": {
           const resp = createSuccessResponse(
             id,

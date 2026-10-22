@@ -168,6 +168,10 @@ export function createLocalControlClient({
   }
 
   return {
+    async localStatus(options = {}) { return callRpc("local_status", {}, options); },
+    async exchangeTurnBinding(binding) {
+      return callRpc("issue_turn", binding);
+    },
     async discoverRecipients(options = {}) {
       const res = await callRpc("discover_recipients", {}, options);
       return res.recipients || [];

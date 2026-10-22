@@ -24,6 +24,7 @@ export function resolveLocalSocketAddress({ stateRoot, name = "local-control.soc
   }
 
   const resolved = path.resolve(stateRoot, name);
+  if (Buffer.byteLength(resolved) > 100) throw coded("unsafe_path", "Local socket path is too long; choose a shorter stateRoot");
   return {
     socketPath: resolved,
     isNamedPipe: false,

@@ -21,6 +21,26 @@ const WORKLOAD_CORE_RELATIVES = [
   "packages/triangle-cli/src/protocol.mjs",
   "packages/triangle-cli/src/workload.mjs",
 ];
+const LOCAL_MESSAGING_RELATIVES = [
+  "packages/agent-worker/src/local-messaging-acl.mjs",
+  "packages/agent-worker/src/local-messaging-address.mjs",
+  "packages/agent-worker/src/local-messaging-client.mjs",
+  "packages/agent-worker/src/local-messaging-credentials.mjs",
+  "packages/agent-worker/src/local-messaging-errors.mjs",
+  "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+  "packages/agent-worker/src/local-messaging-mcp-adapter.mjs",
+  "packages/agent-worker/src/local-messaging-protocol.mjs",
+  "packages/agent-worker/src/local-messaging-rate-limiter.mjs",
+  "packages/agent-worker/src/local-messaging-server.mjs",
+  "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+  "packages/agent-worker/src/shared-delivery-journal.mjs",
+  "packages/agent-worker/src/delivery-private-path.mjs",
+  "packages/agent-worker/src/local-messaging-journal.mjs",
+  "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+  "packages/agent-worker/src/local-messaging-auth-broker.mjs",
+  "packages/agent-worker/src/local-messaging-host.mjs",
+  "packages/agent-worker/src/local-messaging-cli.mjs",
+];
 function mode(file) { return fs.statSync(file).mode & 0o777; }
 
 function makeInstallFixture(t) {
@@ -121,7 +141,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 8);
+  assert.equal(manifest.version, 9);
   for (const relative of WORKLOAD_CORE_RELATIVES) assert.ok(manifest.artifacts[relative], relative);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
@@ -130,6 +150,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
     assert.equal(manifest.environment[mutableName], undefined, `shared runtime manifest contains ${mutableName}`);
   }
   assert.deepEqual(Object.keys(manifest.artifacts).sort(), [
+    ...LOCAL_MESSAGING_RELATIVES,
     "agents/codex/worker/agent-worker.json",
     "packages/agent-worker/runners/codex-runner.mjs",
     "packages/agent-worker/runners/runner-common.mjs",
@@ -234,6 +255,7 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/wake-client.mjs",
     ...WORKLOAD_CORE_RELATIVES,
+    ...LOCAL_MESSAGING_RELATIVES,
   ];
   for (const relative of removed) {
     delete manifest.artifacts[relative];
@@ -313,7 +335,7 @@ test("LaunchAgent install rejects an existing symlink target without touching it
   assert.equal(fs.readFileSync(destination, "utf8"), "outside\n");
 });
 
-test("prepare-runtime upgrades to manifest v8 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
+test("prepare-runtime upgrades to manifest v9 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const installer = path.join(root, "scripts/triangle-worker-install.py");
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
@@ -323,7 +345,7 @@ test("prepare-runtime upgrades to manifest v8 while v6 without ownership or work
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v7.version, 8);
+  assert.equal(v7.version, 9);
   assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
@@ -332,6 +354,7 @@ test("prepare-runtime upgrades to manifest v8 while v6 without ownership or work
     "packages/agent-worker/src/claimer-advisory-lock.mjs",
     "packages/agent-worker/src/open-transaction-recovery.mjs",
     ...WORKLOAD_CORE_RELATIVES,
+    ...LOCAL_MESSAGING_RELATIVES,
   ];
   const projectRoot = v7.projectRoot;
   const v6 = structuredClone(v7);
@@ -380,7 +403,7 @@ test("prepare-runtime upgrades to manifest v8 while v6 without ownership or work
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 8);
+  assert.equal(after.version, 9);
   for (const relative of ownershipRelatives) {
     assert.ok(after.artifacts[relative]);
   }

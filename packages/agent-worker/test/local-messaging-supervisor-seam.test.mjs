@@ -8,7 +8,7 @@ import { createTestMemoryJournal, createTestRecoverableDispatcher } from "./loca
 import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
 
 test("supervisor seam enforces required journal and rejects missing durability adapter", () => {
-  const realTmp = fs.realpathSync(os.tmpdir());
+  const realTmp = fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir());
   const stateRoot = fs.mkdtempSync(path.join(realTmp, "triangle-seam-test-"));
   try {
     assert.throws(
@@ -21,7 +21,7 @@ test("supervisor seam enforces required journal and rejects missing durability a
 });
 
 test("supervisor seam enforces registry identities and refuses unknown profile issuance", { skip: process.platform === "win32" }, async () => {
-  const realTmp = fs.realpathSync(os.tmpdir());
+  const realTmp = fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir());
   const stateRoot = fs.mkdtempSync(path.join(realTmp, "triangle-seam-test-"));
   fs.chmodSync(stateRoot, 0o700);
   const journal = createTestMemoryJournal();
@@ -62,7 +62,7 @@ test("supervisor seam enforces registry identities and refuses unknown profile i
 });
 
 test("supervisor seam manages lifecycle, admission, and client operations", { skip: process.platform === "win32" }, async () => {
-  const realTmp = fs.realpathSync(os.tmpdir());
+  const realTmp = fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir());
   const stateRoot = fs.mkdtempSync(path.join(realTmp, "triangle-seam-test-"));
   fs.chmodSync(stateRoot, 0o700);
   const journal = createTestMemoryJournal();
@@ -125,7 +125,7 @@ test("supervisor seam manages lifecycle, admission, and client operations", { sk
 });
 
 test("supervisor seam requires explicit dispatcher dependency and refuses construction when missing", () => {
-  const realTmp = fs.realpathSync(os.tmpdir());
+  const realTmp = fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir());
   const stateRoot = fs.mkdtempSync(path.join(realTmp, "triangle-seam-test-"));
   const journal = createTestMemoryJournal();
 
@@ -161,7 +161,7 @@ test("supervisor seam requires explicit dispatcher dependency and refuses constr
 });
 
 test("shutdown retains journal until a pending RPC persistence completes", { skip: process.platform === "win32" }, async () => {
-  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "triangle-close-rpc-"));
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-close-rpc-"));
   const journal = createTestMemoryJournal();
   const persist = journal.recordSend.bind(journal);
   const releaseJournal = journal.close.bind(journal);
@@ -205,7 +205,7 @@ test("shutdown retains journal until a pending RPC persistence completes", { ski
 });
 
 test("failed dispatcher recovery rolls back and permits retry and cleanup", { skip: process.platform === "win32" }, async () => {
-  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "triangle-start-fail-"));
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-start-fail-"));
   const journal = createTestMemoryJournal();
   let attempts = 0;
   let stops = 0;
@@ -231,7 +231,7 @@ test("failed dispatcher recovery rolls back and permits retry and cleanup", { sk
 
 test("MCP refresh uses the current credential on the real socket", { skip: process.platform === "win32" }, async () => {
   const { createLocalMessagingMcpHandler } = await import("../src/local-messaging-mcp-adapter.mjs");
-  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "triangle-token-roll-"));
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-token-roll-"));
   const journal = createTestMemoryJournal();
   const subsystem = createLocalMessagingSubsystem({
     stateRoot, journal, dispatcher: createTestRecoverableDispatcher({ journal }),

@@ -1,3 +1,4 @@
+import { createInstalledLocalMessagingHost } from "./local-messaging-host.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -15,7 +16,7 @@ import {
 import path from "node:path";
 
 import { createCommandRunner, createRunnerEnvironment } from "./command-runner.mjs";
-import { createConcurrencyGate } from "./concurrency-gate.mjs";
+import { createProfiledReasonerGate } from "./concurrency-gate.mjs";
 import {
   createHelperWatchTransport,
   createInstallationWatchTransportFactory,
@@ -605,6 +606,7 @@ export function createClientSupervisor({
   headlessWakes = null,
   cursorAcpWakes = null,
   peerWakes = null,
+  localMessaging = null,
   headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
@@ -625,6 +627,7 @@ export function createClientSupervisor({
   createCursorAcpClaimer = createCursorAcpClaimerGuard,
   createInstallDispatcher = createInstallWatchDispatcher,
   createPeerLane = null,
+  createLocalMessagingHost = createInstalledLocalMessagingHost,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -691,7 +694,8 @@ export function createClientSupervisor({
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
-  const gate = createConcurrencyGate({ limit: maxConcurrentReasoners });
+  const gate = createProfiledReasonerGate({ limit: maxConcurrentReasoners });
+  const localRunners = new Map();
   const seen = new Set();
   // One MESH held poll per installation: lanes that share an installationId
   // coalesce onto a single watch-poll.
@@ -774,11 +778,12 @@ export function createClientSupervisor({
     if (!adapterRunner || typeof adapterRunner.run !== "function") {
       throw new TypeError("createRunner must return a runner");
     }
+    localRunners.set(instance.instanceId, adapterRunner);
     const runner = Object.freeze({
       run(request, options = {}) {
         return gate.run(
           () => adapterRunner.run(request, options),
-          { signal: options.signal },
+          { signal: options.signal, instanceId: instance.instanceId },
         );
       },
     });
@@ -816,6 +821,7 @@ export function createClientSupervisor({
       }
       clients.set(drain.instanceId, deliveryClient);
       runners.set(drain.instanceId, adapterRunner);
+      localRunners.set(drain.instanceId, adapterRunner);
     }
   }
 
@@ -1060,6 +1066,10 @@ export function createClientSupervisor({
     }
   }
 
+  const localHost = localMessaging ? createLocalMessagingHost({
+    configPath: localMessaging.configPath, runners: localRunners, gate, logger,
+  }) : null;
+
   const peerLane = createPeerLane && peerConfigs.length > 0
     ? createPeerLane({
         peerConfigs,
@@ -1233,7 +1243,9 @@ export function createClientSupervisor({
       }
       return peerLane.resolvePeerRecord(options);
     },
+    localStatus() { return localHost?.status() ?? {enabled:false,route:"same-device"}; },
     async close() {
+      await localHost?.stop();
       if (peerLane) {
         await peerLane.close();
       }
@@ -1652,6 +1664,7 @@ export function createClientSupervisor({
         ? peerLane.watch({ signal, sleep, runDurableWakeLoop })
         : Promise.resolve([]);
 
+      const localLoop = localHost ? localHost.watch({signal}) : Promise.resolve(null);
       let settled;
       try {
         settled = await Promise.all([
@@ -1662,10 +1675,12 @@ export function createClientSupervisor({
           headlessLoop,
           cursorAcpLoop,
           peerLoop,
+          localLoop,
         ]);
       } finally {
         proactiveController.abort();
         await Promise.allSettled(proactiveRenewals);
+        await localHost?.stop();
       }
       const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult, peerResult] = settled;
       return {
