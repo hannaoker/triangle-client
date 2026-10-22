@@ -1713,6 +1713,7 @@ export function createClientSupervisor({
         ? peerLane.watch({ signal, sleep, runDurableWakeLoop })
         : Promise.resolve([]);
 
+      localClosed = false;
       const localLoop = localMessaging
         ? runDurableWakeLoop({
           start: async () => {
