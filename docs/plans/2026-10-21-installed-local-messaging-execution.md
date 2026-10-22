@@ -2,7 +2,7 @@
 
 > Implementer: use risk-based TDD. Write failing tests for each new behavior and reproduce review defects before fixing them.
 
-Status: execution authorized by user on 2026-10-21. Baseline: upstream main 2443d5f (#105 and #106 merged).
+Status: installed and exercised on 2026-10-21; see `../reviews/2026-10-21-installed-local-messaging-acceptance.md` for measured results and unresolved reliability limits. Execution authorized by user on 2026-10-21. Baseline: upstream main 2443d5f (#105 and #106 merged).
 Goal: this existing Codex conversation delegates a bounded coding task to installed gravity2 through the single installed Triangle supervisor, then retrieves and independently verifies its reply and artifacts.
 
 ## Motivation and target
