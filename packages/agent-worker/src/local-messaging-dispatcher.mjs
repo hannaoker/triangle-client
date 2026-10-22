@@ -7,6 +7,8 @@ export function createLocalMessagingDispatcher({
   logger = {},
   runnerTimeoutMs = 3600000,
   maxConcurrent = 2,
+  now = Date.now,
+  compactIntervalMs = 3600000,
 } = {}) {
   if (!journal) {
     throw coded("invalid_dispatcher_options", "journal is required");
@@ -26,6 +28,20 @@ export function createLocalMessagingDispatcher({
   const activeExecutions = new Map(); // messageId -> executionPromise
 
   let pumpScheduled = false;
+  let lastCompactionAt = null;
+
+  // Cheap retention: once at start, then at most once per interval when work arrives.
+  async function compactIfDue() {
+    if (typeof activeJournal.compact !== "function") return;
+    const at = now();
+    if (lastCompactionAt !== null && at - lastCompactionAt < compactIntervalMs) return;
+    lastCompactionAt = at;
+    try {
+      await activeJournal.compact({ now: at });
+    } catch (error) {
+      logger.error?.("local_messaging_compaction_failed", { error: "Local journal compaction failed", code: error?.code });
+    }
+  }
 
   function schedulePump() {
     if (pumpScheduled) return;
@@ -37,7 +53,7 @@ export function createLocalMessagingDispatcher({
   }
 
   function checkDrain() {
-    if (stopping && pendingQueue.length === 0 && activeExecutions.size === 0) {
+    if (stopping && activeExecutions.size === 0) {
       const resolvers = drainResolvers;
       drainResolvers = [];
       for (const resolve of resolvers) {
@@ -47,6 +63,11 @@ export function createLocalMessagingDispatcher({
   }
 
   function pump() {
+    // Shutdown starts nothing new: unclaimed jobs stay queued_local for the next start.
+    if (stopping) {
+      checkDrain();
+      return;
+    }
     while (activeExecutions.size < maxConcurrent) {
       const nextIndex = pendingQueue.findIndex(
         (job) => !activeRecipients.has(job.recipient),
@@ -127,7 +148,10 @@ export function createLocalMessagingDispatcher({
 
     try {
       if (timedOut) {
-        await activeJournal.holdExecution(fullJob.messageId, "runner_timeout");
+        // Late output is evidence for the owner, never a reply: keep it, hold the record.
+        await activeJournal.holdExecution(fullJob.messageId, "runner_timeout", {
+          lateResultText: result?.status === "completed" && typeof result.text === "string" ? result.text : undefined,
+        });
         return;
       }
       if (result && result.status === "completed") {
@@ -173,6 +197,7 @@ export function createLocalMessagingDispatcher({
     inFlightMessageIds.add(job.messageId);
     pendingQueue.push(job);
     schedulePump();
+    await compactIfDue();
   }
 
   async function start({ journal: injectedJournal } = {}) {
@@ -192,17 +217,22 @@ export function createLocalMessagingDispatcher({
       }
     }
 
+    await compactIfDue();
     schedulePump();
   }
 
   async function stop() {
     stopping = true;
-    if (pendingQueue.length === 0 && activeExecutions.size === 0) {
+    // Only executions that already started are awaited. Queued jobs were never
+    // claimed, so the journal still holds them for recovery.
+    for (const job of pendingQueue.splice(0)) {
+      inFlightMessageIds.delete(job.messageId);
+    }
+    if (activeExecutions.size === 0) {
       return;
     }
     return new Promise((resolve) => {
       drainResolvers.push(resolve);
-      schedulePump();
     });
   }
 
@@ -217,12 +247,8 @@ export function createLocalMessagingDispatcher({
 
   return {
     start,
-    recover: start,
     notifyAdmission,
-    admitExecution: notifyAdmission,
-    dispatch: notifyAdmission,
     stop,
-    wait: stop,
     status,
   };
 }

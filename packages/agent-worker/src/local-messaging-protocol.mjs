@@ -108,15 +108,48 @@ export function createErrorResponse(id, err, protocolVersion = PROTOCOL_VERSION)
   };
 }
 
+function jsonBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+// Returns the reply cut to fit roomBytes once serialized, flagged so the
+// caller can tell. The full text stays in the journal.
+function truncateReplyToFit(reply, roomBytes) {
+  const text = typeof reply.text === "string" ? reply.text : "";
+  const originalTextBytes = Buffer.byteLength(text, "utf8");
+  const framed = (slice, base = reply) => ({ ...base, text: slice, truncated: true, originalTextBytes });
+  // Never end on half of a surrogate pair; the binary search below measures real JSON size.
+  const prefix = (length) => {
+    const cut = length > 0 && (text.charCodeAt(length - 1) & 0xfc00) === 0xd800 ? length - 1 : length;
+    return text.slice(0, cut);
+  };
+  const base = jsonBytes(framed("")) <= roomBytes ? reply : { ...reply, metadata: null };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (jsonBytes(framed(prefix(mid), base)) <= roomBytes) low = mid;
+    else high = mid - 1;
+  }
+  return framed(prefix(low), base);
+}
+
+// A listing always makes progress: the first reply is returned even when it
+// alone exceeds one response (truncated and flagged); later replies that do not
+// fit wait, whole, for the next listing.
 export function boundRepliesToEnvelope(replies, maxBytes = MAX_PAYLOAD_BYTES - 1024) {
   if (!Array.isArray(replies)) return [];
   const bounded = [];
   let currentBytes = 64; // base JSON envelope estimate
   for (const reply of replies) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(reply), "utf8");
-    if (currentBytes + itemBytes > maxBytes) break;
-    currentBytes += itemBytes;
-    bounded.push(reply);
+    const itemBytes = jsonBytes(reply);
+    if (currentBytes + itemBytes <= maxBytes) {
+      currentBytes += itemBytes;
+      bounded.push(reply);
+      continue;
+    }
+    if (bounded.length === 0) bounded.push(truncateReplyToFit(reply, maxBytes - currentBytes));
+    break;
   }
   return bounded;
 }

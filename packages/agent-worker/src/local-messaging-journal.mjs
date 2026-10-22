@@ -1,6 +1,80 @@
 import { createHash } from "node:crypto";
-import { openDeliveryJournal } from "./shared-delivery-journal.mjs";
+import { closeSync, fsyncSync, lstatSync, openSync, renameSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
+import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
+
+const DB_NAME = "local-messaging.sqlite";
+const OWNER_DB_NAME = "local-messaging-owner.sqlite";
+// Installed journals still carry the peer drain's file names, which this journal used to borrow.
+const LEGACY_DB_NAME = "peer-drain.sqlite";
+const LEGACY_OWNER_DB_NAME = "peer-drain-owner.sqlite";
+// Finished records are compacted after the same eight days as the peer drain's.
+const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+
+// One-time move of an installed journal to its own file names. It runs under the
+// legacy owner lock (a live old-version owner blocks it) and moves each
+// journal file before its database, so an interrupted move resumes from the
+// database that is still under the old name. Modes are preserved by rename.
+function adoptLegacyJournalFiles(stateRoot, logger) {
+  privateDir(stateRoot, { create: true });
+  // An in-process owner is reported by openDeliveryJournal; nothing moves under it.
+  if (activeStateRoots.has(stateRoot)) return;
+  const exists = (name) => lstatSync(path.join(stateRoot, name), { throwIfNoEntry: false }) !== undefined;
+  if (!exists(LEGACY_DB_NAME)) return;
+  const moves = [
+    [`${LEGACY_DB_NAME}-journal`, `${DB_NAME}-journal`],
+    [LEGACY_DB_NAME, DB_NAME],
+    [`${LEGACY_OWNER_DB_NAME}-journal`, `${OWNER_DB_NAME}-journal`],
+    [LEGACY_OWNER_DB_NAME, OWNER_DB_NAME],
+  ].filter(([from]) => exists(from));
+  for (const [from, to] of moves) {
+    privateFile(path.join(stateRoot, from));
+    if (exists(to)) {
+      throw coded("journal_migration_conflict", `Both ${from} and ${to} exist; refusing to choose between them`);
+    }
+  }
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  let lock = null;
+  if (exists(LEGACY_OWNER_DB_NAME)) {
+    lock = new DatabaseSync(path.join(stateRoot, LEGACY_OWNER_DB_NAME));
+    try {
+      lock.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
+    } catch {
+      lock.close();
+      throw coded("journal_busy", `State directory is actively owned: failed to acquire exclusive lock on ${LEGACY_OWNER_DB_NAME}`);
+    }
+  }
+  try {
+    // Only a local journal moves: a peer drain sharing the directory keeps its files.
+    const probe = new DatabaseSync(path.join(stateRoot, LEGACY_DB_NAME));
+    let ours;
+    try {
+      ours = probe.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_messages'").get() !== undefined;
+    } finally {
+      probe.close();
+    }
+    if (!ours) return;
+    // SQLite may already have recovered and removed a leftover journal while opening the database.
+    for (const [from, to] of moves) if (exists(from)) renameSync(path.join(stateRoot, from), path.join(stateRoot, to));
+    const dirFd = openSync(stateRoot, "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+    logger.warn?.("local_messaging_journal_adopted", { files: moves.length });
+  } finally {
+    if (lock) {
+      try {
+        lock.exec("ROLLBACK");
+      } catch {}
+      lock.close();
+    }
+  }
+}
 
 function canonicalJson(obj) {
   if (obj === null || typeof obj !== "object") {
@@ -42,6 +116,8 @@ function mapMessageRow(row) {
     phase: row.phase,
     reason: row.reason ?? null,
     runtimeError: row.runtime_error ?? null,
+    // Only the presence: the late text is for owner inspection via getLateResult.
+    hasLateResult: Boolean(row.late_result_text),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -67,10 +143,11 @@ function mapReplyRow(row) {
 }
 
 export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
+  adoptLegacyJournalFiles(stateRoot, logger);
   const deliveryJournal = openDeliveryJournal({
     stateRoot,
-    dbName: "peer-drain.sqlite",
-    ownerDbName: "peer-drain-owner.sqlite",
+    dbName: DB_NAME,
+    ownerDbName: OWNER_DB_NAME,
     busyCode: "journal_busy",
   });
   const { db } = deliveryJournal;
@@ -123,6 +200,12 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     CREATE INDEX IF NOT EXISTS idx_local_replies_req ON local_replies(request_id);
     CREATE INDEX IF NOT EXISTS idx_local_replies_reply ON local_replies(in_reply_to);
   `);
+
+  // Additive migrations only: journals written by earlier versions hold live data.
+  const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
+  if (!messageColumns.includes("late_result_text")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
+  }
 
   // Crash recovery on startup: any in-flight execution is held immediately
   const uncertainOnStartup = db
@@ -344,14 +427,21 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     return row ? mapMessageRow(row) : null;
   }
 
-  async function holdExecution(messageId, reason = "held") {
+  async function holdExecution(messageId, reason = "held", { lateResultText } = {}) {
     assertNotClosed();
     const now = Date.now();
+    // A result that arrives after the deadline is kept for the owner, never delivered.
     db.prepare(
-      "UPDATE local_messages SET phase = 'held', reason = ?, updated_at = ? WHERE message_id = ?"
-    ).run(reason, now, messageId);
+      "UPDATE local_messages SET phase = 'held', reason = ?, late_result_text = COALESCE(?, late_result_text), updated_at = ? WHERE message_id = ?"
+    ).run(reason, typeof lateResultText === "string" ? lateResultText : null, now, messageId);
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
     return row ? mapMessageRow(row) : null;
+  }
+
+  async function getLateResult(messageId) {
+    assertNotClosed();
+    const row = db.prepare("SELECT message_id, late_result_text FROM local_messages WHERE message_id = ?").get(messageId);
+    return row?.late_result_text ? { messageId: row.message_id, text: row.late_result_text } : null;
   }
 
   async function recordExecutionFailure({ messageId, reason = "execution_failed", runtimeError = null } = {}) {
@@ -362,6 +452,21 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     ).run(reason, runtimeError ? String(runtimeError) : null, now, messageId);
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
     return row ? mapMessageRow(row) : null;
+  }
+
+  // Finished records only: held, queued and executing records and unconsumed
+  // replies are never compacted. A completed message goes once every reply to it
+  // is gone (consumed and itself older than the retention), so none dangles.
+  async function compact({ now = Date.now(), retentionMs = RETENTION_MS } = {}) {
+    assertNotClosed();
+    const cutoff = now - retentionMs;
+    const replies = db.prepare("DELETE FROM local_replies WHERE consumed = 1 AND updated_at <= ?").run(cutoff);
+    const messages = db.prepare(`
+      DELETE FROM local_messages
+      WHERE phase = 'completed' AND updated_at <= ?
+        AND NOT EXISTS (SELECT 1 FROM local_replies r WHERE r.in_reply_to = local_messages.message_id)
+    `).run(cutoff);
+    return { messages: Number(messages.changes), replies: Number(replies.changes) };
   }
 
   async function status() {
@@ -403,6 +508,8 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     claimExecution,
     completeExecution,
     holdExecution,
+    getLateResult,
+    compact,
     status,
     close,
   };

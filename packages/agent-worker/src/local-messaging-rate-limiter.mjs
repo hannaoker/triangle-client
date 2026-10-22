@@ -87,22 +87,101 @@ export function createPerSenderRateLimiter({
   };
 }
 
+// Server-side exchange cap that does not depend on caller-supplied linking: callers
+// that omit inReplyTo restart at loop depth 1, so ping-pong between two agents is
+// also bounded by how many messages one sender/recipient pair may exchange (both
+// directions share the budget) within a sliding window. Reservations follow the
+// same reserve/commit/rollback protocol as the per-sender limiter.
+export function createPairExchangeLimiter({
+  maxExchanges = 10,
+  windowMs = 10 * 60 * 1000,
+} = {}) {
+  if (!Number.isSafeInteger(maxExchanges) || maxExchanges < 1 || !Number.isSafeInteger(windowMs) || windowMs < 1) {
+    throw coded("invalid_limiter_options", "maxExchanges and windowMs must be positive integers");
+  }
+  const pairHistory = new Map();
+  const keyFor = (a, b) => (a < b ? `${a}\0${b}` : `${b}\0${a}`);
+
+  return {
+    reserve(senderId, recipientId) {
+      if (!senderId || !recipientId) throw coded("invalid_sender", "sender and recipient required for exchange limiting");
+      const now = Date.now();
+      const key = keyFor(senderId, recipientId);
+      const entries = pairHistory.get(key) ?? [];
+      while (entries.length > 0 && entries[0].time <= now - windowMs) entries.shift();
+      if (entries.length >= maxExchanges) {
+        pairHistory.set(key, entries);
+        throw coded(
+          "exchange_limit_exceeded",
+          `More than ${maxExchanges} messages between these agents within ${windowMs}ms; assuming a conversation loop`,
+        );
+      }
+      const entry = { time: now };
+      entries.push(entry);
+      pairHistory.set(key, entries);
+
+      let settled = false;
+      return {
+        commit() {
+          settled = true;
+        },
+        // A duplicate retry or a rejected admission is not an exchange.
+        rollback() {
+          if (settled) return;
+          settled = true;
+          const index = entries.indexOf(entry);
+          if (index !== -1) entries.splice(index, 1);
+        },
+      };
+    },
+
+    reset() {
+      pairHistory.clear();
+    },
+  };
+}
+
+// Bounded LRU: reads refresh an entry, inserts evict the least recently used.
+function createBoundedLru(maxEntries) {
+  const entries = new Map();
+  return {
+    get(key) {
+      if (!entries.has(key)) return undefined;
+      const value = entries.get(key);
+      entries.delete(key);
+      entries.set(key, value);
+      return value;
+    },
+    set(key, value) {
+      entries.delete(key);
+      entries.set(key, value);
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+    },
+    clear() {
+      entries.clear();
+    },
+  };
+}
+
 export function createConversationLoopTracker({
   maxLoopDepth = 10,
   journal = null,
+  maxTrackedMessages = 10000,
 } = {}) {
-  // Store depth by messageId and requestId for in-memory lookup
-  const depthByMessageId = new Map();
-  const depthByRequestId = new Map();
+  if (!Number.isSafeInteger(maxTrackedMessages) || maxTrackedMessages < 1) {
+    throw coded("invalid_tracker_options", "maxTrackedMessages must be a positive integer");
+  }
+  // Bounded in-memory depth by messageId and requestId; the durable journal answers for evicted entries.
+  const depthByMessageId = createBoundedLru(maxTrackedMessages);
+  const depthByRequestId = createBoundedLru(maxTrackedMessages);
 
   return {
     async resolveParentDepth(parentMessageId) {
       if (!parentMessageId) return null;
 
       // 1. In-memory check
-      if (depthByMessageId.has(parentMessageId)) {
-        return depthByMessageId.get(parentMessageId);
-      }
+      const remembered = depthByMessageId.get(parentMessageId);
+      if (remembered !== undefined) return remembered;
 
       // 2. Injected durable ancestry seam (journal)
       if (journal && typeof journal.getRecord === "function") {

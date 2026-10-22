@@ -19,6 +19,17 @@ import {
 import { coded, sanitizeError } from "./local-messaging-errors.mjs";
 
 const MAX_INFLIGHT_PER_SOCKET = 50;
+const MAX_REQUEST_ID_LENGTH = 128;
+// Message, request and recipient identifiers: UUIDs, rep-<uuid> reply IDs and 64-hex instance IDs all match.
+const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
+
+function identifier(value, name, { optional = false } = {}) {
+  if (optional && (value === undefined || value === null)) return null;
+  if (typeof value !== "string" || !IDENTIFIER_PATTERN.test(value)) {
+    throw coded("invalid_request", `${name} must be a bounded identifier string`);
+  }
+  return value;
+}
 
 export function createLocalControlServer({
   socketPath,
@@ -28,6 +39,7 @@ export function createLocalControlServer({
   credentialBroker = null,
   statusProvider = null,
   rateLimiter,
+  exchangeLimiter = null,
   loopTracker,
   dispatcher,
   logger = { info() {}, warn() {}, error() {} },
@@ -59,22 +71,10 @@ export function createLocalControlServer({
     );
   }
 
-  if (
-    !(typeof activeDispatcher.start === "function" || typeof activeDispatcher.recover === "function") ||
-    !(typeof activeDispatcher.stop === "function" || typeof activeDispatcher.wait === "function")
-  ) {
-    throw coded("invalid_dispatcher", "Dispatcher requires recovery and shutdown hooks");
-  }
-
-  const dispatchHook =
-    activeDispatcher.notifyAdmission ||
-    activeDispatcher.admitExecution ||
-    activeDispatcher.dispatch;
-  if (typeof dispatchHook !== "function") {
-    throw coded(
-      "invalid_dispatcher",
-      "Dispatcher must implement notifyAdmission, admitExecution, or dispatch hook",
-    );
+  for (const hook of ["start", "stop", "notifyAdmission"]) {
+    if (typeof activeDispatcher[hook] !== "function") {
+      throw coded("invalid_dispatcher", `Dispatcher must implement ${hook}`);
+    }
   }
 
   let server = null;
@@ -86,7 +86,7 @@ export function createLocalControlServer({
   let accepting = false;
   let dispatcherActive = false;
 
-  async function handleRpc(msg, socket, socketInFlight) {
+  async function handleRpc(msg, socket, connection) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
       try {
         const errResp = createErrorResponse(null, coded("invalid_request", "Malformed JSON-RPC request object"));
@@ -95,35 +95,53 @@ export function createLocalControlServer({
       return;
     }
 
-    const { id, method, params = {}, credential, senderId } = msg;
+    const { id, method, params = {}, credential, senderId: claimedSenderId } = msg;
     if (typeof id === "undefined") return; // Notifications ignored per spec
 
-    if (socketInFlight.size >= MAX_INFLIGHT_PER_SOCKET) {
-      const errResp = createErrorResponse(
-        id,
-        coded("too_many_requests", "Too many concurrent requests on this connection"),
-        msg.protocol_version || PROTOCOL_VERSION,
-      );
+    const reject = (responseId, error) => {
       try {
-        socket.write(encodeFrame(errResp));
+        socket.write(encodeFrame(createErrorResponse(responseId, error, msg.protocol_version || PROTOCOL_VERSION)));
       } catch {}
+    };
+
+    const validId =
+      (typeof id === "string" && id.length > 0 && id.length <= MAX_REQUEST_ID_LENGTH) ||
+      (typeof id === "number" && Number.isFinite(id));
+    if (!validId) {
+      reject(null, coded("invalid_request", "Request id must be a bounded string or a number"));
+      return;
+    }
+    // A reused id must not multiply in-flight work, so it is refused while its first use runs.
+    if (connection.ids.has(id)) {
+      reject(id, coded("invalid_request", "Request id is already in flight on this connection"));
+      return;
+    }
+    if (connection.active >= MAX_INFLIGHT_PER_SOCKET) {
+      reject(id, coded("too_many_requests", "Too many concurrent requests on this connection"));
       return;
     }
 
-    socketInFlight.add(id);
+    connection.ids.add(id);
+    connection.active += 1;
 
     try {
       if (msg.protocol_version !== PROTOCOL_VERSION) {
         throw coded("protocol_version_mismatch", `Expected protocol version ${PROTOCOL_VERSION}`);
       }
+      if (params === null || typeof params !== "object" || Array.isArray(params)) {
+        throw coded("invalid_request", "params must be an object");
+      }
 
-      // Methods requiring authentication (all except hello)
+      // Methods requiring authentication (all except hello). Every decision below uses the
+      // sender from the signed claims; the client's senderId is only an assertion that must match.
       let claims = null;
+      let senderId = null;
       if (method !== "hello" && method !== "issue_turn") {
-        if (!senderId || typeof senderId !== "string" || !senderId.trim()) {
+        if (!claimedSenderId || typeof claimedSenderId !== "string" || !claimedSenderId.trim()) {
           throw coded("unauthorized", "senderId is required");
         }
-        claims = credentialValidator.validate({ credential, expectedSenderId: senderId.trim() });
+        claims = credentialValidator.validate({ credential, expectedSenderId: claimedSenderId.trim() });
+        senderId = claims.senderId;
       }
 
       switch (method) {
@@ -163,10 +181,14 @@ export function createLocalControlServer({
         }
 
         case "send_message": {
-          const { to, text, messageId, requestId, inReplyTo, metadata = {} } = params;
+          const { to, text, messageId, metadata = {} } = params;
           if (!to || !text || !messageId) {
             throw coded("invalid_request", "to, text, and messageId are required for send_message");
           }
+          identifier(to, "to");
+          identifier(messageId, "messageId");
+          const requestId = identifier(params.requestId, "requestId", { optional: true }) ?? undefined;
+          const inReplyTo = identifier(params.inReplyTo, "inReplyTo", { optional: true }) ?? undefined;
 
           if (typeof text !== "string" || text.length > MAX_FIELD_STRING_LENGTH) {
             throw coded("payload_too_large", `Message text exceeds field limit of ${MAX_FIELD_STRING_LENGTH}`);
@@ -190,7 +212,11 @@ export function createLocalControlServer({
             }
           }
 
+          let pairReservation = null;
           try {
+            // Pair cap: bounds ping-pong however the caller links (or omits linking) its messages.
+            pairReservation = exchangeLimiter ? exchangeLimiter.reserve(senderId, to) : null;
+
             // 4. Conversation loop depth calculation and check
             const effectiveRequestId = requestId || messageId;
             let calculatedDepth = 1;
@@ -223,6 +249,9 @@ export function createLocalControlServer({
             } else if (rateLimiter) {
               rateLimiter.consume(senderId);
             }
+            // A duplicate retry is not a new exchange.
+            if (record.isDuplicate) pairReservation?.rollback();
+            else pairReservation?.commit();
 
             if (loopTracker) {
               loopTracker.commitAdmission({
@@ -247,22 +276,26 @@ export function createLocalControlServer({
               isDuplicate: record.isDuplicate || false,
             };
 
-            const execPromise = (async () => {
-              try {
-                await dispatchHook.call(activeDispatcher, admissionJob);
-              } catch (execErr) {
-                const sanitized = sanitizeError(execErr);
-                logger.error?.(`Local execution admission failed: ${sanitized.message}`);
-                await journal.recordExecutionFailure({
-                  messageId,
-                  reason: "admission_failure",
-                  runtimeError: "Execution admission failed",
-                }).catch(() => {});
-              }
-            })();
+            // Defense in depth: a duplicate of work that is already claimed, finished or held
+            // must never reach the dispatcher again, whatever the dispatcher would do with it.
+            if (!record.isDuplicate || (record.phase ?? "queued_local") === "queued_local") {
+              const execPromise = (async () => {
+                try {
+                  await activeDispatcher.notifyAdmission(admissionJob);
+                } catch (execErr) {
+                  const sanitized = sanitizeError(execErr);
+                  logger.error?.(`Local execution admission failed: ${sanitized.message}`);
+                  await journal.recordExecutionFailure({
+                    messageId,
+                    reason: "admission_failure",
+                    runtimeError: "Execution admission failed",
+                  }).catch(() => {});
+                }
+              })();
 
-            inFlightExecutions.add(execPromise);
-            execPromise.finally(() => inFlightExecutions.delete(execPromise));
+              inFlightExecutions.add(execPromise);
+              execPromise.finally(() => inFlightExecutions.delete(execPromise));
+            }
 
             // 8. Return custody receipt promptly carrying original stored requestId
             const resp = createSuccessResponse(
@@ -280,6 +313,7 @@ export function createLocalControlServer({
           } catch (admissionErr) {
             // Rollback reservation on rejected admission or conflict
             rateReservation?.rollback?.();
+            pairReservation?.rollback();
             throw admissionErr;
           }
           break;
@@ -288,6 +322,7 @@ export function createLocalControlServer({
         case "get_message_status": {
           const { messageId } = params;
           if (!messageId) throw coded("invalid_request", "messageId required");
+          identifier(messageId, "messageId");
 
           const record = await journal.getRecord(messageId);
           if (!record) throw coded("not_found", `Message ${messageId} not found`);
@@ -310,6 +345,8 @@ export function createLocalControlServer({
               phase: record.phase,
               reason: record.reason || null,
               runtimeError: safeRuntimeError,
+              // Presence only: a result that arrived after a timeout is for the owner, not the sender.
+              hasLateResult: record.hasLateResult === true,
             },
             PROTOCOL_VERSION,
           );
@@ -318,7 +355,9 @@ export function createLocalControlServer({
         }
 
         case "list_replies": {
-          const { requestId, inReplyTo, limit = 50 } = params;
+          const { limit = 50 } = params;
+          const requestId = identifier(params.requestId, "requestId", { optional: true }) ?? undefined;
+          const inReplyTo = identifier(params.inReplyTo, "inReplyTo", { optional: true }) ?? undefined;
           const cappedLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
           const replies = await journal.listReplies({
             requester: senderId,
@@ -337,6 +376,7 @@ export function createLocalControlServer({
         case "consume_reply": {
           const { messageId } = params;
           if (!messageId) throw coded("invalid_request", "messageId required");
+          identifier(messageId, "messageId");
           const outcome = await journal.consumeReply({
             requester: senderId,
             messageId,
@@ -368,7 +408,8 @@ export function createLocalControlServer({
         socket.write(encodeFrame(errResp));
       } catch {}
     } finally {
-      socketInFlight.delete(id);
+      connection.ids.delete(id);
+      connection.active -= 1;
     }
   }
 
@@ -389,12 +430,12 @@ export function createLocalControlServer({
             return;
           }
           activeSockets.add(socket);
-          const socketInFlight = new Set();
+          const connection = { ids: new Set(), active: 0 };
 
           const parser = createMessageParser({
             onMessage: (msg) => {
               if (isClosing) return;
-              const rpc = handleRpc(msg, socket, socketInFlight);
+              const rpc = handleRpc(msg, socket, connection);
               inFlightRpcs.add(rpc);
               const finish = () => inFlightRpcs.delete(rpc);
               rpc.then(finish, finish);
@@ -440,11 +481,7 @@ export function createLocalControlServer({
         // No requests are accepted until recovery has established execution ownership.
         dispatcherActive = true;
         // Host-owned recoverable dispatcher claims queued records upon start
-        if (typeof activeDispatcher.start === "function") {
-          await activeDispatcher.start({ journal });
-        } else if (typeof activeDispatcher.recover === "function") {
-          await activeDispatcher.recover({ journal });
-        }
+        await activeDispatcher.start({ journal });
         accepting = true;
       } catch (startupErr) {
         accepting = false;
@@ -452,8 +489,7 @@ export function createLocalControlServer({
         activeSockets.clear();
         if (dispatcherActive) {
           try {
-            const shutdown = activeDispatcher.stop || activeDispatcher.wait;
-            await shutdown.call(activeDispatcher);
+            await activeDispatcher.stop();
           } catch {}
           dispatcherActive = false;
         }
@@ -492,8 +528,7 @@ export function createLocalControlServer({
 
       // Safely wait for dispatcher to complete active executions before closing journal
       if (dispatcherActive) {
-        const shutdown = activeDispatcher.stop || activeDispatcher.wait;
-        await shutdown.call(activeDispatcher);
+        await activeDispatcher.stop();
         dispatcherActive = false;
       }
 

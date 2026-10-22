@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { createOwnerAcl } from "../src/local-messaging-acl.mjs";
 import {
   createPerSenderRateLimiter,
+  createPairExchangeLimiter,
   createConversationLoopTracker,
 } from "../src/local-messaging-rate-limiter.mjs";
 import { createTestMemoryJournal } from "./local-messaging-fixtures.mjs";
@@ -261,4 +262,59 @@ test("rate limiter reserve supports atomic reservation, rollback, and commit", (
     () => limiter.reserve("agent-alice"),
     (err) => err instanceof LocalMessagingError && err.code === "rate_limit_exceeded",
   );
+});
+
+test("pair exchange limiter counts both directions of a pair in a sliding window and ignores rolled-back reservations", async () => {
+  const limiter = createPairExchangeLimiter({ maxExchanges: 3, windowMs: 60 });
+  limiter.reserve("agent-a", "agent-b").commit();
+  limiter.reserve("agent-b", "agent-a").commit(); // the reverse direction shares the budget
+  const third = limiter.reserve("agent-a", "agent-b");
+  assert.throws(
+    () => limiter.reserve("agent-b", "agent-a"),
+    (err) => err instanceof LocalMessagingError && err.code === "exchange_limit_exceeded",
+  );
+  third.rollback(); // a duplicate retry or rejected admission is not an exchange
+  limiter.reserve("agent-b", "agent-a").commit();
+  assert.throws(() => limiter.reserve("agent-a", "agent-b"), (err) => err.code === "exchange_limit_exceeded");
+  // Other pairs are independent, including a ring that never repeats a pair.
+  limiter.reserve("agent-a", "agent-c").commit();
+  limiter.reserve("agent-b", "agent-c").commit();
+  // The window slides: once the old exchanges age out the pair may talk again.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  limiter.reserve("agent-a", "agent-b").commit();
+  assert.throws(() => limiter.reserve("", "agent-b"), (err) => err.code === "invalid_sender");
+  assert.throws(() => createPairExchangeLimiter({ maxExchanges: 0 }), (err) => err.code === "invalid_limiter_options");
+});
+
+test("loop tracker memory is a bounded LRU that falls back to the durable journal", async () => {
+  const journal = createTestMemoryJournal();
+  const lookups = [];
+  const getRecord = journal.getRecord.bind(journal);
+  journal.getRecord = async (id) => { lookups.push(id); return getRecord(id); };
+  const tracker = createConversationLoopTracker({ maxLoopDepth: 50, journal, maxTrackedMessages: 3 });
+  for (let depth = 1; depth <= 6; depth++) {
+    await journal.recordSend({ sender: "agent-a", recipient: "agent-b", messageId: `m-${depth}`, requestId: `r-${depth}`, text: "t", metadata: { _loopDepth: depth } });
+    tracker.commitAdmission({ messageId: `m-${depth}`, requestId: `r-${depth}`, depth });
+  }
+  // Memory holds only the three most recent entries.
+  assert.equal(tracker.getDepth("m-6"), 6);
+  assert.equal(tracker.getDepth("m-4"), 4);
+  assert.equal(tracker.getDepth("m-1"), 1, "an evicted entry is no longer held in memory (default depth)");
+  assert.equal(tracker.getDepth("r-2"), 1);
+  // Recent parents resolve from memory; evicted ones resolve from the journal with the true depth.
+  assert.equal(await tracker.resolveParentDepth("m-6"), 6);
+  assert.deepEqual(lookups, []);
+  assert.equal(await tracker.resolveParentDepth("m-2"), 2);
+  assert.deepEqual(lookups, ["m-2"]);
+  assert.equal(await tracker.calculateDepth({ inReplyTo: "m-1", messageId: "m-7", requestId: "r-7" }), 2, "ancestry survives eviction");
+  // Reading an entry keeps it recent: the least recently used one is evicted.
+  const recency = createConversationLoopTracker({ maxLoopDepth: 50, maxTrackedMessages: 2 });
+  recency.commitAdmission({ messageId: "x1", depth: 5 });
+  recency.commitAdmission({ messageId: "x2", depth: 6 });
+  recency.getDepth("x1");
+  recency.commitAdmission({ messageId: "x3", depth: 7 });
+  assert.equal(recency.getDepth("x1"), 5);
+  assert.equal(recency.getDepth("x2"), 1, "the least recently used entry was evicted");
+  assert.equal(recency.getDepth("x3"), 7);
+  assert.throws(() => createConversationLoopTracker({ maxTrackedMessages: 0 }), (err) => err.code === "invalid_tracker_options");
 });

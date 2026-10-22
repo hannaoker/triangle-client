@@ -10,6 +10,7 @@ import {
 } from "./local-messaging-credentials.mjs";
 import {
   createPerSenderRateLimiter,
+  createPairExchangeLimiter,
   createConversationLoopTracker,
 } from "./local-messaging-rate-limiter.mjs";
 import { coded } from "./local-messaging-errors.mjs";
@@ -33,6 +34,7 @@ export function createLocalMessagingSubsystem({
   aclRules = {},
   ownerAcl = null,
   rateLimiter = null,
+  exchangeLimiter = null,
   loopTracker = null,
   socketName = "local-control.sock",
   logger = { info() {}, warn() {}, error() {} },
@@ -58,22 +60,10 @@ export function createLocalMessagingSubsystem({
     );
   }
 
-  if (
-    !(typeof activeDispatcher.start === "function" || typeof activeDispatcher.recover === "function") ||
-    !(typeof activeDispatcher.stop === "function" || typeof activeDispatcher.wait === "function")
-  ) {
-    throw coded("invalid_dispatcher", "Dispatcher requires recovery and shutdown hooks");
-  }
-
-  const dispatchHook =
-    activeDispatcher.notifyAdmission ||
-    activeDispatcher.admitExecution ||
-    activeDispatcher.dispatch;
-  if (typeof dispatchHook !== "function") {
-    throw coded(
-      "invalid_dispatcher",
-      "Dispatcher must implement notifyAdmission, admitExecution, or dispatch hook",
-    );
+  for (const hook of ["start", "stop", "notifyAdmission"]) {
+    if (typeof activeDispatcher[hook] !== "function") {
+      throw coded("invalid_dispatcher", `Dispatcher must implement ${hook}`);
+    }
   }
 
   const { socketPath } = resolveLocalSocketAddress({ stateRoot, name: socketName });
@@ -102,6 +92,7 @@ export function createLocalMessagingSubsystem({
 
   const acl = ownerAcl || createOwnerAcl({ rules: aclRules });
   const limiter = rateLimiter || createPerSenderRateLimiter();
+  const exchanges = exchangeLimiter || createPairExchangeLimiter();
   const tracker = loopTracker || createConversationLoopTracker({ journal: activeJournal });
 
   const server = createLocalControlServer({
@@ -112,6 +103,7 @@ export function createLocalMessagingSubsystem({
     credentialBroker,
     statusProvider,
     rateLimiter: limiter,
+    exchangeLimiter: exchanges,
     loopTracker: tracker,
     dispatcher: activeDispatcher,
     logger,
@@ -153,8 +145,8 @@ export function createLocalMessagingSubsystem({
       }
       const trimmedSender = senderId.trim();
 
-      // Enforce registry identities: unknown profile issuance refused if registry is configured
-      if (knownProfiles.size > 0 && !knownProfiles.has(trimmedSender)) {
+      // Only registered identities get credentials; an empty registry registers nobody.
+      if (!knownProfiles.has(trimmedSender)) {
         throw coded("unknown_profile", `Turn credential issuance refused for unknown profile: ${trimmedSender}`);
       }
 

@@ -17,9 +17,8 @@ test('supported CLI binds explicitly, sends through one service, reconnects and 
  try {
   const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
   writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'old-thread',enabled:false});
-  assert.throws(()=>setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'new-thread',recipients:['gravity2']}),{code:'binding_changed'});
-  const result=setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'new-thread',recipients:['gravity2'],rebind:true});
-  assert.equal(readPrivateJson(bindingPath).enabled,false);
+  const result=setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'new-thread',recipients:['gravity2']});
+  assert.deepEqual(readPrivateJson(bindingPath),{instanceId:'a'.repeat(64),threadId:'old-thread',enabled:false},'production app-server binding is never rewritten');
   const config=readPrivateJson(configPath),integration=readPrivateJson(config.integrationPath),journal=createTestMemoryJournal();
   const recipient=config.recipients[0].instanceId;
   const broker=createDesktopCredentialBroker({...config,recipients:[recipient],issue:(sender,options)=>subsystem.issueTurnCredential(sender,options)});
@@ -60,4 +59,29 @@ test('supported CLI binds explicitly, sends through one service, reconnects and 
   journal.listReplies=list;
   await assert.rejects(exec(process.execPath,[cli,'send','--config',configPath,'--to','unconfigured','--text','x']));
  }finally{await subsystem?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});
+test('setup keeps the desktop thread only in the integration file and never writes the app-server binding',()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-bind-');
+ try{
+  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'app-server-thread',enabled:false,extra:'kept'});
+  const before=fs.readFileSync(bindingPath),beforeMtime=fs.statSync(bindingPath).mtimeMs;
+  const options={config:configPath,'desktop-binding':bindingPath,recipients:['gravity2']};
+  // A first setup may name any explicit thread: nothing production-owned is rewritten.
+  const first=setupLocalMessaging({...options,'thread-id':'conversation-one'});
+  const integrationPath=readPrivateJson(configPath).integrationPath;
+  assert.equal(first.threadId,'conversation-one');
+  assert.equal(readPrivateJson(integrationPath).threadId,'conversation-one');
+  assert.equal(readPrivateJson(integrationPath).senderId,'a'.repeat(64));
+  assert.deepEqual(fs.readFileSync(bindingPath),before);assert.equal(fs.statSync(bindingPath).mtimeMs,beforeMtime);
+  assert.deepEqual(fs.readdirSync(root).filter(name=>name.includes('before-local-messaging')),[],'no backup of a file that is never changed');
+  // The same thread keeps the secret; another thread needs the explicit flag.
+  const secret=readPrivateJson(integrationPath).secret;
+  setupLocalMessaging({...options,'thread-id':'conversation-one'});assert.equal(readPrivateJson(integrationPath).secret,secret);
+  assert.throws(()=>setupLocalMessaging({...options,'thread-id':'conversation-two'}),{code:'binding_changed'});
+  assert.equal(readPrivateJson(integrationPath).threadId,'conversation-one','a refused rebind changes nothing');
+  setupLocalMessaging({...options,'thread-id':'conversation-two',rebind:true});
+  assert.equal(readPrivateJson(integrationPath).threadId,'conversation-two');assert.notEqual(readPrivateJson(integrationPath).secret,secret,'a rebind rotates the capability');
+  assert.deepEqual(fs.readFileSync(bindingPath),before);assert.equal(fs.statSync(bindingPath).mtimeMs,beforeMtime);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

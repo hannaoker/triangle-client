@@ -1,6 +1,6 @@
 # Triangle Local Agent Messaging: Same-Host Subsystem and MCP Adapter
 
-**Status:** Additive substrate implemented and verified; installed wiring and shared durability gated.
+**Status:** Substrate implemented and verified. The production journal, dispatcher, installed supervisor wiring and desktop credential broker have since landed (see `local-messaging-production-adapters.md` and `installed-local-messaging.md`); the gate table in section 1 records the substrate-era state.
 **Baseline:** `origin/main 47a01ce`.
 **Scope:** Same-host private socket control interface, turn-capability authentication, owner ACL, conversation loop and rate limits, shared durable journal contract, recoverable execution dispatcher contract, thin MCP stdio adapter, and explicit supervisor integration seams.
 
@@ -13,16 +13,17 @@
 | Subsystem Invariant | Verification Suite | Verification Mechanism | Status |
 |---|---|---|---|
 | **Turn Token Authenticates Socket Access** | `local-messaging-credentials.test.mjs`, `local-messaging-server-client.test.mjs` | Missing token, signature mismatch, expired timestamp, or spoofed sender ID rejected with redacted `unauthorized` / `credential_expired`. Tokens authenticate allowed socket access only. | Verified |
-| **Registry Identity Enforcement** | `local-messaging-supervisor-seam.test.mjs` | Subsystem checks configured registry identities; refuses credential issuance for unknown profiles (`unknown_profile`). Client creation never exposes validators or private keys. | Verified |
+| **Registry Identity Enforcement** | `local-messaging-supervisor-seam.test.mjs` | Subsystem checks configured registry identities; refuses credential issuance for unknown profiles (`unknown_profile`), and for every sender when the registry is empty or missing. Client creation never exposes validators or private keys, and the MCP adapter accepts no validator at all (the server validates every RPC). | Verified |
 | **Requester Ownership on Status** | `local-messaging-server-client.test.mjs` | `get_message_status` requires sender or recipient ownership; foreign agent access is denied (`foreign_access_denied`). Unknown messages return `not_found`. Runtime errors are redacted to fixed safe strings (never raw or credential-bearing). | Verified |
 | **Complete Immutable Envelope Idempotency** | `local-messaging-journal.test.mjs`, `local-messaging-server-client.test.mjs` | Compares sender, recipient, requestId, inReplyTo, text, and deterministic metadata. Idempotent duplicate returns stored record and original stored requestId. Conflicting envelope throws `duplicate_id_conflict`. | Verified |
 | **Reply Correlation & Forged Recipient Prevention** | `local-messaging-journal.test.mjs` | Reply persistence validates original request's sender, recipient, and correlation. Mismatched or forged recipient throws `invalid_reply_recipient`. Wrong requestId throws `invalid_reply_correlation`. | Verified |
 | **Foreign Replies & Explicit Consumption** | `local-messaging-journal.test.mjs`, `local-messaging-server-client.test.mjs` | Foreign agent cannot list or consume replies (`foreign_access_denied`). Listing replies does not consume them. Drop/reconnect preserves unconsumed state. | Verified |
 | **Causal Loop Ancestry Binding & No Untrusted Reset** | `local-messaging-acl-limits.test.mjs` | Signed `claims.parentMessageId` is always honored regardless of `claims.loopDepth` (even with default or `loopDepth: 1`). Missing or unknown parent fails closed (`parent_not_found`). Omitting `inReplyTo` or supplying new `requestId` cannot reset ancestry. Duplicate retry does not advance depth. | Verified |
 | **Atomic Rate Reservation & Concurrency Defense** | `local-messaging-acl-limits.test.mjs`, `local-messaging-server-client.test.mjs` | Synchronous reservation before first await prevents concurrent over-admission (`Promise.all` 3 sends with limit 1 accepts only 1). Rejected and conflicting sends roll back reservation without rate use. Retries commit reservation to prevent infinite retry bypass. | Verified |
-| **Host-Owned Recoverable Dispatcher & Executor Requirement** | `local-messaging-supervisor-seam.test.mjs`, `local-messaging-server-client.test.mjs` | Subsystem and server require explicit dispatcher dependency (no silent success defaults; throws `dispatcher_required`). Dispatcher claims queued records on start, holds uncertain started records, dedupes notifications so concurrent duplicate retries never overlap, and close waits for dispatcher before journal closes. | Verified |
-| **Safe Socket Lifecycle & Competitor Protection** | `local-messaging-address.test.mjs`, `local-messaging-server-client.test.mjs` | Failed start and close of competing server never unlinks active owner's socket. Stale cleanup unlinks only verified dead socket inodes; never unlinks regular files or symlinks. Rejects relative paths and path traversal. | Verified |
-| **Coalesced Framing & Parser Bounds** | `local-messaging-protocol.mjs`, `local-messaging-server-client.test.mjs` | Streaming parser processes multiple coalesced valid frames in a single chunk; single oversized frames (>320 KB) are rejected. Malformed or null requests safely return JSON-RPC errors without unhandled rejections. | Verified |
+| **Pair Exchange Cap & Bounded Loop Memory** | `local-messaging-acl-limits.test.mjs`, `local-messaging-supervisor-seam.test.mjs` | Depth tracking follows the signed parent and `inReplyTo` when they are present, but a caller whose token has no parent can omit `inReplyTo` and restart at depth 1. A server-side cap therefore bounds each sender/recipient pair (both directions share one budget) per sliding window, independent of any linking: default 10 messages per 10 minutes, configurable through `exchangeLimiter`, refusing with `exchange_limit_exceeded`. Duplicate retries and rejected sends do not count. The tracker's in-memory depths are a bounded LRU (10,000) backed by the durable journal lookup. | Verified |
+| **Host-Owned Recoverable Dispatcher & Executor Requirement** | `local-messaging-supervisor-seam.test.mjs`, `local-messaging-server-client.test.mjs`, `local-messaging-journal.test.mjs` | Subsystem and server require an explicit dispatcher with exactly the hooks `start`, `stop` and `notifyAdmission` (one name per hook, no aliases: `dispatcher_required` when absent, `invalid_dispatcher` when a hook is missing; no silent success defaults). The journal contract requires the execution transitions `claimExecution`, `completeExecution`, `holdExecution` and `recoverQueued`: a dispatcher claims each message before running it, marks finished work `completed` and holds uncertain executions, so finished work never runs again after a restart (regression: a completed execution stays at one run across a clean restart). The server also never dispatches a duplicate send whose stored phase is not `queued_local`. Close waits for the dispatcher before the journal closes. | Verified |
+| **Safe Socket Lifecycle & Competitor Protection** | `local-messaging-address.test.mjs`, `local-messaging-server-client.test.mjs` | Failed start and close of competing server never unlinks active owner's socket. Stale cleanup unlinks only verified dead socket inodes; never unlinks regular files or symlinks. Rejects relative paths and path traversal. A socket is judged stale only when connecting is refused (`ECONNREFUSED`) or the path has vanished; any other connect error (`EAGAIN`, `EACCES`, a timeout) refuses with `socket_busy` and leaves the socket alone. Directory checks use the shared `delivery-private-path` rules: symlinks, foreign-owned and group- or world-writable ancestors are refused. | Verified |
+| **Coalesced Framing & Parser Bounds** | `local-messaging-protocol.mjs`, `local-messaging-server-client.test.mjs` | Streaming parser processes multiple coalesced valid frames in a single chunk; single oversized frames (>320 KB) are rejected. Malformed or null requests safely return JSON-RPC errors without unhandled rejections. The per-connection in-flight cap is a counter, and a request id that is already in flight on the connection is refused (`invalid_request`), so reusing an id cannot bypass it. | Verified |
 | **MCP Stdio Notifications & Dynamic Seam** | `local-messaging-mcp-adapter.test.mjs` | Full stdio flow (`initialize` -> `notifications/initialized` -> `tools/list` -> `tools/call`). Notifications emit zero response bytes per JSON-RPC 2.0. Dynamic credential provider seam refreshes turn credentials per turn. | Verified |
 | **Client Deadline Compliance** | `local-messaging-server-client.test.mjs` | Connect has bounded timeout with cancellation on close. `waitForReply` respects caller's overall deadline rather than blocking for client default 30s. | Verified |
 | **Separate-Process Acceptance** | `local-messaging-acceptance.test.mjs` | Real child processes communicate over Unix domain socket with mock SQLite test fixture and recoverable dispatcher; verifies reconnect, pending replies, and consumption. | Verified |
@@ -31,10 +32,10 @@
 
 | Feature | Installed Guarantee | Status | Blocker |
 |---|---|---|---|
-| **Shared Peer Journal Reuse** | Multi-process durability in `peer-drain.sqlite` | **GATED** | `peer-drain-service.mjs` holds an exclusive database lock. Extraction of a shared journal seam is blocked pending human completion of the 15 post-merge #104 peer bugs. Production default databases were removed. |
-| **Shared Production Dispatcher Adapter** | Production supervisor recoverable dispatcher adapter | **GATED** | Shared production adapter is unavailable; host must inject host-owned recoverable dispatcher satisfying the recovery and execution contract. |
-| **Installed Supervisor Wiring** | Automatic subsystem launch in `client-supervisor.mjs` | **GATED** | No production supervisor or installer files modified this pass. |
-| **Desktop Thread Turn Minting** | Interactive Codex desktop session turn credential minting | **GATED** | Requires wiring desktop thread turn lifecycle to mint turn tokens via the dynamic injection seam. |
+| **Shared Peer Journal Reuse** | Multi-process durability in `peer-drain.sqlite` | **SUPERSEDED** | The production journal (`local-messaging-journal.mjs`) reuses the shared custody and locking code (`shared-delivery-journal.mjs`) but keeps its own `local-messaging*.sqlite` files; it never takes the peer drain's database or owner lock. |
+| **Shared Production Dispatcher Adapter** | Production supervisor recoverable dispatcher adapter | **IMPLEMENTED** | `local-messaging-dispatcher.mjs` satisfies the recovery and execution contract (see `local-messaging-production-adapters.md`). |
+| **Installed Supervisor Wiring** | Automatic subsystem launch in `client-supervisor.mjs` | **IMPLEMENTED** | The supervisor hosts the local route in an isolated, retried loop (see `installed-local-messaging.md`). |
+| **Desktop Thread Turn Minting** | Interactive Codex desktop session turn credential minting | **IMPLEMENTED** | The desktop credential broker exchanges the owner-created integration capability for short-lived turn credentials. |
 | **Windows Named Pipe ACL** | Multi-agent IPC security on Windows | **EXPLICITLY UNSUPPORTED** | Windows named pipe security ACLs are explicitly unsupported until restricted pipe ACL support exists. |
 
 ---
@@ -46,14 +47,15 @@
    - Turn tokens **do not prevent sandbox escapes**. Process isolation is the responsibility of the OS process sandbox or container boundaries.
    - For sandboxed agents granted access to the domain socket, tokens prevent sender spoofing and cross-agent impersonation. For unsandboxed processes sharing the POSIX UID, user-level file permissions apply.
 2. **Sender Immutability and Claim Constraints:**
-   - Senders cannot forge arbitrary sender IDs; the server validates claims against the cryptographically signed token.
+   - Senders cannot forge arbitrary sender IDs; the server validates claims against the cryptographically signed token and uses the signed `claims.senderId` for every ACL, rate-limit, journal and ownership decision. The client-supplied `senderId` is only an assertion that must match.
+   - Message identifiers (`to`, `messageId`, `requestId`, `inReplyTo`) must be bounded identifier strings (`[A-Za-z0-9._:-]`, 1-256 characters) or the request fails with `invalid_request`.
    - Server enforces `allowedRecipients` and `maxLoopDepth` server-side and fails closed if violated.
-   - Signed `parentMessageId` is strictly checked against ancestry even if caller claims `loopDepth: 1` or omits `inReplyTo`. Unknown parent fails closed.
-   - Subsystem refuses issuance of credentials for unknown profiles.
+   - Signed `parentMessageId` is strictly checked against ancestry even if caller claims `loopDepth: 1` or omits `inReplyTo`. Unknown parent fails closed. Tokens without a parent cannot be linked by the server, so those loops are bounded by the pair exchange cap instead.
+   - Subsystem refuses issuance of credentials for unknown profiles and for every sender when no profiles are registered.
 3. **No Credential Leakage:**
    - Stack traces, private secrets, and credentials are redacted from responses and logs.
    - Status queries enforce sender/recipient ownership; foreign status queries are denied (`foreign_access_denied`).
-   - Clients never receive validators or private subsystem keys.
+   - Clients never receive validators or private subsystem keys; the MCP adapter takes no validator, so the agent-side process cannot mint credentials.
 
 ---
 
@@ -83,14 +85,16 @@ Local Messaging Server (Factory hosted by client-supervisor)
 
 ## 4. Test Fixtures and Custody Semantics
 
-All memory and SQLite persistence implementations live exclusively in test fixtures:
+The memory and SQLite fixture journals live in test code:
 - `packages/agent-worker/test/local-messaging-fixtures.mjs`
-- Test fixtures implement complete immutable envelope comparisons, simulated execution tracking, and the `createTestRecoverableDispatcher` fixture.
-- Test fixture phase-only tables do **not** represent the production peer recovery state machine. Production requires an injected shared-journal adapter and host dispatcher once the peer seam is unlocked.
+- The fixtures implement the full journal contract, including the execution transitions (`claimExecution`, `completeExecution`, `holdExecution`, `recoverQueued`) and complete immutable envelope comparisons, and `createTestRecoverableDispatcher` claims and completes work through them.
+- The fixtures do **not** represent the production journal's schema or durability. The production journal is `packages/agent-worker/src/local-messaging-journal.mjs`; the seam still has no default journal and requires an injected adapter.
 
 ---
 
 ## 5. Integration Seams for Subsequent PRs
+
+(Historical: items 1-3 were completed by the installed local messaging work; see `installed-local-messaging.md`.)
 
 1. **Extract Journal Seam from Peer Drain:**
    Extract raw SQLite operations from `peer-drain-service.mjs` adhering to `REQUIRED_JOURNAL_METHODS` without taking the exclusive `peer-drain-owner` lock.

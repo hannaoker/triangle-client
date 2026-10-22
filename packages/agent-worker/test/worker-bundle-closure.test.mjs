@@ -171,3 +171,56 @@ test("installed local wrapper executes only the verified packaged CLI and reject
     assert.throws(() => execFileSync(wrapper, ["discover"], { stdio: "pipe" }), /Command failed/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("installed local wrapper runs under the interpreter that ran the installer", (t) => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "triangle-local-shebang-")));
+  try {
+    chmodSync(root, 0o700);
+    const venv = path.join(root, "venv");
+    try {
+      execFileSync(python, ["-m", "venv", "--without-pip", venv], { stdio: "pipe" });
+    } catch {
+      t.skip("python venv is unavailable");
+      return;
+    }
+    const interpreter = path.join(venv, "bin", "python3");
+    assert.equal(execFileSync(interpreter, ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim(), interpreter);
+    const app = path.join(root, "app");
+    mkdirSync(app, { mode: 0o700 });
+    execFileSync(interpreter, [installer, "install-local-wrapper", "--application-root", app], { stdio: "pipe" });
+    const wrapper = readFileSync(path.join(app, "bin", "triangle-local"), "utf8");
+    assert.equal(wrapper.split("\n")[0], `#!${interpreter}`, "the wrapper must not hard-code another interpreter");
+    assert.equal(wrapper.split("\n")[1], "# TRIANGLE_MANAGED_LOCAL_WRAPPER_V1");
+    // It is still a verified wrapper: without a staged manifest it refuses to run anything.
+    assert.throws(() => execFileSync(path.join(app, "bin", "triangle-local"), ["discover"], { stdio: "pipe" }), /Command failed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("installer refuses interpreter paths that cannot safely name a shebang", () => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "triangle-local-interp-")));
+  try {
+    const spaced = path.join(root, "with space");
+    mkdirSync(spaced);
+    const spacedPython = path.join(spaced, "python3");
+    writeFileSync(spacedPython, "#!/bin/sh\n", { mode: 0o700 });
+    const notExecutable = path.join(root, "plain-file");
+    writeFileSync(notExecutable, "x", { mode: 0o600 });
+    const candidates = ["", "python3", "./python3", spacedPython, `${root}/new\nline`, `${root}/missing`, root, notExecutable, "/" + "a".repeat(300)];
+    const code = [
+      "import importlib.util, json, sys",
+      "spec = importlib.util.spec_from_file_location('twi', sys.argv[1])",
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "result = {}",
+      "for candidate in json.loads(sys.argv[2]):",
+      "    try:",
+      "        result[candidate] = m.wrapper_interpreter(candidate)",
+      "    except SystemExit:",
+      "        result[candidate] = None",
+      "result['own'] = m.wrapper_interpreter()",
+      "print(json.dumps(result))",
+    ].join("\n");
+    const result = JSON.parse(execFileSync(python, ["-c", code, installer, JSON.stringify(candidates)], { encoding: "utf8" }));
+    for (const candidate of candidates) assert.equal(result[candidate], null, `${JSON.stringify(candidate)} must be refused`);
+    assert.ok(path.isAbsolute(result.own) && !/\s/.test(result.own), "the running interpreter is accepted");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

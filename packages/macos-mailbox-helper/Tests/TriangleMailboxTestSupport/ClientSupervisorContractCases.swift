@@ -207,26 +207,49 @@ public enum ClientSupervisorContractCases {
             let data = try require(fixture.process.standardInput, "missing bootstrap")
             return try require(JSONSerialization.jsonObject(with: data) as? [String: Any], "missing bootstrap")
         }
+        func localOmissions() async throws -> [String] {
+            try await fixture.supervisor.prepareEnabledInstances().omitted
+                .filter { $0.reasonCode.hasPrefix("local_messaging_") }
+                .map(\.reasonCode)
+        }
         let absent = try await bootstrap()
         try expect(absent["localMessaging"] == nil, "missing owner configuration enabled route")
+        let absentOmissions = try await localOmissions()
+        try expect(absentOmissions.isEmpty, "missing owner configuration was reported as invalid")
         try Data(#"{"enabled":false,"brokerSecret":"never-forward-this"}"#.utf8).write(to: config)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
         let disabled = try await bootstrap()
         try expect(disabled["localMessaging"] == nil, "disabled owner configuration enabled route")
+        let disabledOmissions = try await localOmissions()
+        try expect(disabledOmissions.isEmpty, "disabled owner configuration was reported as invalid")
         try Data(#"{"enabled":true,"brokerSecret":"never-forward-this"}"#.utf8).write(to: config)
         let document = try await bootstrap()
         let local = try require(document["localMessaging"] as? [String: Any], "enabled owner configuration omitted")
         try expect(local.count == 1 && local["configPath"] as? String == config.path, "bootstrap exposed configuration beyond path")
+        let validOmissions = try await localOmissions()
+        try expect(validOmissions.isEmpty, "valid owner configuration was reported as invalid")
+        // An unsafe owner file keeps strict validation but only drops the local route:
+        // the MESH lanes still launch, the omission is recorded and preflight still passes.
+        func expectLocalRouteOmitted(_ reason: String) async throws {
+            let launched = try await bootstrap()
+            try expect(launched["localMessaging"] == nil, "\(reason) enabled route")
+            let omissions = try await localOmissions()
+            try expect(omissions == ["local_messaging_invalid"], "\(reason) omission was not reported")
+            try expect(((launched["instances"] as? [[String: Any]])?.count ?? 0) == 1, "\(reason) stopped the MESH lanes")
+            try await fixture.supervisor.preflight()
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: config.path)
-        do { _ = try await bootstrap(); throw SupervisorContractFailure("public owner configuration accepted") }
-        catch is ClientSupervisorError {}
+        try await expectLocalRouteOmitted("public owner configuration")
         try FileManager.default.removeItem(at: config)
         let target = fixture.helperRoot.appendingPathComponent("actual-local.json")
         try Data(#"{"enabled":true}"#.utf8).write(to: target)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
         try FileManager.default.createSymbolicLink(at: config, withDestinationURL: target)
-        do { _ = try await bootstrap(); throw SupervisorContractFailure("symlink owner configuration accepted") }
-        catch is ClientSupervisorError {}
+        try await expectLocalRouteOmitted("symlink owner configuration")
+        try FileManager.default.removeItem(at: config)
+        try Data(#"{"enabled":"yes"}"#.utf8).write(to: config)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
+        try await expectLocalRouteOmitted("malformed owner configuration")
     }
 
     public static func resolveBeforeCredential() async throws {

@@ -25,7 +25,9 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  const recipientIds=config.recipients.map(r=>r.instanceId);
  const registry=[integration.senderId,...recipientIds];
  const aclRules=Object.fromEntries([[integration.senderId,recipientIds],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
+ // Verified exchanges and failed attempts use separate buckets, so a failing caller cannot lock out the desktop.
  const brokerLimit=createPerSenderRateLimiter({maxRequestsPerWindow:120,windowMs:60000});
+ const brokerFailureLimit=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  let subsystem=null,journal=null,dispatcher=null,startPromise=null,closed=false;
  const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:recipientIds,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
  function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients};}
@@ -36,17 +38,26 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    const {createLocalMessagingJournal}=await import('./local-messaging-journal.mjs');
    const {createLocalMessagingDispatcher}=await import('./local-messaging-dispatcher.mjs');
    journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger});
-   dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
-    const runner=runners.get(job.recipient);
-    if(!runner)throw coded('local_recipient_unavailable','Recipient runtime unavailable');
-    const request={contextId:'local-'+createHash('sha256').update(`${job.sender}\0${job.requestId}`).digest('hex').slice(0,40),senderId:job.sender,text:job.text};
-    return gate.run(()=>{options.signal?.throwIfAborted();options.onStarted?.();return runner.run(request,{...options,timeoutMs:config.runnerTimeoutMs??3600000});},{signal:options.signal,instanceId:job.recipient});
-   }});
-   subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,aclRules,logger,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status()}),credentialBroker:params=>{
-    brokerLimit.checkAndConsume('desktop');
-    return {credential:broker.exchange(params),senderId:broker.senderId,threadId:broker.threadId};
-   }});
-   try {await subsystem.start();} catch(error){await subsystem.stop().catch(()=>{});throw error;}
+   try {
+    dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
+     const runner=runners.get(job.recipient);
+     if(!runner)throw coded('local_recipient_unavailable','Recipient runtime unavailable');
+     const request={contextId:'local-'+createHash('sha256').update(`${job.sender}\0${job.requestId}`).digest('hex').slice(0,40),senderId:job.sender,text:job.text};
+     return gate.run(()=>{options.signal?.throwIfAborted();options.onStarted?.();return runner.run(request,{...options,timeoutMs:config.runnerTimeoutMs??3600000});},{signal:options.signal,instanceId:job.recipient});
+    }});
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,aclRules,logger,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status()}),credentialBroker:params=>{
+     try {broker.verify(params);}
+     catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
+     brokerLimit.checkAndConsume('desktop');
+     return {credential:broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
+    }});
+    await subsystem.start();
+   } catch(error){
+    // Release the journal owner lock so the supervisor's retry can reopen it.
+    if(subsystem)await subsystem.stop().catch(()=>{});else await journal.close().catch(()=>{});
+    journal=dispatcher=subsystem=null;
+    throw error;
+   }
   })();
   try {await startPromise;} catch(error){startPromise=null;throw error;}
  }
@@ -58,8 +69,9 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  return {
   start,stop,
   status(){return {...baseStatus(),dispatcher:dispatcher?.status?.()??null};},
-  async watch({signal}={}){
+  async watch({signal,onStarted}={}){
    await start();
+   onStarted?.();
    try {await new Promise(resolve=>{if(signal?.aborted)return resolve();signal?.addEventListener('abort',resolve,{once:true});});}
    finally {await stop();}
    return {stopped:true};

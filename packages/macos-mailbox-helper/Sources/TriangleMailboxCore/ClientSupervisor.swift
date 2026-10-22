@@ -197,9 +197,20 @@ public struct ClientSupervisor: Sendable {
         self.parentEnvironment = parentEnvironment
     }
 
+    /// An existing but unsafe or invalid owner file only disables the local
+    /// route. It must never stop the MESH, headless or ACP lanes, so the reason
+    /// is recorded as a bounded omission instead of failing the bootstrap.
+    private func preparedLocalMessaging(omitted: inout [OmittedClientSupervisorInstance]) -> PreparedLocalMessagingBootstrap? {
+        do { return try strictLocalMessaging() }
+        catch {
+            omitted.append(.init(instanceID: "local-messaging", reasonCode: "local_messaging_invalid"))
+            return nil
+        }
+    }
+
     /// Forward only an opted-in owner file path. Secrets stay in Node's private
     /// configuration loader, never in the Swift bootstrap or diagnostics.
-    private func preparedLocalMessaging() throws -> PreparedLocalMessagingBootstrap? {
+    private func strictLocalMessaging() throws -> PreparedLocalMessagingBootstrap? {
         let url = localMessagingConfigURL
         var metadata = stat()
         if lstat(url.path, &metadata) != 0 {
@@ -518,7 +529,7 @@ public struct ClientSupervisor: Sendable {
             grokBotWake: grokBotWake,
             headlessWakes: headlessWakes,
             cursorAcpWakes: cursorAcpWakes,
-            localMessaging: try preparedLocalMessaging()
+            localMessaging: preparedLocalMessaging(omitted: &omitted)
         )
         let data: Data
         do {
@@ -1226,7 +1237,8 @@ public struct ClientSupervisor: Sendable {
 
     public func preflight() async throws {
         let launch = try await prepareEnabledInstances()
-        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") }) else {
+        // The local route is isolated: its omission never blocks the MESH lanes.
+        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") && !$0.reasonCode.hasPrefix("local_messaging_") }) else {
             throw ClientSupervisorError.invalidBootstrap
         }
     }

@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import { createLocalMessagingDispatcher } from "../src/local-messaging-dispatcher.mjs";
+import { waitFor } from "./local-messaging-fixtures.mjs";
 
 function createIsolatedStateRoot(prefix = "triangle-dispatcher-test-") {
   const realTmp = fs.realpathSync(os.tmpdir());
@@ -177,7 +178,8 @@ test("per-recipient serialization prevents same-harness overlap while overall co
       });
     }
 
-    // Await completion via stop()
+    // stop() no longer drains queued work, so wait for every job to finish first
+    await waitFor(async () => (await journal.status()).completed === 3, { message: "all three jobs" });
     await dispatcher.stop();
 
     // Assert agent-1 never ran 2 executions concurrently
@@ -230,6 +232,7 @@ test("duplicate notifications and retries never overlap or execute duplicate tur
       dispatcher.notifyAdmission(job),
     ]);
 
+    await waitFor(async () => (await journal.getRecord("msg-dup-test")).phase === "completed", { message: "completion" });
     await dispatcher.stop();
 
     assert.equal(invocationCount, 1, "Duplicate notifications must execute runner exactly once");
@@ -454,6 +457,7 @@ test("transient recipient busy does not wedge queue: other recipients make progr
 
     // Release slow job
     slowRelease();
+    await waitFor(() => executionOrder.length === 3, { message: "all three jobs" });
     await dispatcher.stop();
 
     assert.deepEqual(executionOrder, ["job-fast-3", "job-slow-1", "job-queued-2"]);
@@ -521,7 +525,7 @@ test('late success after deadline is held and never presented as a normal reply'
  const dispatcher=createLocalMessagingDispatcher({journal,runnerTimeoutMs:5,runRecipient:async(job,{onStarted,signal})=>{onStarted();await new Promise(r=>setTimeout(r,30));assert.equal(signal.aborted,true);return {status:'completed',text:'late'};}});
  try{
   await journal.recordSend({sender:'a',recipient:'b',messageId:'late',requestId:'late-req',text:'work'});
-  await dispatcher.start();await dispatcher.stop();
+  await dispatcher.start();await waitFor(async()=>(await journal.getRecord('late')).phase==='held',{message:'timeout hold'});await dispatcher.stop();
   assert.equal((await journal.getRecord('late')).reason,'runner_timeout');
   assert.deepEqual(await journal.listReplies({requester:'a'}),[]);
  }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
@@ -531,18 +535,108 @@ test('automatic reply keeps authoritative durable ancestry despite runner metada
  const dispatcher=createLocalMessagingDispatcher({journal,runRecipient:async()=>({status:'completed',text:'ok',metadata:{_loopDepth:1}})});
  try{
   await journal.recordSend({sender:'a',recipient:'b',messageId:'deep',requestId:'deep-req',text:'work',metadata:{_loopDepth:8}});
-  await dispatcher.start();await dispatcher.stop();
+  await dispatcher.start();await waitFor(async()=>(await journal.listReplies({requester:'a'})).length===1,{message:'reply'});await dispatcher.stop();
   const [reply]=await journal.listReplies({requester:'a'});assert.equal(reply.metadata._loopDepth,9);
  }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
 
 test('claim storage failure is contained and does not crash the supervisor',async()=>{
  const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
- const original=journal.claimExecution;journal.claimExecution=async()=>{throw new Error('disk failure');};
+ const original=journal.claimExecution;let attempts=0;journal.claimExecution=async()=>{attempts++;throw new Error('disk failure');};
  const dispatcher=createLocalMessagingDispatcher({journal,runRecipient:async()=>assert.fail('must not execute')});
  try{
   await journal.recordSend({sender:'a',recipient:'b',messageId:'disk',requestId:'disk-req',text:'work'});
-  await dispatcher.start();await dispatcher.stop();
+  await dispatcher.start();await waitFor(()=>attempts===1&&dispatcher.status().active===0,{message:'contained claim failure'});await dispatcher.stop();
   assert.equal((await journal.getRecord('disk')).phase,'queued_local');
  }finally{journal.claimExecution=original;await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
+
+test('stop waits only for running executions and leaves queued work queued_local for the next start',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot}),started=[];
+ let release;const held=new Promise(r=>{release=r;});
+ const runRecipient=async(job,{onStarted})=>{onStarted();started.push(job.messageId);if(job.messageId==='q-0')await held;return {status:'completed',text:'ok'};};
+ const dispatcher=createLocalMessagingDispatcher({journal,maxConcurrent:1,runRecipient});
+ try{
+  await dispatcher.start();
+  for(let i=0;i<5;i++){
+   const envelope={sender:'a',recipient:'b',messageId:`q-${i}`,requestId:`r-${i}`,text:'work'};
+   await journal.recordSend(envelope);await dispatcher.notifyAdmission(envelope);
+  }
+  await waitFor(()=>started.length===1,{message:'first execution'});
+  let stopped=false;const stopping=dispatcher.stop().then(()=>{stopped=true;});
+  await new Promise(r=>setTimeout(r,40));
+  assert.equal(stopped,false,'a running execution is still awaited');
+  assert.deepEqual(started,['q-0'],'nothing new starts once stopping');
+  release();await stopping;
+  assert.deepEqual(started,['q-0'],'queued work was not run during shutdown');
+  const status=await journal.status();
+  assert.equal(status.queued_local,4);assert.equal(status.completed,1);assert.equal(status.executing,0);
+  assert.equal(dispatcher.status().queued,0,'the in-memory queue is dropped, not the journal rows');
+  await dispatcher.notifyAdmission({sender:'a',recipient:'b',messageId:'late-admit',requestId:'r',text:'x'});
+  assert.deepEqual(started,['q-0'],'admissions after stop are ignored');
+  // The next start recovers every untouched queued message.
+  const recovered=[];
+  const next=createLocalMessagingDispatcher({journal,maxConcurrent:2,runRecipient:async(job,{onStarted})=>{onStarted();recovered.push(job.messageId);return {status:'completed',text:'ok'};}});
+  await next.start();
+  await waitFor(async()=>(await journal.status()).completed===5,{message:'recovered queue'});await next.stop();
+  assert.deepEqual(recovered.sort(),['q-1','q-2','q-3','q-4']);
+ }finally{release?.();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
+test('stop with nothing running resolves immediately and later admissions stay queued_local',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
+ try{
+  const dispatcher=createLocalMessagingDispatcher({journal,runRecipient:async()=>assert.fail('must not run during shutdown')});
+  await dispatcher.start();await dispatcher.stop();
+  const envelope={sender:'a',recipient:'b',messageId:'idle',requestId:'idle-req',text:'work'};
+  await journal.recordSend(envelope);await dispatcher.notifyAdmission(envelope);
+  await new Promise(r=>setTimeout(r,20));
+  assert.equal((await journal.getRecord('idle')).phase,'queued_local');
+  assert.equal(dispatcher.status().queued,0);
+ }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
+
+test('a late success after the deadline stays held, is stored for the owner, and never becomes a reply',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
+ const dispatcher=createLocalMessagingDispatcher({journal,runnerTimeoutMs:5,runRecipient:async(job,{onStarted})=>{onStarted();await new Promise(r=>setTimeout(r,40));return {status:'completed',text:'late answer'};}});
+ try{
+  await journal.recordSend({sender:'a',recipient:'b',messageId:'late-kept',requestId:'late-kept-req',text:'work'});
+  await journal.recordSend({sender:'a',recipient:'b2',messageId:'plain',requestId:'plain-req',text:'work'});
+  await journal.holdExecution('plain','operator_hold');
+  await dispatcher.start();await waitFor(async()=>(await journal.getRecord('late-kept')).phase==='held',{message:'timeout hold'});await dispatcher.stop();
+  const record=await journal.getRecord('late-kept');
+  assert.equal(record.reason,'runner_timeout');assert.equal(record.hasLateResult,true);
+  assert.ok(!JSON.stringify(record).includes('late answer'),'record never carries the late text');
+  assert.deepEqual(await journal.listReplies({requester:'a'}),[]);
+  assert.deepEqual(await journal.getLateResult('late-kept'),{messageId:'late-kept',text:'late answer'});
+  assert.equal((await journal.getRecord('plain')).hasLateResult,false);assert.equal(await journal.getLateResult('plain'),null);
+ }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
+
+test('the dispatcher compacts finished records at start and at most hourly, and a failing compaction never disturbs work',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
+ let clock=Date.UTC(2026,9,21,12,0,0);const calls=[],errors=[];
+ const compact=journal.compact.bind(journal);journal.compact=async(options={})=>{calls.push(options.now);return compact(options);};
+ const done=[];
+ const dispatcher=createLocalMessagingDispatcher({journal,now:()=>clock,logger:{error:(event,detail)=>errors.push({event,code:detail?.code})},runRecipient:async(job,{onStarted})=>{onStarted();done.push(job.messageId);return {status:'completed',text:'ok'};}});
+ const admit=async id=>{const envelope={sender:'a',recipient:'b',messageId:id,requestId:`r-${id}`,text:'work'};await journal.recordSend(envelope);await dispatcher.notifyAdmission(envelope);};
+ try{
+  await dispatcher.start();
+  assert.deepEqual(calls,[clock],'compaction runs at start');
+  await admit('m1');await admit('m2');
+  clock+=59*60*1000;await admit('m3');
+  assert.equal(calls.length,1,'at most hourly');
+  clock+=2*60*1000;await admit('m4');
+  assert.deepEqual(calls,[Date.UTC(2026,9,21,12,0,0),clock],'due again after an hour');
+  await waitFor(()=>done.length===4,{message:'all four jobs'});
+  journal.compact=async()=>{throw Object.assign(new Error('disk full'),{code:'disk_full'});};
+  clock+=2*60*60*1000;await admit('m5');
+  await waitFor(()=>done.length===5,{message:'work continues after a compaction failure'});
+  assert.deepEqual(errors,[{event:'local_messaging_compaction_failed',code:'disk_full'}]);
+  await dispatcher.stop();
+ }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
+
+test('the dispatcher exposes exactly one name per hook: start, stop, notifyAdmission (plus status)',()=>{
+ const dispatcher=createLocalMessagingDispatcher({journal:{},runRecipient:async()=>{}});
+ assert.deepEqual(Object.keys(dispatcher).sort(),['notifyAdmission','start','status','stop']);
 });

@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import {
   resolveLocalSocketAddress,
   validatePrivateDirectory,
+  validateSafeAncestors,
   validatePrivateSocket,
   cleanupStaleSocket,
 } from "../src/local-messaging-address.mjs";
@@ -187,4 +188,69 @@ test("cleanupStaleSocket never unlinks regular files or symlinks, and cleans dea
   assert.equal(fs.existsSync(deadSockPath), false);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("cleanupStaleSocket only removes a socket it can prove is dead, never one it merely failed to reach", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const tmpDir = makeTmpDir("triangle-stale-live-");
+  fs.chmodSync(tmpDir, 0o700);
+  const sockPath = path.join(tmpDir, "live.sock");
+  const server = net.createServer((socket) => socket.end("alive"));
+  try {
+    await new Promise((res, rej) => {
+      server.listen(sockPath, () => res());
+      server.on("error", rej);
+    });
+    // A live server that cannot be connected to (EACCES) is not a stale socket.
+    fs.chmodSync(sockPath, 0o000);
+    await assert.rejects(
+      async () => cleanupStaleSocket(sockPath),
+      (err) => err instanceof LocalMessagingError && err.code === "socket_busy",
+    );
+    assert.equal(fs.lstatSync(sockPath).isSocket(), true, "an unverifiable socket must be left alone");
+    // The server is still reachable once the permissions are restored.
+    fs.chmodSync(sockPath, 0o600);
+    const reply = await new Promise((resolve, reject) => {
+      const conn = net.createConnection({ path: sockPath });
+      let data = "";
+      conn.on("data", (chunk) => { data += chunk; });
+      conn.on("end", () => resolve(data));
+      conn.on("error", reject);
+    });
+    assert.equal(reply, "alive");
+  } finally {
+    await new Promise((res) => server.close(res));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("private directory checks reject group-writable ancestors, as the shared journal path checks do", { skip: process.platform === "win32" }, () => {
+  const base = makeTmpDir("triangle-ancestors-");
+  try {
+    fs.chmodSync(base, 0o700);
+    const ancestor = path.join(base, "shared");
+    const target = path.join(ancestor, "private");
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+    fs.chmodSync(ancestor, 0o755);
+    assert.doesNotThrow(() => validateSafeAncestors(target));
+    assert.doesNotThrow(() => validatePrivateDirectory(target));
+
+    fs.chmodSync(ancestor, 0o775);
+    for (const check of [() => validateSafeAncestors(target), () => validatePrivateDirectory(target)]) {
+      assert.throws(check, (err) => err instanceof LocalMessagingError && err.code === "unsafe_path");
+    }
+    // Creating a private directory beneath such an ancestor is refused before anything is made.
+    assert.throws(
+      () => validatePrivateDirectory(path.join(ancestor, "new", "deeper"), { create: true }),
+      (err) => err instanceof LocalMessagingError && err.code === "unsafe_path",
+    );
+    assert.equal(fs.existsSync(path.join(ancestor, "new")), false);
+    // Non-canonical and missing directories keep their unsafe_path code.
+    fs.chmodSync(ancestor, 0o755);
+    assert.throws(() => validatePrivateDirectory(`${target}/`), (err) => err.code === "unsafe_path");
+    assert.throws(() => validatePrivateDirectory(path.join(ancestor, "missing")), (err) => err.code === "unsafe_path");
+    assert.doesNotThrow(() => validatePrivateDirectory(path.join(ancestor, "created"), { create: true }));
+    assert.equal(fs.statSync(path.join(ancestor, "created")).mode & 0o777, 0o700);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
