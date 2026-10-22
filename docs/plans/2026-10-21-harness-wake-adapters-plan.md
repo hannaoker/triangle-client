@@ -15,7 +15,7 @@
 
 - **Owner decision D7-R — APPROVED:** on 2026-10-21 the owner said “push is approved.” This supersedes pivot §16.7's pull-only rule for opt-in desktop reply notifications through the existing real thread owner, under shared local/MESH arbitration. Pull remains a supported fallback, not the only permitted delivery mode. Activation still requires the fix and ownership gates.
 - **Workspace rule:** legacy `event-driven`/`codex exec` remains forbidden. Root `_context.md` and the pivot decision ledger now record approved D7-R. This does not authorize dual thread ownership, an automatic App Server fallback, arbitrary thread injection, or disabled-route reactivation before verification.
-- **Prerequisite / exclusive ownership:** active checkout `/Users/zhenyuhou/Projects/The Triangle/worktrees/local-messaging-fixes`, branch `fix/local-messaging-review-findings`, observed HEAD `2a9d8de` with uncommitted journal/test changes during review. The fix owner alone owns journal, dispatcher, server, client, rate/loop tracker, CLI, host and supervisor changes until released. No parallel wake implementation PR on those files. This documentation-only revision does not modify that checkout. Rebase the wake implementation only after its fixes land in the agreed base; do not assume PR #107 complete or silently absorb another owner's work.
+- **Prerequisite / exclusive ownership:** active checkout `/Users/zhenyuhou/Projects/The Triangle/worktrees/local-messaging-fixes`, branch `fix/local-messaging-review-findings`, owner handoff HEAD `c4182f5`, clean when checked; its fixes were integrated into the existing #107 branch without code conflicts. The fix owner alone owns journal, dispatcher, server, client, rate/loop tracker, CLI, host and supervisor changes until released. No parallel wake implementation PR on those files. This documentation-only revision does not modify that checkout. Rebase the wake implementation only after its fixes land in the agreed base; do not assume PR #107 complete or silently absorb another owner's work.
 - **Critical predecessor findings:** #5 stable message/request IDs on retry and #12 causal/loop cap that currently ignores linking are release blockers for automatic wake. Require regression evidence against real supported CLI/MCP paths, unlinked/new-request-id reply loops, reconnect/retry and mixed MESH/local delivery. A failed fix must keep push OFF. Carry their exact IDs and the fix owner's final commit/PR into the release checklist; this review did not independently close them.
 - **Single thread owner:** verify the ChatGPT app connection and production shared-host resume path. A thread ID in a JSON file, successful queue command or disabled watch flag alone is insufficient. Enforce one owner and one submit arbiter for MESH and local notifications on that thread, including restart. No second app-server/thread-resume fallback.
 - **Two separate approvals:** D7-R desktop push and local-to-MESH content bridging are distinct decisions. Approval of one does not approve the other.
@@ -215,3 +215,17 @@ This revision addresses blocking review items 1–3 and should-fix items 4–8. 
 - Claude custom-channel preview restriction confirmed at https://code.claude.com/docs/en/channels-reference : a custom channel needs `--dangerously-load-development-channels` for development, not ordinary `--channels`. The plan selects the version-pinned unsupported in-session socket prototype and does not enable that flag.
 
 Installed bundle recheck: manifest v9, bundle `cd5492bd98cfe551318258694dc675bd6c5ce580d3f1181d1a29dddfa3cb5c3a`; its packaged local host forwards the configured per-turn budget with the 3600000 ms default. This confirms the saved Mini configuration and packaged path, not an hour-long execution proof.
+
+## Prerequisite handoff — c4182f5
+
+Owner handed off the committed fix branch. Clean checkout verified; focused
+local messaging, supervisor-local integration and bundle closure tests passed
+137/137. Source/tests/scripts in the integrated #107 branch match c4182f5
+exactly; later approved decision notes remain intact. Findings #5/#12 have
+implementation and regression coverage in this handoff, not yet an automatic
+wake production proof. The pair exchange cap is process-local and time-windowed;
+restart/durable anti-loop behavior still requires M0/M1 validation before wake.
+
+This is integration into the review PR, not merge to main, installed activation,
+thread ownership proof, or permission to overlap the fix owner on shared files.
+No runtime or bindings were changed during this integration.
