@@ -40,3 +40,24 @@ No queue probe was submitted: first prove its owner routing without launching an
 5. Prove a common thread-level arbiter for MESH and local wake, plus restart/deduplication behavior.
 
 Result: **current owner identified; automatic desktop push remains OFF.** The user's push approval is preserved. This failed verification does not revoke approval; it identifies the engineering work needed before activation.
+
+## Follow-up: owner retired shared host
+
+User reported retirement completed; read-only inspection confirmed:
+
+- `~/Library/LaunchAgents/dev.thetriangle.shared-app-server.plist` is absent.
+- The shared-host launchd job is not loaded.
+- Production `client/app-server-binding.json` is absent.
+- The exact thread writer-lock lookup still returns only the ChatGPT-owned
+  Codex server PID 55297.
+
+This removes the observed dormant LaunchAgent/binding restart hazard; the
+older sections above are historical observations. It does not establish the
+queue routing or busy/idle notification proof.
+
+The local configuration is still enabled and points at the removed production
+binding. `triangle-local status` now exits 1 with `internal_error`. The next
+step is the reviewed dedicated desktop-sender binding migration from the #107
+fixes, preserving sender identity, followed by a service health check. Do not
+recreate the production binding or resurrect the shared host as a workaround.
+No runtime or configuration was changed by this verification.

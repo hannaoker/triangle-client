@@ -238,3 +238,13 @@ thread, and the installed bundle still uses the old shared binding. Queue routin
 to the actual owner, busy/idle canaries and shared MESH/local arbitration remain
 unverified. See `../reviews/2026-10-21-harness-adapter-spike.md`. No wake probe,
 new server, binding change or activation was performed during this verification.
+
+## Shared-host retirement verified
+
+The owner retired the separate shared host; its LaunchAgent and production
+binding are absent and its job is unloaded. The ChatGPT-owned writer remains
+the sole observed exact-thread lock holder. See the spike report follow-up.
+Local messaging still points to the removed binding and its status call fails;
+migrate to the dedicated desktop-sender binding from #107 before further
+message tests. Do not restore the retired shared-host binding. Queue routing,
+idle/busy delivery and arbitration proof remain open.
