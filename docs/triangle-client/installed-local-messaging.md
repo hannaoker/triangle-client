@@ -19,7 +19,7 @@ triangle-local consume --message-id REPLY_ID
 triangle-local mcp
 ```
 
-Use `--rebind-thread` only as an explicit owner action to move the existing desktop binding to the current conversation. Setup backs up the old binding and preserves its identity and disabled inbound wake flag. It does not enroll a replacement identity. Restart the existing client service after setup. A cold multi-profile start can exceed the service script's default ten-second readiness window; `TRIANGLE_READY_TIMEOUT_MS=60000` is available for the supervised activation check.
+Setup binds the desktop sender to the thread named by `--thread-id`, but only in the owner-created integration file (`desktop-integration.json` in the local state directory). It reads the production app-server binding (`app-server-binding.json`) solely for the existing sender identity and never writes it: the shared app-server host rereads, resumes and rewrites that file itself and may mint a new thread. Local messaging keeps working when it does, because the thread is fixed by the integration file and the broker only verifies that the app-server binding still carries the same sender identity. Use `--rebind-thread` only as an explicit owner action to move an existing integration to another conversation; it rotates the capability secret, so old exchanges stop working. Setup does not enroll a replacement identity or touch the binding's inbound wake flag. Restart the existing client service after setup. A cold multi-profile start can exceed the service script's default ten-second readiness window; `TRIANGLE_READY_TIMEOUT_MS=60000` is available for the supervised activation check.
 
 ## Custody and authority
 
@@ -40,5 +40,7 @@ Local route failures never stop the supervisor's MESH, headless or ACP lanes. A 
 ## Scope and limits
 
 The CLI is an installed supported path. The MCP stdio entry uses the same socket API and passes subprocess protocol tests, but adding it to an already running Codex conversation may require a host reload. Do not claim native Triangle tools are available until that host actually exposes them.
+
+Both entries make a retry safe. The MCP `triangle_send_message` tool generates `messageId` and `requestId` itself when the caller omits them and returns both in its result and in its error text (marked "outcome unknown" after a transport failure); the CLI prints the same IDs as `send_outcome_unknown`. A retry that reuses them is an idempotent duplicate and is never dispatched twice, while a retry without them is a new message.
 
 This milestone proves desktop-to-registered-agent delegation and durable return delivery. Recipient turns do not yet receive a configured outbound Triangle tool for recursive delegation. End-to-end provider availability, repeated long coding tasks, interruption/resume and multi-machine transport require their own evidence; one successful coding task does not establish universal reliability.

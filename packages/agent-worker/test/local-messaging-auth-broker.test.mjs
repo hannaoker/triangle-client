@@ -20,7 +20,11 @@ test('desktop broker authenticates a fixed binding and refuses stale thread or i
   writePrivateJson(integrationPath,{...data,secret:'b'.repeat(64)});
   assert.throws(()=>broker.exchange(data),{code:'unauthorized'});
   assert.equal(broker.exchange({...data,secret:'b'.repeat(64)}).sender,'sender');
+  // The thread is fixed by the integration file, so the shared app-server host may move its own binding.
   writePrivateJson(bindingPath,{instanceId:'sender',threadId:'rebound',enabled:false});
+  assert.equal(broker.exchange({...data,secret:'b'.repeat(64)}).sender,'sender');
+  // The sender identity is still verified against the app-server binding.
+  writePrivateJson(bindingPath,{instanceId:'someone-else',threadId:'thread-current',enabled:false});
   assert.throws(()=>broker.exchange({...data,secret:'b'.repeat(64)}),{code:'binding_changed'});
   assert.equal(readPrivateJson(bindingPath).enabled,false);
  } finally {fs.rmSync(root,{recursive:true,force:true});}

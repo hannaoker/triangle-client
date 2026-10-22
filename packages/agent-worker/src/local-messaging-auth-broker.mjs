@@ -33,9 +33,10 @@ function equalSecret(actual,expected) {
 export function createDesktopCredentialBroker({bindingPath,integrationPath,recipients,issue}) {
  const integration=readPrivateJson(integrationPath);
  if(integration.version!==1||typeof integration.secret!=='string'||integration.secret.length<64||(!Array.isArray(recipients)||recipients.some(r=>typeof r!=='string'))||typeof issue!=='function')throw coded('invalid_binding','Invalid integration binding');
+ // Only the identity is checked: the thread is fixed by the integration file, so the app-server host may move its own binding.
  const validate=()=>{
   const binding=readPrivateJson(bindingPath);
-  if(binding.instanceId!==integration.senderId||binding.threadId!==integration.threadId)throw coded('binding_changed','Desktop binding changed; run explicit owner binding setup');
+  if(binding.instanceId!==integration.senderId)throw coded('binding_changed','Desktop identity changed; run explicit owner binding setup');
  };
  validate();
  return Object.freeze({

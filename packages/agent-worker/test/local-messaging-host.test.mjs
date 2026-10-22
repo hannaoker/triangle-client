@@ -54,3 +54,21 @@ test('an oversized reply is retrievable through the installed CLI, truncated and
   assert.deepEqual((await run(['replies','--request-id','big-req'])).replies,[]);
  }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });
+test('the shared app-server host moving its own thread binding never breaks the installed local route',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-move-');let host;
+ const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+ try{
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'app-server-thread',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'conversation-one',recipients:['gravity2']});
+  const recipient=readPrivateJson(configPath).recipients[0].instanceId;
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,{run:async()=>({status:'completed',text:'ok'})}]]),gate:createProfiledReasonerGate()});await host.start();
+  const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
+  assert.equal((await run(['discover'])).threadId,'conversation-one');
+  // The production host rewrites its binding on every start and may mint a new thread.
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'freshly-minted-thread',enabled:false});
+  const discovered=await run(['discover']);assert.equal(discovered.threadId,'conversation-one');assert.deepEqual(discovered.recipients,[recipient]);
+  // A rebuilt host (supervisor retry or restart) also keeps working.
+  await host.stop();host=createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,{run:async()=>({status:'completed',text:'ok'})}]]),gate:createProfiledReasonerGate()});await host.start();
+  assert.equal((await run(['status'])).running,true);
+ }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});
