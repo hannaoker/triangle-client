@@ -1,0 +1,43 @@
+[   0.0s] mock: mock listening 47498
+[   0.2s] initialize -> {"userAgent":"stagea-driver/0.163.0-alpha.11.1 (Mac OS 27.0.1; arm64) unknown (stagea-driver; 0)","codexHome":"$WORK/runs/smoke/codex-home","platformFamily":"unix","platformOs":"macos"}
+[   0.3s] thread 01a16223-24cd-74d1-9a2a-bac3e125dcd4
+[   0.6s] lock holders after thread/start: [25124] (owner pid 25124)
+[   0.7s] turn completed: {"threadId":"01a16223-24cd-74d1-9a2a-bac3e125dcd4","turn":{"id":"01a16223-2638-7682-af64-fbca1f6e646d","rootTurnId":"01a16223-2638-7682-af64-fbca1f6e646d","items":[{"type":"agentMessage","id":"msg_1","text":"ACK 1: seed turn one [slow:0]","phase":null,"memoryCitation":null,"delivery":null,"questions
+[   0.7s] events: remoteControl/status/changed > thread/started > warning > thread/status/changed > turn/started > item/started > item/completed > item/started > item/completed > thread/tokenUsage/updated > account/rateLimits/updated > thread/readState/changed > thread/status/changed > turn/completed
+[   0.7s] loaded: {"data":["01a16223-24cd-74d1-9a2a-bac3e125dcd4"],"nextCursor":null}
+[   0.7s] mock requests: [{"n":1,"url":"/v1/responses","last":"seed turn one [slow:0]","model":"mock-model","auth":false}]
+[   0.7s] tree:
+  .sandbox_migration 3B
+  .tmp/
+    plugins.sync.lock 0B
+  config.toml 198B
+  goals_1.sqlite 4096B
+  goals_1.sqlite-shm 32768B
+  goals_1.sqlite-wal 74192B
+  installation_id 36B
+  logs_2.sqlite 49152B
+  logs_2.sqlite-shm 32768B
+  logs_2.sqlite-wal 115392B
+  memories_1.sqlite 4096B
+  memories_1.sqlite-shm 32768B
+  memories_1.sqlite-wal 86552B
+  queue_1.sqlite 4096B
+  queue_1.sqlite-shm 32768B
+  queue_1.sqlite-wal 82432B
+  sessions/
+    2026/
+  shell_snapshots/
+    01a16223-24cd-74d1-9a2a-bac3e125dcd4.1792647832815876000.sh 7521B
+  skills/
+    .system/
+  state_5.sqlite 4096B
+  state_5.sqlite-shm 32768B
+  state_5.sqlite-wal 2373152B
+  thread_history_1.sqlite 4096B
+  thread_history_1.sqlite-shm 32768B
+  thread_history_1.sqlite-wal 379072B
+  thread-writer-locks/
+    .coordination.lock 0B
+    01a16223-24cd-74d1-9a2a-bac3e125dcd4.lock 0B
+  tmp/
+    arg0-macos/

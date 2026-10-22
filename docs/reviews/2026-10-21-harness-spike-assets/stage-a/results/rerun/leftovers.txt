@@ -1,0 +1,3 @@
+harness processes left running: 0
+temporary socket dirs left   : 0
+real state before/after: identical

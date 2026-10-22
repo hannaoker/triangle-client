@@ -1,0 +1,6 @@
+[   0.1s] mock: mock listening 47589
+[   0.8s] add #1 -> {"queuedSubmission":{"id":"01a1624f-ec16-7d03-8916-427026640b5e","input":[{"type":"text","text":"HIST-A [slow:0]","text_elements":[]}],"clientUserMessageId":"hist-1"}}
+[   1.1s] HIST-A dispatched by the owner itself: true
+[   2.6s] add #2 (same clientUserMessageId, after dispatch) -> {"queuedSubmission":{"id":"01a1624f-f333-7e30-994d-988ff85ae1c7","input":[{"type":"text","text":"HIST-B [slow:0]","text_elements":[]}],"clientUserMessageId":"hist-1"}}
+[   2.9s] HIST-B dispatched (i.e. NOT deduped against history): true
+[   2.9s] queue now -> []

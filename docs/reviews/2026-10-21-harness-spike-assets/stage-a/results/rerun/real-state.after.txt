@@ -1,0 +1,4 @@
+managed daemon pids : 16779 
+writer-lock holders : 39686 
+lock files          : 2
+daemon socket dir   : 2 entries

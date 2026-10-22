@@ -1,0 +1,7 @@
+[   0.0s] mock: mock listening 47498
+[   1.3s] owner pid 46545 | lock holders [46545] | persistent server pid 46540
+[   2.9s] queue result: {"exit":{"code":0,"sig":null},"ms":19,"stdout":"Queued message 01a16231-1a12-7e30-ac2a-6c6ff7ca86e4 for thread 01a16231-15db-7e40-a6a0-fba47c9bd33b.","stderr":"","spawned":[],"survivors":[]}
+[  10.3s] owner started a turn from the queued message after 9.0s | mock saw TOPO-1: true
+[  10.6s] lock holders after: [46545] | persistent server holds locks: 0
+[  12.2s] queue result: {"exit":{"code":0,"sig":null},"ms":20,"stdout":"Queued message 01a16231-3ead-7893-a9d0-83cff2ce9753 for thread 01a16231-15db-7e40-a6a0-fba47c9bd33b.","stderr":"","spawned":[],"survivors":[]}
+[  12.3s] rows queued for thread after flagged attempt: 1

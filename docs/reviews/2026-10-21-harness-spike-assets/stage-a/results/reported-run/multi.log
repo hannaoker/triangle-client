@@ -1,0 +1,7 @@
+[   0.0s] mock: mock listening 47498
+[   0.9s] queued 3 idle messages in 98 ms
+[  30.9s] model requests after 3 idle adds: 3 ["MULTI-IDLE-1 [slow:0]","MULTI-IDLE-2 [slow:0]","MULTI-IDLE-3 [slow:0]"]
+[  30.9s] turn/started events: 3 | owner events: +9.4s thread/queue/changed(4e47) > +9.4s warning(4e47) > +9.4s thread/queue/changed(4e47) > +9.4s thread/status/changed(4e47) > +9.4s turn/started(4e47) > +9.4s item/started(4e47) > +9.4s item/completed(4e47) > +9.4s item/started(4e47) > +9.4s item/completed(4e47) > +9.4s thread/tokenUsage/updated(4e47) > +9.4s account/rateLimits/updated > +9.4s thread/readState/changed(4e47) > +9.4s thread/status/changed(4e47) > +9.4s turn/completed(4e47) > +9.4s warning(4e47) > +9.4s thread/queue/changed(4e47) > +9.4s thread/status/changed(4e47) > +9.4s turn/started(4e47) > +9.4s item/started(4e47) > +9.4s i
+[  33.0s] queued 3 messages while busy
+[  68.0s] model requests after busy turn + 3 adds: 4 ["HOLD [slow:12]","MULTI-BUSY-1 [slow:0]","MULTI-BUSY-2 [slow:0]","MULTI-BUSY-3 [slow:0]"]
+[  68.0s] turn/started events during busy phase: 4
