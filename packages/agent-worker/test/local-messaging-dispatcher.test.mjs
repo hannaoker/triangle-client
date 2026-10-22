@@ -611,3 +611,27 @@ test('a late success after the deadline stays held, is stored for the owner, and
   assert.equal((await journal.getRecord('plain')).hasLateResult,false);assert.equal(await journal.getLateResult('plain'),null);
  }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
+
+test('the dispatcher compacts finished records at start and at most hourly, and a failing compaction never disturbs work',async()=>{
+ const stateRoot=createIsolatedStateRoot(),journal=createLocalMessagingJournal({stateRoot});
+ let clock=Date.UTC(2026,9,21,12,0,0);const calls=[],errors=[];
+ const compact=journal.compact.bind(journal);journal.compact=async(options={})=>{calls.push(options.now);return compact(options);};
+ const done=[];
+ const dispatcher=createLocalMessagingDispatcher({journal,now:()=>clock,logger:{error:(event,detail)=>errors.push({event,code:detail?.code})},runRecipient:async(job,{onStarted})=>{onStarted();done.push(job.messageId);return {status:'completed',text:'ok'};}});
+ const admit=async id=>{const envelope={sender:'a',recipient:'b',messageId:id,requestId:`r-${id}`,text:'work'};await journal.recordSend(envelope);await dispatcher.notifyAdmission(envelope);};
+ try{
+  await dispatcher.start();
+  assert.deepEqual(calls,[clock],'compaction runs at start');
+  await admit('m1');await admit('m2');
+  clock+=59*60*1000;await admit('m3');
+  assert.equal(calls.length,1,'at most hourly');
+  clock+=2*60*1000;await admit('m4');
+  assert.deepEqual(calls,[Date.UTC(2026,9,21,12,0,0),clock],'due again after an hour');
+  await waitFor(()=>done.length===4,{message:'all four jobs'});
+  journal.compact=async()=>{throw Object.assign(new Error('disk full'),{code:'disk_full'});};
+  clock+=2*60*60*1000;await admit('m5');
+  await waitFor(()=>done.length===5,{message:'work continues after a compaction failure'});
+  assert.deepEqual(errors,[{event:'local_messaging_compaction_failed',code:'disk_full'}]);
+  await dispatcher.stop();
+ }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});

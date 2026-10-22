@@ -37,6 +37,12 @@ Timeout starts when the runner actually acquires the reasoner gate. A late succe
 
 Local route failures never stop the supervisor's MESH, headless or ACP lanes. A bad owner configuration, a missing recipient lane, a changed desktop identity, or a busy journal or socket disables only the local route. The supervisor logs the failure code, retries the host with exponential backoff (rebuilding it so repaired owner files are reread), and its `localStatus()` reports `state: "failed"` with that code, never secrets, until a start succeeds. An existing but unsafe or invalid `local-messaging.json` keeps its strict validation but is omitted from the helper bootstrap and recorded as a `local_messaging_invalid` omission instead of failing the whole bootstrap; the supervisor preflight does not count it as a MESH failure. The owner can still see the cause with `triangle-local status`, which rereads and validates the same file.
 
+## Journal files and retention
+
+The journal lives in the local state directory as `local-messaging.sqlite` (plus `local-messaging-owner.sqlite`, the exclusive owner lock). Services installed before this change used the peer drain's file names (`peer-drain.sqlite`, `peer-drain-owner.sqlite`). The first start moves them once, under the old owner lock and together with any `-journal` files, keeping their 0600 modes; it refuses with `journal_busy` while an old-version service still owns them, with `journal_migration_conflict` when both name sets exist, and never moves a database that is not a local journal. Nothing is copied or rewritten, so rolling back to a build that predates the move means moving the two files back to their old names.
+
+The dispatcher compacts finished records at start and at most hourly, with the peer drain's eight-day rule: completed messages are removed only once all of their replies have been consumed and aged out, and consumed replies after eight days. `held`, `queued_local` and `executing` records and unconsumed replies are never compacted. An exact retry of a compacted message ID is admitted as new work.
+
 ## Scope and limits
 
 The CLI is an installed supported path. The MCP stdio entry uses the same socket API and passes subprocess protocol tests, but adding it to an already running Codex conversation may require a host reload. Do not claim native Triangle tools are available until that host actually exposes them.

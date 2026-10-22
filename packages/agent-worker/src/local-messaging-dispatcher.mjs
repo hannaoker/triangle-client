@@ -7,6 +7,8 @@ export function createLocalMessagingDispatcher({
   logger = {},
   runnerTimeoutMs = 3600000,
   maxConcurrent = 2,
+  now = Date.now,
+  compactIntervalMs = 3600000,
 } = {}) {
   if (!journal) {
     throw coded("invalid_dispatcher_options", "journal is required");
@@ -26,6 +28,20 @@ export function createLocalMessagingDispatcher({
   const activeExecutions = new Map(); // messageId -> executionPromise
 
   let pumpScheduled = false;
+  let lastCompactionAt = null;
+
+  // Cheap retention: once at start, then at most once per interval when work arrives.
+  async function compactIfDue() {
+    if (typeof activeJournal.compact !== "function") return;
+    const at = now();
+    if (lastCompactionAt !== null && at - lastCompactionAt < compactIntervalMs) return;
+    lastCompactionAt = at;
+    try {
+      await activeJournal.compact({ now: at });
+    } catch (error) {
+      logger.error?.("local_messaging_compaction_failed", { error: "Local journal compaction failed", code: error?.code });
+    }
+  }
 
   function schedulePump() {
     if (pumpScheduled) return;
@@ -181,6 +197,7 @@ export function createLocalMessagingDispatcher({
     inFlightMessageIds.add(job.messageId);
     pendingQueue.push(job);
     schedulePump();
+    await compactIfDue();
   }
 
   async function start({ journal: injectedJournal } = {}) {
@@ -200,6 +217,7 @@ export function createLocalMessagingDispatcher({
       }
     }
 
+    await compactIfDue();
     schedulePump();
   }
 
