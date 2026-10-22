@@ -229,3 +229,12 @@ restart/durable anti-loop behavior still requires M0/M1 validation before wake.
 This is integration into the review PR, not merge to main, installed activation,
 thread ownership proof, or permission to overlap the fix owner on shared files.
 No runtime or bindings were changed during this integration.
+
+## M0 live inspection result
+
+Single-thread proof did not pass. Current observed writer is the ChatGPT-owned
+server, but the dormant shared-host startup can select the rebound production
+thread, and the installed bundle still uses the old shared binding. Queue routing
+to the actual owner, busy/idle canaries and shared MESH/local arbitration remain
+unverified. See `../reviews/2026-10-21-harness-adapter-spike.md`. No wake probe,
+new server, binding change or activation was performed during this verification.
