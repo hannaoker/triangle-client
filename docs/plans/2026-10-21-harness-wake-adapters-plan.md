@@ -6,6 +6,66 @@
 
 **Architecture:** Keep Triangle's existing supervisor, identities, durable journal and delivery modes. Use harness-native delivery mechanisms behind small adapters. Reason Network is the behavioral baseline and a source of selectively reusable code, not a second production message bus.
 
+## October 22 execution addendum
+
+**Codex slice status:** implemented in the source candidate, with automatic wake
+disabled by default. Antigravity completed the reviewed correction and test
+handoffs through installed Triangle; parent Codex independently verified 142
+focused tests and the full worker suite (851 passed, three skipped, zero failed),
+plus 11 Swift launcher tests and the v10 packaging checks. The initial full run
+found one stale v9 test expectation, corrected before the final full run.
+The macOS candidate package builds successfully. These checks do not close the
+remaining visual/bound-thread/arbitration activation gates or imply the Mini's
+installed v9 service has been upgraded. Claude and hosted Grok remain separate
+milestones.
+
+This addendum supersedes the generic event-stream proposal below for the first
+Codex milestone. Derive notification obligations from canonical unread replies
+and held messages, with one durable delivery-state row per binding. Generic
+subscriptions are deferred; free-form agent results remain unchanged.
+
+- One outstanding hint across submitting, accepted-awaiting-ack, uncertain and
+  stale-held. New arrivals accumulate; ordinary pull, consumption and elapsed
+  time never clear submission uncertainty. No automatic retries after expiry.
+- Every hint has a fresh wake ID, binding generation and snapshot fingerprint
+  including held/late-result state. Only authorized acknowledgment for that
+  exact wake ID/generation completes it. Do not repeat an unchanged acknowledged
+  snapshot. Explicit operator force-clear must warn of duplicate-turn risk.
+- Fixed automated/untrusted hint template; validated infrastructure IDs and
+  counts only. No peer-provided content is inserted into the queued user text.
+- Request-pair admission is durable and atomic with unique request insertion;
+  exact duplicate retries must still succeed at the cap. Terminal replies do
+  not spend or fail this request budget. Keep separate wake-rate/no-progress
+  controls and preserve counting evidence during journal compaction.
+- Auto-wake stays disabled by default. Integration needs a new exact manifest
+  version coordinated across the Python installer, Swift validator and tests;
+  immutable old manifest sets remain unchanged.
+
+Execution evidence: [October 22 canary record](../reviews/2026-10-22-desktop-queue-canary.md).
+Live idle delivery passed. Busy delivery passed its own strict collector and
+turn timestamps establish non-interruption, but delegated preceding-turn
+correlation is INCONCLUSIVE in the collector. Remaining protocol/activation
+gates are not waived. Both target and working chat are actually owned by the
+ChatGPT-bundled app server, despite the desktop tool naming.
+
+Independent prerequisite review found a P2 retry-at-full-pair-cap defect in
+`local-messaging-server.mjs`. On October 22 the owner explicitly answered “Yes”
+to releasing the shared files to parent Codex for this fix and wake integration.
+This supersedes the older ownership-pending statements below. Antigravity owns
+the runtime integration allowlist through Triangle, request
+`wake-m1-integration-20261022`; parent Codex owns documentation, installer, Swift
+manifest validation/fixtures and bundle-closure tests. The reviewer is read-only.
+No parallel implementation PR or production activation is authorized by this
+ownership transfer. Installation remains gated on verification.
+
+Focused proof matrix: valid exact-target receipt; explicit owner CODEX_HOME;
+invalid/disabled binding never spawns; no shell/peer interpolation; abort before
+start; timeout/abort/nonzero/malformed receipt held uncertain; bounded output;
+child termination before settlement; no implicit retry. Integration adds
+restart recovery, exact scoped acknowledgment, coalescing, late-result changes,
+duplicate-at-cap/concurrent admission, shared submission arbitration and bundle
+closure before activation.
+
 **Tech stack:** Existing Node supervisor, SQLite journal, CLI/MCP interface, Swift bootstrap, versioned package manifests; Codex CLI/App Server; version-pinned unsupported Claude in-session socket; hosted Grok routine webhook and MESH tools.
 
 **Status:** Desktop reply push approved by the owner ("push is approved"), 2026-10-21. D7-R supersedes pivot §16.7 for opt-in desktop reply notifications through the existing thread owner. Implementation and activation remain gated below; this approval does not approve local-to-MESH content copying. PR #107 remains unfinished and its review-finding fixes are not installed. The fix branch's work through `ce67d23` is integrated and pushed on `origin/codex/installed-local-messaging` (`d47976e`), and the fix checkout and local branch no longer exist, but no explicit release of the files it owned is recorded: confirm with the fix owner before any adapter implementation touches them. No account sign-in, Reason installation, webhook registration or live conversation injection was performed during this quick verification.

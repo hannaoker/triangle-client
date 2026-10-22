@@ -123,12 +123,34 @@ test("production supervisor closure contains no peer modules", () => {
 test("v9 packages installed messaging in every harness and retains v8 supervisor manifests", () => {
   const code = ["import importlib.util,json,sys", "spec=importlib.util.spec_from_file_location('twi',sys.argv[1])", "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)", "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'legacy':m.expected_artifacts('supervisor',8)}))"].join("\n");
   const contract=JSON.parse(execFileSync(python,["-c",code,installer],{encoding:"utf8"}));
-  assert.equal(contract.version,9);
+  assert.ok(contract.version >= 9);
   assert.ok(!contract.legacy.some(p=>p.includes('local-messaging')));
   for(const agent of ['codex','hermes','antigravity','supervisor']) {
     const artifacts=expectedArtifacts(agent);
     for(const name of ['shared-delivery-journal','local-messaging-cli','local-messaging-host','local-messaging-journal','local-messaging-dispatcher','local-messaging-auth-broker']) assert.ok(artifacts.has(`packages/agent-worker/src/${name}.mjs`),`${agent} missing ${name}`);
   }
+});
+
+test("v10 packages wake modules without changing the exact v8/v9 artifact sets", () => {
+  const code = [
+    "import importlib.util,json,sys",
+    "spec=importlib.util.spec_from_file_location('twi',sys.argv[1])",
+    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)",
+    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [8,9,10]} for a in ['codex','hermes','antigravity','supervisor']}}))",
+  ].join("\n");
+  const contract = JSON.parse(execFileSync(python, ["-c", code, installer], {encoding:"utf8"}));
+  assert.equal(contract.version, 10);
+  const additions = ['codex-wake-adapter','local-messaging-notifier'].map(name=>`packages/agent-worker/src/${name}.mjs`);
+  for (const [agent, versions] of Object.entries(contract.sets)) {
+    const old = new Set(versions[9]);
+    assert.deepEqual(versions[10].filter(p=>!old.has(p)).sort(), [...additions].sort(), agent);
+    assert.deepEqual(versions[9].filter(p=>!versions[10].includes(p)), [], agent);
+    for (const version of [8,9]) for (const added of additions) assert.ok(!versions[version].includes(added), `${agent} v${version} changed`);
+  }
+  const swift = readFileSync(path.join(repoRoot,"packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),"utf8");
+  const block = /if manifestVersion >= 10 \{\s*artifacts\.formUnion\(\[([^\]]*)\]\)/.exec(swift);
+  assert.ok(block, "Swift v10 exact artifact additions");
+  assert.deepEqual([...block[1].matchAll(/"([^"]+)"/g)].map(m=>m[1]).sort(), [...additions].sort());
 });
 
 test("installed local wrapper refuses unrelated replacements and validates manifest before execution", () => {

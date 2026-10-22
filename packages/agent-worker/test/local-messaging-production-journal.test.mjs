@@ -733,3 +733,133 @@ test("compaction removes only finished, consumed records older than eight days",
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
 });
+
+test("durable pair window: duplicateatfullcap, newrequestatcap, conflicts, concurrency, close/reopen, compact bypass, unlinkedrequests", async () => {
+  const stateRoot = createIsolatedStateRoot();
+  let journal;
+  try {
+    // 1. Initialize journal with maxPairRequests: 2, pairWindowMs: 60000 (1 minute)
+    journal = createLocalMessagingJournal({ stateRoot, maxPairRequests: 2, pairWindowMs: 60000 });
+    assert.equal(journal.hasDurablePairLimiter, true);
+
+    // Initial message from Alice to Bob
+    const msg1 = { sender: "alice", recipient: "bob", messageId: "msg-1", requestId: "req-1", text: "hello 1", metadata: { depth: 1 } };
+    const res1 = await journal.recordSend(msg1);
+    assert.equal(res1.isDuplicate, false);
+
+    // Symmetric message from Bob to Alice (counts towards same pair)
+    const msg2 = { sender: "bob", recipient: "alice", messageId: "msg-2", requestId: "req-2", text: "hello 2" };
+    const res2 = await journal.recordSend(msg2);
+    assert.equal(res2.isDuplicate, false);
+
+    // Cap of 2 is now reached.
+    // Test A: duplicateatfullcap - exact retry of msg1 succeeds at full cap
+    const dupRes = await journal.recordSend(msg1);
+    assert.equal(dupRes.isDuplicate, true);
+    assert.equal(dupRes.messageId, "msg-1");
+
+    // Test B: newrequestatcap - a new 3rd request is rejected
+    const msg3 = { sender: "alice", recipient: "bob", messageId: "msg-3", requestId: "req-3", text: "hello 3" };
+    await assert.rejects(
+      journal.recordSend(msg3),
+      (err) => err.code === "exchange_limit_exceeded",
+    );
+
+    // Terminal replies never denied by request budget
+    const rep1 = await journal.recordReply({
+      sender: "bob", recipient: "alice", messageId: "rep-1", requestId: "req-1", inReplyTo: "msg-1", text: "reply 1",
+    });
+    assert.equal(rep1.isDuplicate, false);
+
+    // Test C: conflicts - retry msg1 with changed metadata or changed text throws duplicate_id_conflict
+    await assert.rejects(
+      journal.recordSend({ ...msg1, text: "tampered text" }),
+      (err) => err.code === "duplicate_id_conflict",
+    );
+    await assert.rejects(
+      journal.recordSend({ ...msg1, metadata: { depth: 2 } }),
+      (err) => err.code === "duplicate_id_conflict",
+    );
+
+    // Test D: close/reopen - close journal and reopen, pair cap is still enforced
+    await journal.close();
+    journal = createLocalMessagingJournal({ stateRoot, maxPairRequests: 2, pairWindowMs: 60000 });
+    await assert.rejects(
+      journal.recordSend(msg3),
+      (err) => err.code === "exchange_limit_exceeded",
+    );
+    // Exact duplicate retry still works on reopened journal
+    assert.equal((await journal.recordSend(msg1)).isDuplicate, true);
+
+    // Test E: compact bypass - complete messages and run compact with retentionMs: 0
+    await journal.claimExecution("msg-1");
+    await journal.completeExecution("msg-1");
+    await journal.consumeReply({ requester: "alice", messageId: "rep-1" });
+    await journal.compact({ retentionMs: 0 });
+    // Window evidence must be preserved despite retentionMs: 0!
+    await assert.rejects(
+      journal.recordSend(msg3),
+      (err) => err.code === "exchange_limit_exceeded",
+    );
+
+    await journal.close();
+  } finally {
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+
+  // Test F: concurrency - concurrent async admissions cannot overshoot
+  {
+    const stateRoot = createIsolatedStateRoot();
+    let journal;
+    try {
+      journal = createLocalMessagingJournal({ stateRoot, maxPairRequests: 5, pairWindowMs: 60000 });
+      const promises = [];
+      for (let i = 0; i < 15; i++) {
+        promises.push(
+          journal.recordSend({
+            sender: "alice",
+            recipient: "bob",
+            messageId: `concurrent-${i}`,
+            requestId: `req-conc-${i}`,
+            text: `conc ${i}`,
+          }),
+        );
+      }
+      const results = await Promise.allSettled(promises);
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      assert.equal(fulfilled.length, 5, "exactly maxPairRequests admissions succeed");
+      assert.equal(rejected.length, 10, "excess admissions are rejected");
+      for (const rej of rejected) {
+        assert.equal(rej.reason?.code, "exchange_limit_exceeded");
+      }
+    } finally {
+      await journal?.close();
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  }
+
+  // Test G: unlinkedrequests - requests without inReplyTo or requestId count towards pair budget symmetrically
+  {
+    const stateRoot = createIsolatedStateRoot();
+    let journal;
+    try {
+      journal = createLocalMessagingJournal({ stateRoot, maxPairRequests: 2, pairWindowMs: 60000 });
+      // Alice -> Bob (unlinked)
+      await journal.recordSend({ sender: "alice", recipient: "bob", messageId: "u-1", requestId: "u-1", text: "u1" });
+      // Bob -> Alice (unlinked)
+      await journal.recordSend({ sender: "bob", recipient: "alice", messageId: "u-2", requestId: "u-2", text: "u2" });
+      // Third unlinked request fails
+      await assert.rejects(
+        journal.recordSend({ sender: "alice", recipient: "bob", messageId: "u-3", requestId: "u-3", text: "u3" }),
+        (err) => err.code === "exchange_limit_exceeded",
+      );
+      // Different pair (Alice <-> Charlie) is independent and has its own budget
+      const charlieMsg = await journal.recordSend({ sender: "alice", recipient: "charlie", messageId: "c-1", requestId: "c-1", text: "c1" });
+      assert.equal(charlieMsg.isDuplicate, false);
+    } finally {
+      await journal?.close();
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  }
+});

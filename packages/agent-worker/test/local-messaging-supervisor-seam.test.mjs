@@ -410,6 +410,8 @@ test("duplicate retries are not exchanges and one-way traffic uses the same pair
     await client.sendMessage({ to: "gravity2", text: "task 3", messageId: "task-3" });
     await assert.rejects(client.sendMessage({ to: "gravity2", text: "task 4", messageId: "task-4" }), (err) => err.code === "exchange_limit_exceeded");
     assert.equal(await journal.getRecord("task-4"), null, "a refused message is not admitted");
+    // Duplicate retry at full cap MUST succeed
+    assert.equal((await client.sendMessage(task)).isDuplicate, true, "duplicate retry succeeds at full cap");
   } finally {
     await client.close();
     await subsystem.stop();

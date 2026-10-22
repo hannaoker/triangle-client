@@ -52,3 +52,33 @@ The CLI is an installed supported path. The MCP stdio entry uses the same socket
 Both entries make a retry safe. The MCP `triangle_send_message` tool generates `messageId` and `requestId` itself when the caller omits them and returns both in its result and in its error text (marked "outcome unknown" after a transport failure); the CLI prints the same IDs as `send_outcome_unknown`. A retry that reuses them is an idempotent duplicate and is never dispatched twice, while a retry without them is a new message.
 
 This milestone proves desktop-to-registered-agent delegation and durable return delivery. Recipient turns do not yet receive a configured outbound Triangle tool for recursive delegation. End-to-end provider availability, repeated long coding tasks, interruption/resume and multi-machine transport require their own evidence; one successful coding task does not establish universal reliability.
+
+## Opt-in desktop reply wake (v10 candidate)
+
+The v10 source candidate adds Codex queue notifications to the existing host;
+this does not mean the Mini has been upgraded or push enabled. Exact v8/v9
+bundles remain supported. The v10 artifact set adds `codex-wake-adapter.mjs`
+and `local-messaging-notifier.mjs`; update the verified helper and supervisor
+bundle together before enabling this configuration.
+
+An optional `wake` object in the private local configuration pins `enabled`,
+the absolute `codexPath`, and the owner's absolute `codexHome`. Absence or
+`enabled: false` preserves pull behavior. The target is the existing desktop
+broker's identity and thread, never a peer-selected destination. Activation
+still requires the live ownership, delivery and shared-submission gates in
+the harness-wake plan. There is no fallback server or thread resume.
+
+Hints contain only validated infrastructure identifiers, counts and held/late
+presence, using a fixed automated/untrusted template. Agent reply text remains
+free-form and must be independently verified. One durable outstanding hint
+coalesces the backlog. A successful queue receipt means accepted for queueing,
+not read or completed. Timeout, crash or ambiguous output holds the hint;
+new replies, ordinary retrieval, consumption and time do not retry it.
+
+After retrieving updates, the bound desktop can explicitly acknowledge the
+exact wake ID and generation using `triangle-local ack-wake --wake-id ID
+--generation N`, or MCP `triangle_ack_notification`. Acknowledgment does not
+consume replies. An unchanged acknowledged snapshot does not generate another
+turn; new updates can produce a later coalesced hint. Foreign/stale
+acknowledgments must fail. Uncertain delivery requires exact acknowledgment or
+future explicit operator reconciliation, rather than automatic retry.

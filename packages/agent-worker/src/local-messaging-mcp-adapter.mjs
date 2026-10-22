@@ -61,6 +61,18 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "triangle_ack_notification",
+    description: "Acknowledge a wake notification delivered to this desktop session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        wakeId: { type: "string", description: "Wake ID to acknowledge" },
+        generation: { type: "integer", description: "Binding generation number" },
+      },
+      required: ["wakeId", "generation"],
+    },
+  },
+  {
     name: "triangle_cancel_message",
     description: "Signal cancellation of a sent message (unsupported on local route).",
     inputSchema: {
@@ -224,6 +236,15 @@ export function createLocalMessagingMcpHandler({
 
               case "triangle_consume_reply": {
                 const res = await client.consumeReply({ messageId: args.messageId }, rpcOptions);
+                resultData = res;
+                break;
+              }
+
+              case "triangle_ack_notification": {
+                const res = await client.ackNotification({
+                  wakeId: args.wakeId,
+                  generation: args.generation,
+                }, rpcOptions);
                 resultData = res;
                 break;
               }

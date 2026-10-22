@@ -88,7 +88,11 @@ LOCAL_MESSAGING_ARTIFACTS = [
     "packages/agent-worker/src/local-messaging-host.mjs",
     "packages/agent-worker/src/local-messaging-cli.mjs",
 ]
-CURRENT_MANIFEST_VERSION = 9
+WAKE_NOTIFICATION_ARTIFACTS = [
+    "packages/agent-worker/src/codex-wake-adapter.mjs",
+    "packages/agent-worker/src/local-messaging-notifier.mjs",
+]
+CURRENT_MANIFEST_VERSION = 10
 CODEX_HEADLESS_ARTIFACTS = [
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
@@ -231,26 +235,27 @@ def copy_regular(source, destination, destination_mode=0o600):
 
 def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     if agent == "supervisor":
-        if version not in {8, 9}:
+        if version not in {8, 9, 10}:
             fail("unsupported supervisor manifest version")
         return expected_artifacts("codex", version)[:-2]
     if agent not in AGENTS:
         fail("invalid worker kind")
     if version == 3:
         common = LEGACY_COMMON_ARTIFACTS
-    elif version in {4, 5, 6, 7, 8, 9}:
+    elif version in {4, 5, 6, 7, 8, 9, 10}:
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7, 8, 9} else [])
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7, 8, 9, 10} else [])
     # The coordinator (client-supervisor-cli.mjs) may launch from any worker's
     # bundle and statically imports codex-runtime/headless-drain-service.mjs, so
     # v7 ships codex-runtime in every bundle; v5/v6 keep their exact sets.
-    extras += CODEX_HEADLESS_ARTIFACTS if (version in {7, 8, 9} or (version in {5, 6} and agent == "codex")) else []
-    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7, 8, 9} else []
-    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version in {7, 8, 9} else []
+    extras += CODEX_HEADLESS_ARTIFACTS if (version in {7, 8, 9, 10} or (version in {5, 6} and agent == "codex")) else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7, 8, 9, 10} else []
+    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version in {7, 8, 9, 10} else []
     extras += WORKLOAD_CORE_ARTIFACTS if version >= 8 else []
     extras += LOCAL_MESSAGING_ARTIFACTS if version >= 9 else []
+    extras += WAKE_NOTIFICATION_ARTIFACTS if version >= 10 else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
@@ -393,7 +398,7 @@ def strict_manifest(path, agent):
     }
     if agent == "supervisor":
         expected_environment = {"PATH", "LANG", "LC_ALL"}
-    if value["version"] not in {3, 4, 5, 6, 7, 8, 9} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in {3, 4, 5, 6, 7, 8, 9, 10} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")

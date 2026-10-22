@@ -1,0 +1,109 @@
+# Desktop queue canary — October 22, 2026
+
+Scope: one dedicated scratch conversation created with owner authorization;
+no production binding changes, queue database writes, second server, or installs.
+
+Target: `01a16531-3a1d-7d41-85cf-f6ba0dccc2db` (Triangle wake canary).
+The initial setup completed with `READY`. Although created using Codex desktop
+tools, its actual writer is the ChatGPT-bundled server, PID 39686, parent
+ChatGPT.app PID 39266. CLI is Homebrew `codex-cli 0.163.0`.
+
+## Observations
+
+All timestamps below are UTC on October 22 (subtract seven hours for PDT).
+
+| Case | Submission | Observed result | Evidence boundary |
+| --- | --- | --- | --- |
+| Idle, `B1-IDLE-20261022` | 20:19:57.186; exit 0, receipt `01a16545-3821-77c3-82a7-cd93736d8f97` | Turn `01a16545-4577-7f63-be54-67d81dc489ba` started 20:20:01.023, completed 20:20:02.512; exact acknowledgment | Strict collector PASS: one queue-triggered turn, one acknowledgment, zero tools/unclassified records. Same sole lock holder in all 30 samples (~36 seconds). CLI exit time was not measured separately from observation. |
+| Busy, `B1-BUSY-20261022` | 20:21:06.158–06.423; exit 0, receipt `01a16546-44f4-7391-91ab-07adf95d4e0b` | Busy turn completed 20:21:24.822; canary turn `01a16546-8cd7-7b42-88df-cf3f2ced3d79` started 11 ms later, completed 20:21:27.417; exact acknowledgment | Strict collector PASS for canary itself. `--after-token` is INCONCLUSIVE because the busy request arrived as a delegated tool input, not an ordinary user item. Separate JSON turn-ID/timestamp inspection establishes ordering; do not label full protocol PASS. |
+
+Busy predecessor: `01a16545-cbb6-7680-9645-a43af0e06b71`, started
+20:20:35.392. Its sole requested shell command was `sleep 45`, observed in
+the rollout before queue submission. It returned `busy done.` (extra period
+relative to requested output). The queued canary did not interrupt that turn.
+Post-test lock holder remained PID 39686; target queue count was zero.
+
+Transient evidence: `/private/tmp/triangle-wake-canary-20261022/idle.json`
+and `busy.json`; original rollout is the exact target's October 22 session.
+No unrelated conversation content was collected.
+
+## Remaining gates
+
+This establishes useful live idle/busy delivery evidence, not installed adapter
+acceptance. Full protocol gates remain: visible/background observation, bound
+working-thread canary, restart behavior, and local/MESH arbitration. Automatic
+wake remains OFF. No MESH content bridge is authorized.
+
+Independent prerequisite review found one remaining P2: exact retries are
+rejected at a full pair cap because exchange reservation precedes durable
+deduplication (`local-messaging-server.mjs:218`). No other P1/P2 was reported;
+reviewer ran 41 relevant tests successfully. The owner subsequently explicitly
+released shared-file ownership to parent Codex; fixing the retry regression
+remains a prerequisite for activation.
+
+Antigravity was assigned only the new standalone queue adapter and its test
+file, through installed Triangle, request `wake-adapter-build-20261022`.
+That first task excluded shared files, packaging, live configuration and
+installation. Its correction passes produced an 11-test standalone adapter;
+independent review still found a descendant-cleanup edge case and an unbounded
+probe version, both assigned to the next integration task.
+
+After ownership release, Antigravity received runtime integration request
+`wake-m1-integration-20261022`. Parent Codex owns packaging and docs separately.
+The focused v10 Python/Swift contract test and 11 Swift launcher tests passed;
+independent packaging review found no P1/P2 and verified old v8/v9 exact sets
+against the pre-change source. Full closure tests await the notifier module.
+This is source verification, not installation or automatic-wake activation.
+
+## Integration review checkpoint
+
+The candidate passed 33 focused adapter/notifier/SQLite tests and all 21
+combined bundle-closure/installation-contract tests. Those passes did not close
+independent review findings: installed binding format incompatibility, notifier
+shutdown race, configurable interval below the 15-second floor, startup before
+socket readiness, and a parent-reproduced stale acknowledgment accepted after
+thread rebind. The batched correction request is
+`wake-m1-review-fixes-20261022`, under the same integration request ID.
+
+The initial implementation request ended held with `runtime_error`, without a
+final reply. Its stored diagnostic contains network-unavailable/503 indicators;
+this is not a proven source-test failure or a completed handoff. Triangle
+started the queued correction separately after the first execution ended.
+Do not treat the partial source or passing tests as accepted implementation.
+
+Computer-use observation of the desktop app was denied by the tool's app safety
+restriction. No alternate screen-access method was used. A user-observed
+visual/background check remains necessary before closing those activation gates.
+
+## Final source verification
+
+Both follow-ups completed through installed Triangle, with correlated replies
+to `wake-m1-review-fixes-20261022` and `wake-m1-test-wiring-20261022`. Independent
+re-review found no remaining P1/P2 source blocker in the correction batch.
+Binding compatibility, stable restart identity, durable generation advance,
+stale/foreign acknowledgment rejection, full evaluation shutdown custody,
+production configuration bounds and socket-first startup have regression
+coverage. Parent independently reproduced zero post-stop submissions and the
+reviewer verified real SQLite/socket retry-at-cap behavior.
+
+- Focused final run: 142 passed, zero failed/cancelled/skipped. All 167 worker
+  source/test file hashes remained unchanged during the run.
+- Full worker package: final run 851 passed, three skipped, zero failed or
+  cancelled; source hashes remained unchanged. The prior run's sole failure
+  was an old v9 assertion in the supervisor bundle test. It was updated to v10;
+  that file's nine tests and then the final full suite passed.
+- Packaging/installation contracts: 21 passed. Swift launcher tests: 11 passed.
+  Canary collector self-tests: 19 passed. Earlier targeted results are subsets,
+  not additional independent test counts.
+- Release-candidate build: `0.1.0-wake-candidate`, macOS arm64, 131 manifest
+  files. Archive SHA-256:
+  `b58759a7f27e8a558b7280562321f024609b6c73370e11cd0844b539564b655b`.
+- Export smoke: generated checksum-verifying installer installed the actual
+  archive into a disposable private test home. Packaged CLI help succeeded;
+  the exported source staged and validated a v10 supervisor containing both
+  wake modules. The test service stayed staged/stopped; the real account's
+  installation was not changed.
+
+The package is local under `/private/tmp/triangle-wake-release-20261022`.
+This remains a candidate with automatic wake off; live activation gates above
+are still open. No MESH content bridge or second app-server was introduced.

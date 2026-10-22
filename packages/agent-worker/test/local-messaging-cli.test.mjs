@@ -47,6 +47,13 @@ test('supported CLI binds explicitly, sends through one service, reconnects and 
   assert.equal(replies.replies[0].sender,recipient);
   await run(['consume','--message-id','reply-coding-one']);
   assert.deepEqual((await run(['replies','--request-id','request-one'])).replies,[]);
+  await journal.initWakeBinding({targetIdentity:integration.senderId,bindingId:'b-cli-1',threadId:'new-thread',generation:1});
+  await journal.setWakeSubmitting({targetIdentity:integration.senderId,wakeId:'wake-cli-1',fingerprint:'fp-1'});
+  await journal.setWakeAccepted({targetIdentity:integration.senderId,wakeId:'wake-cli-1',receipt:{queuedId:'q-cli-1',threadId:'th-1'}});
+  const acked=await run(['ack-wake','--wake-id','wake-cli-1','--generation','1']);
+  assert.equal(acked.acknowledged,true);
+  assert.equal(acked.wakeId,'wake-cli-1');
+  await assert.rejects(run(['ack-wake','--wake-id','wake-cli-1','--generation','2']));
   assert.ok(!JSON.stringify(sent).includes(integration.secret));
   const previousExchanges=exchanges;exchangeLimit=exchanges+1;
   const waited=await run(['send','--to','gravity2','--text','wait','--message-id','wait-one','--request-id','request-wait','--wait-ms','1200']);

@@ -13,7 +13,7 @@ import {coded} from './local-messaging-errors.mjs';
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms']);
+ const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation']);
  while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -54,9 +54,9 @@ export function setupLocalMessaging(options,env=process.env){
 }
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, mcp\n');return 0;}
  if(command==='setup'){output.write(JSON.stringify(setupLocalMessaging(options,env))+'\n');return 0;}
- if(!['status','discover','send','replies','consume','mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
+ if(!['status','discover','send','replies','consume','ack-wake','mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
  const binding=readPrivateJson(config.integrationPath);
@@ -78,6 +78,11 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,recipients:await client.discoverRecipients(rpcOptions)};
   if(command==='replies')result={senderId:binding.senderId,replies:await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to']},rpcOptions)};
   if(command==='consume')result=await client.consumeReply({messageId:options['message-id']},rpcOptions);
+  if(command==='ack-wake'){
+   const wakeId=options['wake-id'],generation=Number(options.generation);
+   if(!wakeId||!Number.isInteger(generation)||generation<0)throw coded('invalid_arguments','wake-id and valid generation are required');
+   result=await client.ackWake({wakeId,generation},rpcOptions);
+  }
   if(command==='send'){
    const to=config.recipients.find(r=>r.profile===options.to||r.instanceId===options.to)?.instanceId;
    if(!to)throw coded('recipient_not_allowed','Choose an explicitly configured recipient');

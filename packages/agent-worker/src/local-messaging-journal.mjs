@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, lstatSync, openSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -13,6 +13,12 @@ const LEGACY_DB_NAME = "peer-drain.sqlite";
 const LEGACY_OWNER_DB_NAME = "peer-drain-owner.sqlite";
 // Finished records are compacted after the same eight days as the peer drain's.
 const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+export const DEFAULT_MAX_PAIR_EXCHANGES = 10;
+export const DEFAULT_PAIR_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+function pairKeyFor(a, b) {
+  return a < b ? `${a}\0${b}` : `${b}\0${a}`;
+}
 
 // One-time move of an installed journal to its own file names. It runs under the
 // legacy owner lock (a live old-version owner blocks it) and moves each
@@ -142,7 +148,12 @@ function mapReplyRow(row) {
   };
 }
 
-export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
+export function createLocalMessagingJournal({
+  stateRoot,
+  logger = {},
+  maxPairRequests = DEFAULT_MAX_PAIR_EXCHANGES,
+  pairWindowMs = DEFAULT_PAIR_WINDOW_MS,
+} = {}) {
   adoptLegacyJournalFiles(stateRoot, logger);
   const deliveryJournal = openDeliveryJournal({
     stateRoot,
@@ -199,12 +210,41 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     CREATE INDEX IF NOT EXISTS idx_local_replies_recip_consumed ON local_replies(recipient, consumed);
     CREATE INDEX IF NOT EXISTS idx_local_replies_req ON local_replies(request_id);
     CREATE INDEX IF NOT EXISTS idx_local_replies_reply ON local_replies(in_reply_to);
+
+    CREATE TABLE IF NOT EXISTS local_pair_admissions (
+      pair_key TEXT NOT NULL,
+      message_id TEXT NOT NULL PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_pair_admissions_key_time ON local_pair_admissions(pair_key, created_at);
+
+    CREATE TABLE IF NOT EXISTS local_wake_bindings (
+      target_identity TEXT NOT NULL PRIMARY KEY,
+      binding_id TEXT NOT NULL,
+      auth_binding_id TEXT,
+      thread_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      delivery_state TEXT NOT NULL DEFAULT 'idle',
+      active_wake_id TEXT,
+      active_fingerprint TEXT,
+      last_acknowledged_fingerprint TEXT,
+      last_acknowledged_wake_id TEXT,
+      receipt_queued_id TEXT,
+      receipt_thread_id TEXT,
+      last_submitted_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
   // Additive migrations only: journals written by earlier versions hold live data.
   const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
   if (!messageColumns.includes("late_result_text")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
+  }
+  const wakeColumns = db.prepare("PRAGMA table_info(local_wake_bindings)").all().map((c) => c.name);
+  if (!wakeColumns.includes("auth_binding_id")) {
+    db.exec("ALTER TABLE local_wake_bindings ADD COLUMN auth_binding_id TEXT");
   }
 
   // Crash recovery on startup: any in-flight execution is held immediately
@@ -227,12 +267,17 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     reason: "crash_recovery",
   }));
 
+  // Wake state crash recovery: crash-in-submitting recovers uncertain, no CLI retry
+  db.prepare(
+    "UPDATE local_wake_bindings SET delivery_state = 'uncertain', updated_at = ? WHERE delivery_state = 'submitting'"
+  ).run(Date.now());
+
   } catch (error) {
     deliveryJournal.close();
     throw error;
   }
 
-  async function recordSend(envelope) {
+  async function recordSend(envelope, options = {}) {
     assertNotClosed();
     if (!envelope || typeof envelope !== "object") {
       throw coded("invalid_envelope", "Envelope must be an object");
@@ -243,24 +288,57 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     }
 
     const hash = computeEnvelopeHash(envelope);
-    const existing = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
-    if (existing) {
-      if (existing.canonical_hash === hash) {
-        return { ...mapMessageRow(existing), isDuplicate: true };
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+      if (existing) {
+        if (existing.canonical_hash === hash) {
+          db.exec("COMMIT");
+          return { ...mapMessageRow(existing), isDuplicate: true };
+        }
+        throw coded("duplicate_id_conflict", `Conflicting envelope for messageId: ${messageId}`);
       }
-      throw coded("duplicate_id_conflict", `Conflicting envelope for messageId: ${messageId}`);
+
+      // Check pair window admission limit atomically with insertion
+      const effectiveMax = options.maxPairRequests ?? maxPairRequests;
+      const effectiveWindow = options.pairWindowMs ?? pairWindowMs;
+      const now = options.now ?? Date.now();
+      const pairKey = pairKeyFor(sender, recipient);
+      const cutoff = now - effectiveWindow;
+
+      const countRow = db.prepare(
+        "SELECT count(*) as count FROM local_pair_admissions WHERE pair_key = ? AND created_at > ?"
+      ).get(pairKey, cutoff);
+
+      if (countRow && countRow.count >= effectiveMax) {
+        throw coded(
+          "exchange_limit_exceeded",
+          `More than ${effectiveMax} requests between these agents within ${effectiveWindow}ms; assuming a conversation loop`,
+        );
+      }
+
+      const metadataJson = metadata ? JSON.stringify(metadata) : null;
+      db.prepare(`
+        INSERT INTO local_messages (
+          message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?)
+      `).run(messageId, sender, recipient, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now);
+
+      db.prepare(`
+        INSERT INTO local_pair_admissions (pair_key, message_id, created_at)
+        VALUES (?, ?, ?)
+      `).run(pairKey, messageId, now);
+
+      const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+      db.exec("COMMIT");
+      return { ...mapMessageRow(row), isDuplicate: false };
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw err;
     }
-
-    const now = Date.now();
-    const metadataJson = metadata ? JSON.stringify(metadata) : null;
-    db.prepare(`
-      INSERT INTO local_messages (
-        message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?)
-    `).run(messageId, sender, recipient, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now);
-
-    const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
-    return { ...mapMessageRow(row), isDuplicate: false };
   }
 
   async function recordReply(envelope) {
@@ -466,7 +544,194 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
       WHERE phase = 'completed' AND updated_at <= ?
         AND NOT EXISTS (SELECT 1 FROM local_replies r WHERE r.in_reply_to = local_messages.message_id)
     `).run(cutoff);
+
+    // Prune pair admissions ONLY when older than effective window AND older than cutoff.
+    // This preserves window evidence even if caller supplies retentionMs: 0!
+    const pairCutoff = Math.min(cutoff, now - pairWindowMs);
+    db.prepare("DELETE FROM local_pair_admissions WHERE created_at <= ?").run(pairCutoff);
+
     return { messages: Number(messages.changes), replies: Number(replies.changes) };
+  }
+
+  function mapWakeBindingRow(row) {
+    if (!row) return null;
+    return {
+      targetIdentity: row.target_identity,
+      bindingId: row.binding_id,
+      authBindingId: row.auth_binding_id ?? null,
+      threadId: row.thread_id,
+      generation: row.generation,
+      deliveryState: row.delivery_state,
+      activeWakeId: row.active_wake_id ?? null,
+      activeFingerprint: row.active_fingerprint ?? null,
+      lastAcknowledgedFingerprint: row.last_acknowledged_fingerprint ?? null,
+      lastAcknowledgedWakeId: row.last_acknowledged_wake_id ?? null,
+      receiptQueuedId: row.receipt_queued_id ?? null,
+      receiptThreadId: row.receipt_thread_id ?? null,
+      lastSubmittedAt: row.last_submitted_at ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  async function initWakeBinding({ targetIdentity, bindingId, authBindingId, threadId, generation }) {
+    assertNotClosed();
+    if (!targetIdentity || !threadId) {
+      throw coded("invalid_params", "targetIdentity and threadId are required");
+    }
+    const now = Date.now();
+    const existing = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+    const effectiveAuthBinding = authBindingId ?? (bindingId && !UUID_PATTERN.test(bindingId) ? bindingId : null);
+
+    if (!existing) {
+      const wakeBindingId = (bindingId && UUID_PATTERN.test(bindingId)) ? bindingId.toLowerCase() : randomUUID();
+      const initialGen = typeof generation === "number" && generation >= 1 ? generation : 1;
+      db.prepare(`
+        INSERT INTO local_wake_bindings (
+          target_identity, binding_id, auth_binding_id, thread_id, generation, delivery_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'idle', ?, ?)
+      `).run(targetIdentity, wakeBindingId, effectiveAuthBinding, threadId, initialGen, now, now);
+    } else {
+      const threadChanged = existing.thread_id !== threadId;
+      const authBindingChanged = Boolean(effectiveAuthBinding && existing.auth_binding_id && existing.auth_binding_id !== effectiveAuthBinding);
+      const uuidBindingChanged = Boolean(bindingId && UUID_PATTERN.test(bindingId) && existing.binding_id !== bindingId.toLowerCase());
+      const isRebind = threadChanged || authBindingChanged || uuidBindingChanged;
+
+      if (isRebind) {
+        const nextGen = existing.generation + 1;
+        const nextBindingId = (bindingId && UUID_PATTERN.test(bindingId)) ? bindingId.toLowerCase() : randomUUID();
+        const nextState = existing.delivery_state !== "idle" ? "stale_held" : "idle";
+        db.prepare(`
+          UPDATE local_wake_bindings
+          SET binding_id = ?, auth_binding_id = COALESCE(?, auth_binding_id), thread_id = ?, generation = ?, delivery_state = ?, updated_at = ?
+          WHERE target_identity = ?
+        `).run(nextBindingId, effectiveAuthBinding, threadId, nextGen, nextState, now, targetIdentity);
+      }
+    }
+    const row = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+    return mapWakeBindingRow(row);
+  }
+
+  async function getWakeBinding(targetIdentity) {
+    assertNotClosed();
+    const row = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+    return mapWakeBindingRow(row);
+  }
+
+  async function getWakeObligations(targetIdentity) {
+    assertNotClosed();
+    const unreadReplies = db.prepare(
+      "SELECT * FROM local_replies WHERE recipient = ? AND consumed = 0 ORDER BY created_at ASC, message_id ASC"
+    ).all(targetIdentity);
+
+    const heldMessages = db.prepare(
+      "SELECT * FROM local_messages WHERE sender = ? AND phase = 'held' ORDER BY created_at ASC, message_id ASC"
+    ).all(targetIdentity);
+
+    const lateRow = db.prepare(
+      "SELECT 1 FROM local_messages WHERE sender = ? AND phase = 'held' AND late_result_text IS NOT NULL LIMIT 1"
+    ).get(targetIdentity);
+    const hasLateResult = lateRow !== undefined;
+
+    const replyIds = unreadReplies.map((r) => r.message_id).sort();
+    const replyTimestamps = unreadReplies.map((r) => r.created_at);
+    const heldIds = heldMessages.map((m) => m.message_id).sort();
+    const heldTimestamps = heldMessages.map((m) => m.updated_at || m.created_at);
+    const heldLateFlags = heldMessages.map((m) => ({
+      id: m.message_id,
+      hasLate: Boolean(m.late_result_text),
+    })).sort((a, b) => a.id.localeCompare(b.id));
+
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      replyIds,
+      replyTimestamps,
+      heldIds,
+      heldTimestamps,
+      hasLateResult,
+      heldLateFlags,
+    })).digest("hex");
+
+    return {
+      unreadReplies: unreadReplies.map(mapReplyRow),
+      heldMessages: heldMessages.map(mapMessageRow),
+      hasLateResult,
+      snapshotFingerprint: fingerprint,
+    };
+  }
+
+  async function setWakeSubmitting({ targetIdentity, wakeId, fingerprint, submittedAt = Date.now() }) {
+    assertNotClosed();
+    const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+    if (!binding) {
+      throw coded("unknown_wake_target", `Target identity ${targetIdentity} has no wake binding`);
+    }
+    if (binding.delivery_state !== "idle") {
+      throw coded("wake_state_conflict", `Cannot submit wake: binding is in state ${binding.delivery_state}`);
+    }
+    db.prepare(`
+      UPDATE local_wake_bindings
+      SET delivery_state = 'submitting', active_wake_id = ?, active_fingerprint = ?, last_submitted_at = ?, updated_at = ?
+      WHERE target_identity = ?
+    `).run(wakeId, fingerprint, submittedAt, submittedAt, targetIdentity);
+    return mapWakeBindingRow(db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity));
+  }
+
+  async function setWakeAccepted({ targetIdentity, wakeId, receipt }) {
+    assertNotClosed();
+    const now = Date.now();
+    db.prepare(`
+      UPDATE local_wake_bindings
+      SET delivery_state = 'accepted_awaiting_ack', receipt_queued_id = ?, receipt_thread_id = ?, updated_at = ?
+      WHERE target_identity = ? AND active_wake_id = ?
+    `).run(receipt.queuedId, receipt.threadId, now, targetIdentity, wakeId);
+    return mapWakeBindingRow(db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity));
+  }
+
+  async function setWakeUncertain({ targetIdentity, wakeId, reason = "uncertain" }) {
+    assertNotClosed();
+    const now = Date.now();
+    db.prepare(`
+      UPDATE local_wake_bindings
+      SET delivery_state = 'uncertain', updated_at = ?
+      WHERE target_identity = ? AND active_wake_id = ?
+    `).run(now, targetIdentity, wakeId);
+    return mapWakeBindingRow(db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity));
+  }
+
+  async function ackWake({ requester, wakeId, generation }) {
+    assertNotClosed();
+    if (!requester || !wakeId || typeof generation !== "number") {
+      throw coded("invalid_params", "requester, wakeId, and generation are required");
+    }
+    const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(requester);
+    if (!binding) {
+      throw coded("foreign_access_denied", `Requester ${requester} has no bound wake target`);
+    }
+    if (binding.delivery_state === "stale_held") {
+      throw coded("stale_wake_rebound", `Cannot acknowledge wake in stale_held state`);
+    }
+    if (binding.generation !== generation) {
+      throw coded("stale_wake_generation", `Ack generation ${generation} does not match active generation ${binding.generation}`);
+    }
+    if (binding.active_wake_id !== wakeId) {
+      throw coded("stale_wake_id", `Ack wakeId ${wakeId} does not match active wake ${binding.active_wake_id}`);
+    }
+
+    const now = Date.now();
+    db.prepare(`
+      UPDATE local_wake_bindings
+      SET delivery_state = 'idle',
+          last_acknowledged_fingerprint = active_fingerprint,
+          last_acknowledged_wake_id = active_wake_id,
+          active_wake_id = NULL,
+          active_fingerprint = NULL,
+          updated_at = ?
+      WHERE target_identity = ?
+    `).run(now, requester);
+
+    return { acknowledged: true, wakeId, generation };
   }
 
   async function status() {
@@ -498,6 +763,7 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
   }
 
   return {
+    hasDurablePairLimiter: true,
     recordSend,
     recordReply,
     recordExecutionFailure,
@@ -510,6 +776,13 @@ export function createLocalMessagingJournal({ stateRoot, logger = {} } = {}) {
     holdExecution,
     getLateResult,
     compact,
+    initWakeBinding,
+    getWakeBinding,
+    getWakeObligations,
+    setWakeSubmitting,
+    setWakeAccepted,
+    setWakeUncertain,
+    ackWake,
     status,
     close,
   };

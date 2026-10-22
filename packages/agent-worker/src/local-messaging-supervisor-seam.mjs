@@ -36,6 +36,7 @@ export function createLocalMessagingSubsystem({
   rateLimiter = null,
   exchangeLimiter = null,
   loopTracker = null,
+  notifier = null,
   socketName = "local-control.sock",
   logger = { info() {}, warn() {}, error() {} },
 } = {}) {
@@ -92,7 +93,9 @@ export function createLocalMessagingSubsystem({
 
   const acl = ownerAcl || createOwnerAcl({ rules: aclRules });
   const limiter = rateLimiter || createPerSenderRateLimiter();
-  const exchanges = exchangeLimiter || createPairExchangeLimiter();
+  const exchanges = activeJournal?.hasDurablePairLimiter
+    ? (exchangeLimiter || null)
+    : (exchangeLimiter || createPairExchangeLimiter());
   const tracker = loopTracker || createConversationLoopTracker({ journal: activeJournal });
 
   const server = createLocalControlServer({
@@ -106,6 +109,7 @@ export function createLocalMessagingSubsystem({
     exchangeLimiter: exchanges,
     loopTracker: tracker,
     dispatcher: activeDispatcher,
+    notifier,
     logger,
   });
 

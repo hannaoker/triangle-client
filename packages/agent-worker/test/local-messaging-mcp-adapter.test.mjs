@@ -281,3 +281,33 @@ test("the adapter never holds or consults a credential validator: the server val
   assert.equal(refused.result.isError, true);
   assert.match(refused.result.content[0].text, /missing injected turn credential/);
 });
+
+test("triangle_ack_notification calls client.ackNotification and returns result", async () => {
+  let ackedArgs;
+  const mockClient = {
+    ackNotification: async (args, options) => {
+      ackedArgs = { args, options };
+      return { acknowledged: true, wakeId: args.wakeId, generation: args.generation };
+    },
+  };
+  const handler = createLocalMessagingMcpHandler({
+    client: mockClient,
+    turnCredential: "mock-token",
+  });
+  const res = await handler.handleRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "triangle_ack_notification",
+      arguments: { wakeId: "wake-test-mcp", generation: 3 },
+    },
+  });
+  assert.equal(res.result.isError, false);
+  const data = JSON.parse(res.result.content[0].text);
+  assert.equal(data.acknowledged, true);
+  assert.equal(data.wakeId, "wake-test-mcp");
+  assert.equal(data.generation, 3);
+  assert.deepEqual(ackedArgs.args, { wakeId: "wake-test-mcp", generation: 3 });
+  assert.deepEqual(ackedArgs.options, { credential: "mock-token" });
+});

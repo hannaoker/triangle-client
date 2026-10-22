@@ -42,6 +42,7 @@ export function createLocalControlServer({
   exchangeLimiter = null,
   loopTracker,
   dispatcher,
+  notifier = null,
   logger = { info() {}, warn() {}, error() {} },
 } = {}) {
   if (!socketPath || typeof socketPath !== "string") {
@@ -212,14 +213,14 @@ export function createLocalControlServer({
             }
           }
 
-          let pairReservation = null;
-          try {
-            // Pair cap: bounds ping-pong however the caller links (or omits linking) its messages.
-            pairReservation = exchangeLimiter ? exchangeLimiter.reserve(senderId, to) : null;
+          // 4. Dedupe check & persisted loop depth before unique pair charge
+          const existingRecord = await journal.getRecord(messageId);
+          const effectiveRequestId = requestId || messageId;
+          let calculatedDepth = 1;
 
-            // 4. Conversation loop depth calculation and check
-            const effectiveRequestId = requestId || messageId;
-            let calculatedDepth = 1;
+          if (existingRecord) {
+            calculatedDepth = existingRecord.loopDepth || existingRecord.metadata?._loopDepth || 1;
+          } else {
             if (loopTracker) {
               calculatedDepth = await loopTracker.calculateDepth({
                 claims,
@@ -227,6 +228,15 @@ export function createLocalControlServer({
                 messageId,
                 requestId: effectiveRequestId,
               });
+            }
+          }
+
+          let pairReservation = null;
+          try {
+            // Pair cap fallback only for injected test journals lacking durable pair limiter:
+            // Do NOT charge for known duplicates!
+            if (!journal.hasDurablePairLimiter && exchangeLimiter && !existingRecord) {
+              pairReservation = exchangeLimiter.reserve(senderId, to);
             }
 
             // 5. Record to durable shared journal
@@ -381,6 +391,36 @@ export function createLocalControlServer({
             requester: senderId,
             messageId,
           });
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "ack_notification": {
+          const { wakeId, generation } = params;
+          if (!wakeId) throw coded("invalid_request", "wakeId required");
+          identifier(wakeId, "wakeId");
+          if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0) {
+            throw coded("invalid_request", "generation must be a safe integer >= 0");
+          }
+
+          let outcome;
+          if (notifier && typeof notifier.ackNotification === "function") {
+            outcome = await notifier.ackNotification({
+              requester: senderId,
+              wakeId,
+              generation,
+            });
+          } else if (typeof journal.ackWake === "function") {
+            outcome = await journal.ackWake({
+              requester: senderId,
+              wakeId,
+              generation,
+            });
+          } else {
+            throw coded("unsupported", "Wake notifications are not configured on this host");
+          }
+
           const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;

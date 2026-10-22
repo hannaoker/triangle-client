@@ -21,7 +21,7 @@ function validate(manifest) { return spawnSync(python, [installer, 'validate-run
 test('Cursor-only supervisor installs with Node alone and runs the complete coordinator import closure', () => installed((manifest, value) => {
   assert.equal(validate(manifest).status, 0);
   assert.deepEqual(value.environment, { PATH: `${value.projectRoot}/bin:/usr/bin:/bin`, LANG: 'C', LC_ALL: 'C' });
-  assert.equal(value.version, 9);
+  assert.equal(value.version, 10);
   assert.ok(!Object.keys(value.artifacts).some(p => p.includes('/agents/') || /runners\/(codex|hermes|antigravity)-runner/.test(p)));
   execFileSync(path.join(value.projectRoot, 'bin/node'), ['--input-type=module', '-e', `await import(${JSON.stringify(path.join(value.projectRoot, 'packages/agent-worker/src/client-supervisor.mjs'))})`], { env: value.environment });
 }));

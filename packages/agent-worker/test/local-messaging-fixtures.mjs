@@ -51,6 +51,7 @@ export function createTestMemoryJournal() {
   const records = new Map(); // messageId -> record
   const replies = new Map(); // messageId -> replyRecord
   const executions = new Map(); // messageId -> status
+  const wakeBindings = new Map(); // targetIdentity -> binding
   let isClosed = false;
 
   return {
@@ -232,6 +233,125 @@ export function createTestMemoryJournal() {
     async getRecord(messageId) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       return records.get(messageId) ?? null;
+    },
+
+    async initWakeBinding({ targetIdentity, bindingId, threadId, generation }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      let binding = wakeBindings.get(targetIdentity);
+      const now = Date.now();
+      if (!binding) {
+        binding = {
+          targetIdentity,
+          bindingId,
+          threadId,
+          generation,
+          deliveryState: "idle",
+          activeWakeId: null,
+          activeFingerprint: null,
+          lastAcknowledgedFingerprint: null,
+          lastAcknowledgedWakeId: null,
+          receiptQueuedId: null,
+          receiptThreadId: null,
+          lastSubmittedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        wakeBindings.set(targetIdentity, binding);
+      } else {
+        const rebind = binding.generation !== generation || binding.bindingId !== bindingId || binding.threadId !== threadId;
+        if (rebind) {
+          binding.bindingId = bindingId;
+          binding.threadId = threadId;
+          binding.generation = generation;
+          binding.deliveryState = (binding.deliveryState !== "idle") ? "stale_held" : "idle";
+          binding.updatedAt = now;
+        }
+      }
+      return { ...binding };
+    },
+
+    async getWakeBinding(targetIdentity) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      return b ? { ...b } : null;
+    },
+
+    async getWakeObligations(targetIdentity) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const unreadReplies = Array.from(replies.values())
+        .filter((r) => r.recipient === targetIdentity && !r.consumed)
+        .sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+      const heldMessages = Array.from(records.values())
+        .filter((m) => m.sender === targetIdentity && m.phase === "held")
+        .sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+      const hasLateResult = heldMessages.some((m) => m.lateResultText || m.hasLateResult);
+
+      const replyIds = unreadReplies.map((r) => r.messageId).sort();
+      const replyTimestamps = unreadReplies.map((r) => r.createdAt);
+      const heldIds = heldMessages.map((m) => m.messageId).sort();
+      const heldTimestamps = heldMessages.map((m) => m.updatedAt || m.createdAt);
+
+      const crypto = await import("node:crypto");
+      const fingerprint = crypto.createHash("sha256").update(JSON.stringify({
+        replyIds,
+        replyTimestamps,
+        heldIds,
+        heldTimestamps,
+        hasLateResult,
+      })).digest("hex");
+
+      return {
+        unreadReplies: unreadReplies.map((r) => ({ ...r })),
+        heldMessages: heldMessages.map((m) => ({ ...m })),
+        hasLateResult,
+        snapshotFingerprint: fingerprint,
+      };
+    },
+
+    async setWakeSubmitting({ targetIdentity, wakeId, fingerprint, submittedAt = Date.now() }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      if (!b) throw coded("unknown_wake_target", "Target identity has no wake binding");
+      if (b.deliveryState !== "idle") throw coded("wake_state_conflict", "Cannot submit wake: state is " + b.deliveryState);
+      b.deliveryState = "submitting";
+      b.activeWakeId = wakeId;
+      b.activeFingerprint = fingerprint;
+      b.lastSubmittedAt = submittedAt;
+      b.updatedAt = submittedAt;
+      return { ...b };
+    },
+
+    async setWakeAccepted({ targetIdentity, wakeId, receipt }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      b.deliveryState = "accepted_awaiting_ack";
+      b.receiptQueuedId = receipt.queuedId;
+      b.receiptThreadId = receipt.threadId;
+      b.updatedAt = Date.now();
+      return { ...b };
+    },
+
+    async setWakeUncertain({ targetIdentity, wakeId, reason = "uncertain" }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      b.deliveryState = "uncertain";
+      b.updatedAt = Date.now();
+      return { ...b };
+    },
+
+    async ackWake({ requester, wakeId, generation }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(requester);
+      if (!b) throw coded("foreign_access_denied", "No bound wake target");
+      if (b.generation !== generation) throw coded("stale_wake_generation", "Generation mismatch");
+      if (b.activeWakeId !== wakeId) throw coded("stale_wake_id", "WakeId mismatch");
+      b.deliveryState = "idle";
+      b.lastAcknowledgedFingerprint = b.activeFingerprint;
+      b.lastAcknowledgedWakeId = b.activeWakeId;
+      b.activeWakeId = null;
+      b.activeFingerprint = null;
+      b.updatedAt = Date.now();
+      return { acknowledged: true, wakeId, generation };
     },
 
     trackExecution(messageId, status) {
