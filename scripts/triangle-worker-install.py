@@ -648,6 +648,21 @@ def run_local_wrapper():
     os.execve(node, [node, entry, *sys.argv[1:]], dict(os.environ))
 
 
+def wrapper_interpreter(executable=None):
+    # The wrapper embeds a frozen copy of this installer, so it runs under the interpreter that validated it.
+    executable = sys.executable if executable is None else executable
+    if (
+        not isinstance(executable, str)
+        or not os.path.isabs(executable)
+        or len(executable) > 200
+        or re.search(r"[\s\x00-\x1f\x7f]", executable)
+        or not os.path.isfile(executable)
+        or not os.access(executable, os.X_OK)
+    ):
+        fail("triangle-local needs an absolute, whitespace-free interpreter path; run the installer with such a Python")
+    return executable
+
+
 def install_local_wrapper(application_root):
     root = checked_dir(application_root, exact_mode=0o700)
     bin_root = ensure_dir(os.path.join(root, "bin"))
@@ -660,7 +675,7 @@ def install_local_wrapper(application_root):
     with open(__file__, "rb") as source_file:
         source = source_file.read()
     source = source.replace(b"#!/usr/bin/env python3\n", b"", 1)
-    header = b"#!/usr/bin/python3\n" + LOCAL_WRAPPER_MARKER
+    header = b"#!" + wrapper_interpreter().encode() + b"\n" + LOCAL_WRAPPER_MARKER
     header += ("TRIANGLE_LOCAL_APPLICATION_ROOT = " + repr(root) + "\n").encode()
     atomic_write(target, header + source, mode=0o700)
     fsync_dir(bin_root)
