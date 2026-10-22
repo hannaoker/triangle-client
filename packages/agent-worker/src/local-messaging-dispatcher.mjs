@@ -5,7 +5,7 @@ export function createLocalMessagingDispatcher({
   journal,
   runRecipient,
   logger = {},
-  runnerTimeoutMs = 180000,
+  runnerTimeoutMs = 3600000,
   maxConcurrent = 2,
 } = {}) {
   if (!journal) {

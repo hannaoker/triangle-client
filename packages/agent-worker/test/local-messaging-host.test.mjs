@@ -7,7 +7,7 @@ import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {setupLocalMessaging} from '../src/local-messaging-cli.mjs';
 import {writePrivateJson,readPrivateJson} from '../src/local-messaging-auth-broker.mjs';
-import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
+import {createInstalledLocalMessagingHost,loadLocalMessagingConfig} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
 const exec=promisify(execFile),cli=fileURLToPath(new URL('../src/local-messaging-cli.mjs',import.meta.url));
 test('production host executes via registered runner and preserves replies across restart',async()=>{
@@ -17,7 +17,11 @@ test('production host executes via registered runner and preserves replies acros
   writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'thread-current',enabled:false});
   setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'thread-current',recipients:['gravity2']});
   const config=readPrivateJson(configPath),recipient=config.recipients[0].instanceId;
-  const runner={run:async request=>{calls++;assert.equal(request.senderId,'a'.repeat(64));return {status:'completed',text:'assessment '+request.text};}};
+  assert.equal(config.runnerTimeoutMs,3600000);
+  writePrivateJson(configPath,{...config,runnerTimeoutMs:86400000});assert.equal(loadLocalMessagingConfig(configPath).runnerTimeoutMs,86400000);
+  writePrivateJson(configPath,{...config,runnerTimeoutMs:86400001});assert.throws(()=>loadLocalMessagingConfig(configPath),{code:'invalid_local_config'});
+  writePrivateJson(configPath,config);
+  const runner={run:async (request,options)=>{assert.equal(options.timeoutMs,3600000);calls++;assert.equal(request.senderId,'a'.repeat(64));return {status:'completed',text:'assessment '+request.text};}};
   const make=()=>createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,runner]]),gate:createProfiledReasonerGate()});
   const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
   host=make();await host.start();

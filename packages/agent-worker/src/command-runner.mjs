@@ -125,7 +125,8 @@ export function createCommandRunner({
   const childEnvironment = createRunnerEnvironment(environment);
 
   return {
-    async run(request, { signal } = {}) {
+    async run(request, { signal, timeoutMs: turnTimeoutMs = timeoutMs } = {}) {
+      if (!Number.isSafeInteger(turnTimeoutMs) || turnTimeoutMs < 1) throw new TypeError("timeoutMs must be a positive integer");
       if (signal?.aborted) throw runnerAbortError();
       const input = `${JSON.stringify(request)}\n`;
       if (Buffer.byteLength(input) > MAX_IO_BYTES) {
@@ -154,7 +155,7 @@ export function createCommandRunner({
         timer = setTimeout(() => {
           timedOut = true;
           killTree(child, "SIGKILL");
-        }, timeoutMs);
+        }, turnTimeoutMs);
         timer.unref?.();
       });
       const onAbort = () => {
@@ -182,7 +183,7 @@ export function createCommandRunner({
           throw runnerAbortError();
         }
         if (timedOut) {
-          throw new Error(`Runner timed out after ${timeoutMs}ms`);
+          throw new Error(`Runner timed out after ${turnTimeoutMs}ms`);
         }
         if (stdinResult.status === "rejected") throw stdinResult.reason;
         if (exitResult.status === "rejected") throw exitResult.reason;

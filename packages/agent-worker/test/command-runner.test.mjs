@@ -250,3 +250,10 @@ test("command runner contains stdin EPIPE when a child exits before a large requ
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stderr, new RegExp(marker));
 });
+
+ test("local turn budget overrides the shorter profile subprocess deadline",async()=>{
+ const runner=createCommandRunner({command:process.execPath,args:["-e", "process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>process.stdout.write(JSON.stringify({status:'completed',text:'ok'})),60))"],timeoutMs:5});
+ assert.equal((await runner.run(request,{timeoutMs:2000})).text,'ok');
+ await assert.rejects(runner.run(request),/timed out after 5ms/);
+ await assert.rejects(runner.run(request,{timeoutMs:0}),/positive/);
+ });

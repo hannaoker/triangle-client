@@ -33,7 +33,7 @@ export function setupLocalMessaging(options,env=process.env){
  // Explicit owner rebind preserves identity, enabled flag and every unrelated setting.
  if(binding.threadId!==threadId){writePrivateJson(bindingPath+'.before-local-messaging',binding);writePrivateJson(bindingPath,{...binding,threadId});}
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(binding.instanceId+'\0'+threadId).digest('hex').slice(0,32),senderId:binding.instanceId,threadId,secret});
- writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:300000});
+ writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
  return {configPath,senderId:binding.instanceId,threadId,recipients,requiresServiceRestart:true};
 }
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
