@@ -94,10 +94,8 @@ function errorText(code, message, retryIds) {
  */
 export function createLocalMessagingMcpHandler({
   client,
-  credentialValidator,
   turnCredential = null,
   turnCredentialProvider = null,
-  senderId,
 }) {
   async function resolveActiveTurnCredential() {
     if (typeof turnCredentialProvider === "function") {
@@ -112,9 +110,8 @@ export function createLocalMessagingMcpHandler({
     if (!cred) {
       throw new Error("unauthorized: missing injected turn credential");
     }
-    if (credentialValidator) {
-      credentialValidator.validate({ credential: cred, expectedSenderId: senderId });
-    }
+    // The server validates every RPC. The validator holds the signing secret and
+    // must never reach this agent-side process, so none is accepted here.
     return cred;
   }
 

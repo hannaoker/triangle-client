@@ -7,7 +7,7 @@ import {
   createTestMemoryJournal,
   createTestSqliteJournal,
 } from "./local-messaging-fixtures.mjs";
-import { validateJournalAdapter } from "../src/local-messaging-journal-contract.mjs";
+import { validateJournalAdapter, REQUIRED_JOURNAL_METHODS } from "../src/local-messaging-journal-contract.mjs";
 import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
 
 test("validateJournalAdapter validates explicit contract and rejects incomplete adapters", () => {
@@ -21,15 +21,22 @@ test("validateJournalAdapter validates explicit contract and rejects incomplete 
     (err) => err instanceof LocalMessagingError && err.code === "invalid_journal_adapter",
   );
 
-  const validMock = {
-    recordSend: () => {},
-    recordReply: () => {},
-    recordExecutionFailure: () => {},
-    listReplies: () => {},
-    consumeReply: () => {},
-    getRecord: () => {},
-  };
+  const validMock = Object.fromEntries(REQUIRED_JOURNAL_METHODS.map((method) => [method, () => {}]));
   assert.equal(validateJournalAdapter(validMock), validMock);
+});
+
+test("the journal contract requires the execution transitions the server and dispatcher rely on", () => {
+  for (const method of ["claimExecution", "completeExecution", "holdExecution", "recoverQueued"]) {
+    assert.ok(REQUIRED_JOURNAL_METHODS.includes(method), `${method} is part of the contract`);
+    const incomplete = Object.fromEntries(REQUIRED_JOURNAL_METHODS.filter((name) => name !== method).map((name) => [name, () => {}]));
+    assert.throws(
+      () => validateJournalAdapter(incomplete),
+      (err) => err instanceof LocalMessagingError && err.code === "invalid_journal_adapter" && err.message.includes(method),
+    );
+  }
+  // A journal that only records and lists (the old six methods) is no longer a valid adapter.
+  const sixMethods = Object.fromEntries(["recordSend", "recordReply", "recordExecutionFailure", "listReplies", "consumeReply", "getRecord"].map((name) => [name, () => {}]));
+  assert.throws(() => validateJournalAdapter(sixMethods), (err) => err.code === "invalid_journal_adapter");
 });
 
 for (const [name, createJournal] of [
@@ -290,25 +297,33 @@ for (const [name, createJournal] of [
     }
   });
 
-  test(`${name}: resuming queued records yields pending jobs; uncertain started executions are held`, async () => {
+  test(`${name}: satisfies the journal contract and moves work through claim, complete, hold and recovery`, async () => {
     const journal = createJournal();
     try {
-      await journal.recordSend({
-        sender: "alice",
-        recipient: "bob",
-        messageId: "msg-queued",
-        requestId: "req-q",
-        text: "waiting job",
-      });
-
-      if (typeof journal.trackExecution === "function") {
-        journal.trackExecution("msg-executing", "started");
+      assert.equal(validateJournalAdapter(journal), journal);
+      for (const id of ["a", "b", "c", "d"]) {
+        await journal.recordSend({ sender: "alice", recipient: "bob", messageId: `msg-${id}`, requestId: `req-${id}`, text: id });
       }
+      const claimed = await journal.claimExecution("msg-a");
+      assert.equal(claimed.phase, "executing");
+      assert.equal(await journal.claimExecution("msg-a"), null, "a claimed record cannot be claimed twice");
+      await journal.completeExecution("msg-a");
+      assert.equal((await journal.getRecord("msg-a")).phase, "completed");
+      assert.equal(await journal.claimExecution("msg-a"), null, "completed work is never claimed again");
+      await journal.holdExecution("msg-b", "operator_hold");
+      const held = await journal.getRecord("msg-b");
+      assert.equal(held.phase, "held");
+      assert.equal(held.reason, "operator_hold");
+      assert.equal(await journal.claimExecution("msg-b"), null, "held work is never claimed");
+      await journal.claimExecution("msg-c"); // in flight when the process died
 
-      const { toRun, uncertain } = await journal.resumeQueuedRecords();
-      assert.ok(toRun.some((r) => r.messageId === "msg-queued"));
-      // Resumption must not blindly rerun uncertain started executions
-      assert.ok(Array.isArray(uncertain));
+      const { toRun, uncertain } = await journal.recoverQueued();
+      assert.deepEqual(toRun.map((r) => r.messageId), ["msg-d"], "only still-queued work is resumed");
+      assert.deepEqual(uncertain.map((r) => r.messageId), ["msg-c"]);
+      const recovered = await journal.getRecord("msg-c");
+      assert.equal(recovered.phase, "held", "an uncertain execution is held, not replayed");
+      assert.equal(recovered.reason, "crash_recovery");
+      assert.deepEqual((await journal.recoverQueued()).toRun.map((r) => r.messageId), ["msg-d"]);
     } finally {
       await journal.close?.();
     }

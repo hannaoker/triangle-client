@@ -58,7 +58,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  };
  try {
   if(command==='mcp'){
-   await runMcpStdioSession({input,output,handler:createLocalMessagingMcpHandler({client,senderId:binding.senderId,turnCredentialProvider:credential})});return 0;
+   await runMcpStdioSession({input,output,handler:createLocalMessagingMcpHandler({client,turnCredentialProvider:credential})});return 0;
   }
   const rpcOptions={credential:await credential()};let result;
   if(command==='status')result=options['message-id'] ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);

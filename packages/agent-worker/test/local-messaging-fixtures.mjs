@@ -9,8 +9,9 @@ import { coded } from "../src/local-messaging-errors.mjs";
  * CUSTODY SEMANTICS DISCLAIMER:
  * These journal implementations (Memory and SQLite) are strictly test fixtures designed
  * to verify the local messaging server, client, protocol, and adapter contract.
- * They do NOT represent the production peer recovery state machine, peer drain queues,
- * or shared durability pipeline. Production requires an injected shared-journal adapter.
+ * They do NOT represent the production SQLite journal's durability or schema. They do
+ * implement the journal contract, including the execution transitions (claim, complete,
+ * hold, recover) that keep finished work from running again after a restart.
  */
 
 export function deterministicMetadataEqual(a, b) {
@@ -139,6 +140,51 @@ export function createTestMemoryJournal() {
       return { ...reply, isDuplicate: false };
     },
 
+    async claimExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record || record.phase !== "queued_local") return null;
+      record.phase = "executing";
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async completeExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record) return null;
+      record.phase = "completed";
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async holdExecution(messageId, reason = "held") {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record) return null;
+      record.phase = "held";
+      record.reason = reason;
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async recoverQueued() {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const toRun = [];
+      const uncertain = [];
+      for (const record of records.values()) {
+        if (record.phase === "executing" || record.phase === "started") {
+          // Outcome unknown after a restart: hold it, never replay it.
+          record.phase = "held";
+          record.reason = "crash_recovery";
+          record.updatedAt = Date.now();
+        }
+        if (record.phase === "queued_local") toRun.push({ ...record });
+        else if (record.phase === "held" && record.reason === "crash_recovery") uncertain.push({ ...record });
+      }
+      return { toRun, uncertain };
+    },
+
     async recordExecutionFailure({ messageId, reason, runtimeError = null }) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       const record = records.get(messageId);
@@ -194,20 +240,6 @@ export function createTestMemoryJournal() {
 
     getActiveExecutions() {
       return Array.from(executions.entries()).map(([messageId, val]) => ({ messageId, ...val }));
-    },
-
-    async resumeQueuedRecords() {
-      // Returns records queued for execution; uncertain started executions are flagged, not rerun
-      const toRun = [];
-      const uncertain = [];
-      for (const rec of records.values()) {
-        if (rec.phase === "queued_local") {
-          toRun.push(rec);
-        } else if (rec.phase === "executing" || rec.phase === "started") {
-          uncertain.push(rec);
-        }
-      }
-      return { toRun, uncertain };
     },
 
     async close() {
@@ -276,6 +308,8 @@ export function createTestSqliteJournal({ dbPath }) {
     INSERT INTO local_replies (message_id, sender, recipient, request_id, in_reply_to, text, metadata, consumed, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `);
+  const stmtClaim = db.prepare("UPDATE local_messages SET phase = 'executing', updated_at = ? WHERE message_id = ? AND phase = 'queued_local'");
+  const stmtSetPhase = db.prepare("UPDATE local_messages SET phase = ?, reason = COALESCE(?, reason), updated_at = ? WHERE message_id = ?");
   const stmtGetReply = db.prepare("SELECT * FROM local_replies WHERE message_id = ?");
   const stmtConsumeReply = db.prepare("UPDATE local_replies SET consumed = 1, updated_at = ? WHERE message_id = ?");
 
@@ -441,6 +475,37 @@ export function createTestSqliteJournal({ dbPath }) {
       };
     },
 
+    async claimExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      if (stmtClaim.run(Date.now(), messageId).changes === 0) return null;
+      return this.getRecord(messageId);
+    },
+
+    async completeExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      stmtSetPhase.run("completed", null, Date.now(), messageId);
+      return this.getRecord(messageId);
+    },
+
+    async holdExecution(messageId, reason = "held") {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      stmtSetPhase.run("held", reason, Date.now(), messageId);
+      return this.getRecord(messageId);
+    },
+
+    async recoverQueued() {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      // Outcome unknown after a restart: hold it, never replay it.
+      db.prepare("UPDATE local_messages SET phase = 'held', reason = 'crash_recovery', updated_at = ? WHERE phase IN ('executing', 'started')").run(Date.now());
+      const toRun = [];
+      const uncertain = [];
+      for (const row of db.prepare("SELECT message_id, phase, reason FROM local_messages WHERE phase = 'queued_local' OR (phase = 'held' AND reason = 'crash_recovery') ORDER BY created_at").all()) {
+        const record = await this.getRecord(row.message_id);
+        (row.phase === "queued_local" ? toRun : uncertain).push(record);
+      }
+      return { toRun, uncertain };
+    },
+
     async recordExecutionFailure({ messageId, reason, runtimeError = null }) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       stmtUpdateFail.run(reason, runtimeError, Date.now(), messageId);
@@ -518,35 +583,6 @@ export function createTestSqliteJournal({ dbPath }) {
       };
     },
 
-    async resumeQueuedRecords() {
-      if (isClosed) throw coded("journal_closed", "Journal is closed");
-      const rows = db.prepare("SELECT * FROM local_messages WHERE phase IN ('queued_local', 'executing', 'started')").all();
-      const toRun = [];
-      const uncertain = [];
-      for (const r of rows) {
-        let meta = {};
-        try {
-          meta = JSON.parse(r.metadata || "{}");
-        } catch {}
-        const rec = {
-          messageId: r.message_id,
-          sender: r.sender,
-          recipient: r.recipient,
-          requestId: r.request_id,
-          inReplyTo: r.in_reply_to,
-          text: r.text,
-          metadata: meta,
-          phase: r.phase,
-        };
-        if (r.phase === "queued_local") {
-          toRun.push(rec);
-        } else {
-          uncertain.push(rec);
-        }
-      }
-      return { toRun, uncertain };
-    },
-
     async close() {
       if (isClosed) return;
       isClosed = true;
@@ -562,8 +598,10 @@ export function createTestSqliteJournal({ dbPath }) {
  * Test fixture demonstrating host-owned recoverable dispatcher contract.
  *
  * Implements:
- * - start/recover: claims queued records on start, holds uncertain started executions.
- * - notifyAdmission/admitExecution: dedupes notifications; prevents concurrent overlap.
+ * - start/recover: recovers queued records on start; uncertain executions are held, not rerun.
+ * - notifyAdmission/admitExecution: dedupes notifications, prevents concurrent overlap, and
+ *   claims each message in the journal first, so claimed, finished or held work never runs
+ *   again, including after a restart. Finished work is marked completed.
  * - stop/wait: awaits active executions to complete before shutdown.
  */
 export function createTestRecoverableDispatcher({
@@ -574,6 +612,7 @@ export function createTestRecoverableDispatcher({
   const running = new Map();
   const completed = new Set();
   const uncertainHeld = new Set();
+  let activeJournal = journal;
   let recoveryCount = 0;
   let isClosing = false;
 
@@ -596,12 +635,19 @@ export function createTestRecoverableDispatcher({
       return;
     }
 
-    dispatched.push(job);
-
     const promise = (async () => {
       try {
-        await execute(job);
+        // One claimant per message: work that is claimed, finished or held is skipped.
+        if (activeJournal && !(await activeJournal.claimExecution(messageId))) return;
+        dispatched.push(job);
+        try {
+          await execute(job);
+        } catch (error) {
+          await activeJournal?.holdExecution(messageId, "runtime_error");
+          throw error;
+        }
         completed.add(messageId);
+        await activeJournal?.completeExecution(messageId);
       } finally {
         running.delete(messageId);
       }
@@ -628,11 +674,11 @@ export function createTestRecoverableDispatcher({
       return recoveryCount;
     },
 
-    async start({ journal: activeJournal } = {}) {
-      const j = activeJournal || journal;
+    async start({ journal: startJournal } = {}) {
+      activeJournal = startJournal || journal;
       recoveryCount++;
-      if (j && typeof j.resumeQueuedRecords === "function") {
-        const { toRun = [], uncertain = [] } = await j.resumeQueuedRecords();
+      if (activeJournal) {
+        const { toRun = [], uncertain = [] } = await activeJournal.recoverQueued();
         for (const rec of uncertain) {
           uncertainHeld.add(rec.messageId);
         }

@@ -28,6 +28,7 @@ export function createLocalControlServer({
   credentialBroker = null,
   statusProvider = null,
   rateLimiter,
+  exchangeLimiter = null,
   loopTracker,
   dispatcher,
   logger = { info() {}, warn() {}, error() {} },
@@ -190,7 +191,11 @@ export function createLocalControlServer({
             }
           }
 
+          let pairReservation = null;
           try {
+            // Pair cap: bounds ping-pong however the caller links (or omits linking) its messages.
+            pairReservation = exchangeLimiter ? exchangeLimiter.reserve(senderId, to) : null;
+
             // 4. Conversation loop depth calculation and check
             const effectiveRequestId = requestId || messageId;
             let calculatedDepth = 1;
@@ -223,6 +228,9 @@ export function createLocalControlServer({
             } else if (rateLimiter) {
               rateLimiter.consume(senderId);
             }
+            // A duplicate retry is not a new exchange.
+            if (record.isDuplicate) pairReservation?.rollback();
+            else pairReservation?.commit();
 
             if (loopTracker) {
               loopTracker.commitAdmission({
@@ -247,22 +255,26 @@ export function createLocalControlServer({
               isDuplicate: record.isDuplicate || false,
             };
 
-            const execPromise = (async () => {
-              try {
-                await dispatchHook.call(activeDispatcher, admissionJob);
-              } catch (execErr) {
-                const sanitized = sanitizeError(execErr);
-                logger.error?.(`Local execution admission failed: ${sanitized.message}`);
-                await journal.recordExecutionFailure({
-                  messageId,
-                  reason: "admission_failure",
-                  runtimeError: "Execution admission failed",
-                }).catch(() => {});
-              }
-            })();
+            // Defense in depth: a duplicate of work that is already claimed, finished or held
+            // must never reach the dispatcher again, whatever the dispatcher would do with it.
+            if (!record.isDuplicate || (record.phase ?? "queued_local") === "queued_local") {
+              const execPromise = (async () => {
+                try {
+                  await dispatchHook.call(activeDispatcher, admissionJob);
+                } catch (execErr) {
+                  const sanitized = sanitizeError(execErr);
+                  logger.error?.(`Local execution admission failed: ${sanitized.message}`);
+                  await journal.recordExecutionFailure({
+                    messageId,
+                    reason: "admission_failure",
+                    runtimeError: "Execution admission failed",
+                  }).catch(() => {});
+                }
+              })();
 
-            inFlightExecutions.add(execPromise);
-            execPromise.finally(() => inFlightExecutions.delete(execPromise));
+              inFlightExecutions.add(execPromise);
+              execPromise.finally(() => inFlightExecutions.delete(execPromise));
+            }
 
             // 8. Return custody receipt promptly carrying original stored requestId
             const resp = createSuccessResponse(
@@ -280,6 +292,7 @@ export function createLocalControlServer({
           } catch (admissionErr) {
             // Rollback reservation on rejected admission or conflict
             rateReservation?.rollback?.();
+            pairReservation?.rollback();
             throw admissionErr;
           }
           break;

@@ -8,15 +8,11 @@ import {
 } from "../src/local-messaging-mcp-adapter.mjs";
 import { createLocalMessagingSubsystem } from "../src/local-messaging-supervisor-seam.mjs";
 import { createTestMemoryJournal, createTestRecoverableDispatcher } from "./local-messaging-fixtures.mjs";
-import {
-  createTurnCapabilityIssuer,
-  createTurnCapabilityValidator,
-} from "../src/local-messaging-credentials.mjs";
+import { createTurnCapabilityIssuer } from "../src/local-messaging-credentials.mjs";
 
 test("MCP adapter lists tools and handles initialize", async () => {
   const secret = "test-secret-key-32-bytes-long-1234567890";
   const issuer = createTurnCapabilityIssuer({ secret });
-  const validator = createTurnCapabilityValidator({ secret });
   const token = issuer.issue({ senderId: "desktop-codex" });
 
   const mockClient = {
@@ -30,9 +26,7 @@ test("MCP adapter lists tools and handles initialize", async () => {
 
   const handler = createLocalMessagingMcpHandler({
     client: mockClient,
-    credentialValidator: validator,
     turnCredential: token,
-    senderId: "desktop-codex",
   });
 
   // 1. Initialize
@@ -77,7 +71,6 @@ test("MCP stdio regression: initialize -> initialized notification (no response)
 
   const secret = "test-secret-key-32-bytes-long-1234567890";
   const issuer = createTurnCapabilityIssuer({ secret });
-  const validator = createTurnCapabilityValidator({ secret });
   const token = issuer.issue({ senderId: "desktop-codex" });
 
   const mockClient = {
@@ -86,9 +79,7 @@ test("MCP stdio regression: initialize -> initialized notification (no response)
 
   const handler = createLocalMessagingMcpHandler({
     client: mockClient,
-    credentialValidator: validator,
     turnCredential: token,
-    senderId: "desktop-codex",
   });
 
   const sessionPromise = runMcpStdioSession({ input, output, handler });
@@ -128,14 +119,9 @@ test("MCP stdio regression: initialize -> initialized notification (no response)
 });
 
 test("MCP adapter safely handles invalid scalar/null requests and bounds line length", async () => {
-  const secret = "test-secret-key-32-bytes-long-1234567890";
-  const validator = createTurnCapabilityValidator({ secret });
-
   const handler = createLocalMessagingMcpHandler({
     client: {},
-    credentialValidator: validator,
     turnCredential: "dummy",
-    senderId: "desktop-codex",
   });
 
   // Scalar / null request
@@ -169,7 +155,6 @@ test("MCP adapter safely handles invalid scalar/null requests and bounds line le
 test("MCP adapter supports dynamic per-turn injection seam", async () => {
   const secret = "test-secret-key-32-bytes-long-1234567890";
   const issuer = createTurnCapabilityIssuer({ secret });
-  const validator = createTurnCapabilityValidator({ secret });
 
   let dynamicToken = issuer.issue({ senderId: "desktop-codex" });
 
@@ -179,9 +164,7 @@ test("MCP adapter supports dynamic per-turn injection seam", async () => {
 
   const handler = createLocalMessagingMcpHandler({
     client: mockClient,
-    credentialValidator: validator,
     turnCredentialProvider: () => dynamicToken, // dynamic provider
-    senderId: "desktop-codex",
   });
 
   const res1 = await handler.handleRequest({
@@ -228,7 +211,7 @@ test("triangle_send_message returns its IDs on success and failure so a retry is
       },
     };
     const handler = createLocalMessagingMcpHandler({
-      client: flakyClient, senderId: "sender", turnCredentialProvider: () => subsystem.issueTurnCredential("sender"),
+      client: flakyClient, turnCredentialProvider: () => subsystem.issueTurnCredential("sender"),
     });
     const call = (args, id = 1) => handler.handleRequest({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "triangle_send_message", arguments: args } });
 
@@ -240,7 +223,7 @@ test("triangle_send_message returns its IDs on success and failure so a retry is
     const requestId = /requestId="([A-Za-z0-9._:-]+)"/.exec(errorText)?.[1];
     assert.ok(messageId && requestId, errorText);
     assert.match(errorText, /outcome unknown/i);
-    assert.equal((await journal.getRecord(messageId)).phase, "queued_local", "the lost response had in fact been admitted");
+    assert.ok(await journal.getRecord(messageId), "the lost response had in fact been admitted");
 
     // Retrying with the returned IDs is a duplicate: it never runs the work twice.
     const retry = await call({ to: "gravity2", text: "merge PR 42", messageId, requestId }, 2);
@@ -278,4 +261,23 @@ test("triangle_send_message returns its IDs on success and failure so a retry is
     await subsystem.stop();
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
+});
+
+test("the adapter never holds or consults a credential validator: the server validates every RPC", async () => {
+  // A validator holds the HMAC secret, so an agent-side process that could call one could mint credentials.
+  const validator = { validate() { throw new Error("the adapter process must not validate credentials"); } };
+  let forwarded;
+  const handler = createLocalMessagingMcpHandler({
+    client: { discoverRecipients: async (options) => { forwarded = options; return ["gravity2"]; } },
+    credentialValidator: validator,
+    turnCredential: "opaque-token-validated-by-the-server",
+  });
+  const response = await handler.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "triangle_list_recipients", arguments: {} } });
+  assert.equal(response.result.isError, false, JSON.stringify(response));
+  assert.deepEqual(forwarded, { credential: "opaque-token-validated-by-the-server" });
+  // A missing credential is still refused locally, before any RPC.
+  const none = createLocalMessagingMcpHandler({ client: {} });
+  const refused = await none.handleRequest({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "triangle_list_recipients", arguments: {} } });
+  assert.equal(refused.result.isError, true);
+  assert.match(refused.result.content[0].text, /missing injected turn credential/);
 });
