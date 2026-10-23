@@ -83,6 +83,21 @@ turn; new updates can produce a later coalesced hint. Foreign/stale
 acknowledgments must fail. Uncertain delivery requires exact acknowledgment or
 future explicit operator reconciliation, rather than automatic retry.
 
+### Claude Desktop session adapter (v11 source candidate)
+
+The v11 candidate adds the interactive-session broker, version-pinned Claude
+socket delivery module, and session-local MCP child to every bundle. Existing
+v8/v9/v10 artifact sets remain supported. This source change does not upgrade
+the Mini or grant a Claude session Triangle access.
+
+The new `triangle-local claude-session-mcp --expected-version 2.1.307`
+entry runs inside Claude's project-scoped MCP server process. It requires a
+distinct owner-paired interactive integration whose session UUID matches the
+child's inherited UUID. The supervisor owns the journal and identity authority;
+the child holds only its own inherited Claude socket capability. Never copy the
+Codex desktop integration to enroll Claude. Explicit pairing, bundle verification
+and live bidirectional acceptance remain release gates.
+
 ### Recovering a wake held after rebinding
 
 Rebinding while a notification is outstanding fences it into `stale_held`.

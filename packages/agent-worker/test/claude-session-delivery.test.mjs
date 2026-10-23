@@ -82,7 +82,7 @@ test('Darwin trusted /var system alias normalizes once without allowing user ali
  const alias=path.join(root,'user-alias');fs.symlinkSync(root,alias);
  const foreign=path.join(alias,'inbox.sock');assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:foreign},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
  const finalAlias=path.join(root,'final-alias');fs.symlinkSync(socketPath,finalAlias);assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:finalAlias.replace('/private/var/','/var/')},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
-},fs.realpathSync(os.tmpdir()))});
+},'/private/var/tmp')});
 
 test('Darwin trusted /tmp alias accepts only private owned descendants',{skip:process.platform!=='darwin'},async()=>{await fixture(async({env,socketPath,root,frames})=>{
  const exported=socketPath.replace('/private/tmp/','/tmp/');assert.notEqual(exported,socketPath);

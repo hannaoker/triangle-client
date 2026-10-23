@@ -139,7 +139,7 @@ test("v10 packages wake modules without changing the exact v8/v9 artifact sets",
     "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [8,9,10]} for a in ['codex','hermes','antigravity','supervisor']}}))",
   ].join("\n");
   const contract = JSON.parse(execFileSync(python, ["-c", code, installer], {encoding:"utf8"}));
-  assert.equal(contract.version, 10);
+  assert.ok(contract.version >= 10);
   const additions = ['codex-wake-adapter','local-messaging-notifier'].map(name=>`packages/agent-worker/src/${name}.mjs`);
   for (const [agent, versions] of Object.entries(contract.sets)) {
     const old = new Set(versions[9]);
@@ -150,6 +150,27 @@ test("v10 packages wake modules without changing the exact v8/v9 artifact sets",
   const swift = readFileSync(path.join(repoRoot,"packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),"utf8");
   const block = /if manifestVersion >= 10 \{\s*artifacts\.formUnion\(\[([^\]]*)\]\)/.exec(swift);
   assert.ok(block, "Swift v10 exact artifact additions");
+  assert.deepEqual([...block[1].matchAll(/"([^"]+)"/g)].map(m=>m[1]).sort(), [...additions].sort());
+});
+
+test("v11 adds the Claude session closure and preserves every v10 artifact", () => {
+  const code = [
+    "import importlib.util,json,sys",
+    "spec=importlib.util.spec_from_file_location('twi',sys.argv[1])",
+    "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)",
+    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [10,11]} for a in ['codex','hermes','antigravity','supervisor']}}))",
+  ].join("\n");
+  const contract = JSON.parse(execFileSync(python, ["-c", code, installer], {encoding:"utf8"}));
+  assert.equal(contract.version, 11);
+  const additions = ['local-messaging-interactive-session','claude-session-delivery','claude-session-mcp-child'].map(name=>`packages/agent-worker/src/${name}.mjs`);
+  for (const [agent, versions] of Object.entries(contract.sets)) {
+    assert.deepEqual(versions[11].filter(p=>!versions[10].includes(p)).sort(), [...additions].sort(), agent);
+    assert.deepEqual(versions[10].filter(p=>!versions[11].includes(p)), [], agent);
+    for (const added of additions) assert.ok(!versions[10].includes(added), `${agent} v10 changed`);
+  }
+  const swift = readFileSync(path.join(repoRoot,"packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),"utf8");
+  const block = /if manifestVersion >= 11 \{\s*artifacts\.formUnion\(\[([^\]]*)\]\)/.exec(swift);
+  assert.ok(block, "Swift v11 exact artifact additions");
   assert.deepEqual([...block[1].matchAll(/"([^"]+)"/g)].map(m=>m[1]).sort(), [...additions].sort());
 });
 

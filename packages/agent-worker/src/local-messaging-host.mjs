@@ -1,15 +1,24 @@
 import {createHash} from 'node:crypto';
 import {createDesktopCredentialBroker,readPrivateJson} from './local-messaging-auth-broker.mjs';
+import {validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
 import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.mjs';
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
+ if(config.interactive!==undefined){
+  if(!config.interactive||typeof config.interactive!=='object'||Array.isArray(config.interactive))throw coded('invalid_local_config','Invalid interactive configuration');
+  const interactiveKeys=['enabled','integrationPath'];
+  if(Object.keys(config.interactive).some(k=>!interactiveKeys.includes(k))||typeof config.interactive.enabled!=='boolean')throw coded('invalid_local_config','Invalid interactive configuration');
+  if(config.interactive.enabled){
+   if(typeof config.interactive.integrationPath!=='string'||!config.interactive.integrationPath.startsWith('/')||config.interactive.integrationPath.includes('\0'))throw coded('invalid_local_config','Interactive integrationPath must be absolute');
+  }
+ }
  if(config.wake!==undefined){
   if(!config.wake||typeof config.wake!=='object'||Array.isArray(config.wake))throw coded('invalid_local_config','Invalid wake configuration');
   const wakeKeys=['enabled','codexPath','codexHome','minIntervalMs','timerIntervalMs','timeoutMs'];
@@ -39,13 +48,40 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  for(const r of config.recipients)if(typeof runners.get(r.instanceId)?.run!=='function')throw coded('local_recipient_unavailable',`Recipient runtime unavailable: ${r.profile}`);
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
+
+ let interactiveIntegration=null;
+ if(config.interactive?.enabled){
+  interactiveIntegration=validateInteractiveIntegration(config.interactive.integrationPath);
+  if(interactiveIntegration.senderId===integration.senderId){
+   throw coded('identity_collision','Interactive senderId collides with host Codex senderId');
+  }
+  if(recipientIds.includes(interactiveIntegration.senderId)){
+   throw coded('identity_collision','Interactive senderId collides with worker profile instanceId');
+  }
+  if(config.recipients.some(r=>r.profile==='claude')){
+   throw coded('identity_collision','Worker profile claude collides with interactive destination');
+  }
+ }
+
+ const codexAllowedRecipients=[...recipientIds];
  const registry=[integration.senderId,...recipientIds];
- const aclRules=Object.fromEntries([[integration.senderId,recipientIds],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
+ const aclRules=Object.fromEntries([[integration.senderId,codexAllowedRecipients],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
+
+ if(interactiveIntegration){
+  const claudeId=interactiveIntegration.senderId;
+  codexAllowedRecipients.push(claudeId);
+  registry.push(claudeId);
+  aclRules[claudeId]=[...recipientIds];
+  for(const id of recipientIds){
+   if(aclRules[id]&&!aclRules[id].includes(claudeId))aclRules[id].push(claudeId);
+  }
+ }
+
  // Verified exchanges and failed attempts use separate buckets, so a failing caller cannot lock out the desktop.
  const brokerLimit=createPerSenderRateLimiter({maxRequestsPerWindow:120,windowMs:60000});
  const brokerFailureLimit=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  let subsystem=null,journal=null,dispatcher=null,notifier=null,startPromise=null,closed=false;
- const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:recipientIds,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
+ const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:codexAllowedRecipients,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
  function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients};}
  async function start() {
   if(closed)throw coded('local_host_closed','Local host is closed');
@@ -54,7 +90,26 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    const {createLocalMessagingJournal}=await import('./local-messaging-journal.mjs');
    const {createLocalMessagingDispatcher}=await import('./local-messaging-dispatcher.mjs');
    const {createLocalMessagingNotifier}=await import('./local-messaging-notifier.mjs');
+   let interactiveBroker=null;
+   const interactiveRecipients=new Set();
+   if(interactiveIntegration){
+    const {createInteractiveSessionBroker}=await import('./local-messaging-interactive-session.mjs');
+    interactiveBroker=createInteractiveSessionBroker({
+     integrationPath:config.interactive.integrationPath,
+     recipients:recipientIds,
+     issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts),
+    });
+    interactiveRecipients.add(interactiveBroker.senderId);
+   }
    journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger});
+   if(interactiveIntegration){
+    await journal.initInteractiveWakeBinding({
+     senderId:interactiveIntegration.senderId,
+     sessionId:interactiveIntegration.sessionId,
+     generation:interactiveIntegration.generation,
+     bindingId:interactiveIntegration.bindingId,
+    });
+   }
    try {
     dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
      const runner=runners.get(job.recipient);
@@ -82,7 +137,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      timerIntervalMs:timerIntervalMs??config.wake?.timerIntervalMs??5000,
      clock:clock??{now:()=>Date.now()},
     });
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

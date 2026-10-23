@@ -52,6 +52,46 @@ The first implementation owns only the delivery module and its tests. Shared
 broker/identity changes, production installation and MESH bridging do not follow
 from primitive success alone. No claim of Claude parity until step 5 passes.
 
+## Stage 2 review checkpoint — 2026-10-22
+
+Stage 1 broker/core passed 168 focused tests in the prior verification slice.
+It remains source-only and uncommitted; those tests are not Desktop MCP proof.
+The installed `bin/triangle-local` entry is the working delegation path. The
+top-level `triangle` enrollment CLI and native tool discovery do not establish
+whether this separate installed entry exists.
+
+The Stage 2 proposal is not approved for implementation yet. First establish
+Gate 0 in a disposable project with a project `.mcp.json`: actual Desktop Code
+MCP launch, inherited own-session environment, metadata-only tool response and
+clean stdio lifecycle. A shell child receiving these variables is insufficient.
+The probe must never dump `process.env`, token values, socket paths or arbitrary
+error strings. Do not read or change global Claude configuration. Missing MCP
+environment or project support is an unresolved capability gate, not a pass.
+
+Before Stage 2 coding, revise the proposal to define a distinct Claude identity
+and durable wake binding. Include inbound queued interactive messages in Claude
+obligations; current Codex obligations cover replies and held outgoing work.
+Keep authentication, generation fencing, one outstanding hint and uncertainty
+state in supervisor-owned broker/journal operations; the session child must not
+open SQLite or reuse Codex's wake binding. Preserve all Codex wake behavior.
+Socket write acceptance remains separate from model execution and wake ack.
+No automatic retry may replay a mutating operation after an unknown outcome.
+
+At that checkpoint only the scratch launch fixture was delegated. Adapter
+implementation, installation, packaging and bidirectional acceptance remained
+subsequent gates.
+
+### Subsequent source gate
+
+The reviewed Stage 2 adapter and v11 bundle changes are now implemented and
+verified. See `../reviews/2026-10-22-claude-session-stage2-review.md`: final package
+suite 906 passed, 0 failed, 3 skipped; Swift launcher 11 passed; real staged MCP
+entry and legacy installation gate 18 passed. Initial review findings were fixed
+and independently re-reviewed. No production install or full live bidirectional
+acceptance is implied. The next operational gate is explicit owner pairing of
+the actual Claude session, activation through the existing supervisor, then
+correlated incoming/outgoing messages and durable acknowledgments.
+
 ## Baseline sources
 
 - Existing approved M3: docs/plans/2026-10-21-harness-wake-adapters-plan.md
