@@ -139,3 +139,36 @@ so unread backlog can generate a fresh wake on the new thread. It does not
 acknowledge or consume replies, retry held tasks, or erase message data. There is
 no recovery RPC or agent MCP tool. Disabling wake does not withdraw a hint
 already queued in the old conversation; its old acknowledgment remains fenced.
+
+### Automatic Claude discovery (new source candidate)
+
+After upgrading to this candidate, the owner can opt one canonical workspace in:
+
+```text
+triangle-local setup-discovery --workspace /absolute/workspace
+```
+
+The command adds lifecycle hooks to `.claude/settings.local.json` and a private
+workspace-scoped installation capability. Preserve the printed hook-approval
+requirement and restart the existing Triangle service once to load the optional
+configuration. Do not assume this command exists in a previously installed build.
+Already-open Claude chats appear on their next hook-bearing turn; new chats and
+forks appear when their backend starts. The live disposable Desktop check picked
+up the hooks without an app restart; other surfaces/versions are not established.
+The hook never scans other chats or collects prompt text or transcript contents.
+
+Use `sessions` or `triangle_list_sessions` to inspect exact session handles,
+workspace/session-prefix labels, lifecycle and last-seen metadata. Discovered
+entries explicitly report `visible: true`, `reachable: false`, `wakeCapable:
+false`. They do not acquire a Triangle inbox or messaging permissions. Presence
+is unknown while observed and offline after an end event; missing crash/end
+signals do not establish live status. Actual chat titles and automatic Codex
+registration are not implemented.
+
+To turn it off or prepare rollback, run `triangle-local disable-discovery` using
+the candidate before restoring older runtime code. It disables the capability,
+removes only its managed hooks, and removes the optional config key so the old
+host can read the configuration. Additive SQLite metadata can remain. No existing
+messages, bindings, claims or unrelated agent settings are reset. Metadata has a
+128-session cap and eight-day cleanup on subsequent reports. One installation
+supports one workspace; a different workspace requires a separate explicit scope.

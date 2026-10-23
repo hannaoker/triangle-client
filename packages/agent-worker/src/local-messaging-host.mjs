@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {createDesktopCredentialBroker,readPrivateJson} from './local-messaging-auth-broker.mjs';
+import {createDesktopCredentialBroker,readPrivateJson,createSessionDiscoveryBroker} from './local-messaging-auth-broker.mjs';
 import {validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
 import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.mjs';
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
@@ -7,7 +7,7 @@ import {coded} from './local-messaging-errors.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
@@ -18,6 +18,11 @@ export function loadLocalMessagingConfig(configPath) {
   if(config.interactive.enabled){
    if(typeof config.interactive.integrationPath!=='string'||!config.interactive.integrationPath.startsWith('/')||config.interactive.integrationPath.includes('\0'))throw coded('invalid_local_config','Interactive integrationPath must be absolute');
   }
+ }
+ if(config.discovery!==undefined){
+  const d=config.discovery;
+  if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['enabled','integrationPath'].includes(k))||typeof d.enabled!=='boolean'||
+    (d.enabled&&(typeof d.integrationPath!=='string'||!d.integrationPath.startsWith('/')||d.integrationPath.includes('\0'))))throw coded('invalid_local_config','Invalid discovery configuration');
  }
  if(config.wake!==undefined){
   if(!config.wake||typeof config.wake!=='object'||Array.isArray(config.wake))throw coded('invalid_local_config','Invalid wake configuration');
@@ -142,7 +147,8 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      timerIntervalMs:timerIntervalMs??config.wake?.timerIntervalMs??5000,
      clock:clock??{now:()=>Date.now()},
     });
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,recipientDirectory,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
+    const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal}):null;
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,recipientDirectory,discoveryBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

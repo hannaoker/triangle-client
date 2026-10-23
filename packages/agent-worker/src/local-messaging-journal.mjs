@@ -179,6 +179,15 @@ export function createLocalMessagingJournal({
   try {
   // Schema initialization
   db.exec(`
+    CREATE TABLE IF NOT EXISTS local_discovered_sessions (
+      id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, workspace TEXT NOT NULL,
+      session_id TEXT NOT NULL, lifecycle TEXT NOT NULL, generation INTEGER NOT NULL,
+      event_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS local_discovery_events (
+      event_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result_json TEXT NOT NULL,
+      received_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS local_messages (
       message_id TEXT NOT NULL PRIMARY KEY,
       sender TEXT NOT NULL,
@@ -1534,6 +1543,47 @@ export function createLocalMessagingJournal({
     };
   }
 
+  async function recordDiscoveryEvent({installationId,event,digest,receivedAt}) {
+    assertNotClosed();
+    const id='session-'+createHash('sha256').update(`${installationId}\0${event.workspace}\0${event.sessionId}`).digest('hex');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous=db.prepare('SELECT * FROM local_discovery_events WHERE event_id=?').get(event.eventId);
+      if(previous){
+        if(previous.digest!==digest)throw coded('duplicate_id_conflict','Lifecycle event ID reused with different metadata');
+        db.exec('COMMIT');return {...JSON.parse(previous.result_json),duplicate:true};
+      }
+      const cutoff=receivedAt-RETENTION_MS;
+      db.prepare('DELETE FROM local_discovery_events WHERE received_at < ?').run(cutoff);
+      db.prepare('DELETE FROM local_discovered_sessions WHERE last_seen_at < ?').run(cutoff);
+      const old=db.prepare('SELECT * FROM local_discovered_sessions WHERE id=?').get(id);
+      const stale=!!old&&(event.observedAt<old.event_at||
+        (event.observedAt===old.event_at&&event.kind!=='end')||
+        (old.lifecycle==='ended'&&event.kind==='activity'));
+      if(!old&&db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n>=128)throw coded('directory_full','Session directory is full');
+      const generation=old ? old.generation+(old.lifecycle==='ended'&&event.kind==='start'&&!stale?1:0) : 1;
+      if(!stale){
+        db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at)
+          VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
+          generation=excluded.generation,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at`)
+          .run(id,installationId,event.workspace,event.sessionId,event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt);
+      }
+      const result={id,generation,stale,duplicate:false};
+      db.prepare('INSERT INTO local_discovery_events(event_id,digest,result_json,received_at) VALUES(?,?,?,?)').run(event.eventId,digest,JSON.stringify(result),receivedAt);
+      db.exec('COMMIT');return result;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  }
+
+  async function listDiscoveredSessions({installationId,workspace}) {
+    assertNotClosed();
+    return db.prepare('SELECT * FROM local_discovered_sessions WHERE installation_id=? AND workspace=? ORDER BY id').all(installationId,workspace).map(row=>({
+      id:row.id,label:`Claude · ${path.basename(workspace).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,48)} · ${row.session_id.slice(0,8)}`,
+      kind:'conversation',harness:'claude',workspace,generation:row.generation,
+      presence:row.lifecycle==='ended'?'offline':'unknown',lifecycle:row.lifecycle,lastSeenAt:row.last_seen_at,
+      capabilities:{visible:true,reachable:false,wakeCapable:false},
+    }));
+  }
+
   async function close() {
     if (closed) return;
     closed = true;
@@ -1542,6 +1592,8 @@ export function createLocalMessagingJournal({
 
   return {
     hasDurablePairLimiter: true,
+    recordDiscoveryEvent,
+    listDiscoveredSessions,
     recordSend,
     recordReply,
     recordExecutionFailure,
