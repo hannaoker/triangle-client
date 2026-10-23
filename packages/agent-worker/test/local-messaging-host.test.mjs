@@ -27,6 +27,7 @@ test('production host executes via registered runner and preserves replies acros
   const make=()=>createInstalledLocalMessagingHost({configPath,runners:new Map([[recipient,runner]]),gate:createProfiledReasonerGate()});
   const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
   host=make();await host.start();
+  assert.deepEqual((await run(['sessions'])).sessions,[{id:recipient,label:'gravity2',kind:'worker',presence:'unknown'}]);
   const sent=await run(['send','--to','gravity2','--text','inspect','--message-id','host-one','--request-id','host-request','--wait-ms','2000']);
   assert.equal(sent.replies[0].text,'assessment inspect');assert.equal(calls,1);
   assert.equal((await run(['status','--message-id','host-one'])).phase,'completed');

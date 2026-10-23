@@ -175,7 +175,7 @@ test("lost send, claim and reply responses retain exact IDs for safe retries", a
   }
 });
 
-test("Codex MCP tool surface is unchanged and does not contain interactive tools", () => {
+test("Codex MCP retains legacy tools and adds read-only directory without interactive inbox tools", () => {
   const toolNames = MCP_TOOLS.map((t) => t.name);
   assert.equal(toolNames.includes("triangle_list_inbox"), false);
   assert.equal(toolNames.includes("triangle_claim_message"), false);
@@ -187,6 +187,7 @@ test("Codex MCP tool surface is unchanged and does not contain interactive tools
     "triangle_get_replies",
     "triangle_get_status",
     "triangle_list_recipients",
+    "triangle_list_sessions",
     "triangle_send_message",
   ].sort());
 });
@@ -613,6 +614,14 @@ test("Issue 3 [P2]: Claude MCP child exposes authorized bidirectional tools tria
     assert.equal(recipsRes.result.isError, false);
     const recipsData = JSON.parse(recipsRes.result.content[0].text);
     assert.deepEqual(recipsData.recipients, [env.codexId]);
+    const directoryResult = await child.handleRequest({
+      jsonrpc: "2.0", id: "directory", method: "tools/call",
+      params: { name: "triangle_list_sessions", arguments: {} },
+    });
+    assert.equal(directoryResult.result.isError, false);
+    assert.deepEqual(JSON.parse(directoryResult.result.content[0].text).sessions,
+      [{ id: env.codexId, label: env.codexId, kind: "unknown", presence: "unknown" }]);
+
 
     // 2. Claude sends initial request to runner
     const sendRes = await child.handleRequest({

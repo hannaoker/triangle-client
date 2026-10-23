@@ -63,6 +63,11 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
   }
  }
 
+ const recipientDirectory=[
+  {id:integration.senderId,label:'Codex (paired conversation)',kind:'conversation'},
+  ...config.recipients.map(r=>({id:r.instanceId,label:r.profile,kind:'worker'})),
+  ...(interactiveIntegration?[{id:interactiveIntegration.senderId,label:'Claude (paired conversation)',kind:'conversation'}]:[]),
+ ];
  const codexAllowedRecipients=[...recipientIds];
  const registry=[integration.senderId,...recipientIds];
  const aclRules=Object.fromEntries([[integration.senderId,codexAllowedRecipients],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
@@ -137,7 +142,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      timerIntervalMs:timerIntervalMs??config.wake?.timerIntervalMs??5000,
      clock:clock??{now:()=>Date.now()},
     });
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,recipientDirectory,statusProvider:async()=>({...baseStatus(),journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
