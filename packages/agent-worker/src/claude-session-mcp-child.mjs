@@ -1,6 +1,7 @@
 import readline from "node:readline";
+import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID,createHash } from "node:crypto";
 import { readPrivateJson } from "./local-messaging-auth-broker.mjs";
 import { resolveLocalSocketAddress } from "./local-messaging-address.mjs";
 import { createLocalControlClient } from "./local-messaging-client.mjs";
@@ -12,6 +13,8 @@ import {
 import {
   validateInteractiveIntegration,
   UUID_PATTERN,
+  readSessionMessagingPolicy,
+  attachedSessionIdentity,
 } from "./local-messaging-interactive-session.mjs";
 import { sanitizeError, coded } from "./local-messaging-errors.mjs";
 import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH } from "./local-messaging-protocol.mjs";
@@ -169,6 +172,7 @@ export function createClaudeSessionMcpChild({
   output = process.stdout,
   connect = null,
   wakeIntervalMs = 5000,
+  attachment = null,
 }) {
   if (!expectedVersion || typeof expectedVersion !== "string") {
     throw coded("missing_expected_version", "Explicit expected version required");
@@ -180,7 +184,7 @@ export function createClaudeSessionMcpChild({
   }
 
   const integrationPath = explicitIntegrationPath || config.interactive?.integrationPath || path.join(config.stateRoot, "claude-integration.json");
-  const integration = validateInteractiveIntegration(integrationPath);
+  const integration = attachment ? attachment.integration : validateInteractiveIntegration(integrationPath);
   if (integration.enabled !== true) {
     throw coded("session_disabled", "Interactive session is disabled");
   }
@@ -192,7 +196,7 @@ export function createClaudeSessionMcpChild({
   if (!inheritedSessionId || typeof inheritedSessionId !== "string" || !UUID_PATTERN.test(inheritedSessionId)) {
     throw coded("missing_or_mismatched_session", "Inherited CLAUDE_CODE_SESSION_ID is missing or not a valid UUID");
   }
-  if (inheritedSessionId !== integration.sessionId) {
+  if (!attachment && inheritedSessionId !== integration.sessionId) {
     throw coded("missing_or_mismatched_session", "Inherited CLAUDE_CODE_SESSION_ID does not match paired owner integration");
   }
 
@@ -216,7 +220,7 @@ export function createClaudeSessionMcpChild({
   const pinnedSenderId = integration.senderId;
   const pinnedSessionId = integration.sessionId;
   const pinnedBindingId = integration.bindingId;
-  const pinnedGeneration = integration.generation;
+  let pinnedGeneration = integration.generation;
   const pinnedSecret = integration.secret;
 
   let activeGrant = null;
@@ -230,6 +234,14 @@ export function createClaudeSessionMcpChild({
   async function getValidCredential() {
     if (closed) throw coded("client_closed", "MCP child is closed");
     const now = Date.now();
+    if(attachment){
+      const policy=readSessionMessagingPolicy(attachment.policyPath);
+      if(!policy.enabled||policy.secret!==pinnedSecret)throw coded('session_revoked','Workspace participation was disabled or rotated');
+      const grant=await client.attachSession({...attachment.tuple,...(pinnedGeneration===null?{}:{generation:pinnedGeneration})});
+      if(pinnedGeneration===null)pinnedGeneration=grant.generation;
+      if(grant.senderId!==pinnedSenderId||grant.sessionId!==pinnedSessionId||grant.bindingId!==pinnedBindingId||grant.generation!==pinnedGeneration)throw coded('session_fenced','Session lifecycle changed; reconnect this MCP child');
+      return grant.credential;
+    }
     if (activeGrant?.credential && (now - grantIssuedAt < 240000)) {
       return activeGrant.credential;
     }
@@ -267,7 +279,8 @@ export function createClaudeSessionMcpChild({
   }
 
   async function pollWake() {
-    if (closed || !pushSupported || !delivery || inFlightWakePromise) return;
+    if (closed || inFlightWakePromise) return;
+    if(!pushSupported||!delivery){if(attachment)await getValidCredential().catch(()=>{});return;}
     const ac = new AbortController();
     wakeAbortController = ac;
     const wakePromise = (async () => {
@@ -296,7 +309,7 @@ export function createClaudeSessionMcpChild({
           let outcomeState = "uncertain";
           try {
             const notifyResult = await delivery.notify(
-              { sessionId: pinnedSessionId, generation: res.generation },
+              { sessionId: attachment ? inheritedSessionId : pinnedSessionId, generation: res.generation },
               res.snapshot,
               { signal: ac.signal }
             );
@@ -338,7 +351,7 @@ export function createClaudeSessionMcpChild({
   }
 
   function startWakeLoop() {
-    if (pushSupported && delivery && wakeIntervalMs > 0) {
+    if (((pushSupported && delivery) || attachment) && wakeIntervalMs > 0) {
       wakeTimer = setInterval(pollWake, wakeIntervalMs);
       wakeTimer.unref?.();
     }
@@ -610,6 +623,7 @@ export function createClaudeSessionMcpChild({
         await inFlightWakePromise;
       } catch {}
     }
+    if(attachment)await client.detachSession(attachment.tuple,{timeout:1500}).catch(()=>{});
     await client.close();
   }
 
@@ -623,4 +637,20 @@ export function createClaudeSessionMcpChild({
     },
     handleRequest: handleMcpRequest,
   };
+}
+
+
+// Only this MCP child's own exported context is used; never enumerate session token files.
+export async function createAttachedClaudeSessionMcpChild(options){
+ const {configPath,policyPath,expectedVersion,env=process.env}=options;
+ const c=readPrivateJson(configPath),policy=readSessionMessagingPolicy(policyPath);
+ if(fs.realpathSync(options.cwd||process.cwd())!==policy.workspace)throw coded('workspace_mismatch','Own MCP workspace does not match owner opt-in');
+ if(!policy.enabled||!UUID_PATTERN.test(env.CLAUDE_CODE_SESSION_ID))throw coded('session_disabled','Own-session context and owner opt-in required');
+ const probe=probeClaudeSession({env,version:expectedVersion});
+ const tuple={installationId:policy.installationId,secret:policy.secret,sessionId:env.CLAUDE_CODE_SESSION_ID.toLowerCase(),childId:randomUUID(),wakeCapable:probe.supported===true};
+ const id='session-'+createHash('sha256').update(policy.installationId+'\0'+policy.workspace+'\0'+tuple.sessionId).digest('hex');
+ const identity=attachedSessionIdentity(policy.installationId,tuple.sessionId);
+ // Initialize MCP immediately. Claude may wait for MCP initialization before
+ // firing SessionStart. First tool call / heartbeat attaches after that hook.
+ return createClaudeSessionMcpChild({...options,attachment:{policyPath,tuple,integration:{senderId:id,sessionId:identity.pseudoSessionId,bindingId:tuple.childId,generation:null,enabled:true,revoked:false,secret:policy.secret}}});
 }

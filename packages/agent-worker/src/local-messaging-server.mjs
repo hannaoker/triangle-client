@@ -42,6 +42,7 @@ export function createLocalControlServer({
   statusProvider = null,
   recipientDirectory = [],
   discoveryBroker = null,
+  sessionBroker = null,
   rateLimiter,
   exchangeLimiter = null,
   loopTracker,
@@ -157,7 +158,7 @@ export function createLocalControlServer({
       // sender from the signed claims; the client's senderId is only an assertion that must match.
       let claims = null;
       let senderId = null;
-      if (method !== "hello" && method !== "issue_turn" && method !== "exchange_session" && method !== "discovery_challenge" && method !== "discovery_report") {
+      if (method !== "hello" && method !== "issue_turn" && method !== "exchange_session" && method !== "discovery_challenge" && method !== "discovery_report" && method !== "attach_session" && method !== "detach_session") {
         if (!claimedSenderId || typeof claimedSenderId !== "string" || !claimedSenderId.trim()) {
           throw coded("unauthorized", "senderId is required");
         }
@@ -169,11 +170,17 @@ export function createLocalControlServer({
           if (!interactiveBroker) {
             throw coded("unauthorized", "Interactive sessions are not supported or disabled");
           }
-          interactiveBroker.validateRequest({ claims, senderId });
+          await interactiveBroker.validateRequest({ claims, senderId });
         }
       }
 
       switch (method) {
+        case "attach_session":
+        case "detach_session": {
+          if(!sessionBroker)throw coded('unsupported','Workspace messaging is not enabled');
+          const result=method==='attach_session'?await sessionBroker.attach(params):await sessionBroker.detach(params);
+          socket.write(encodeFrame(createSuccessResponse(id,result)));break;
+        }
         case "discovery_challenge":
         case "discovery_report": {
           if(!discoveryBroker)throw coded("unsupported", "Session discovery is not enabled");
@@ -227,7 +234,7 @@ export function createLocalControlServer({
         }
 
         case "list_sessions": {
-          let ids = acl.listAuthorizedRecipients(senderId);
+          let ids = await acl.listAuthorizedRecipients(senderId);
           if (claims?.allowedRecipients) {
             const allowed = new Set(claims.allowedRecipients);
             ids = ids.filter(id => allowed.has(id));
@@ -236,6 +243,10 @@ export function createLocalControlServer({
           const sessions = ids.map(id => directory.get(id) ?? {
             id, label: id, kind: "unknown", presence: "unknown",
           });
+          if(sessionBroker){
+            const attached=await sessionBroker.listFor(senderId);
+            for(const entry of attached){const index=sessions.findIndex(row=>row.id===entry.id);if(index>=0)sessions[index]=entry;else sessions.push(entry);}
+          }
           if(discoveryBroker){
             const discovered=await discoveryBroker.listFor(senderId);
             const known=new Set(sessions.map(entry=>entry.id));
@@ -245,7 +256,7 @@ export function createLocalControlServer({
           break;
         }
         case "discover_recipients": {
-          let recipients = acl.listAuthorizedRecipients(senderId);
+          let recipients = await acl.listAuthorizedRecipients(senderId);
           if (claims?.allowedRecipients) {
             const allowedSet = new Set(claims.allowedRecipients);
             recipients = recipients.filter((r) => allowedSet.has(r));
@@ -270,7 +281,7 @@ export function createLocalControlServer({
           }
 
           // 1. ACL check
-          acl.checkAllowed(senderId, to);
+          await acl.checkAllowed(senderId, to);
 
           // 2. Turn claims recipient check (fail closed)
           if (claims?.allowedRecipients && !claims.allowedRecipients.includes(to)) {

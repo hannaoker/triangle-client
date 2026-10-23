@@ -183,3 +183,38 @@ was disabled when its file cannot be updated. Base setup preserves existing
 optional integrations. At the 128-row limit, discovery evicts the oldest ended
 row and retains its end marker; it does not evict observed sessions. Local status
 reports directory `used` and `capacity` so an all-observed full directory is visible.
+
+## Workspace Claude attachments (candidate)
+
+After installing this feature, enable lifecycle discovery, then run
+`triangle-local setup-session-messaging --workspace /absolute/workspace`.
+Restart the existing supervisor and reconnect/create Claude MCP sessions as
+required by the harness, honoring its approvals. Setup adds only its managed
+`triangle-session` entry to `.mcp.json`, preserving other entries and refusing
+to overwrite an existing different entry. Existing MCP children are not
+retroactively attached.
+
+Participation is a separate capability from discovery. The initial receiver
+policy permits only the bound Codex sender; attached sessions can initiate sends
+only to configured workers. Replies follow the original sender and claim.
+This does not add an incoming Codex inbox or Claude-to-Claude permission.
+
+MCP initializes before attachment: Claude may fire SessionStart only after MCP
+initialization finishes. First tool call/heartbeat attaches only after matching
+lifecycle registration. The child uses its own exported session/socket/token;
+no supervisor scanning of session token files occurs. Lifecycle end fences
+stale inherited identities after `/clear`.
+
+Use exact `session-...` IDs. A child renews a durable 30-second lease every five
+seconds. Clean close detaches; a crash becomes offline after expiry. Restart
+preserves custody; competing children cannot replace an unexpired lease.
+Capability rotation/disable fences prior credentials. Presence means a recent
+child heartbeat, not that the model is free. Wake remains unsupported and pinned
+to Claude 2.1.307; write acceptance alone is not visible-delivery proof.
+
+`disable-session-messaging` revokes participation and removes only the matching
+managed MCP entry. Disabling discovery also disables participation. Neither
+cancels claimed execution, deletes messages, redirects work to another chat,
+or launches a replacement. Existing claim/retention behavior is unchanged;
+this adds no new task expiry contract. Same-account shell isolation is not
+claimed. Cross-machine transport and worker launch remain deferred.

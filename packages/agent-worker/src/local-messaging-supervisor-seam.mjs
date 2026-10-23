@@ -35,6 +35,7 @@ export function createLocalMessagingSubsystem({
   statusProvider = null,
   recipientDirectory = [],
   discoveryBroker = null,
+  sessionBroker = null,
   aclRules = {},
   ownerAcl = null,
   rateLimiter = null,
@@ -113,6 +114,7 @@ export function createLocalMessagingSubsystem({
     statusProvider,
     recipientDirectory,
     discoveryBroker,
+    sessionBroker,
     rateLimiter: limiter,
     exchangeLimiter: exchanges,
     loopTracker: tracker,
@@ -150,6 +152,8 @@ export function createLocalMessagingSubsystem({
       stopped = true;
       logger.info?.("Local messaging subsystem stopped");
     },
+
+    registerInteractiveIdentity(id) { knownProfiles.add(id); },
 
     issueTurnCredential(senderId, options = {}) {
       if (!senderId || typeof senderId !== "string") {

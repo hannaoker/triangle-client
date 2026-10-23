@@ -14,7 +14,7 @@ import {coded} from './local-messaging-errors.mjs';
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli']);
+ const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging']);
  while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -52,7 +52,7 @@ export function setupLocalMessaging(options,env=process.env){
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
- const optional=Object.fromEntries(['wake','interactive','discovery'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
@@ -322,7 +322,8 @@ export function disableSessionDiscovery(options,env=process.env){
   }
  }catch{hooksCleanupRequired=true;}
  // Always remove the optional key, even if hook cleanup needs an explicit moved workspace.
- const {discovery,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
+ if(config.sessionMessaging?.enabled)disableWorkspaceMessaging({config:configPath},env);
+ const {discovery,sessionMessaging,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
  return {discoveryEnabled:false,hooksCleanupRequired};
 }
 
@@ -350,7 +351,9 @@ export async function runSessionDiscoveryHook({configPath,input,stderr=process.s
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
+ if(command==='disable-session-messaging'){output.write(JSON.stringify(disableWorkspaceMessaging(options,env))+'\n');return 0;}
  if(command==='setup-discovery'){output.write(JSON.stringify(setupSessionDiscovery(options,env))+'\n');return 0;}
  if(command==='discovery-hook')return runSessionDiscoveryHook({configPath:options.config||defaultLocalConfigPath(env),input});
  if(command==='disable-discovery'){output.write(JSON.stringify(disableSessionDiscovery(options,env))+'\n');return 0;}
@@ -365,8 +368,10 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   if(!expectedVersion){
    throw coded('missing_expected_version','Explicit expected Claude version is required');
   }
-  const {createClaudeSessionMcpChild}=await import('./claude-session-mcp-child.mjs');
-  const child=createClaudeSessionMcpChild({
+  const {createClaudeSessionMcpChild,createAttachedClaudeSessionMcpChild}=await import('./claude-session-mcp-child.mjs');
+  const factory=options['workspace-messaging']?createAttachedClaudeSessionMcpChild:createClaudeSessionMcpChild;
+  const child=await factory({
+   policyPath:options['workspace-messaging'],
    configPath,
    integrationPath:options.integration,
    expectedVersion,
@@ -428,7 +433,11 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
      }
     }catch{}
    }
-   if(!to)throw coded('recipient_not_allowed','Choose an explicitly configured recipient');
+   if(!to&&config.sessionMessaging?.enabled&&/^session-[a-f0-9]{64}$/.test(options.to||'')){
+    const sessions=await client.listSessions(rpcOptions);
+    if(sessions.some(row=>row.id===options.to&&row.capabilities?.reachable===true))to=options.to;
+   }
+   if(!to)throw coded('recipient_not_allowed','Choose an explicitly authorized reachable recipient');
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;
    if(typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>128*1024)throw coded('invalid_message','A bounded nonempty message is required');
@@ -460,4 +469,57 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
+}
+
+
+export function setupWorkspaceMessaging(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
+ if(!config.discovery?.enabled)throw coded('discovery_required','Enable lifecycle discovery in this disposable workspace first');
+ const d=readPrivateJson(config.discovery.integrationPath);
+ if(!d.enabled||!options.workspace||fs.realpathSync(options.workspace)!==d.workspace)throw coded('workspace_mismatch','Explicit opted-in discovery workspace required');
+ const wrapper=options['local-cli']||path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/bin/triangle-local');
+ const st=fs.lstatSync(wrapper);
+ if(fs.realpathSync(wrapper)!==wrapper||!st.isFile()||st.uid!==process.getuid()||(st.mode&0o022)||!(st.mode&0o100))throw coded('unsafe_path','Owner installed wrapper required');
+ const integrationPath=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
+ const old=fs.existsSync(integrationPath)?readPrivateJson(integrationPath):null;
+ const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:old?.enabled===true&&old?.installationId===d.installationId?old.secret:randomBytes(32).toString('hex'),allowedSenders:[readPrivateJson(config.integrationPath).senderId],allowedRecipients:config.recipients.map(r=>r.instanceId)};
+ const file=path.join(d.workspace,'.mcp.json');
+ let mcp={};
+ if(fs.existsSync(file)){
+  const stat=fs.lstatSync(file);
+  if(!stat.isFile()||stat.uid!==process.getuid()||stat.nlink!==1||stat.size>1024*1024)throw coded('unsafe_path','Unsafe workspace MCP configuration');
+  mcp=JSON.parse(fs.readFileSync(file,'utf8'));
+ }
+ if(!mcp||typeof mcp!=='object'||Array.isArray(mcp)||mcp.mcpServers&&(typeof mcp.mcpServers!=='object'||Array.isArray(mcp.mcpServers)))throw coded('invalid_settings','Invalid MCP configuration');
+ const name='triangle-session';
+ const entry={command:wrapper,args:['claude-session-mcp','--config',configPath,'--workspace-messaging',integrationPath,'--expected-version','2.1.307']};
+ if(mcp.mcpServers?.[name]&&JSON.stringify(mcp.mcpServers[name])!==JSON.stringify(entry))throw coded('integration_exists','Preserve existing Triangle MCP configuration; choose a disposable workspace');
+ writePrivateJson(integrationPath,policy);
+ // Workspace config is not a credential; preserve unrelated MCP entries atomically.
+ const temp=file+'.triangle-'+randomUUID();
+ try{fs.writeFileSync(temp,JSON.stringify({...mcp,mcpServers:{...mcp.mcpServers,[name]:entry}},null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,file);}finally{try{fs.unlinkSync(temp);}catch{}}
+ writePrivateJson(configPath,{...config,sessionMessaging:{enabled:true,integrationPath}});
+ return {workspace:d.workspace,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false};
+}
+export function disableWorkspaceMessaging(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
+ const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
+ if(fs.existsSync(file)){const policy=readPrivateJson(file);writePrivateJson(file,{...policy,enabled:false});}
+ const {sessionMessaging,...rest}=config;writePrivateJson(configPath,rest);
+ let mcpCleanupRequired=false;
+ try{
+  const policy=readPrivateJson(file),mcpPath=path.join(policy.workspace,'.mcp.json');
+  if(fs.existsSync(mcpPath)){
+   const st=fs.lstatSync(mcpPath);
+   if(fs.realpathSync(policy.workspace)!==policy.workspace||!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe MCP settings');
+   const mcp=JSON.parse(fs.readFileSync(mcpPath,'utf8')),entry=mcp.mcpServers?.['triangle-session'];
+   const args=entry?.args;
+   if(Array.isArray(args)&&args[0]==='claude-session-mcp'&&args[1]==='--config'&&args[2]===configPath&&args[3]==='--workspace-messaging'&&args[4]===file){
+    delete mcp.mcpServers['triangle-session'];
+    const temp=mcpPath+'.triangle-'+randomUUID();
+    try{fs.writeFileSync(temp,JSON.stringify(mcp,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,mcpPath);}finally{try{fs.unlinkSync(temp);}catch{}}
+   }
+  }
+ }catch{mcpCleanupRequired=true;}
+ return {sessionMessagingEnabled:false,mcpCleanupRequired};
 }

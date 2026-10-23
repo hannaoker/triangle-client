@@ -181,6 +181,17 @@ export function createLocalControlClient({
       }
       return grant;
     },
+    async attachSession(tuple,options={}) {
+      try{return await callRpc('attach_session',tuple,options);}
+      catch(error){
+        if(!['connection_error','disconnected'].includes(error?.code))throw error;
+        // The tuple is stable and attachment renewal is idempotent. A restart may
+        // close a cached socket before its close event reaches this process.
+        await new Promise(resolve=>setImmediate(resolve));
+        return callRpc('attach_session',tuple,options);
+      }
+    },
+    async detachSession(tuple,options={}) {return callRpc('detach_session',tuple,options);},
     async exchangeInteractiveSession(tuple, options = {}) {
       const grant = await callRpc("exchange_session", tuple, options);
       if (grant?.credential) {

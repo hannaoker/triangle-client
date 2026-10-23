@@ -253,6 +253,10 @@ export function createLocalMessagingJournal({
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS local_session_attachments (
+      id TEXT PRIMARY KEY, child_id TEXT NOT NULL, generation INTEGER NOT NULL,
+      installation_id TEXT NOT NULL, expires_at INTEGER NOT NULL, wake_capable INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS local_interactive_wake_history (
       target_identity TEXT NOT NULL,
       session_id TEXT NOT NULL,
@@ -1601,6 +1605,19 @@ export function createLocalMessagingJournal({
     }));
   }
 
+  // Attachment custody is durable across supervisor restart; no raw session UUID is stored.
+  async function attachDiscoveredSession({id,childId,generation,installationId,wakeCapable,now=Date.now()}) {
+    assertNotClosed();
+    const row=db.prepare('SELECT * FROM local_session_attachments WHERE id=?').get(id);
+    if(row&&row.installation_id===installationId&&row.expires_at>now&&row.child_id!==childId)throw coded('attachment_busy','Another MCP child owns this session');
+    db.prepare(`INSERT INTO local_session_attachments(id,child_id,generation,installation_id,expires_at,wake_capable)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET child_id=excluded.child_id,generation=excluded.generation,
+      installation_id=excluded.installation_id,expires_at=excluded.expires_at,wake_capable=excluded.wake_capable`)
+      .run(id,childId,generation,installationId,now+30000,wakeCapable?1:0);
+  }
+  async function getSessionAttachment(id){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments WHERE id=?').get(id)??null;}
+  async function detachDiscoveredSession({id,childId}){assertNotClosed();db.prepare('UPDATE local_session_attachments SET expires_at=0 WHERE id=? AND child_id=?').run(id,childId);}
+
   async function close() {
     if (closed) return;
     closed = true;
@@ -1610,6 +1627,9 @@ export function createLocalMessagingJournal({
   return {
     hasDurablePairLimiter: true,
     discoveryUsage: async()=>{assertNotClosed();return {used:db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n};},
+    attachDiscoveredSession,
+    getSessionAttachment,
+    detachDiscoveredSession,
     recordDiscoveryEvent,
     listDiscoveredSessions,
     recordSend,
