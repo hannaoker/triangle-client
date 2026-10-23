@@ -40,6 +40,7 @@ export function createLocalControlServer({
   interactiveBroker = null,
   interactiveRecipients = null,
   statusProvider = null,
+  recipientDirectory = [],
   rateLimiter,
   exchangeLimiter = null,
   loopTracker,
@@ -78,6 +79,22 @@ export function createLocalControlServer({
     if (typeof activeDispatcher[hook] !== "function") {
       throw coded("invalid_dispatcher", `Dispatcher must implement ${hook}`);
     }
+  }
+
+  // Owner-configured labels are display metadata, never routing or authority.
+  if (!Array.isArray(recipientDirectory) || recipientDirectory.length > 256) {
+    throw coded("invalid_options", "Recipient directory must be a bounded array");
+  }
+  const directory = new Map();
+  for (const entry of recipientDirectory) {
+    identifier(entry?.id, "directory id");
+    if (directory.has(entry.id) || typeof entry.label !== "string" ||
+        entry.label.length < 1 || entry.label.length > 128 ||
+        /[\u0000-\u001f\u007f]/.test(entry.label) ||
+        !["worker", "conversation"].includes(entry.kind)) {
+      throw coded("invalid_options", "Invalid recipient directory entry");
+    }
+    directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown" });
   }
 
   let server = null;
@@ -200,6 +217,19 @@ export function createLocalControlServer({
           break;
         }
 
+        case "list_sessions": {
+          let ids = acl.listAuthorizedRecipients(senderId);
+          if (claims?.allowedRecipients) {
+            const allowed = new Set(claims.allowedRecipients);
+            ids = ids.filter(id => allowed.has(id));
+          }
+          // Filter before looking up metadata, so hidden names never leak.
+          const sessions = ids.map(id => directory.get(id) ?? {
+            id, label: id, kind: "unknown", presence: "unknown",
+          });
+          socket.write(encodeFrame(createSuccessResponse(id, { sessions }, PROTOCOL_VERSION)));
+          break;
+        }
         case "discover_recipients": {
           let recipients = acl.listAuthorizedRecipients(senderId);
           if (claims?.allowedRecipients) {

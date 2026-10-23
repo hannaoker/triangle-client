@@ -47,6 +47,26 @@ The dispatcher compacts finished records at start and at most hourly, with the p
 
 ## Scope and limits
 
+### Readable recipient directory (source candidate)
+
+The source candidate adds `triangle-local sessions`, RPC `list_sessions`, and
+MCP `triangle_list_sessions` to both Codex and Claude adapters. These require a
+matching updated supervisor; an older server reports an unsupported-method error.
+This section does not imply an installed runtime upgrade.
+
+Each entry contains `id`, `label`, `kind` (`worker`, `conversation`, or `unknown`)
+and `presence` (currently always `unknown`). Worker profile names and fixed paired
+conversation labels come from owner configuration, not transcript scans. Labels
+are untrusted display text; use the exact `id` for routing. The directory lists
+only the intersection of the existing owner ACL and credential recipient scope.
+It neither grants access nor proves that a recipient is online or can wake.
+Legacy `discover` and `triangle_list_recipients` keep their ID-only output.
+
+This is a directory for existing registrations, not automatic discovery of all
+open chats. Automatic registration, lifecycle handoff, liveness and readable
+conversation titles remain separate work. No schema migration is needed. Rolling
+back removes the new read-only method without modifying messaging data or grants.
+
 The CLI is an installed supported path. The MCP stdio entry uses the same socket API and passes subprocess protocol tests, but adding it to an already running Codex conversation may require a host reload. Do not claim native Triangle tools are available until that host actually exposes them.
 
 Both entries make a retry safe. The MCP `triangle_send_message` tool generates `messageId` and `requestId` itself when the caller omits them and returns both in its result and in its error text (marked "outcome unknown" after a transport failure); the CLI prints the same IDs as `send_outcome_unknown`. A retry that reuses them is an idempotent duplicate and is never dispatched twice, while a retry without them is a new message.

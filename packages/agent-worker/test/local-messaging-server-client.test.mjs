@@ -998,3 +998,45 @@ test("sendMessage forwards exactly its documented fields (no dead loopCount)", a
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("readable directory preserves ACL and capability scope without changing legacy discovery", async () => {
+  const env = setupEnvironment();
+  const server = createLocalControlServer({
+    ...env,
+    credentialValidator: env.validator,
+    recipientDirectory: [
+      { id: "gravity2", label: "Antigravity worker", kind: "worker" },
+      { id: "eve", label: "Hidden conversation", kind: "conversation" },
+    ],
+  });
+  let client;
+  try {
+    await server.start();
+    client = createLocalControlClient({
+      socketPath: env.socketPath, senderId: "desktop-codex",
+      turnCredential: env.issuer.issue({ senderId: "desktop-codex" }),
+    });
+    assert.deepEqual(await client.listSessions(), [
+      { id: "gravity2", label: "Antigravity worker", kind: "worker", presence: "unknown" },
+    ]);
+    assert.deepEqual(await client.discoverRecipients(), ["gravity2"]);
+    const restricted = env.issuer.issue({ senderId: "desktop-codex", allowedRecipients: [] });
+    assert.deepEqual(await client.listSessions({ credential: restricted }), []);
+    await assert.rejects(client.listSessions({ credential: "invalid" }));
+  } finally {
+    await client?.close();
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("directory rejects ambiguous or unbounded owner metadata before serving", () => {
+  const env = setupEnvironment();
+  try {
+    for (const recipientDirectory of [null, {}, [{ id: "gravity2", label: "bad\nlabel", kind: "worker" }],
+      [{ id: "gravity2", label: "x".repeat(129), kind: "worker" }],
+      [{ id: "gravity2", label: "one", kind: "worker" }, { id: "gravity2", label: "two", kind: "conversation" }]]) {
+      assert.throws(() => createLocalControlServer({ ...env, credentialValidator: env.validator, recipientDirectory }));
+    }
+  } finally { fs.rmSync(env.tmpDir, { recursive: true, force: true }); }
+});

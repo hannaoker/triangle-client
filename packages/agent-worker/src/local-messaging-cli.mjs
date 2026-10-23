@@ -229,7 +229,7 @@ export async function reconcileWakeOffline(options,env=process.env){
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
  if(command==='reconcile-wake'){
   output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;
  }
@@ -266,7 +266,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   return 0;
  }
- if(!['status','discover','send','replies','consume','ack-wake','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
+ if(!['status','discover','sessions','send','replies','consume','ack-wake','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
  const binding=readPrivateJson(config.integrationPath);
@@ -285,6 +285,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   const rpcOptions={credential:await credential()};let result;
   if(command==='status')result=options['message-id'] ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);
+  if(command==='sessions')result={sessions:await client.listSessions(rpcOptions)};
   if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,recipients:await client.discoverRecipients(rpcOptions)};
   if(command==='replies')result={senderId:binding.senderId,replies:await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to']},rpcOptions)};
   if(command==='consume')result=await client.consumeReply({messageId:options['message-id']},rpcOptions);

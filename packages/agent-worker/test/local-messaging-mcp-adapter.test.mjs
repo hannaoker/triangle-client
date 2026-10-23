@@ -311,3 +311,22 @@ test("triangle_ack_notification calls client.ackNotification and returns result"
   assert.deepEqual(ackedArgs.args, { wakeId: "wake-test-mcp", generation: 3 });
   assert.deepEqual(ackedArgs.options, { credential: "mock-token" });
 });
+
+test("directory tool forwards the active credential and fails visibly on an older server", async () => {
+  const entry = { id: "gravity2", label: "Antigravity", kind: "worker", presence: "unknown" };
+  let seen;
+  const handler = createLocalMessagingMcpHandler({
+    client: { listSessions: async options => { seen = options; return [entry]; } },
+    turnCredentialProvider: () => "active-credential",
+  });
+  const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "triangle_list_sessions" } };
+  const result = await handler.handleRequest(request);
+  assert.equal(result.result.isError, false);
+  assert.deepEqual(JSON.parse(result.result.content[0].text), { sessions: [entry] });
+  assert.deepEqual(seen, { credential: "active-credential" });
+  const older = createLocalMessagingMcpHandler({
+    client: { listSessions: async () => { throw Object.assign(new Error("Unsupported directory method"), { code: "method_not_found" }); } },
+    turnCredential: "credential",
+  });
+  assert.equal((await older.handleRequest(request)).result.isError, true);
+});
