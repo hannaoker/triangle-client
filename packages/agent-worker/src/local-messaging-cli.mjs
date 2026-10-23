@@ -52,9 +52,31 @@ export function setupLocalMessaging(options,env=process.env){
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
  return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }
+export async function reconcileWakeOffline(options,env=process.env){
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
+ if(config.wake?.enabled!==false)throw coded('wake_must_be_disabled','Disable wake explicitly and stop the Triangle service before reconciliation');
+ const generation=Number(options.generation),wakeId=options['wake-id'];
+ if(!wakeId||!Number.isSafeInteger(generation)||generation<1)throw coded('invalid_arguments','Exact held wake-id and current generation are required');
+ const integration=readPrivateJson(config.integrationPath),binding=readPrivateJson(config.bindingPath);
+ if((binding.instanceId??binding.senderId)!==integration.senderId)throw coded('binding_changed','Desktop sender identity changed');
+ const {createLocalMessagingJournal}=await import('./local-messaging-journal.mjs');
+ let journal;
+ try {
+  journal=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  return await journal.reconcileStaleWake({requester:integration.senderId,threadId:integration.threadId,authBindingId:integration.bindingId,wakeId,generation});
+ } catch(error){
+  if(error?.code==='journal_busy'||error?.code==='drain_busy')throw coded('journal_busy','Stop the Triangle service before offline wake reconciliation');
+  throw error;
+ } finally {await journal?.close();}
+}
+
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, reconcile-wake, mcp\n');return 0;}
+ if(command==='reconcile-wake'){
+  output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;
+ }
  if(command==='setup'){output.write(JSON.stringify(setupLocalMessaging(options,env))+'\n');return 0;}
  if(!['status','discover','send','replies','consume','ack-wake','mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));

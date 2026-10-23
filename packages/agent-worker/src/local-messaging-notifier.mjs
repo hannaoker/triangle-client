@@ -251,6 +251,7 @@ export function createLocalMessagingNotifier({
 
     return {
       deliveryState: binding.deliveryState,
+      generation: binding.generation,
       activeWakeId: binding.activeWakeId,
       receiptQueuedId: binding.receiptQueuedId,
       receiptThreadId: binding.receiptThreadId,

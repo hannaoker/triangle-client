@@ -82,3 +82,25 @@ consume replies. An unchanged acknowledged snapshot does not generate another
 turn; new updates can produce a later coalesced hint. Foreign/stale
 acknowledgments must fail. Uncertain delivery requires exact acknowledgment or
 future explicit operator reconciliation, rather than automatic retry.
+
+### Recovering a wake held after rebinding
+
+Rebinding while a notification is outstanding fences it into `stale_held`.
+Normal acknowledgment cannot clear that state, even using the new generation.
+The operator can reconcile it without modifying SQLite manually:
+
+1. Read `triangle-local status` and note `wake.activeWakeId` and `wake.generation`.
+2. Set `wake.enabled` explicitly to `false` in the private local configuration,
+   then stop the Triangle Client service.
+3. Run `triangle-local reconcile-wake --wake-id ID --generation N` with the exact
+   held wake ID and current generation (add `--config` for a nondefault config).
+4. Restart the service. Re-enable wake only when the new target is ready.
+
+This offline command requires the current private desktop binding and exclusive
+journal ownership; it refuses while the supervisor owns the journal. It only
+clears `stale_held`, validates the current integration thread and binding, and
+rejects a wrong wake ID or generation. It clears obsolete notification metadata
+so unread backlog can generate a fresh wake on the new thread. It does not
+acknowledge or consume replies, retry held tasks, or erase message data. There is
+no recovery RPC or agent MCP tool. Disabling wake does not withdraw a hint
+already queued in the old conversation; its old acknowledgment remains fenced.

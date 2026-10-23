@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
-import {setupLocalMessaging} from '../src/local-messaging-cli.mjs';
+import {setupLocalMessaging,reconcileWakeOffline} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson,createDesktopCredentialBroker} from '../src/local-messaging-auth-broker.mjs';
 import {createLocalMessagingSubsystem} from '../src/local-messaging-supervisor-seam.mjs';
 import {createTestMemoryJournal,createTestRecoverableDispatcher} from './local-messaging-fixtures.mjs';
@@ -111,4 +111,29 @@ test('setup migrates cleanly to dedicated desktop-binding.json when app-server-b
   assert.equal(fs.existsSync(desktopBindingPath),true);
   assert.equal(readPrivateJson(desktopBindingPath).instanceId,'d'.repeat(64));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+
+test('offline operator recovery requires disabled wake and exclusive journal ownership',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-reconcile-'); let journal;
+ try {
+  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64)});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'new-thread',recipients:['gravity2']});
+  const config=readPrivateJson(configPath),integration=readPrivateJson(config.integrationPath);
+  const args={config:configPath,'wake-id':'old-wake',generation:'2'};
+  await assert.rejects(reconcileWakeOffline(args),{code:'wake_must_be_disabled'});
+  config.wake={enabled:false};writePrivateJson(configPath,config);
+  const {createLocalMessagingJournal}=await import('../src/local-messaging-journal.mjs');
+  journal=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  await journal.initWakeBinding({targetIdentity:integration.senderId,bindingId:'old-auth',threadId:'old-thread'});
+  await journal.setWakeSubmitting({targetIdentity:integration.senderId,wakeId:'old-wake',fingerprint:'old-fp'});
+  await journal.initWakeBinding({targetIdentity:integration.senderId,bindingId:integration.bindingId,threadId:integration.threadId});
+  await assert.rejects(reconcileWakeOffline(args),{code:'journal_busy'});
+  await journal.close();journal=null;
+  const result=JSON.parse((await exec(process.execPath,[cli,'reconcile-wake','--config',configPath,'--wake-id','old-wake','--generation','2'])).stdout);
+  assert.equal(result.reconciled,true);
+  journal=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  assert.equal((await journal.getWakeBinding(integration.senderId)).deliveryState,'idle');
+ } finally {await journal?.close();fs.rmSync(root,{recursive:true,force:true});}
 });

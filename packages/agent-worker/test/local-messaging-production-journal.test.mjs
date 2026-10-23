@@ -863,3 +863,41 @@ test("durable pair window: duplicateatfullcap, newrequestatcap, conflicts, concu
     }
   }
 });
+
+test('offline stale wake reconciliation is exact, fenced and durable without consuming replies', async () => {
+ const stateRoot=createIsolatedStateRoot(); let journal;
+ try {
+  journal=createLocalMessagingJournal({stateRoot});
+  await journal.recordSend({sender:'owner',recipient:'peer',messageId:'msg-recovery',requestId:'req-recovery',text:'request'});
+  await journal.recordReply({sender:'peer',recipient:'owner',messageId:'recovery-reply',requestId:'req-recovery',inReplyTo:'msg-recovery',text:'keep me'});
+  await journal.initWakeBinding({targetIdentity:'owner',bindingId:'old-auth',threadId:'old-thread'});
+  const oldFingerprint=(await journal.getWakeObligations('owner')).snapshotFingerprint;
+  await journal.setWakeSubmitting({targetIdentity:'owner',wakeId:'previous-ack',fingerprint:oldFingerprint});
+  await journal.ackWake({requester:'owner',wakeId:'previous-ack',generation:1});
+  await journal.setWakeSubmitting({targetIdentity:'owner',wakeId:'old-wake',fingerprint:oldFingerprint});
+  await journal.setWakeAccepted({targetIdentity:'owner',wakeId:'old-wake',receipt:{queuedId:'old-receipt',threadId:'old-thread'}});
+  const args={requester:'owner',threadId:'new-thread',authBindingId:'new-auth',wakeId:'old-wake',generation:2};
+  await assert.rejects(journal.reconcileStaleWake(args),{code:'wake_not_stale'});
+  await journal.initWakeBinding({targetIdentity:'owner',bindingId:'new-auth',threadId:'new-thread'});
+  for(const [change,code] of [[{requester:'foreign'},'foreign_access_denied'],[{generation:1},'stale_wake_generation'],[{wakeId:'wrong'},'stale_wake_id'],[{threadId:'old-thread'},'binding_changed'],[{authBindingId:'old-auth'},'binding_changed']]) {
+   await assert.rejects(journal.reconcileStaleWake({...args,...change}),{code});
+  }
+  await assert.rejects(journal.ackWake({requester:'owner',wakeId:'old-wake',generation:2}),{code:'stale_wake_rebound'});
+  assert.equal((await journal.reconcileStaleWake(args)).reconciled,true);
+  await journal.close(); journal=createLocalMessagingJournal({stateRoot});
+  const binding=await journal.getWakeBinding('owner');
+  assert.equal(binding.generation,2); assert.equal(binding.deliveryState,'idle');
+  for(const key of ['activeWakeId','activeFingerprint','lastAcknowledgedFingerprint','receiptQueuedId','receiptThreadId'])assert.equal(binding[key],null,key);
+  assert.equal((await journal.listReplies({requester:'owner'})).length,1);
+  await assert.rejects(journal.reconcileStaleWake(args),{code:'wake_not_stale'});
+  const {createLocalMessagingNotifier}=await import('../src/local-messaging-notifier.mjs');
+  const calls=[];
+  const notifier=createLocalMessagingNotifier({journal,targetIdentity:'owner',threadId:'new-thread',bindingId:'new-auth',wakeConfig:{enabled:true},adapter:{async notify(binding,snapshot){calls.push({binding,snapshot});return {state:'accepted',receipt:{queuedId:'fresh-receipt',threadId:binding.threadId}};}}});
+  try {
+   await notifier.start();
+   assert.equal(calls.length,1); assert.notEqual(calls[0].snapshot.wakeId,'old-wake');
+   assert.equal(calls[0].binding.threadId,'new-thread'); assert.equal(calls[0].binding.generation,2);
+   await assert.rejects(journal.ackWake({requester:'owner',wakeId:'old-wake',generation:2}),{code:'stale_wake_id'});
+  } finally {await notifier.stop();}
+ } finally {await journal?.close(); fs.rmSync(stateRoot,{recursive:true,force:true});}
+});

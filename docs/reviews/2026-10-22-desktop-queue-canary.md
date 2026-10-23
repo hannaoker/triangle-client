@@ -220,3 +220,28 @@ the periodic timer supplies eventual notification, so the review's delayed
 notification concern is plausible, not a reproduced loss. Its separate Swift
 signal-test failure has not been independently reproduced. No source changes
 were made by this read-only review and no merge was requested or performed.
+
+## Pre-merge review corrections
+
+The owner subsequently authorized fixing the two blockers and merging. The
+service test now expects v10. Offline `triangle-local reconcile-wake` recovers
+only `stale_held`, requiring explicitly disabled wake, stopped service/exclusive
+journal ownership, current private integration, and exact wake ID/current
+generation. It is not exposed through socket RPC or MCP. Ordinary stale
+acknowledgments remain rejected; recovery preserves replies and permits a new
+wake on the new thread. Status exposes the generation needed by the operator.
+
+Independent review found no P1/P2 issue and independently passed 25 CLI/journal
+tests. Final focused journal/CLI/notifier suite: 35 passed. Service suite:
+27 passed. Parent final full worker suite: 853 passed, three skipped, zero
+failed/cancelled (856 total). Packaging tests: nine passed. Supported Swift
+host runner: 193 PASS checks, including signal preservation/serialization.
+Direct `swift test` could not compile because the installed toolchain lacked
+TestingMacros; the supported host runner succeeded instead. The historical
+Antigravity signal-test failure was not reproduced by that runner.
+
+The recovery command was tested in disposable journals, including exclusive-lock
+refusal and re-open/fresh-notification behavior. It has not been installed into
+the Mini's existing v10 bundle by these source corrections. Live wake remains
+disabled after the completed canary; merging does not enable it or deploy a new
+runtime automatically.

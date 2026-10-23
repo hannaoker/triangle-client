@@ -700,6 +700,24 @@ export function createLocalMessagingJournal({
     return mapWakeBindingRow(db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity));
   }
 
+  // Offline operator recovery only: intentionally not exposed by the socket/MCP.
+  // Caller must hold this journal's exclusive owner lock and validate private config.
+  async function reconcileStaleWake({ requester, threadId, authBindingId, wakeId, generation }) {
+    assertNotClosed();
+    const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(requester);
+    if (!binding) throw coded("foreign_access_denied", "No wake binding for this desktop identity");
+    if (binding.delivery_state !== "stale_held") throw coded("wake_not_stale", "Only stale_held wakes may be reconciled");
+    if (!Number.isSafeInteger(generation) || binding.generation !== generation) throw coded("stale_wake_generation", "Current wake generation required");
+    if (!wakeId || binding.active_wake_id !== wakeId) throw coded("stale_wake_id", "Exact held wake ID required");
+    if (binding.thread_id !== threadId || !authBindingId || binding.auth_binding_id !== authBindingId) throw coded("binding_changed", "Current desktop integration does not match wake binding");
+    db.prepare(`UPDATE local_wake_bindings SET delivery_state = 'idle',
+      active_wake_id = NULL, active_fingerprint = NULL,
+      last_acknowledged_fingerprint = NULL, last_acknowledged_wake_id = NULL,
+      receipt_queued_id = NULL, receipt_thread_id = NULL, last_submitted_at = NULL,
+      updated_at = ? WHERE target_identity = ?`).run(Date.now(), requester);
+    return {reconciled: true, wakeId, generation, threadId};
+  }
+
   async function ackWake({ requester, wakeId, generation }) {
     assertNotClosed();
     if (!requester || !wakeId || typeof generation !== "number") {
@@ -783,6 +801,7 @@ export function createLocalMessagingJournal({
     setWakeAccepted,
     setWakeUncertain,
     ackWake,
+    reconcileStaleWake,
     status,
     close,
   };
