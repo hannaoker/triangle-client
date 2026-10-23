@@ -107,3 +107,85 @@ reviewer verified real SQLite/socket retry-at-cap behavior.
 The package is local under `/private/tmp/triangle-wake-release-20261022`.
 This remains a candidate with automatic wake off; live activation gates above
 are still open. No MESH content bridge or second app-server was introduced.
+
+## User-observed scratch wake
+
+On October 22 (01:39 UTC October 23), the existing scratch conversation
+`01a16531-3a1d-7d41-85cf-f6ba0dccc2db` received one queue submission labeled
+`B1-VISIBLE-20261022-01`. Receipt:
+`01a16669-3208-7322-8039-da16d8040635`. Its sole turn
+`01a16669-536b-7bf1-b412-b8e303805612` completed in 3,135 ms with exactly
+`canary ack B1-VISIBLE-20261022-01`; the rollout records no tool calls in that
+turn. The queue was empty afterward and writer-lock inspection returned the
+same sole PID, 39686.
+
+The user explicitly confirmed: "Yes, exactly once and automatically" when
+asked whether the notification and acknowledgment appeared without typing or
+clicking to trigger it. This closes the user-observed foreground scratch-chat
+queue wake check. It does not establish background-app behavior, installed
+v10 notifier delivery/acknowledgment, or the bound working-thread and retired
+MESH-route arbitration gates. Production remains v9 with automatic wake off.
+
+## Installed v10 checkpoint
+
+The subsequent supported developer-helper upgrade and service installation
+completed. The public package installer first refused an existing helper whose
+hash did not match its older receipt; that refusal was not bypassed. The
+repository helper installer upgraded the helper; service preparation required
+the trusted Node directory explicitly in PATH. Service installation refreshed
+agent bundles but preserved the dedicated v9 supervisor manifest, so the
+dedicated supervisor was explicitly staged at v10 and the local wrapper
+refreshed through the installer before restarting the existing service.
+
+Authenticated installed `triangle-local status` then confirmed running true,
+the unchanged desktop sender/thread and gravity2 recipient, zero active tasks,
+eight unread replies and two held tasks. Wake state was idle. The retired
+shared host remained disabled, its live app-server binding was absent, and no
+registered instance requested appServerWake. The working-thread lock still had
+the same sole owner, PID 39686. This is absence of a competing configured route,
+not proof of arbitration between two live wake producers.
+
+Automatic approval review rejected the subsequent command to enable wake on
+the real working thread because its existing backlog could immediately cause
+a model turn. That command did not execute. Explicit owner approval for that
+specific activation was requested; installed v10 remains running with wake off.
+
+## Approved live working-thread test
+
+The owner then explicitly approved: "Enable for the live test." Wake was
+enabled on the existing integration without changing sender, thread or recipient.
+The installed supervisor submitted one coalesced hint for eight unread replies
+and two held tasks, with no late result. Wake ID:
+`e4e1b96a-68a6-4795-8693-50df612e0fb3`, generation 1; queue receipt:
+`01a16675-12bd-7fc0-be8f-9fcded38aacb`, targeting working thread
+`01a14c05-6603-7921-b744-659195a490a5`.
+
+A subsequent supported supervisor restart retained that exact wake ID,
+generation, receipt and `accepted_awaiting_ack` state. The target queue contained
+one item and the sole writer-lock owner remained PID 39686. No peer task was
+executing. This proves durable submission retention across the observed restart;
+delivery into a subsequent conversation turn and exact acknowledgment are still
+pending at this checkpoint. Wake is enabled for the authorized test.
+
+## Delivered wake, acknowledgment and restart recovery
+
+The queued notification subsequently arrived in the actual working conversation
+after the submitting turn ended, with the exact wake ID and generation above.
+Codex used installed `triangle-local replies` to retrieve all eight updates,
+then installed `ack-wake` returned `acknowledged: true` for generation 1.
+Historical peer instructions were not executed; no replies were consumed or
+deleted, and the two held tasks were not retried.
+
+A second supported supervisor restart retained generation 1, the same
+`last_acknowledged_wake_id`, and a non-null acknowledged fingerprint. Status
+returned idle with no active wake; the Codex target queue contained zero items,
+and the sole thread writer remained PID 39686. The unchanged backlog remained
+eight replies/two held tasks without a duplicate submission. This closes the
+observed installed-notifier delivery, exact acknowledgment, outstanding-wake
+restart recovery and acknowledged-snapshot restart checks. It does not prove
+delivery with the desktop app quit, sustained soak, new-reply latency, Iroh
+transport, or arbitration between two live desktop wake producers.
+
+The controlled test was then ended by switching wake enabled to false and
+restarting the existing service. v10 remains installed; no second app-server,
+identity change or local-to-MESH content bridge was introduced.
