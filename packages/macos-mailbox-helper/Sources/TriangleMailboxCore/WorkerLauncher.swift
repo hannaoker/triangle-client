@@ -165,7 +165,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if (5...10).contains(manifestVersion) {
+        if (5...11).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -241,6 +241,13 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 artifacts.formUnion([
                     "packages/agent-worker/src/codex-wake-adapter.mjs",
                     "packages/agent-worker/src/local-messaging-notifier.mjs",
+                ])
+            }
+            if manifestVersion >= 11 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/local-messaging-interactive-session.mjs",
+                    "packages/agent-worker/src/claude-session-delivery.mjs",
+                    "packages/agent-worker/src/claude-session-mcp-child.mjs",
                 ])
             }
             // The coordinator can run from any worker bundle and imports
@@ -435,7 +442,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
-        guard (8...10).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
+        guard (8...11).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
               manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
         else { throw WorkerLauncherError.invalidManifest }
         let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { closeSync, fsyncSync, lstatSync, openSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -114,6 +114,7 @@ function mapMessageRow(row) {
     messageId: row.message_id,
     sender: row.sender,
     recipient: row.recipient,
+    recipientType: row.recipient_type ?? "runner",
     requestId: row.request_id,
     inReplyTo: row.in_reply_to ?? null,
     text: row.text,
@@ -122,6 +123,9 @@ function mapMessageRow(row) {
     phase: row.phase,
     reason: row.reason ?? null,
     runtimeError: row.runtime_error ?? null,
+    claimSessionId: row.claim_session_id ?? null,
+    claimGeneration: row.claim_generation ?? null,
+    leaseExpiresAt: row.lease_expires_at ?? null,
     // Only the presence: the late text is for owner inspection via getLateResult.
     hasLateResult: Boolean(row.late_result_text),
     createdAt: row.created_at,
@@ -235,6 +239,19 @@ export function createLocalMessagingJournal({
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS local_interactive_wake_history (
+      target_identity TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      wake_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (target_identity, session_id, binding_id, generation, wake_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wake_history_lookup ON local_interactive_wake_history(target_identity, session_id, binding_id, generation, wake_id);
   `);
 
   // Additive migrations only: journals written by earlier versions hold live data.
@@ -242,10 +259,34 @@ export function createLocalMessagingJournal({
   if (!messageColumns.includes("late_result_text")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
   }
+  if (!messageColumns.includes("recipient_type")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN recipient_type TEXT NOT NULL DEFAULT 'runner'");
+  }
+  if (!messageColumns.includes("claim_token")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN claim_token TEXT");
+  }
+  if (!messageColumns.includes("claim_session_id")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN claim_session_id TEXT");
+  }
+  if (!messageColumns.includes("claim_generation")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN claim_generation INTEGER");
+  }
+  if (!messageColumns.includes("lease_expires_at")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN lease_expires_at INTEGER");
+  }
+  if (!messageColumns.includes("claim_operation_id")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN claim_operation_id TEXT");
+  }
   const wakeColumns = db.prepare("PRAGMA table_info(local_wake_bindings)").all().map((c) => c.name);
   if (!wakeColumns.includes("auth_binding_id")) {
     db.exec("ALTER TABLE local_wake_bindings ADD COLUMN auth_binding_id TEXT");
   }
+
+  // Indices on additive columns created AFTER migrations
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_local_messages_recip_phase_type ON local_messages(recipient, phase, recipient_type);
+    CREATE INDEX IF NOT EXISTS idx_local_messages_claim_token ON local_messages(claim_token);
+  `);
 
   // Crash recovery on startup: any in-flight execution is held immediately
   const uncertainOnStartup = db
@@ -260,6 +301,11 @@ export function createLocalMessagingJournal({
       count: uncertainOnStartup.length,
     });
   }
+
+  // Crash recovery on startup for wake bindings: any submitting binding is reset to uncertain
+  db.prepare(
+    "UPDATE local_wake_bindings SET delivery_state = 'uncertain', updated_at = ? WHERE delivery_state = 'submitting'"
+  ).run(Date.now());
 
   uncertainRecords = uncertainOnStartup.map((r) => ({
     ...mapMessageRow(r),
@@ -287,13 +333,14 @@ export function createLocalMessagingJournal({
       throw coded("invalid_envelope", "Envelope missing required fields");
     }
 
+    const recipientType = envelope.recipientType ?? options.recipientType ?? "runner";
     const hash = computeEnvelopeHash(envelope);
 
     db.exec("BEGIN IMMEDIATE");
     try {
       const existing = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
       if (existing) {
-        if (existing.canonical_hash === hash) {
+        if (existing.canonical_hash === hash && (existing.recipient_type ?? "runner") === recipientType) {
           db.exec("COMMIT");
           return { ...mapMessageRow(existing), isDuplicate: true };
         }
@@ -321,9 +368,9 @@ export function createLocalMessagingJournal({
       const metadataJson = metadata ? JSON.stringify(metadata) : null;
       db.prepare(`
         INSERT INTO local_messages (
-          message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?)
-      `).run(messageId, sender, recipient, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now);
+          message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?)
+      `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now);
 
       db.prepare(`
         INSERT INTO local_pair_admissions (pair_key, message_id, created_at)
@@ -475,7 +522,7 @@ export function createLocalMessagingJournal({
     }
 
     const queuedRows = db
-      .prepare("SELECT * FROM local_messages WHERE phase = 'queued_local' ORDER BY created_at ASC")
+      .prepare("SELECT * FROM local_messages WHERE phase = 'queued_local' AND recipient_type = 'runner' ORDER BY created_at ASC")
       .all();
 
     return {
@@ -488,7 +535,7 @@ export function createLocalMessagingJournal({
     assertNotClosed();
     const now = Date.now();
     const res = db.prepare(
-      "UPDATE local_messages SET phase = 'executing', updated_at = ? WHERE message_id = ? AND phase = 'queued_local'"
+      "UPDATE local_messages SET phase = 'executing', updated_at = ? WHERE message_id = ? AND phase = 'queued_local' AND recipient_type = 'runner'"
     ).run(now, messageId);
     if (res.changes === 0) return null;
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
@@ -620,8 +667,11 @@ export function createLocalMessagingJournal({
     return mapWakeBindingRow(row);
   }
 
-  async function getWakeObligations(targetIdentity) {
+  function getWakeObligationsSync(targetIdentity, options = {}) {
     assertNotClosed();
+    const binding = db.prepare("SELECT thread_id FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+    const isInteractive = options.isInteractive === true || Boolean(binding?.thread_id?.startsWith("claude-session:"));
+
     const unreadReplies = db.prepare(
       "SELECT * FROM local_replies WHERE recipient = ? AND consumed = 0 ORDER BY created_at ASC, message_id ASC"
     ).all(targetIdentity);
@@ -644,21 +694,384 @@ export function createLocalMessagingJournal({
       hasLate: Boolean(m.late_result_text),
     })).sort((a, b) => a.id.localeCompare(b.id));
 
-    const fingerprint = createHash("sha256").update(JSON.stringify({
+    let queuedMessages = [];
+    let queuedIds = [];
+    let queuedTimestamps = [];
+    if (isInteractive) {
+      queuedMessages = db.prepare(
+        "SELECT * FROM local_messages WHERE recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive' ORDER BY created_at ASC, message_id ASC"
+      ).all(targetIdentity);
+      queuedIds = queuedMessages.map((m) => m.message_id).sort();
+      queuedTimestamps = queuedMessages.map((m) => m.updated_at || m.created_at);
+    }
+
+    const fingerprintPayload = {
       replyIds,
       replyTimestamps,
       heldIds,
       heldTimestamps,
       hasLateResult,
       heldLateFlags,
-    })).digest("hex");
+    };
+    if (isInteractive) {
+      fingerprintPayload.queuedIds = queuedIds;
+      fingerprintPayload.queuedTimestamps = queuedTimestamps;
+    }
+
+    const fingerprint = createHash("sha256").update(JSON.stringify(fingerprintPayload)).digest("hex");
 
     return {
       unreadReplies: unreadReplies.map(mapReplyRow),
       heldMessages: heldMessages.map(mapMessageRow),
+      queuedMessages: queuedMessages.map(mapMessageRow),
       hasLateResult,
       snapshotFingerprint: fingerprint,
     };
+  }
+
+  async function getWakeObligations(targetIdentity, options = {}) {
+    return getWakeObligationsSync(targetIdentity, options);
+  }
+
+  let immediateTxQueue = Promise.resolve();
+  function withImmediateTransaction(fn) {
+    const next = immediateTxQueue.then(() => {
+      assertNotClosed();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = fn();
+        db.exec("COMMIT");
+        return result;
+      } catch (err) {
+        try { db.exec("ROLLBACK"); } catch {}
+        throw err;
+      }
+    });
+    immediateTxQueue = next.catch(() => {});
+    return next;
+  }
+
+  async function initInteractiveWakeBinding({ senderId, sessionId, generation, bindingId }) {
+    assertNotClosed();
+    if (!senderId || !sessionId || !bindingId || typeof generation !== "number") {
+      throw coded("invalid_params", "senderId, sessionId, generation, and bindingId are required");
+    }
+    const now = Date.now();
+    const canonicalBindingId = bindingId.toLowerCase();
+    const threadId = `claude-session:${sessionId}`;
+    const existing = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(senderId);
+
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO local_wake_bindings (
+          target_identity, binding_id, thread_id, generation, delivery_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'idle', ?, ?)
+      `).run(senderId, canonicalBindingId, threadId, generation, now, now);
+    } else {
+      const isRebind = existing.binding_id !== canonicalBindingId ||
+                       existing.generation !== generation ||
+                       existing.thread_id !== threadId;
+      if (isRebind) {
+        const nextState = existing.delivery_state !== "idle" ? "stale_held" : "idle";
+        db.prepare(`
+          UPDATE local_wake_bindings
+          SET binding_id = ?, thread_id = ?, generation = ?, delivery_state = ?, updated_at = ?
+          WHERE target_identity = ?
+        `).run(canonicalBindingId, threadId, generation, nextState, now, senderId);
+      }
+    }
+    const row = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(senderId);
+    return mapWakeBindingRow(row);
+  }
+
+  async function reserveInteractiveWake({ targetIdentity, reservationId, sessionId, generation, bindingId, now = Date.now() }) {
+    assertNotClosed();
+    if (
+      !targetIdentity ||
+      typeof targetIdentity !== "string" ||
+      !reservationId ||
+      typeof reservationId !== "string" ||
+      !sessionId ||
+      typeof sessionId !== "string" ||
+      !bindingId ||
+      typeof bindingId !== "string" ||
+      typeof generation !== "number" ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1
+    ) {
+      throw coded("invalid_params", "targetIdentity, reservationId, sessionId, valid positive generation, and bindingId are required");
+    }
+    const canonicalBindingId = bindingId.toLowerCase();
+
+    return withImmediateTransaction(() => {
+      const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+      if (!binding) {
+        throw coded("foreign_access_denied", `No wake binding for target ${targetIdentity}`);
+      }
+      if (binding.delivery_state === "stale_held") {
+        throw coded("stale_wake_rebound", "Cannot reserve wake on stale_held binding");
+      }
+      if (binding.thread_id !== `claude-session:${sessionId}`) {
+        throw coded("session_fenced", `Session ID ${sessionId} does not match active binding ${binding.thread_id}`);
+      }
+      if (binding.generation !== generation) {
+        throw coded("stale_wake_generation", `Stale wake generation ${generation} !== ${binding.generation}`);
+      }
+      if (binding.binding_id !== canonicalBindingId) {
+        throw coded("binding_changed", "Binding ID mismatch");
+      }
+
+      // Check durable used-reservation tombstones/history (Issue 6)
+      const existingHistory = db.prepare(`
+        SELECT * FROM local_interactive_wake_history
+        WHERE target_identity = ? AND session_id = ? AND binding_id = ? AND generation = ? AND wake_id = ?
+      `).get(targetIdentity, sessionId, canonicalBindingId, generation, reservationId);
+
+      if (existingHistory) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          isDuplicate: true,
+          wakeId: reservationId,
+          generation: binding.generation,
+          state: existingHistory.state,
+        };
+      }
+
+      // Active wake duplicate check
+      if (binding.active_wake_id === reservationId) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          isDuplicate: true,
+          wakeId: reservationId,
+          generation: binding.generation,
+          state: binding.delivery_state,
+        };
+      }
+
+      if (binding.delivery_state !== "idle") {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          state: binding.delivery_state,
+        };
+      }
+
+      // Min-interval check: 15 seconds
+      if (binding.last_submitted_at && (now - binding.last_submitted_at < 15000)) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          state: "rate_limited",
+          reason: "min_interval",
+        };
+      }
+
+      // Check obligations synchronously
+      const obligations = getWakeObligationsSync(targetIdentity, { isInteractive: true });
+      const totalCount = obligations.unreadReplies.length + obligations.heldMessages.length + obligations.queuedMessages.length;
+      if (totalCount === 0) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          state: "no_obligations",
+        };
+      }
+
+      if (obligations.snapshotFingerprint === binding.last_acknowledged_fingerprint) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          state: "unchanged_backlog",
+        };
+      }
+
+      // Record durable tombstone in local_interactive_wake_history
+      db.prepare(`
+        INSERT INTO local_interactive_wake_history (
+          target_identity, session_id, binding_id, generation, wake_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'submitting', ?, ?)
+      `).run(targetIdentity, sessionId, canonicalBindingId, generation, reservationId, now, now);
+
+      // Atomic update
+      const updateResult = db.prepare(`
+        UPDATE local_wake_bindings
+        SET delivery_state = 'submitting',
+            active_wake_id = ?,
+            active_fingerprint = ?,
+            last_submitted_at = ?,
+            updated_at = ?
+        WHERE target_identity = ?
+          AND generation = ?
+          AND binding_id = ?
+          AND delivery_state = 'idle'
+      `).run(reservationId, obligations.snapshotFingerprint, now, now, targetIdentity, binding.generation, binding.binding_id);
+
+      if (updateResult.changes === 0) {
+        return {
+          reserved: false,
+          deliveryAllowed: false,
+          state: "race_lost",
+        };
+      }
+
+      return {
+        reserved: true,
+        deliveryAllowed: true,
+        wakeId: reservationId,
+        generation: binding.generation,
+        sessionId,
+        bindingId: binding.binding_id,
+        snapshot: {
+          wakeId: reservationId,
+          replyCount: obligations.unreadReplies.length + obligations.queuedMessages.length,
+          heldCount: obligations.heldMessages.length,
+          lateResult: obligations.hasLateResult,
+        },
+      };
+    });
+  }
+
+  async function reportInteractiveWakeResult({ targetIdentity, wakeId, generation, sessionId, bindingId, result, now = Date.now() }) {
+    assertNotClosed();
+    if (
+      !targetIdentity ||
+      typeof targetIdentity !== "string" ||
+      !wakeId ||
+      typeof wakeId !== "string" ||
+      !result ||
+      typeof result !== "string" ||
+      !sessionId ||
+      typeof sessionId !== "string" ||
+      !bindingId ||
+      typeof bindingId !== "string" ||
+      typeof generation !== "number" ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1
+    ) {
+      throw coded("invalid_params", "targetIdentity, wakeId, sessionId, bindingId, positive safe integer generation, and result are required");
+    }
+    const canonicalBindingId = bindingId.toLowerCase();
+
+    return withImmediateTransaction(() => {
+      const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+      if (!binding) {
+        throw coded("foreign_access_denied", `No wake binding for target ${targetIdentity}`);
+      }
+      if (binding.delivery_state === "stale_held") {
+        throw coded("stale_wake_rebound", "Binding is in stale_held state");
+      }
+      if (binding.thread_id !== `claude-session:${sessionId}`) {
+        throw coded("session_fenced", `Session ID ${sessionId} does not match active binding ${binding.thread_id}`);
+      }
+      if (binding.generation !== generation) {
+        throw coded("stale_wake_generation", `Stale wake generation ${generation} !== ${binding.generation}`);
+      }
+      if (binding.binding_id !== canonicalBindingId) {
+        throw coded("binding_changed", "Binding ID mismatch");
+      }
+
+      // Early ack race protection: if already acknowledged, do not resurrect!
+      if (binding.last_acknowledged_wake_id === wakeId && binding.active_wake_id !== wakeId) {
+        return { success: true, alreadyAcknowledged: true, state: binding.delivery_state };
+      }
+
+      if (binding.active_wake_id !== wakeId) {
+        throw coded("stale_wake_id", `Report wakeId ${wakeId} does not match active wake ${binding.active_wake_id}`);
+      }
+
+      const nextState = result === "accepted" ? "accepted_awaiting_ack" : "uncertain";
+      db.prepare(`
+        UPDATE local_wake_bindings
+        SET delivery_state = ?, updated_at = ?
+        WHERE target_identity = ? AND active_wake_id = ?
+      `).run(nextState, now, targetIdentity, wakeId);
+
+      // Update history table
+      db.prepare(`
+        UPDATE local_interactive_wake_history
+        SET state = ?, updated_at = ?
+        WHERE target_identity = ? AND session_id = ? AND binding_id = ? AND generation = ? AND wake_id = ?
+      `).run(nextState, now, targetIdentity, sessionId, canonicalBindingId, generation, wakeId);
+
+      return { success: true, state: nextState };
+    });
+  }
+
+  async function ackInteractiveWake({ targetIdentity, wakeId, generation, sessionId, bindingId, now = Date.now() }) {
+    assertNotClosed();
+    if (
+      !targetIdentity ||
+      typeof targetIdentity !== "string" ||
+      !wakeId ||
+      typeof wakeId !== "string" ||
+      !sessionId ||
+      typeof sessionId !== "string" ||
+      !bindingId ||
+      typeof bindingId !== "string" ||
+      typeof generation !== "number" ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1
+    ) {
+      throw coded("invalid_params", "targetIdentity, wakeId, sessionId, bindingId, and valid generation are required");
+    }
+    const canonicalBindingId = bindingId.toLowerCase();
+
+    return withImmediateTransaction(() => {
+      const binding = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(targetIdentity);
+      if (!binding) {
+        throw coded("foreign_access_denied", `No wake binding for target ${targetIdentity}`);
+      }
+      if (binding.delivery_state === "stale_held") {
+        throw coded("stale_wake_rebound", "Cannot acknowledge wake in stale_held state");
+      }
+      if (binding.thread_id !== `claude-session:${sessionId}`) {
+        throw coded("session_fenced", `Session ID ${sessionId} does not match active binding ${binding.thread_id}`);
+      }
+      if (binding.generation !== generation) {
+        throw coded("stale_wake_generation", `Ack generation ${generation} does not match active generation ${binding.generation}`);
+      }
+      if (binding.binding_id !== canonicalBindingId) {
+        throw coded("binding_changed", "Binding ID mismatch");
+      }
+
+      // If active_wake_id is different from wakeId, check if it was previously acknowledged or in history
+      if (binding.active_wake_id !== wakeId) {
+        if (binding.last_acknowledged_wake_id === wakeId) {
+          return { acknowledged: true, wakeId, generation: binding.generation, duplicate: true };
+        }
+        const hist = db.prepare(`
+          SELECT * FROM local_interactive_wake_history
+          WHERE target_identity = ? AND session_id = ? AND binding_id = ? AND generation = ? AND wake_id = ?
+        `).get(targetIdentity, sessionId, canonicalBindingId, generation, wakeId);
+        if (hist) {
+          return { acknowledged: true, wakeId, generation: binding.generation, duplicate: true };
+        }
+        throw coded("stale_wake_id", `Ack wakeId ${wakeId} does not match active wake ${binding.active_wake_id}`);
+      }
+
+      // Valid delivery states for ack: submitting, accepted_awaiting_ack, uncertain
+      db.prepare(`
+        UPDATE local_wake_bindings
+        SET delivery_state = 'idle',
+            last_acknowledged_fingerprint = active_fingerprint,
+            last_acknowledged_wake_id = active_wake_id,
+            active_wake_id = NULL,
+            active_fingerprint = NULL,
+            updated_at = ?
+        WHERE target_identity = ? AND active_wake_id = ?
+      `).run(now, targetIdentity, wakeId);
+
+      // Update history table to acknowledged
+      db.prepare(`
+        UPDATE local_interactive_wake_history
+        SET state = 'acknowledged', updated_at = ?
+        WHERE target_identity = ? AND session_id = ? AND binding_id = ? AND generation = ? AND wake_id = ?
+      `).run(now, targetIdentity, sessionId, canonicalBindingId, generation, wakeId);
+
+      return { acknowledged: true, wakeId, generation: binding.generation };
+    });
   }
 
   async function setWakeSubmitting({ targetIdentity, wakeId, fingerprint, submittedAt = Date.now() }) {
@@ -752,6 +1165,353 @@ export function createLocalMessagingJournal({
     return { acknowledged: true, wakeId, generation };
   }
 
+  const cursorSecret = randomBytes(32);
+
+  function encodeCursor({ requester, createdAt, messageId }) {
+    const payload = JSON.stringify({ r: requester, t: createdAt, m: messageId });
+    const b64 = Buffer.from(payload, "utf8").toString("base64url");
+    const hmac = createHmac("sha256", cursorSecret).update(b64).digest("base64url");
+    return `${b64}.${hmac}`;
+  }
+
+  function decodeCursor(cursor, requester) {
+    if (typeof cursor !== "string") {
+      throw coded("invalid_cursor", "Cursor must be a string");
+    }
+    const dotIndex = cursor.indexOf(".");
+    if (dotIndex === -1) {
+      throw coded("invalid_cursor", "Malformed cursor format");
+    }
+    const b64 = cursor.slice(0, dotIndex);
+    const hmac = cursor.slice(dotIndex + 1);
+    const expectedHmac = createHmac("sha256", cursorSecret).update(b64).digest("base64url");
+    const hmacBuf = Buffer.from(hmac);
+    const expectedBuf = Buffer.from(expectedHmac);
+    if (hmacBuf.length !== expectedBuf.length || !timingSafeEqual(hmacBuf, expectedBuf)) {
+      throw coded("invalid_cursor", "Invalid or tampered cursor signature");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.from(b64, "base64url").toString("utf8"));
+    } catch {
+      throw coded("invalid_cursor", "Malformed cursor payload");
+    }
+    if (!parsed || parsed.r !== requester || typeof parsed.t !== "number" || typeof parsed.m !== "string") {
+      throw coded("invalid_cursor", "Cursor requester mismatch or invalid fields");
+    }
+    return { createdAt: parsed.t, messageId: parsed.m };
+  }
+
+  async function listInbox({ requester, limit = 50, cursor = null, now = Date.now } = {}) {
+    assertNotClosed();
+    if (!requester || typeof requester !== "string") {
+      throw coded("invalid_params", "requester is required");
+    }
+    const currentTime = typeof now === "function" ? now() : now;
+    // Reap expired claims
+    db.prepare(`
+      UPDATE local_messages
+      SET phase = 'held', reason = 'lease_expired', updated_at = ?
+      WHERE recipient = ? AND phase = 'executing' AND recipient_type = 'interactive'
+        AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+    `).run(currentTime, requester, currentTime);
+
+    let cursorObj = null;
+    if (cursor) {
+      cursorObj = decodeCursor(cursor, requester);
+    }
+
+    const maxCount = Math.min(Math.max(1, limit), 100);
+    let candidateRows;
+    if (cursorObj) {
+      candidateRows = db.prepare(`
+        SELECT * FROM local_messages
+        WHERE recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive'
+          AND (created_at > ? OR (created_at = ? AND message_id > ?))
+        ORDER BY created_at ASC, message_id ASC
+        LIMIT ?
+      `).all(requester, cursorObj.createdAt, cursorObj.createdAt, cursorObj.messageId, maxCount + 1);
+    } else {
+      candidateRows = db.prepare(`
+        SELECT * FROM local_messages
+        WHERE recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive'
+        ORDER BY created_at ASC, message_id ASC
+        LIMIT ?
+      `).all(requester, maxCount + 1);
+    }
+
+    const MAX_INBOX_PAYLOAD_BYTES = 180 * 1024;
+    let totalBytes = 64;
+    const items = [];
+    let nextCursor = null;
+
+    for (let i = 0; i < candidateRows.length; i++) {
+      if (items.length >= maxCount) {
+        const lastItem = items[items.length - 1];
+        nextCursor = encodeCursor({
+          requester,
+          createdAt: lastItem.createdAt,
+          messageId: lastItem.messageId,
+        });
+        break;
+      }
+
+      const row = candidateRows[i];
+      const mapped = mapMessageRow(row);
+      const rowBytes = Buffer.byteLength(JSON.stringify(mapped), "utf8") + 2;
+
+      if (items.length > 0 && totalBytes + rowBytes > MAX_INBOX_PAYLOAD_BYTES) {
+        const lastItem = items[items.length - 1];
+        nextCursor = encodeCursor({
+          requester,
+          createdAt: lastItem.createdAt,
+          messageId: lastItem.messageId,
+        });
+        break;
+      }
+
+      items.push(mapped);
+      totalBytes += rowBytes;
+    }
+
+    items.nextCursor = nextCursor;
+    items.items = items;
+    return items;
+  }
+
+  const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
+
+  async function claimInboxMessage({ messageId, requester, sessionId, generation, claimId, leaseDurationMs = 3600000, now = Date.now } = {}) {
+    assertNotClosed();
+    if (
+      !messageId ||
+      !requester ||
+      !sessionId ||
+      typeof generation !== "number" ||
+      !claimId ||
+      typeof claimId !== "string" ||
+      !IDENTIFIER_PATTERN.test(claimId)
+    ) {
+      throw coded("invalid_params", "messageId, requester, sessionId, generation, and valid nonempty claimId are required");
+    }
+    const currentTime = typeof now === "function" ? now() : now;
+    const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+    if (!row) {
+      throw coded("not_found", `Message ${messageId} not found`);
+    }
+    if (row.recipient !== requester) {
+      throw coded("foreign_access_denied", "Only recipient may claim this message");
+    }
+    if ((row.recipient_type ?? "runner") !== "interactive") {
+      throw coded("invalid_recipient_type", "Message is not an interactive message");
+    }
+
+    if (row.phase === "executing") {
+      if (row.lease_expires_at && row.lease_expires_at <= currentTime) {
+        db.prepare(
+          "UPDATE local_messages SET phase = 'held', reason = 'lease_expired', updated_at = ? WHERE message_id = ?"
+        ).run(currentTime, messageId);
+        throw coded("lease_expired", "Claim lease expired and execution was held");
+      }
+      if (row.claim_session_id === sessionId && row.claim_generation === generation) {
+        if (row.claim_operation_id === claimId) {
+          return {
+            messageId: row.message_id,
+            claimToken: row.claim_token,
+            claimId: row.claim_operation_id,
+            leaseExpiresAt: row.lease_expires_at,
+            requestId: row.request_id,
+            isRetry: true,
+          };
+        }
+        return null;
+      }
+      return null;
+    }
+
+    if (row.phase !== "queued_local") {
+      return null;
+    }
+
+    const claimToken = createHash("sha256").update(randomUUID() + "\0" + currentTime).digest("hex");
+    const boundedLease = Math.min(Math.max(Number(leaseDurationMs) || 3600000, 1000), 3600000);
+    const leaseExpiresAt = currentTime + boundedLease;
+
+    const res = db.prepare(`
+      UPDATE local_messages
+      SET phase = 'executing',
+          claim_token = ?,
+          claim_session_id = ?,
+          claim_generation = ?,
+          claim_operation_id = ?,
+          lease_expires_at = ?,
+          updated_at = ?
+      WHERE message_id = ? AND recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive'
+    `).run(claimToken, sessionId, generation, claimId, leaseExpiresAt, currentTime, messageId, requester);
+
+    if (res.changes === 0) {
+      return null;
+    }
+
+    return {
+      messageId,
+      claimToken,
+      claimId,
+      leaseExpiresAt,
+      requestId: row.request_id,
+      isRetry: false,
+    };
+  }
+
+  async function recordInteractiveReply({ messageId, claimToken, sessionId, generation, requester, text, replyId, metadata = {}, now = Date.now } = {}) {
+    assertNotClosed();
+    if (!messageId || !claimToken || typeof text !== "string" || !requester || !sessionId || typeof generation !== "number") {
+      throw coded("invalid_params", "messageId, claimToken, requester, sessionId, generation, and text are required");
+    }
+
+    const currentTime = typeof now === "function" ? now() : now;
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const orig = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+      if (!orig) {
+        throw coded("invalid_reply_correlation", `Original message ${messageId} not found`);
+      }
+      if (orig.recipient !== requester) {
+        throw coded("foreign_access_denied", "Only original recipient can reply");
+      }
+      if ((orig.recipient_type ?? "runner") !== "interactive") {
+        throw coded("invalid_reply_recipient", "Not an interactive message");
+      }
+
+      // Claim tuple validation MUST happen BEFORE ANY duplicate acceptance or mutation/late evidence
+      if (!orig.claim_token || !orig.claim_session_id || typeof orig.claim_generation !== "number") {
+        throw coded("claim_failed", "Message is not claimed");
+      }
+      if (orig.claim_session_id !== sessionId) {
+        throw coded("session_fenced", "Claim session mismatch");
+      }
+      if (orig.claim_generation !== generation) {
+        throw coded("generation_fenced", "Claim generation mismatch");
+      }
+      if (orig.claim_token !== claimToken) {
+        throw coded("invalid_claim_token", "Claim token mismatch");
+      }
+
+      if (orig.phase === "completed") {
+        const existingReply = db.prepare("SELECT * FROM local_replies WHERE in_reply_to = ?").get(messageId);
+        if (!existingReply) {
+          throw coded("reply_not_accepted", "Completed message has no recorded reply");
+        }
+        if (replyId && replyId !== existingReply.message_id) {
+          throw coded("duplicate_id_conflict", `Reply ID ${replyId} does not match existing reply ID ${existingReply.message_id}`);
+        }
+        const parentMetadata = orig.metadata_json ? JSON.parse(orig.metadata_json) : null;
+        const parentDepth = parentMetadata?._loopDepth ?? 1;
+        const monotonicDepth = parentDepth + 1;
+        const replyMetadata = {
+          ...(metadata || {}),
+          _loopDepth: monotonicDepth,
+        };
+        const candidateEnvelope = {
+          sender: requester,
+          recipient: orig.sender,
+          messageId: existingReply.message_id,
+          requestId: orig.request_id,
+          inReplyTo: messageId,
+          text,
+          metadata: replyMetadata,
+        };
+        const candidateHash = computeEnvelopeHash(candidateEnvelope);
+        if (
+          existingReply.sender === requester &&
+          existingReply.text === text &&
+          existingReply.canonical_hash === candidateHash
+        ) {
+          db.exec("COMMIT");
+          return { ...mapReplyRow(existingReply), isDuplicate: true };
+        }
+        throw coded("duplicate_id_conflict", "Conflicting reply content or metadata for already completed message");
+      }
+
+      if (orig.phase === "held") {
+        db.prepare(
+          "UPDATE local_messages SET late_result_text = COALESCE(?, late_result_text), updated_at = ? WHERE message_id = ?"
+        ).run(text, currentTime, messageId);
+        db.exec("COMMIT");
+        throw coded("reply_not_accepted", "Message is in phase held; late result retained as held evidence");
+      }
+
+      if (orig.phase !== "executing") {
+        throw coded("reply_not_accepted", `Message is in phase ${orig.phase}`);
+      }
+
+      if (orig.lease_expires_at && orig.lease_expires_at <= currentTime) {
+        db.prepare(
+          "UPDATE local_messages SET phase = 'held', reason = 'lease_expired', late_result_text = ?, updated_at = ? WHERE message_id = ?"
+        ).run(text, currentTime, messageId);
+        db.exec("COMMIT");
+        throw coded("lease_expired", "Claim lease expired; late result retained as held evidence");
+      }
+
+      const parentMetadata = orig.metadata_json ? JSON.parse(orig.metadata_json) : null;
+      const parentDepth = parentMetadata?._loopDepth ?? 1;
+      const monotonicDepth = parentDepth + 1;
+      const replyMetadata = {
+        ...(metadata || {}),
+        _loopDepth: monotonicDepth,
+      };
+
+      const effectiveReplyId = replyId || ("rep-" + randomUUID());
+      const replyEnvelope = {
+        sender: requester,
+        recipient: orig.sender,
+        messageId: effectiveReplyId,
+        requestId: orig.request_id,
+        inReplyTo: messageId,
+        text,
+        metadata: replyMetadata,
+      };
+      const replyHash = computeEnvelopeHash(replyEnvelope);
+
+      const existingWithId = db.prepare("SELECT * FROM local_replies WHERE message_id = ?").get(effectiveReplyId);
+      if (existingWithId) {
+        if (existingWithId.canonical_hash === replyHash) {
+          db.exec("COMMIT");
+          return { ...mapReplyRow(existingWithId), isDuplicate: true };
+        }
+        throw coded("duplicate_id_conflict", `Conflicting reply ID: ${effectiveReplyId}`);
+      }
+
+      db.prepare(`
+        INSERT INTO local_replies (
+          message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, consumed, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      `).run(effectiveReplyId, requester, orig.sender, orig.request_id, messageId, text, JSON.stringify(replyMetadata), replyHash, currentTime, currentTime);
+
+      db.prepare(
+        "UPDATE local_messages SET phase = 'completed', updated_at = ? WHERE message_id = ?"
+      ).run(currentTime, messageId);
+
+      const row = db.prepare("SELECT * FROM local_replies WHERE message_id = ?").get(effectiveReplyId);
+      db.exec("COMMIT");
+      return { ...mapReplyRow(row), isDuplicate: false };
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw err;
+    }
+  }
+
+  async function getInteractiveInboxCounts(recipient) {
+    assertNotClosed();
+    const queued = db.prepare("SELECT count(*) as count FROM local_messages WHERE recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive'").get(recipient)?.count || 0;
+    const executing = db.prepare("SELECT count(*) as count FROM local_messages WHERE recipient = ? AND phase = 'executing' AND recipient_type = 'interactive'").get(recipient)?.count || 0;
+    const held = db.prepare("SELECT count(*) as count FROM local_messages WHERE recipient = ? AND phase = 'held' AND recipient_type = 'interactive'").get(recipient)?.count || 0;
+    return { queued, executing, held };
+  }
+
   async function status() {
     assertNotClosed();
     const rows = db.prepare("SELECT phase, count(*) as count FROM local_messages GROUP BY phase").all();
@@ -793,6 +1553,10 @@ export function createLocalMessagingJournal({
     completeExecution,
     holdExecution,
     getLateResult,
+    listInbox,
+    claimInboxMessage,
+    recordInteractiveReply,
+    getInteractiveInboxCounts,
     compact,
     initWakeBinding,
     getWakeBinding,
@@ -802,6 +1566,10 @@ export function createLocalMessagingJournal({
     setWakeUncertain,
     ackWake,
     reconcileStaleWake,
+    initInteractiveWakeBinding,
+    reserveInteractiveWake,
+    reportInteractiveWakeResult,
+    ackInteractiveWake,
     status,
     close,
   };

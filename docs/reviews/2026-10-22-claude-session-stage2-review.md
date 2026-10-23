@@ -1,0 +1,152 @@
+# Claude session Stage 2 — review checkpoint
+
+Status: source correction gate accepted after the review below. Not installed or accepted as a live
+bidirectional adapter. Gate 0 desktop MCP launch is independently verified in
+`2026-10-22-claude-desktop-mcp-gate0.md`.
+
+Antigravity returned request `claude-m3-stage2-implement-20261022`. Parent reran
+the local messaging, Claude session, Codex wake and supervisor-boundary suites:
+192 tests passed, zero failures or skips. These passing tests did not cover all
+required invariants.
+
+## Parent reproductions
+
+1. **Old child adopts a rebound identity during credential refresh.**
+   `getValidCredential` in `claude-session-mcp-child.mjs` reads a new integration
+   tuple and exchanges it without comparing against the original inherited
+   session. Parent created a real broker/control socket and MCP child, made a
+   successful inbox call, changed the owner-paired session UUID/binding/generation,
+   advanced the clock by 241 seconds, then made another inbox call from the old
+   child. It succeeded using the new session. Refresh must fence the captured
+   identity/session/binding/generation and never silently adopt a rebind.
+2. **Claude cannot retrieve or consume outbound replies.** Its MCP tool list
+   omits `triangle_get_replies`, `triangle_consume_reply` and recipient discovery.
+   Therefore an outbound request and notification cannot complete a conversation
+   through the session's own MCP tools.
+3. **Concurrent journal reservations can overlap an open transaction.** Calling
+   two `reserveInteractiveWake` operations concurrently on the journal yielded
+   one delivery permit and one `ERR_SQLITE_ERROR`. An `await` occurs while the
+   single shared SQLite connection holds `BEGIN IMMEDIATE`. Existing race tests
+   use separate client IO callbacks and do not cover this scheduling case.
+4. **Reservation retry can reuse an acknowledged wake ID.** Parent reserved R,
+   acknowledged R, admitted a fresh inbound message, then retried R at +16s.
+   It returned `deliveryAllowed: true`. Retry identity must stay deduplicated
+   after acknowledgment; otherwise stale acknowledgments can collide with a new
+   notification using the same ID.
+
+The parent reproduction script is disposable:
+`/private/tmp/triangle-stage2-parent-repro.mjs`. It prints only booleans, missing
+tool names and error codes. It uses synthetic credentials and scratch sockets.
+
+## Scope preservation
+
+The pre-existing dirty Darwin alias test fixture was restored to
+`/private/var/tmp` before parent verification. No install/runtime manifest or
+user settings changes are accepted from this source-only slice. The current
+bundle artifact allowlist must be extended and tested in a separate release gate
+before these new modules can be installed.
+
+## Independent review
+
+The independent reviewer reproduced the rebind issue and identified additional
+blockers: generated mutation retry IDs are lost on errors; a delayed socket
+connect can write after child close returns; journal wake methods do not check
+their session tuple, while report RPC parameters can override claims. Its new
+test run passed 13/13 despite these failures. It concurred with the reservation
+replay and transaction-await findings. All seven findings are sent as one
+correction batch; completion requires regressions and parent verification.
+
+## Corrected candidate verification
+
+Antigravity returned all seven fixes through Triangle request
+`claude-m3-stage2-corrections-20261022`. Parent reran the standalone reproductions:
+old-session adoption false, missing outbound tools empty, concurrent reservations
+both fulfilled with exactly one permit, and reused acknowledged ID denied.
+The independent reviewer repeated actual dropped send/claim/reply responses and
+a delayed-connect-after-close probe; retries recovered and post-close writes
+were zero. It found no remaining P1/P2 in the scoped fixes.
+
+Parent added actual dropped-response injection as a persistent regression rather
+than relying on the earlier success-only test titled transport loss. Parent also
+added failing real-process SIGINT/SIGTERM cases, implemented awaited CLI shutdown
+and readline closure, and verified both pass; independent re-review passed them.
+
+Final validation:
+
+- Normal agent-worker package suite: 909 tests, 906 passed, 0 failed, 3 skipped.
+- Focused adapter/supervisor/Codex/packaging boundary: 216/216 passed before the
+  final packaged-MCP smoke test was added; that test is included in the package run.
+- Installer and legacy-bundle gate: 18/18 passed, including actual MCP initialize
+  and tools/list through the staged wrapper and frozen v11 bundle.
+- Swift WorkerLauncher contract suite: 11/11 passed.
+- Bundle-closure tests: 14/14 passed; independent packaging review confirmed all
+  pre-v11 exact artifact lists are unchanged. v11 adds exactly the three session
+  broker/delivery/MCP modules to each worker and standalone supervisor bundle.
+- `git diff --check` passed.
+
+The first package run failed four stale packaging fixtures after the v11 bump;
+their current-version assertions and legacy artifact removal list were updated.
+The final complete package rerun above is clean. Tests use synthetic identities
+and private scratch sockets; no live session token is placed in a test fixture.
+
+The disposable staged application root is
+`/private/tmp/triangle-claude-v11-candidate`. This is not the installed production
+application root. Claude owner pairing, activation of the existing supervisor,
+and real bidirectional Claude/Codex/Antigravity canaries remain unclosed gates.
+
+## Installed checkpoint — 2026-10-22
+
+Installed the verified public-ad-hoc/file-custody helper and Triangle Client,
+staged and validated supervisor manifest v11, and restarted the existing
+`dev.thetriangle.client` service. Installed `triangle-local status` reports
+running, zero executing/queued work, and the preserved 20 completed / 2 held /
+14 pending historical replies. Discovery includes the distinct Claude identity.
+No second supervisor was started and no historical tasks were retried.
+
+The scratch project's own MCP probe reconnected and exported a nonce-bound,
+UUID-only owner pairing handoff. The separate Claude binding was created disabled,
+then explicitly activated at generation 2. Its socket token was never exported.
+Only the disposable project's `.mcp.json` was changed to the installed
+`triangle-local claude-session-mcp --expected-version 2.1.307` entry; the previous
+probe configuration and owner local config have private rollback copies.
+
+**Remaining live gate:** the already-running Claude Desktop scratch session still
+exposes its original `triangle-session-probe` tools. A real model tool lookup
+reported `TRIANGLE_TOOL_UNAVAILABLE`; Desktop View > Reload did not refresh the
+backend MCP set. Full adapter messaging/push has not passed. Restart/reopen the
+scratch session's backend, verify the inherited UUID still matches the explicit
+binding, then prove status, inbox/claim/reply, outbound worker reply, wake/ack and
+restart behavior. Do not silently rebind a changed session UUID. No canary was
+queued into the unready Claude inbox.
+
+## Live Desktop acceptance — 2026-10-22, after owner-approved app restart
+
+The owner explicitly approved quitting/reopening Claude. Cold launch and reopening
+`Triangle MCP Gate 0 scratch test` loaded the real project `triangle-session`
+MCP server. Its actual `triangle_get_status` call returned the paired identity,
+generation 2 and empty inbox, proving the inherited session still matched.
+No rebind or global configuration edit was needed.
+
+Observed the following in Claude's visible tool history and independently in the
+supervisor-owned journal / installed CLI. Claude ended each preparation turn;
+no model-side polling or manual prompt was used to trigger the later wake.
+
+| Live case | Evidence | Result |
+| --- | --- | --- |
+| Codex → idle Claude | `claude-live-inbound-e840fee-01`; wake `89f1cc94-f517-47df-9c61-fc5237e5c1e4` | Automatic visible wake; exclusive claim; exact `CLAUDE_TRIANGLE_INBOUND_OK` reply; request completed; reply consumed; wake acknowledged |
+| Claude → Antigravity → idle Claude | `claude-live-outbound-e840fee-01`; reply `rep-7408f368-8984-494b-8e65-2b3bf6c651e6`; wake `c856615b-cad2-4859-a85b-56f7b7ed3f73` | Send admitted once; worker completed; automatic visible return wake; exact `ANTIGRAVITY_TO_CLAUDE_OK`; matching request/inReplyTo; Claude consumed only that reply and acknowledged wake |
+| Supervisor restart / exact retry | Retried original inbound ID and identical content after restarting the existing service | `isDuplicate: true`, status `completed`; original execution preserved |
+| Fresh wake after supervisor restart | `claude-live-restart-e840fee-01`; wake `83770288-e07d-4e15-8aea-12df320b850f` | Automatic wake; exact `CLAUDE_TRIANGLE_RESTART_OK`; completed; consumed; wake acknowledged and idle |
+
+Journal timings (single-run observations, not latency guarantees): initial inbound
+admission to wake reservation 3.37 s; admission to reply 26.61 s. Outbound worker
+admission to reply 41.90 s; reply to wake reservation 4.15 s; wake reservation to
+ack 8.97 s. Post-restart admission to reservation 4.17 s; admission to reply 12.78 s.
+All three Claude wake-history entries ended `acknowledged`, generation 2.
+
+These cases prove the installed same-device adapter through one existing
+supervisor. They do not prove inter-machine Iroh, MESH bridging, arbitrary coding
+task reliability, or every timing of restart / in-flight failure. The unsupported
+Claude socket remains pinned to 2.1.307. Existing 14 historical Codex replies and
+2 held tasks were left intact. This live evidence supersedes the preceding
+pending-Desktop-reload checkpoint for these tested cases only.

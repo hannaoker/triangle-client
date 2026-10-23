@@ -37,6 +37,8 @@ export function createLocalControlServer({
   acl,
   credentialValidator,
   credentialBroker = null,
+  interactiveBroker = null,
+  interactiveRecipients = null,
   statusProvider = null,
   rateLimiter,
   exchangeLimiter = null,
@@ -137,18 +139,46 @@ export function createLocalControlServer({
       // sender from the signed claims; the client's senderId is only an assertion that must match.
       let claims = null;
       let senderId = null;
-      if (method !== "hello" && method !== "issue_turn") {
+      if (method !== "hello" && method !== "issue_turn" && method !== "exchange_session") {
         if (!claimedSenderId || typeof claimedSenderId !== "string" || !claimedSenderId.trim()) {
           throw coded("unauthorized", "senderId is required");
         }
         claims = credentialValidator.validate({ credential, expectedSenderId: claimedSenderId.trim() });
         senderId = claims.senderId;
+
+        // Enforce expiry and active session/revocation on EVERY authenticated request
+        if (claims.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
+          if (!interactiveBroker) {
+            throw coded("unauthorized", "Interactive sessions are not supported or disabled");
+          }
+          interactiveBroker.validateRequest({ claims, senderId });
+        }
       }
 
       switch (method) {
         case "local_status": {
+          if (claims?.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
+            const inbox = await journal.getInteractiveInboxCounts?.(senderId) ?? { queued: 0, executing: 0, held: 0 };
+            const statusRes = {
+              route: "same-device",
+              senderId,
+              sessionId: claims.sessionId,
+              generation: claims.generation,
+              inbox,
+            };
+            socket.write(encodeFrame(createSuccessResponse(id, statusRes)));
+            break;
+          }
           if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
           socket.write(encodeFrame(createSuccessResponse(id, await statusProvider())));
+          break;
+        }
+        case "exchange_session": {
+          if (!interactiveBroker || typeof interactiveBroker.exchange !== "function") {
+            throw coded("unsupported", "No interactive session broker configured");
+          }
+          const grant = await interactiveBroker.exchange(params);
+          socket.write(encodeFrame(createSuccessResponse(id, grant)));
           break;
         }
         case "issue_turn": {
@@ -240,9 +270,14 @@ export function createLocalControlServer({
             }
 
             // 5. Record to durable shared journal
+            const recipientType = (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(to) : interactiveRecipients.includes(to)))
+              ? "interactive"
+              : "runner";
+
             const record = await journal.recordSend({
               sender: senderId,
               recipient: to,
+              recipientType,
               messageId,
               requestId: effectiveRequestId,
               inReplyTo,
@@ -288,7 +323,8 @@ export function createLocalControlServer({
 
             // Defense in depth: a duplicate of work that is already claimed, finished or held
             // must never reach the dispatcher again, whatever the dispatcher would do with it.
-            if (!record.isDuplicate || (record.phase ?? "queued_local") === "queued_local") {
+            // Interactive recipients are claimed and executed by the interactive session, never the runner dispatcher.
+            if (recipientType !== "interactive" && (!record.isDuplicate || (record.phase ?? "queued_local") === "queued_local")) {
               const execPromise = (async () => {
                 try {
                   await activeDispatcher.notifyAdmission(admissionJob);
@@ -405,7 +441,21 @@ export function createLocalControlServer({
           }
 
           let outcome;
-          if (notifier && typeof notifier.ackNotification === "function") {
+          if (claims?.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
+            if (!claims?.sessionId || !claims?.bindingId || typeof claims?.generation !== "number" || !Number.isSafeInteger(claims.generation) || claims.generation < 1) {
+              throw coded("unauthorized", "Interactive credential missing required session claims");
+            }
+            if (generation !== claims.generation) {
+              throw coded("generation_fenced", "Ack generation does not match authenticated claims");
+            }
+            outcome = await journal.ackInteractiveWake({
+              targetIdentity: senderId,
+              wakeId,
+              generation: claims.generation,
+              sessionId: claims.sessionId,
+              bindingId: claims.bindingId,
+            });
+          } else if (notifier && typeof notifier.ackNotification === "function") {
             outcome = await notifier.ackNotification({
               requester: senderId,
               wakeId,
@@ -426,6 +476,72 @@ export function createLocalControlServer({
           break;
         }
 
+        case "reserve_wake_notification": {
+          if (claims?.senderType !== "interactive" || !interactiveBroker?.isInteractiveSender(senderId)) {
+            throw coded("unauthorized", "Interactive credential required for reserve_wake_notification");
+          }
+          if (!claims?.sessionId || !claims?.bindingId || typeof claims?.generation !== "number" || !Number.isSafeInteger(claims.generation) || claims.generation < 1) {
+            throw coded("unauthorized", "Interactive credential missing required session claims");
+          }
+          const { reservationId } = params;
+          if (!reservationId || typeof reservationId !== "string") {
+            throw coded("invalid_request", "reservationId required");
+          }
+          identifier(reservationId, "reservationId");
+          const outcome = await journal.reserveInteractiveWake({
+            targetIdentity: senderId,
+            reservationId,
+            sessionId: claims.sessionId,
+            generation: claims.generation,
+            bindingId: claims.bindingId,
+          });
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "report_wake_result": {
+          if (claims?.senderType !== "interactive" || !interactiveBroker?.isInteractiveSender(senderId)) {
+            throw coded("unauthorized", "Interactive credential required for report_wake_result");
+          }
+          if (!claims?.sessionId || !claims?.bindingId || typeof claims?.generation !== "number" || !Number.isSafeInteger(claims.generation) || claims.generation < 1) {
+            throw coded("unauthorized", "Interactive credential missing required session claims");
+          }
+          const { wakeId, generation, sessionId, bindingId, result } = params;
+          if (!wakeId || typeof wakeId !== "string") {
+            throw coded("invalid_request", "wakeId required");
+          }
+          identifier(wakeId, "wakeId");
+          if (!result || typeof result !== "string" || !["accepted", "uncertain", "failed"].includes(result)) {
+            throw coded("invalid_request", "result must be one of: accepted, uncertain, failed");
+          }
+          if (typeof generation !== "undefined") {
+            if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) {
+              throw coded("invalid_request", "generation must be a positive safe integer");
+            }
+            if (generation !== claims.generation) {
+              throw coded("generation_fenced", "Supplied generation does not match authenticated claims");
+            }
+          }
+          if (typeof sessionId !== "undefined" && sessionId !== claims.sessionId) {
+            throw coded("session_fenced", "Supplied sessionId does not match authenticated claims");
+          }
+          if (typeof bindingId !== "undefined" && bindingId.toLowerCase() !== claims.bindingId.toLowerCase()) {
+            throw coded("binding_changed", "Supplied bindingId does not match authenticated claims");
+          }
+          const outcome = await journal.reportInteractiveWakeResult({
+            targetIdentity: senderId,
+            wakeId,
+            generation: claims.generation,
+            sessionId: claims.sessionId,
+            bindingId: claims.bindingId,
+            result,
+          });
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
         case "cancel_message": {
           const resp = createSuccessResponse(
             id,
@@ -435,6 +551,77 @@ export function createLocalControlServer({
             },
             PROTOCOL_VERSION,
           );
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "list_inbox": {
+          const { limit = 50, cursor = null } = params;
+          const cappedLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+          const result = await journal.listInbox({
+            requester: senderId,
+            limit: cappedLimit,
+            cursor,
+          });
+          const resp = createSuccessResponse(id, { items: result.items, nextCursor: result.nextCursor ?? null }, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "claim_inbox_message": {
+          const { messageId, claimId } = params;
+          if (!messageId) throw coded("invalid_request", "messageId required");
+          if (!claimId) throw coded("invalid_request", "claimId required");
+          identifier(messageId, "messageId");
+          identifier(claimId, "claimId");
+          const record = await journal.getRecord(messageId);
+          if (record && record.recipient !== senderId) {
+            throw coded("foreign_access_denied", "Only recipient may claim this message");
+          }
+          if (!claims?.sessionId || typeof claims?.generation !== "number") {
+            throw coded("unauthorized", "Interactive session credential required");
+          }
+          const outcome = await journal.claimInboxMessage({
+            messageId,
+            claimId,
+            requester: senderId,
+            sessionId: claims.sessionId,
+            generation: claims.generation,
+            leaseDurationMs: 3600000,
+          });
+          if (!outcome) {
+            throw coded("claim_failed", "Message is not available for claim");
+          }
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "send_reply": {
+          const { messageId, claimToken, text, replyId, metadata = {} } = params;
+          if (!messageId || !claimToken || typeof text !== "string") {
+            throw coded("invalid_request", "messageId, claimToken, and text are required for send_reply");
+          }
+          identifier(messageId, "messageId");
+          if (replyId) identifier(replyId, "replyId");
+          if (text.length > MAX_FIELD_STRING_LENGTH) {
+            throw coded("payload_too_large", `Reply text exceeds field limit of ${MAX_FIELD_STRING_LENGTH}`);
+          }
+          if (!claims?.sessionId || typeof claims?.generation !== "number") {
+            throw coded("unauthorized", "Interactive session credential required");
+          }
+          const outcome = await journal.recordInteractiveReply({
+            messageId,
+            claimToken,
+            sessionId: claims.sessionId,
+            generation: claims.generation,
+            requester: senderId,
+            text,
+            replyId,
+            metadata,
+          });
+          notifier?.notifyObligationChange?.();
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }

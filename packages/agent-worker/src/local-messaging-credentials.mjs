@@ -33,6 +33,10 @@ export function validateClaimsShape(claims) {
     conversationId,
     parentMessageId,
     loopDepth,
+    sessionId,
+    generation,
+    bindingId,
+    senderType,
   } = claims;
 
   if (typeof senderId !== "string" || !senderId.trim()) {
@@ -86,6 +90,30 @@ export function validateClaimsShape(claims) {
     }
   }
 
+  if (sessionId !== null && typeof sessionId !== "undefined") {
+    if (typeof sessionId !== "string" || !sessionId.trim()) {
+      throw coded("malformed_claims", "sessionId must be a non-empty string when provided");
+    }
+  }
+
+  if (generation !== null && typeof generation !== "undefined") {
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw coded("malformed_claims", "generation must be an integer >= 1 when provided");
+    }
+  }
+
+  if (bindingId !== null && typeof bindingId !== "undefined") {
+    if (typeof bindingId !== "string" || !bindingId.trim()) {
+      throw coded("malformed_claims", "bindingId must be a non-empty string when provided");
+    }
+  }
+
+  if (senderType !== null && typeof senderType !== "undefined") {
+    if (typeof senderType !== "string" || !senderType.trim()) {
+      throw coded("malformed_claims", "senderType must be a non-empty string when provided");
+    }
+  }
+
   return true;
 }
 
@@ -107,6 +135,10 @@ export function createTurnCapabilityIssuer({
       conversationId = null,
       parentMessageId = null,
       loopDepth = 1,
+      sessionId = null,
+      generation = null,
+      bindingId = null,
+      senderType = null,
     } = {}) {
       if (!senderId || typeof senderId !== "string" || !senderId.trim()) {
         throw coded("invalid_sender_id", "senderId must be a non-empty string");
@@ -128,6 +160,10 @@ export function createTurnCapabilityIssuer({
         conversationId: conversationId ? String(conversationId).trim() : null,
         parentMessageId: parentMessageId ? String(parentMessageId).trim() : null,
         loopDepth: Number.isInteger(loopDepth) && loopDepth >= 1 ? loopDepth : 1,
+        sessionId: sessionId ? String(sessionId).trim() : null,
+        generation: Number.isInteger(generation) && generation >= 1 ? generation : null,
+        bindingId: bindingId ? String(bindingId).trim() : null,
+        senderType: senderType ? String(senderType).trim() : null,
       };
 
       validateClaimsShape(claims);

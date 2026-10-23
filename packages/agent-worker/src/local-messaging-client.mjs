@@ -181,6 +181,42 @@ export function createLocalControlClient({
       }
       return grant;
     },
+    async exchangeInteractiveSession(tuple, options = {}) {
+      const grant = await callRpc("exchange_session", tuple, options);
+      if (grant?.credential) {
+        activeTurnCredential = grant.credential;
+      }
+      return grant;
+    },
+    async listInbox({ limit = 50, cursor = null } = {}, options = {}) {
+      const res = await callRpc("list_inbox", { limit, cursor }, options);
+      const items = res.items || [];
+      Object.defineProperty(items, "nextCursor", {
+        value: res.nextCursor ?? null,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+      Object.defineProperty(items, "items", {
+        value: items,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+      return items;
+    },
+    async claimInboxMessage({ messageId, claimId } = {}, options = {}) {
+      return await callRpc("claim_inbox_message", { messageId, claimId }, options);
+    },
+    async sendReply({ messageId, claimToken, text, replyId = null, metadata = {} } = {}, options = {}) {
+      return await callRpc("send_reply", { messageId, claimToken, text, replyId, metadata }, options);
+    },
+    async reserveWakeNotification({ reservationId, clientFingerprint = null } = {}, options = {}) {
+      return await callRpc("reserve_wake_notification", { reservationId, clientFingerprint }, options);
+    },
+    async reportWakeResult({ wakeId, generation, sessionId, bindingId, result } = {}, options = {}) {
+      return await callRpc("report_wake_result", { wakeId, generation, sessionId, bindingId, result }, options);
+    },
     async discoverRecipients(options = {}) {
       const res = await callRpc("discover_recipients", {}, options);
       return res.recipients || [];

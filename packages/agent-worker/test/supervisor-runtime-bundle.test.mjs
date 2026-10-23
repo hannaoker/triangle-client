@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { randomUUID, randomBytes } from 'node:crypto';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const installer = path.join(repo, 'scripts/triangle-worker-install.py');
 const python = '/usr/bin/python3';
@@ -21,7 +22,7 @@ function validate(manifest) { return spawnSync(python, [installer, 'validate-run
 test('Cursor-only supervisor installs with Node alone and runs the complete coordinator import closure', () => installed((manifest, value) => {
   assert.equal(validate(manifest).status, 0);
   assert.deepEqual(value.environment, { PATH: `${value.projectRoot}/bin:/usr/bin:/bin`, LANG: 'C', LC_ALL: 'C' });
-  assert.equal(value.version, 10);
+  assert.equal(value.version, 11);
   assert.ok(!Object.keys(value.artifacts).some(p => p.includes('/agents/') || /runners\/(codex|hermes|antigravity)-runner/.test(p)));
   execFileSync(path.join(value.projectRoot, 'bin/node'), ['--input-type=module', '-e', `await import(${JSON.stringify(path.join(value.projectRoot, 'packages/agent-worker/src/client-supervisor.mjs'))})`], { env: value.environment });
 }));
@@ -38,6 +39,25 @@ for (const mutation of ['artifact', 'node', 'environment', 'extra', 'mode', 'unt
     assert.notEqual(validate(manifest).status, 0);
   }));
 }
+
+test('Claude MCP entry initializes and lists tools from the validated v11 bundle', () => installed((manifest,value) => {
+  const appRoot=path.dirname(path.dirname(manifest));
+  execFileSync(python,[installer,'install-local-wrapper','--application-root',appRoot]);
+  const base=process.platform==='darwin'?'/private/tmp':realpathSync(tmpdir());
+  const state=mkdtempSync(path.join(base,'tri-mcp-'));
+  chmodSync(state,0o700);
+  try {
+    const sessionId=randomUUID(),integrationPath=path.join(state,'integration.json'),configPath=path.join(state,'config.json');
+    writeFileSync(integrationPath,JSON.stringify({version:1,type:'interactive',senderId:randomBytes(32).toString('hex'),sessionId,generation:1,bindingId:randomUUID(),secret:randomBytes(32).toString('hex'),enabled:true,revoked:false}),{mode:0o600});
+    writeFileSync(configPath,JSON.stringify({version:1,enabled:true,stateRoot:state,interactive:{enabled:true,integrationPath}}),{mode:0o600});
+    const input=[{jsonrpc:'2.0',id:1,method:'initialize',params:{}},{jsonrpc:'2.0',id:2,method:'tools/list',params:{}}].map(JSON.stringify).join('\n')+'\n';
+    const output=execFileSync(path.join(appRoot,'bin/triangle-local'),['claude-session-mcp','--config',configPath,'--expected-version','2.1.307'],{input,encoding:'utf8',timeout:5000,env:{...value.environment,CLAUDE_CODE_SESSION_ID:sessionId}});
+    const responses=output.trim().split('\n').map(JSON.parse);
+    assert.equal(responses[0].result.serverInfo.name,'triangle-claude-session-mcp');
+    const names=responses[1].result.tools.map(tool=>tool.name);
+    for(const name of ['triangle_list_inbox','triangle_get_replies','triangle_consume_reply','triangle_list_recipients'])assert.ok(names.includes(name));
+  } finally {rmSync(state,{recursive:true,force:true});}
+}));
 
 test('service preparation accepts a validated standalone supervisor without any harness CLI', () => {
   const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'triangle-supervisor-service-')));

@@ -8,12 +8,13 @@ import {readPrivateJson,writePrivateJson} from './local-messaging-auth-broker.mj
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messaging-mcp-adapter.mjs';
+import {validateInteractiveIntegration,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation']);
+ const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version']);
  while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -52,6 +53,161 @@ export function setupLocalMessaging(options,env=process.env){
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
  return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }
+const KNOWN_SETUP_KEYS = new Set([
+ 'configPath',
+ 'config',
+ 'stateRoot',
+ 'state-root',
+ 'integrationPath',
+ 'integration-path',
+ 'senderId',
+ 'secret',
+ 'sessionId',
+ 'bindingId',
+ 'generation',
+ 'enabled',
+ 'revoked',
+ 'recipients',
+]);
+
+export function setupInteractiveSession(options = {}, env = process.env) {
+ for (const k of Object.keys(options)) {
+  if (!KNOWN_SETUP_KEYS.has(k)) {
+   throw coded('invalid_options', `Unknown option: ${k}`);
+  }
+ }
+
+ if (options.senderId !== undefined && (!HEX64_PATTERN.test(options.senderId) || typeof options.senderId !== 'string')) {
+  throw coded('invalid_options', 'senderId must be 64-char hex string');
+ }
+ if (options.secret !== undefined && (!HEX64_PATTERN.test(options.secret) || typeof options.secret !== 'string')) {
+  throw coded('invalid_options', 'secret must be 64-char hex string');
+ }
+ if (options.sessionId !== undefined && (!UUID_PATTERN.test(options.sessionId) || typeof options.sessionId !== 'string')) {
+  throw coded('invalid_options', 'sessionId must be a valid UUID');
+ }
+ if (options.bindingId !== undefined && (!UUID_PATTERN.test(options.bindingId) || typeof options.bindingId !== 'string')) {
+  throw coded('invalid_options', 'bindingId must be a valid UUID');
+ }
+ if (options.generation !== undefined && (!Number.isSafeInteger(options.generation) || options.generation < 1)) {
+  throw coded('invalid_options', 'generation must be a safe positive integer >= 1');
+ }
+ if (options.enabled !== undefined && typeof options.enabled !== 'boolean') {
+  throw coded('invalid_options', 'enabled must be a boolean');
+ }
+ if (options.revoked !== undefined && typeof options.revoked !== 'boolean') {
+  throw coded('invalid_options', 'revoked must be a boolean');
+ }
+
+ const configPath = options.configPath || options.config || defaultLocalConfigPath(env);
+ const configDir = path.dirname(configPath);
+ const stateRoot = options.stateRoot || options['state-root'] || path.join(configDir, 'local');
+ const integrationPath = options.integrationPath || options['integration-path'] || path.join(stateRoot, 'claude-integration.json');
+
+ let senderId = options.senderId || randomBytes(32).toString('hex');
+ let secret = options.secret || randomBytes(32).toString('hex');
+ let sessionId = options.sessionId || randomUUID();
+ let bindingId = options.bindingId || randomUUID();
+ let generation = options.generation || 1;
+ let enabled = options.enabled !== undefined ? options.enabled : false; // Default disabled
+ let revoked = options.revoked !== undefined ? options.revoked : false;
+
+ if (fs.existsSync(integrationPath)) {
+  let existing;
+  try {
+   existing = validateInteractiveIntegration(integrationPath);
+  } catch (err) {
+   throw coded('invalid_existing_state', `Existing interactive integration file is malformed: ${err.message}`);
+  }
+
+  if (options.senderId && options.senderId !== existing.senderId) {
+   throw coded('invalid_existing_state', 'Cannot change senderId on existing interactive session');
+  }
+  if (options.sessionId && options.sessionId !== existing.sessionId) {
+   throw coded('invalid_existing_state', 'Cannot change sessionId on existing interactive session');
+  }
+  if (options.bindingId && options.bindingId !== existing.bindingId) {
+   throw coded('invalid_existing_state', 'Cannot change bindingId on existing interactive session');
+  }
+  if (options.secret && options.secret !== existing.secret) {
+   throw coded('invalid_existing_state', 'Cannot change secret on existing interactive session without rebind helper');
+  }
+  if (options.generation !== undefined && options.generation !== existing.generation) {
+   throw coded('invalid_existing_state', 'Cannot change generation on existing interactive session');
+  }
+
+  if (options.revoked !== undefined && options.revoked !== existing.revoked) {
+   throw coded('unsupported_operation', 'Cannot change revoked state on existing interactive session via setup; requires explicit activation or revocation');
+  }
+  revoked = existing.revoked;
+
+  if (options.enabled !== undefined && options.enabled !== existing.enabled) {
+   throw coded('unsupported_operation', 'Cannot change enabled state on existing interactive session via setup; requires explicit activation or revocation');
+  }
+  enabled = existing.enabled;
+
+  senderId = existing.senderId;
+  secret = existing.secret;
+  sessionId = existing.sessionId;
+  bindingId = existing.bindingId;
+  generation = existing.generation;
+ }
+
+ writePrivateJson(integrationPath, {
+  version: 1,
+  type: 'interactive',
+  senderId,
+  sessionId,
+  generation,
+  bindingId,
+  secret,
+  enabled,
+  revoked,
+ });
+
+ return {
+  configPath,
+  integrationPath,
+  senderId,
+  sessionId,
+  generation,
+  bindingId,
+  enabled,
+  revoked,
+ };
+}
+
+export function activateInteractiveSession({ integrationPath }) {
+ if (!integrationPath || typeof integrationPath !== 'string') {
+  throw coded('invalid_options', 'integrationPath is required');
+ }
+ const existing = validateInteractiveIntegration(integrationPath);
+ const newSecret = randomBytes(32).toString('hex');
+ const newGeneration = existing.generation + 1;
+ const updated = {
+  ...existing,
+  secret: newSecret,
+  generation: newGeneration,
+  enabled: true,
+  revoked: false,
+ };
+ writePrivateJson(integrationPath, updated);
+ return updated;
+}
+
+export function revokeInteractiveSession({ integrationPath }) {
+ if (!integrationPath || typeof integrationPath !== 'string') {
+  throw coded('invalid_options', 'integrationPath is required');
+ }
+ const existing = validateInteractiveIntegration(integrationPath);
+ const updated = {
+  ...existing,
+  enabled: false,
+  revoked: true,
+ };
+ writePrivateJson(integrationPath, updated);
+ return updated;
+}
 export async function reconcileWakeOffline(options,env=process.env){
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
@@ -73,12 +229,44 @@ export async function reconcileWakeOffline(options,env=process.env){
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, reconcile-wake, mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
  if(command==='reconcile-wake'){
   output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;
  }
  if(command==='setup'){output.write(JSON.stringify(setupLocalMessaging(options,env))+'\n');return 0;}
- if(!['status','discover','send','replies','consume','ack-wake','mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
+ if(command==='claude-session-mcp'){
+  const configPath=options.config||defaultLocalConfigPath(env);
+  const config=readPrivateJson(configPath);
+  const expectedVersion=options['expected-version']||config.interactive?.expectedVersion;
+  if(!expectedVersion){
+   throw coded('missing_expected_version','Explicit expected Claude version is required');
+  }
+  const {createClaudeSessionMcpChild}=await import('./claude-session-mcp-child.mjs');
+  const child=createClaudeSessionMcpChild({
+   configPath,
+   integrationPath:options.integration,
+   expectedVersion,
+   env,
+   input,
+   output,
+  });
+  let stopping=null;
+  const stop=()=>{
+   stopping??=child.close().catch(()=>{process.exitCode=1;}).finally(()=>{input.destroy?.();});
+  };
+  process.once('SIGINT',stop);
+  process.once('SIGTERM',stop);
+  try {
+   await child.run();
+  } finally {
+   process.removeListener('SIGINT',stop);
+   process.removeListener('SIGTERM',stop);
+   await child.close();
+   if(stopping)await stopping;
+  }
+  return 0;
+ }
+ if(!['status','discover','send','replies','consume','ack-wake','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
  const binding=readPrivateJson(config.integrationPath);
@@ -106,7 +294,15 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    result=await client.ackWake({wakeId,generation},rpcOptions);
   }
   if(command==='send'){
-   const to=config.recipients.find(r=>r.profile===options.to||r.instanceId===options.to)?.instanceId;
+   let to=config.recipients.find(r=>r.profile===options.to||r.instanceId===options.to)?.instanceId;
+   if(!to&&config.interactive?.enabled&&config.interactive.integrationPath){
+    try {
+     const claudeIntegration=readPrivateJson(config.interactive.integrationPath);
+     if(options.to==='claude'||options.to===claudeIntegration.senderId){
+      to=claudeIntegration.senderId;
+     }
+    }catch{}
+   }
    if(!to)throw coded('recipient_not_allowed','Choose an explicitly configured recipient');
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;
