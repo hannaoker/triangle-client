@@ -118,3 +118,35 @@ scratch session's backend, verify the inherited UUID still matches the explicit
 binding, then prove status, inbox/claim/reply, outbound worker reply, wake/ack and
 restart behavior. Do not silently rebind a changed session UUID. No canary was
 queued into the unready Claude inbox.
+
+## Live Desktop acceptance — 2026-10-22, after owner-approved app restart
+
+The owner explicitly approved quitting/reopening Claude. Cold launch and reopening
+`Triangle MCP Gate 0 scratch test` loaded the real project `triangle-session`
+MCP server. Its actual `triangle_get_status` call returned the paired identity,
+generation 2 and empty inbox, proving the inherited session still matched.
+No rebind or global configuration edit was needed.
+
+Observed the following in Claude's visible tool history and independently in the
+supervisor-owned journal / installed CLI. Claude ended each preparation turn;
+no model-side polling or manual prompt was used to trigger the later wake.
+
+| Live case | Evidence | Result |
+| --- | --- | --- |
+| Codex → idle Claude | `claude-live-inbound-e840fee-01`; wake `89f1cc94-f517-47df-9c61-fc5237e5c1e4` | Automatic visible wake; exclusive claim; exact `CLAUDE_TRIANGLE_INBOUND_OK` reply; request completed; reply consumed; wake acknowledged |
+| Claude → Antigravity → idle Claude | `claude-live-outbound-e840fee-01`; reply `rep-7408f368-8984-494b-8e65-2b3bf6c651e6`; wake `c856615b-cad2-4859-a85b-56f7b7ed3f73` | Send admitted once; worker completed; automatic visible return wake; exact `ANTIGRAVITY_TO_CLAUDE_OK`; matching request/inReplyTo; Claude consumed only that reply and acknowledged wake |
+| Supervisor restart / exact retry | Retried original inbound ID and identical content after restarting the existing service | `isDuplicate: true`, status `completed`; original execution preserved |
+| Fresh wake after supervisor restart | `claude-live-restart-e840fee-01`; wake `83770288-e07d-4e15-8aea-12df320b850f` | Automatic wake; exact `CLAUDE_TRIANGLE_RESTART_OK`; completed; consumed; wake acknowledged and idle |
+
+Journal timings (single-run observations, not latency guarantees): initial inbound
+admission to wake reservation 3.37 s; admission to reply 26.61 s. Outbound worker
+admission to reply 41.90 s; reply to wake reservation 4.15 s; wake reservation to
+ack 8.97 s. Post-restart admission to reservation 4.17 s; admission to reply 12.78 s.
+All three Claude wake-history entries ended `acknowledged`, generation 2.
+
+These cases prove the installed same-device adapter through one existing
+supervisor. They do not prove inter-machine Iroh, MESH bridging, arbitrary coding
+task reliability, or every timing of restart / in-flight failure. The unsupported
+Claude socket remains pinned to 2.1.307. Existing 14 historical Codex replies and
+2 held tasks were left intact. This live evidence supersedes the preceding
+pending-Desktop-reload checkpoint for these tested cases only.
