@@ -130,3 +130,31 @@ other settings. Same-binding activation remains intact. All 33 focused tests and
 descendant-readiness timing failure; that result is retained in the review record.
 The full suite was not rerun for this narrow setup change. Production remains
 on the previously installed release; PR #110 remains a draft candidate.
+
+## Installed supervisor acceptance — candidate 18ccf89
+
+The owner authorized installing, testing, then merging and deploying if the
+checks passed. The candidate was staged with the supported installer; all 80
+supervisor artifacts matched candidate source by SHA-256. The existing service
+was restarted, with no second supervisor or app-server launched.
+
+Only /private/tmp/triangle-session-discovery-m0-20261023 was opted in. An existing
+Claude Desktop chat's normal prompt registered one session, and a newly created
+Desktop fork registered another on its first prompt. Both had distinct hashed
+handles and visible=true, reachable=false, wakeCapable=false. A separate harmless
+new-chat acknowledgment was accidentally sent in the default project during UI
+navigation; that workspace was not opted in and produced no discovery entry.
+
+Restarting the installed supervisor preserved all four listed entries exactly
+(two configured recipients plus two discovered sessions), including timestamps
+and generations. A send to a discovered handle failed recipient_not_allowed.
+Disabling discovery immediately removed both discovered entries, returned
+hooksCleanupRequired=false, removed only managed discovery hooks, and retained
+the original disposable lifecycle-probe settings. The 14 packaging closure tests
+passed. Normal messaging canary result and final merged installation follow.
+
+The installed normal messaging canary pr110-installed-canary-20261023-01
+completed through the existing gravity2 runner, returning exactly
+INSTALLED_PR110_MESSAGING_OK in correlated reply
+rep-9e6eb9a0-01e1-4a84-aa7a-94e4d6471e81. Only that reply was consumed.
+All installed acceptance gates above passed; discovery is disabled after the test.
