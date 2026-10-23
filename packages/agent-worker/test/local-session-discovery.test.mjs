@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
 import {createSessionDiscoveryBroker,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 
@@ -101,8 +101,10 @@ test('owner opt-in preserves settings; real hook/host/CLI discovers existing and
   let sessions=(await run(['sessions'])).sessions;
   const discovered=sessions.filter(row=>row.harness==='claude');assert.equal(discovered.length,2);
   assert.ok(discovered.every(row=>!row.capabilities.reachable&&!row.capabilities.wakeCapable));
-  assert.ok(discovered.every(row=>ids.some(id=>row.label.endsWith(id.slice(0,8)))));
+  assert.ok(discovered.every(row=>ids.some(id=>row.label.endsWith(createHash('sha256').update(id).digest('hex').slice(0,8)))));
   assert.ok(!JSON.stringify(discovered).includes('DO_NOT_STORE'));
+  const databaseBytes=fs.readFileSync(path.join(config.stateRoot,'local-messaging.sqlite'));
+  for(const id of ids)assert.equal(databaseBytes.includes(Buffer.from(id)),false,'raw session IDs are not retained');
   assert.equal((await run(['discover'])).recipients.length,1,'legacy discovery does not acquire new routes');
   await assert.rejects(run(['send','--to',discovered[0].id,'--text','must not run']),/recipient|authorized|allowed/i);
   assert.equal(executions,0);

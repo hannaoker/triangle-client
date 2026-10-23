@@ -28,7 +28,8 @@ cannot reopen the old record. A later start can resume the same handle with a ne
 generation. Directory state shares the existing exclusively owned SQLite journal.
 New tables are additive and ignored by old code.
 
-New rows use exact `session-<hash>` handles and workspace/session-prefix labels,
+Raw session IDs are hashed before journal storage. New rows use exact
+`session-<hash>` handles and workspace/session-hash-prefix labels,
 not actual conversation titles. Capabilities explicitly say visible=true,
 reachable=false, wakeCapable=false. An installation's reader policy controls
 visibility separately from recipient send scope; existing ACLs still deny sends
@@ -70,9 +71,22 @@ reconfigured for automatic discovery. Existing idle sessions do not appear until
 a hook fires. This is not complete Reason parity, universal hook hot-reload proof,
 MCP identity handoff proof, true crash/offline detection, or messaging reachability.
 
+Final privacy canary: removed the stopped prototype's disposable journal, started
+a fresh isolated candidate and sent one ordinary prompt in the existing new fork.
+The directory showed its session-hash prefix 889d6c4a. Read-only SQLite inspection
+confirmed the stored session identity was 64 hex characters, with no raw session
+UUID retained. The regression test also checks database bytes for non-retention
+of raw input IDs. Disabled discovery, removed its hooks and stopped this host too.
+Earlier live prefixes above identify the pre-minimization prototype; final labels
+use hashes and are not claimed to match those raw prefixes.
+
 The first full agent-worker run had 914 passes, three skips, and one failure in
 the unchanged wake-scheduler async cursor-write test. That suite passed all 22
 tests in isolation. The complete rerun with cross-file concurrency limited to two
 passed 915 tests with zero failures and three skips (918 total, about 171 seconds).
-The original run remains a failed run. Bundle closure checks also passed all 14
-tests. No independent code review or production activation is claimed.
+The original run remains a failed run. A final metadata-minimization adjustment
+hashes session IDs before storage and label display; it has a separate raw-ID
+non-retention regression check. The final privacy-adjusted candidate also passed
+the complete suite: 915 passed, zero failed, three skipped (918 total, about 172
+seconds, cross-file concurrency two). Bundle closure checks passed all 14 tests.
+No independent code review or production activation is claimed.

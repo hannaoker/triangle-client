@@ -1565,8 +1565,8 @@ export function createLocalMessagingJournal({
       if(!stale){
         db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at)
           VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
-          generation=excluded.generation,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at`)
-          .run(id,installationId,event.workspace,event.sessionId,event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt);
+          generation=excluded.generation,session_id=excluded.session_id,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at`)
+          .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt);
       }
       const result={id,generation,stale,duplicate:false};
       db.prepare('INSERT INTO local_discovery_events(event_id,digest,result_json,received_at) VALUES(?,?,?,?)').run(event.eventId,digest,JSON.stringify(result),receivedAt);

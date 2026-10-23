@@ -158,7 +158,7 @@ up the hooks without an app restart; other surfaces/versions are not established
 The hook never scans other chats or collects prompt text or transcript contents.
 
 Use `sessions` or `triangle_list_sessions` to inspect exact session handles,
-workspace/session-prefix labels, lifecycle and last-seen metadata. Discovered
+workspace/session-hash-prefix labels, lifecycle and last-seen metadata. Discovered
 entries explicitly report `visible: true`, `reachable: false`, `wakeCapable:
 false`. They do not acquire a Triangle inbox or messaging permissions. Presence
 is unknown while observed and offline after an end event; missing crash/end
