@@ -111,3 +111,28 @@ components canonical, and inode/session fences remain unchanged. Final-socket
 symlinks and nonprivate immediate parents are tested and rejected. Focused suite:
 11 passed. A fresh desktop canary was submitted with wake ID
 `caeae11f-efca-48d8-b864-e905bb0b93e6`; observed result follows when available.
+
+## Desktop canary observed success
+
+After the alias fix, the same scratch desktop conversation visibly showed:
+
+1. `DESKTOP_CANARY_READY_2` after launching the own-session tool child.
+2. A separate `Message from another session` containing the fixed Triangle hint
+   with exact wake ID `caeae11f-efca-48d8-b864-e905bb0b93e6`.
+3. Exact assistant text `CLAUDE_DESKTOP_WAKE_OK_2`, without an intervening user
+   prompt or requested tool use for that acknowledgment.
+
+The child's sanitized result was supported true, state write_accepted, delivery
+unconfirmed. The separately observed desktop assistant response establishes
+execution for this canary; the module correctly does not infer it from writing.
+Claude added its own peer-message warning to the displayed notification.
+
+The owner had changed this scratch session to Bypass permissions; Codex did not
+change the setting. Thus this successful run does not establish behavior under
+Auto or Ask approval. The earlier classifier denials remain part of the evidence.
+This is an own-session tool-child transport test, not yet a production MCP
+adapter, session identity registration, durable interactive inbox or a
+bidirectional Triangle exchange. No production settings/install were changed.
+
+Alias extension independent re-review passed all 11 focused tests and reported
+no P1/P2 defect. The source-only draft remains the review boundary.
