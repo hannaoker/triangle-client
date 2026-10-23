@@ -193,6 +193,27 @@ test('R1: base setup preserves optional integrations so disable can remove manag
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
+test('N1: setup preserves wake activation only for the same sender and thread',()=>{
+ for(const change of ['same','thread','sender','missing-integration']){
+  const f=ownerFixture();try{
+   const config=JSON.parse(fs.readFileSync(f.configPath));
+   const wake={enabled:true,adapter:'codex-queue',coalesceMs:123};
+   const interactive={enabled:false},runnerTimeoutMs=7200000;
+   writePrivateJson(f.configPath,{...config,wake,interactive,runnerTimeoutMs});
+   const setup={...f.setup};
+   if(change==='thread'){setup['thread-id']='replacement-thread';setup.rebind=true;}
+   if(change==='sender')writePrivateJson(f.setup['desktop-binding'],{instanceId:'b'.repeat(64)});
+   if(change==='missing-integration')fs.unlinkSync(config.integrationPath);
+   setupLocalMessaging(setup);
+   const after=JSON.parse(fs.readFileSync(f.configPath));
+   assert.deepEqual(after.wake,{...wake,enabled:change==='same'});
+   assert.deepEqual(after.discovery,config.discovery);
+   assert.deepEqual(after.interactive,interactive);
+   assert.equal(after.runnerTimeoutMs,runnerTimeoutMs);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+ }
+});
+
 test('R2: full directory evicts oldest ended row, retaining its end fence across restart',async()=>{
  const f=fixture();try{
   let n=0;const now=Date.now(),ended=randomUUID();

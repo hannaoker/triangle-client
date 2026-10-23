@@ -118,3 +118,15 @@ cover ended entries created before the new table existed.
 The expanded discovery suite has ten tests; 32 focused discovery/host/socket tests
 passed with zero failures. Full-suite and focused independent re-review results
 follow when complete. R3-R10 are not collectively claimed resolved by this batch.
+
+## Focused re-review and binding activation correction
+
+The full suite at f6f0d63 completed with 919 passed, zero failed and three skipped
+(test concurrency two). Claude's static re-review cleared B1/R1/R2 and found N1:
+base setup could preserve enabled wake across a binding change. The follow-up
+disables wake for a changed sender/thread or missing prior integration, preserving
+other settings. Same-binding activation remains intact. All 33 focused tests and
+47 serial wake/CLI tests passed. The parallel wake/CLI run first had one unchanged
+descendant-readiness timing failure; that result is retained in the review record.
+The full suite was not rerun for this narrow setup change. Production remains
+on the previously installed release; PR #110 remains a draft candidate.

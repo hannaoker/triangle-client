@@ -42,16 +42,19 @@ export function setupLocalMessaging(options,env=process.env){
  const profiles=options.recipients||['gravity2'];
  if(profiles.length>32||new Set(profiles).size!==profiles.length||profiles.some(p=>!/^[A-Za-z0-9._-]{1,64}$/.test(p)))throw coded('invalid_recipient','Invalid recipient profiles');
  const recipients=profiles.map(profile=>({profile,instanceId:createHash('sha256').update('triangle-client-instance-v1\0'+profile).digest('hex')}));
- let secret=randomBytes(32).toString('hex');
+ let secret=randomBytes(32).toString('hex'),bindingChanged=true;
  if(fs.existsSync(integrationPath)){
   const existing=readPrivateJson(integrationPath);
   // The desktop thread lives only in the integration file; moving it is an explicit owner action that rotates the capability.
   if(existing.threadId!==threadId&&!options.rebind)throw coded('binding_changed','Explicit --rebind-thread is required to change the desktop thread');
-  if(existing.senderId===senderId&&existing.threadId===threadId)secret=existing.secret;
+  bindingChanged=existing.senderId!==senderId||existing.threadId!==threadId;
+  if(!bindingChanged)secret=existing.secret;
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
  const optional=Object.fromEntries(['wake','interactive','discovery'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ // Wake activation belongs to a specific sender/thread, never to a replacement binding.
+ if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
  return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }

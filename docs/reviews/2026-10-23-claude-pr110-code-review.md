@@ -69,3 +69,49 @@ config-key-loss cleanup, preservation of optional integrations, and ended-row
 eviction with durable end fences. Ten discovery tests and 32 focused tests pass.
 Other recommendations are not collectively marked fixed. Full-suite results and
 the follow-up reviewer verdict are recorded separately when available.
+
+## Focused follow-up review at f6f0d63
+
+RE-REVIEW: PR #110 fixes, 0239c46..f6f0d63a81b1f405b4ad1842bdd17f538ff7a77f (request claude-review-pr110-fixes-20261023-01)
+Basis: read-only static review of the single commit f6f0d63 ("Harden discovery cleanup, degradation and capacity recovery"; 8 files, +250/-36) in the named checkout (HEAD = f6f0d63, packages/ clean). I ran no tests, hooks, services or build; the 10/32 passing counts are as stated in your request. Line refs are f6f0d63.
+
+VERDICT
+B1, R1 and R2 are addressed as scoped. No remaining blocker, and no change to messaging authorization: server, ACL and send paths are untouched in this delta, and discovered rows stay reachable=false. One new Medium finding (N1) changes behavior outside discovery and needs an owner decision before install.
+
+VERIFIED
+- B1 listing: listFor wraps current() and the journal read in try/catch and returns [] with one generic, path-free warning (auth-broker:105-115); status() was already guarded and now adds capacity/used (:101-104). The server call site (server:239-243) is unchanged, so a moved workspace, missing/corrupt/over-permissive integration file or DB error can no longer fail list_sessions. The live test drives this through the real host and CLI (test:113-117: workspace renamed, then integration unlinked; the configured recipient still lists).
+- B1/R1 disable: the integration path falls back to <stateRoot>/session-discovery.json (cli:288); an unreadable integration is tolerated (cli:289-291); the workspace resolves from --workspace, the new recorded discovery.workspace (cli:282; host validation allows it) or the integration (cli:292); hook cleanup is best-effort inside try/catch and the config key is always removed (cli:320-322); the outcome is reported as hooksCleanupRequired (cli:323). Cleanup now keeps entries it did not touch, including empty or malformed ones (cli:306-311), and the unsafe-path checks are unchanged (cli:299-301). A readable capability that cannot be rewritten still throws (cli:291, outside the try), so revocation is not falsely claimed. Partial setup and key loss are recoverable through the default path.
+- R1 setup: wake/interactive/discovery and runnerTimeoutMs survive a base setup (cli:53-55), so key loss no longer comes from re-running setup; test:186-194 covers discovery.
+- R2: end markers live in local_discovery_ended (journal:187), are written on every non-stale end and deleted on non-stale start (journal:1583-1587), and are pruned on the same 8-day horizon (:1563). At 128 rows a new non-stale session evicts the oldest ended row (order last_seen_at,id) after copying its event_at/generation/last_seen_at into the marker (:1570-1575), and raises directory_full only if no ended row exists. A tombstoned session keeps its generation on a later start, and stale activity stays stale after restart. All of it runs inside the existing BEGIN IMMEDIATE transaction. Migration is additive (CREATE TABLE IF NOT EXISTS); ended rows from 0239c46 need no backfill because the row itself fences activity until the marker is written at eviction. Status exposes used (journal:1612) and capacity (broker:102).
+
+NEW FINDINGS (ranked)
+N1 Medium (owner decision). Base setup now preserves wake across --rebind-thread. Previously the rebind rewrote the config without wake, which the docs call pull-only behavior (installed-local-messaging.md:84-90). Now cli:49-55 carries wake.enabled:true over a thread change, so after the required restart an enabled wake targets the new thread without the explicit step the recovery section implies ("Re-enable wake only when the new target is ready", docs:121-134). Evidence is mixed (that section also tells operators to set wake.enabled false before reconciling, so some flows keep wake across a rebind), and the new docs sentence says preservation is intentional; I did not trace the notifier. This follows from my broad R1 suggestion: discovery needs preserving, wake need not be. Option: always preserve discovery, interactive and runnerTimeoutMs, but when the sender or thread changes keep wake settings with enabled:false; add a test either way.
+N2 Medium-Low (residual R2). Only ended rows are evictable (journal:1570-1572), so 128 observed rows (chats that crash, are killed, or never emit SessionEnd, kept 8 days) still block all new registrations. The hook prints only a stderr line, and status shows used/capacity but not that new sessions are being rejected. Consider evicting the least-recently-seen observed row as a last resort (presence is unknown anyway) or a purge command, and add full/rejected to status. The docs state this limit, so it is a design decision rather than a defect.
+N3 Low. disable-discovery result ambiguity. (a) Every cleanup exception collapses into hooksCleanupRequired:true with no reason and exit code 0 (cli:320); a deleted workspace gives a permanent true (cli:297) although nothing is left to clean. Return a reason code. (b) An integration file that readPrivateJson rejects, for example a valid capability at mode 0644, is skipped silently (cli:290), so disable reports success without disabling it; it fails closed today because the broker uses the same reader, but a later chmod revives it. Report an integration state. (c) settings.local.json is rewritten whenever it exists, even when no managed hook was found (cli:298,314-318), which now also happens on repeat runs.
+N4 Low. A duplicate or late end for an already-evicted, tombstoned session is not stale (journal:1567-1569), so at capacity it evicts another ended row to re-create this one as offline (journal:1570-1587). Harmless churn; refreshing only the marker would avoid it.
+
+TEST GAPS (static)
+- The R2 test (test:196-212) has one ended row and a constant receivedAt, so it cannot tell "oldest by last_seen_at" from id order; add two ended rows with different receivedAt.
+- Marker migration is untested: the only ended row is created by the new code, which already writes the marker (journal:1584). Test an ended row whose marker was removed, then eviction, restart, stale activity.
+- No test for disable --workspace on a moved workspace or for a true hooksCleanupRequired (the docs advertise this flow), none asserting wake/interactive/runnerTimeoutMs preservation (or N1), and none for the warn-once behavior.
+- Nits: capacity 128 is hard-coded in both the broker (:102) and the journal (:1570); the new warning passes a sentence where other modules pass event-name keys.
+
+UNVERIFIED
+Test and full-suite results, the live canaries, notifier behavior after a rebind with wake enabled (N1), and Claude Code hook behavior remain unverified by me. R3-R10 were not re-reviewed, per your scope.
+
+## Codex disposition of focused follow-up
+
+The B1/R1/R2 clearance is a static peer assessment, not a fresh live proof.
+N1 was independently confirmed in setupLocalMessaging: the preserved wake object
+was copied even when the sender/thread changed. The follow-up disables wake for
+a changed or missing prior binding, preserving its other settings and the
+discovery, interactive and runner timeout configuration. An unchanged binding
+retains its activation. This follows the existing explicit per-target activation
+rule; it does not enable any new target. Tests cover all four cases.
+
+Validation after N1: 33 discovery/host/socket tests passed. The parallel wake/CLI
+run passed 46 and failed one unchanged descendant-readiness timing test (ENOENT
+for descendant.ready); the serial rerun passed all 47. Before this small setup
+change, the complete suite at f6f0d63 passed 919, failed zero and skipped three.
+No new production deployment or discovery opt-in was performed. N2-N4 and the
+earlier R3-R10 remain follow-ups, not claimed fixed.
