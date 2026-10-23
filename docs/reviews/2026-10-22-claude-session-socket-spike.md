@@ -94,3 +94,20 @@ command once, and its Auto classifier denied it again with the same reason.
 The parent did not retry through another tool or inspect other processes'
 credentials. The owner was asked to use Ask mode in this scratch session and
 approve the exact command there; no permission-mode change was made by Codex.
+
+## Desktop `/tmp` alias diagnosis and correction
+
+The owner subsequently supplied successful in-session diagnostic JSON:
+absolute true, canonical false, varAlias false, tmpAlias true, socket true,
+socketOwned true, socketMode 600, parentOwned true, parentMode 700,
+sessionPresent true and tokenPresent true. No path or credential value was
+provided. This identifies the exported `/tmp` alias as the custody mismatch.
+
+A new regression failed before the fix (10 pass/one fail). The module now also
+normalizes Darwin's exact root-owned `/tmp -> /private/tmp` alias. The shared
+system ancestor is accepted only when root-owned, nonsymlink and sticky 1777;
+the socket's immediate parent must still be private and owner-held, all remaining
+components canonical, and inode/session fences remain unchanged. Final-socket
+symlinks and nonprivate immediate parents are tested and rejected. Focused suite:
+11 passed. A fresh desktop canary was submitted with wake ID
+`caeae11f-efca-48d8-b864-e905bb0b93e6`; observed result follows when available.

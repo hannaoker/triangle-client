@@ -83,3 +83,15 @@ test('Darwin trusted /var system alias normalizes once without allowing user ali
  const foreign=path.join(alias,'inbox.sock');assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:foreign},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
  const finalAlias=path.join(root,'final-alias');fs.symlinkSync(socketPath,finalAlias);assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:finalAlias.replace('/private/var/','/var/')},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
 },fs.realpathSync(os.tmpdir()))});
+
+test('Darwin trusted /tmp alias accepts only private owned descendants',{skip:process.platform!=='darwin'},async()=>{await fixture(async({env,socketPath,root,frames})=>{
+ const exported=socketPath.replace('/private/tmp/','/tmp/');assert.notEqual(exported,socketPath);
+ const d=createClaudeSessionDelivery({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:exported},version:SUPPORTED_CLAUDE_VERSION});
+ assert.equal((await d.notify(binding,snapshot)).state,'write_accepted');
+ await new Promise(r=>setImmediate(r));assert.equal(frames.length,2);
+ fs.symlinkSync(socketPath,path.join(root,'alias.sock'));
+ assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:path.join(root,'alias.sock').replace('/private/tmp/','/tmp/')},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
+ fs.chmodSync(root,0o755);
+ assert.equal(probeClaudeSession({env:{...env,CLAUDE_CODE_MESSAGING_SOCKET:exported},version:SUPPORTED_CLAUDE_VERSION}).supported,false);
+ fs.chmodSync(root,0o700);
+},'/private/tmp')});

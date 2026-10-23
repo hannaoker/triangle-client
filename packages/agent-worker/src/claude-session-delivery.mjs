@@ -17,16 +17,19 @@ function fail(code){throw coded(code,code.replaceAll('_',' '));}
 function canonicalSocketPath(socketPath){
  if(typeof socketPath!=='string'||!path.isAbsolute(socketPath)||socketPath.includes('\0'))fail('unsafe_claude_socket');
  let normalized=socketPath;
- if(process.platform==='darwin'&&socketPath.startsWith('/var/')){
-  // Only Apple's fixed system alias is admitted. Every remaining path component
-  // must already be canonical, so user-directory and final-socket aliases fail.
-  const alias=fs.lstatSync('/var');
-  if(!alias.isSymbolicLink()||alias.uid!==0||path.resolve('/',fs.readlinkSync('/var'))!=='/private/var')fail('unsafe_claude_socket');
-  for(const directory of ['/','/private','/private/var']){
+ const systemAlias=process.platform==='darwin'?['/var','/tmp'].find(prefix=>socketPath.startsWith(prefix+'/')):null;
+ if(systemAlias){
+  // Only Apple's fixed root-owned aliases are admitted. Descendants must be
+  // canonical, and the socket's immediate parent must still be private/owned.
+  const target='/private'+systemAlias;
+  const alias=fs.lstatSync(systemAlias);
+  if(!alias.isSymbolicLink()||alias.uid!==0||path.resolve('/',fs.readlinkSync(systemAlias))!==target)fail('unsafe_claude_socket');
+  for(const directory of ['/','/private',target]){
    const st=fs.lstatSync(directory);
-   if(!st.isDirectory()||st.isSymbolicLink()||st.uid!==0||(st.mode&0o022)!==0)fail('unsafe_claude_socket');
+   const trustedTmp=directory==='/private/tmp'&&(st.mode&0o1777)===0o1777;
+   if(!st.isDirectory()||st.isSymbolicLink()||st.uid!==0||((st.mode&0o022)!==0&&!trustedTmp))fail('unsafe_claude_socket');
   }
-  normalized='/private/var/'+socketPath.slice('/var/'.length);
+  normalized=target+socketPath.slice(systemAlias.length);
  }
  if(fs.realpathSync(normalized)!==normalized)fail('unsafe_claude_socket');
  return normalized;
