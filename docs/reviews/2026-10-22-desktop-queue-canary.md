@@ -189,3 +189,34 @@ transport, or arbitration between two live desktop wake producers.
 The controlled test was then ended by switching wake enabled to false and
 restarting the existing service. v10 remains installed; no second app-server,
 identity change or local-to-MESH content bridge was introduced.
+
+## Fresh Antigravity review completion wake
+
+The owner requested Antigravity review PR #107. Installed `triangle-local send`
+admitted `pr107-review-fresh-20261022` under the existing desktop sender, with
+gravity2 as recipient. It was observed executing, then completed with correlated
+reply `rep-033a4e2d-1c28-4ff1-bb18-57d94a6d7dba`. Durable admission-to-completion
+elapsed time was 862,305 ms (14 min 22.305 s), including review and its reported
+test work; this is not a transport latency measurement.
+
+That fresh reply changed unread count from eight to nine and caused wake
+`0ff87b58-ff5b-4e16-9aa0-ec96c610bb15`, generation 1, receipt
+`01a1668a-2f9f-7011-8a9d-0c44972a4794`. It arrived as the next notification in
+the bound working conversation. Codex retrieved the correlated review through
+the installed CLI and acknowledged the exact wake successfully. This proves
+the observed fresh-task send → execution → reply → automatic wake → retrieval
+→ acknowledgment path, on the same device, without model-side reply polling.
+Wake was then disabled and the healthy existing supervisor restarted.
+
+Review validation: Codex reproduced one service-test failure, not Antigravity's
+reported three: 26 passed/one failed in 27 tests; the failure is the stale v9
+assertion at `tests/triangle-client-service.test.mjs:171` against v10. Source
+inspection confirms rebind of an outstanding wake enters `stale_held` and no
+supported recovery command exists. Holding and rejecting stale acknowledgments
+is intentional safety behavior; the missing operator reconciliation is an
+availability gap, not grounds to accept stale acknowledgments. Source also
+confirms the 20 ms notification callback precedes dispatcher reply persistence;
+the periodic timer supplies eventual notification, so the review's delayed
+notification concern is plausible, not a reproduced loss. Its separate Swift
+signal-test failure has not been independently reproduced. No source changes
+were made by this read-only review and no merge was requested or performed.
