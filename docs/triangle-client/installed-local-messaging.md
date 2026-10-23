@@ -19,7 +19,7 @@ triangle-local consume --message-id REPLY_ID
 triangle-local mcp
 ```
 
-Setup binds the desktop sender to the thread named by `--thread-id`, but only in the owner-created integration file (`desktop-integration.json` in the local state directory). It reads the dedicated desktop-sender binding (`desktop-binding.json`, falling back to legacy `app-server-binding.json` if present) solely for the existing sender identity and never writes it. Local messaging keeps working when an older app-server host is retired or moves its own binding, because the thread is fixed by the integration file and the broker verifies that the desktop identity matches. Use `--rebind-thread` only as an explicit owner action to move an existing integration to another conversation; it rotates the capability secret, so old exchanges stop working. Setup does not enroll a replacement identity or touch the binding's inbound wake flag. Restart the existing client service after setup. A cold multi-profile start can exceed the service script's default ten-second readiness window; `TRIANGLE_READY_TIMEOUT_MS=60000` is available for the supervised activation check.
+Setup binds the desktop sender to the thread named by `--thread-id`, but only in the owner-created integration file (`desktop-integration.json` in the local state directory). It reads the dedicated desktop-sender binding (`desktop-binding.json`, falling back to legacy `app-server-binding.json` if present) solely for the existing sender identity and never writes it. Local messaging keeps working when an older app-server host is retired or moves its own binding, because the thread is fixed by the integration file and the broker verifies that the desktop identity matches. Use `--rebind-thread` only as an explicit owner action to move an existing integration to another conversation; it rotates the capability secret, so old exchanges stop working. Setup preserves wake settings but disables automatic wake whenever the sender or thread changes (or the prior integration is missing); activate wake explicitly for the new binding. Setup does not enroll a replacement identity or touch the binding's inbound wake flag. Restart the existing client service after setup. A cold multi-profile start can exceed the service script's default ten-second readiness window; `TRIANGLE_READY_TIMEOUT_MS=60000` is available for the supervised activation check.
 
 ## Custody and authority
 
@@ -139,3 +139,47 @@ so unread backlog can generate a fresh wake on the new thread. It does not
 acknowledge or consume replies, retry held tasks, or erase message data. There is
 no recovery RPC or agent MCP tool. Disabling wake does not withdraw a hint
 already queued in the old conversation; its old acknowledgment remains fenced.
+
+### Automatic Claude discovery (new source candidate)
+
+After upgrading to this candidate, the owner can opt one canonical workspace in:
+
+```text
+triangle-local setup-discovery --workspace /absolute/workspace
+```
+
+The command adds lifecycle hooks to `.claude/settings.local.json` and a private
+workspace-scoped installation capability. Preserve the printed hook-approval
+requirement and restart the existing Triangle service once to load the optional
+configuration. Do not assume this command exists in a previously installed build.
+Already-open Claude chats appear on their next hook-bearing turn; new chats and
+forks appear when their backend starts. The live disposable Desktop check picked
+up the hooks without an app restart; other surfaces/versions are not established.
+The hook never scans other chats or collects prompt text or transcript contents.
+
+Use `sessions` or `triangle_list_sessions` to inspect exact session handles,
+workspace/session-hash-prefix labels, lifecycle and last-seen metadata. Discovered
+entries explicitly report `visible: true`, `reachable: false`, `wakeCapable:
+false`. They do not acquire a Triangle inbox or messaging permissions. Presence
+is unknown while observed and offline after an end event; missing crash/end
+signals do not establish live status. Actual chat titles and automatic Codex
+registration are not implemented.
+
+To turn it off or prepare rollback, run `triangle-local disable-discovery` using
+the candidate before restoring older runtime code. It disables the capability,
+removes only its managed hooks, and removes the optional config key so the old
+host can read the configuration. Additive SQLite metadata can remain. No existing
+messages, bindings, claims or unrelated agent settings are reset. Metadata has a
+128-session cap and eight-day cleanup on subsequent reports. One installation
+supports one workspace; a different workspace requires a separate explicit scope.
+
+If the discovery integration is missing/corrupt or its workspace has moved,
+configured recipients still list normally while discovered entries are hidden.
+`disable-discovery` still removes the optional host config key for rollback.
+Check its `hooksCleanupRequired` result: if true, supply the actual moved workspace
+with `disable-discovery --workspace /absolute/moved/workspace` to finish hook
+cleanup. The command does not follow unsafe paths or pretend a valid capability
+was disabled when its file cannot be updated. Base setup preserves existing
+optional integrations. At the 128-row limit, discovery evicts the oldest ended
+row and retains its end marker; it does not evict observed sessions. Local status
+reports directory `used` and `capacity` so an all-observed full directory is visible.

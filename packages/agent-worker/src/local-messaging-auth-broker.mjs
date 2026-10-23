@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {randomUUID,timingSafeEqual} from 'node:crypto';
+import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import {validatePrivateDirectory} from './local-messaging-address.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
@@ -53,4 +53,65 @@ export function createDesktopCredentialBroker({bindingPath,integrationPath,recip
   verify, issue:issueCredential,
   exchange(request) {verify(request);return issueCredential();},
  });
+}
+
+// Discovery credentials admit lifecycle metadata only. They never issue a turn
+// credential or alter a messaging ACL. Same-account shell isolation is not claimed.
+export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>Date.now(),logger={}}) {
+ const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ const hex=/^[a-f0-9]{64}$/;
+ const pending=new Map();
+ let warned=false;
+ let windowStart=clock(),attempts=0;
+ function current(){
+  const c=readPrivateJson(integrationPath);
+  if(Object.keys(c).sort().join(',')!=='enabled,installationId,readerIds,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||!uuid.test(c.installationId)||!hex.test(c.secret)||
+     typeof c.workspace!=='string'||/[\u0000-\u001f\u007f]/.test(c.workspace)||Buffer.byteLength(JSON.stringify(c.workspace))>512||fs.realpathSync(c.workspace)!==c.workspace||
+     !Array.isArray(c.readerIds)||c.readerIds.length>64||c.readerIds.some(id=>!hex.test(id)))throw coded('invalid_discovery_config','Invalid discovery integration');
+  return c;
+ }
+ function verify(request){
+  const now=clock();if(now-windowStart>=60000){windowStart=now;attempts=0;}
+  const c=current();
+  if(!c.enabled||request?.installationId!==c.installationId||!equalSecret(request?.secret,c.secret))throw coded('unauthorized','Discovery integration unavailable');
+  if(++attempts>240)throw coded('rate_limited','Discovery request limit reached');
+  return c;
+ }
+ function normalize(event,c){
+  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
+    !uuid.test(event.eventId)||!uuid.test(event.sessionId)||!['start','activity','end'].includes(event.kind)||
+    event.workspace!==c.workspace||!Number.isSafeInteger(event.observedAt)||event.observedAt>clock()+1000||event.observedAt<clock()-30000)throw coded('invalid_discovery_event','Invalid or stale lifecycle metadata');
+  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt};
+ }
+ const digest=(event,installationId)=>createHash('sha256').update(installationId+'\0'+JSON.stringify(event)).digest('hex');
+ return {
+  challenge(request){
+   const c=verify(request),event=normalize(request.event,c),now=clock();
+   for(const [key,value] of pending)if(value.expiresAt<=now)pending.delete(key);
+   if(pending.size>=128)throw coded('too_many_requests','Too many pending discovery challenges');
+   const nonce=randomUUID();pending.set(nonce,{digest:digest(event,c.installationId),expiresAt:now+5000,secret:c.secret});
+   return {nonce,expiresAt:now+5000};
+  },
+  async report(request){
+   const c=verify(request),event=normalize(request.event,c),challenge=pending.get(request.nonce);
+   pending.delete(request.nonce);
+   if(!challenge||challenge.expiresAt<=clock()||challenge.digest!==digest(event,c.installationId)||!equalSecret(challenge.secret,c.secret))throw coded('unauthorized','Discovery challenge expired or mismatched');
+   return journal.recordDiscoveryEvent({installationId:c.installationId,event,digest:digest(event,c.installationId),receivedAt:clock()});
+  },
+  async status(){
+   try{const c=current();return {enabled:c.enabled,mode:'visibility-only',sessions:c.enabled?(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).length:0,capacity:128,...(journal.discoveryUsage?await journal.discoveryUsage():{})};}
+   catch{return {enabled:false,mode:'visibility-only',error:'invalid_discovery_config'};}
+  },
+  async listFor(readerId){
+   try{
+    const c=current();
+    if(!c.enabled||!c.readerIds.includes(readerId))return [];
+    const rows=await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
+    warned=false;return rows;
+   }catch{
+    if(!warned){warned=true;try{logger?.warn?.('Session discovery unavailable; configured recipients remain available');}catch{}}
+    return [];
+   }
+  },
+ };
 }

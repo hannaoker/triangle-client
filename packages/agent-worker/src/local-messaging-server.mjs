@@ -41,6 +41,7 @@ export function createLocalControlServer({
   interactiveRecipients = null,
   statusProvider = null,
   recipientDirectory = [],
+  discoveryBroker = null,
   rateLimiter,
   exchangeLimiter = null,
   loopTracker,
@@ -156,7 +157,7 @@ export function createLocalControlServer({
       // sender from the signed claims; the client's senderId is only an assertion that must match.
       let claims = null;
       let senderId = null;
-      if (method !== "hello" && method !== "issue_turn" && method !== "exchange_session") {
+      if (method !== "hello" && method !== "issue_turn" && method !== "exchange_session" && method !== "discovery_challenge" && method !== "discovery_report") {
         if (!claimedSenderId || typeof claimedSenderId !== "string" || !claimedSenderId.trim()) {
           throw coded("unauthorized", "senderId is required");
         }
@@ -173,6 +174,14 @@ export function createLocalControlServer({
       }
 
       switch (method) {
+        case "discovery_challenge":
+        case "discovery_report": {
+          if(!discoveryBroker)throw coded("unsupported", "Session discovery is not enabled");
+          const result=method==="discovery_challenge"
+            ? discoveryBroker.challenge(params) : await discoveryBroker.report(params);
+          socket.write(encodeFrame(createSuccessResponse(id,result)));
+          break;
+        }
         case "local_status": {
           if (claims?.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
             const inbox = await journal.getInteractiveInboxCounts?.(senderId) ?? { queued: 0, executing: 0, held: 0 };
@@ -227,6 +236,11 @@ export function createLocalControlServer({
           const sessions = ids.map(id => directory.get(id) ?? {
             id, label: id, kind: "unknown", presence: "unknown",
           });
+          if(discoveryBroker){
+            const discovered=await discoveryBroker.listFor(senderId);
+            const known=new Set(sessions.map(entry=>entry.id));
+            sessions.push(...discovered.filter(entry=>!known.has(entry.id)));
+          }
           socket.write(encodeFrame(createSuccessResponse(id, { sessions }, PROTOCOL_VERSION)));
           break;
         }

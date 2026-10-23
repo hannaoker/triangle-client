@@ -217,6 +217,12 @@ export function createLocalControlClient({
     async reportWakeResult({ wakeId, generation, sessionId, bindingId, result } = {}, options = {}) {
       return await callRpc("report_wake_result", { wakeId, generation, sessionId, bindingId, result }, options);
     },
+    async discoveryChallenge(params, options = {}) {
+      return callRpc("discovery_challenge", params, options);
+    },
+    async reportDiscovery(params, options = {}) {
+      return callRpc("discovery_report", params, options);
+    },
     async listSessions(options = {}) {
       const res = await callRpc("list_sessions", {}, options);
       return res.sessions || [];

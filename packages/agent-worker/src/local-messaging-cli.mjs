@@ -14,7 +14,7 @@ import {coded} from './local-messaging-errors.mjs';
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version']);
+ const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli']);
  while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -42,15 +42,20 @@ export function setupLocalMessaging(options,env=process.env){
  const profiles=options.recipients||['gravity2'];
  if(profiles.length>32||new Set(profiles).size!==profiles.length||profiles.some(p=>!/^[A-Za-z0-9._-]{1,64}$/.test(p)))throw coded('invalid_recipient','Invalid recipient profiles');
  const recipients=profiles.map(profile=>({profile,instanceId:createHash('sha256').update('triangle-client-instance-v1\0'+profile).digest('hex')}));
- let secret=randomBytes(32).toString('hex');
+ let secret=randomBytes(32).toString('hex'),bindingChanged=true;
  if(fs.existsSync(integrationPath)){
   const existing=readPrivateJson(integrationPath);
   // The desktop thread lives only in the integration file; moving it is an explicit owner action that rotates the capability.
   if(existing.threadId!==threadId&&!options.rebind)throw coded('binding_changed','Explicit --rebind-thread is required to change the desktop thread');
-  if(existing.senderId===senderId&&existing.threadId===threadId)secret=existing.secret;
+  bindingChanged=existing.senderId!==senderId||existing.threadId!==threadId;
+  if(!bindingChanged)secret=existing.secret;
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
- writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
+ const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
+ const optional=Object.fromEntries(['wake','interactive','discovery'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ // Wake activation belongs to a specific sender/thread, never to a replacement binding.
+ if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
+ writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
  return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }
 const KNOWN_SETUP_KEYS = new Set([
@@ -227,9 +232,128 @@ export async function reconcileWakeOffline(options,env=process.env){
  } finally {await journal?.close();}
 }
 
+// Local discovery is an owner-installed hook integration, not an agent tool.
+const shellQuote=value=>"'"+value.replace(/'/g,"'\\''")+"'";
+export function setupSessionDiscovery(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
+ if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
+ if(typeof options.workspace!=='string'||!path.isAbsolute(options.workspace))throw coded('invalid_arguments','An explicit absolute workspace is required');
+ const workspace=fs.realpathSync(options.workspace);
+ const localCli=options['local-cli']||path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/bin/triangle-local');
+ const wrapper=fs.lstatSync(localCli);
+ if(fs.realpathSync(localCli)!==localCli||!wrapper.isFile()||wrapper.uid!==process.getuid()||(wrapper.mode&0o022)||(wrapper.mode&0o111)===0)throw coded('unsafe_path','Local CLI must be an owned canonical executable');
+ const integrationPath=path.join(config.stateRoot,'session-discovery.json');
+ const readerIds=[readPrivateJson(config.integrationPath).senderId,...config.recipients.map(r=>r.instanceId)];
+ if(config.interactive?.enabled)readerIds.push(validateInteractiveIntegration(config.interactive.integrationPath).senderId);
+ let integration={version:1,enabled:true,installationId:randomUUID(),secret:randomBytes(32).toString('hex'),workspace,readerIds:[...new Set(readerIds)]};
+ if(fs.existsSync(integrationPath)){
+  const old=readPrivateJson(integrationPath);
+  if(old.workspace!==workspace)throw coded('workspace_conflict','This discovery installation is scoped to another workspace');
+  integration={...old,enabled:true,readerIds:integration.readerIds};
+ }
+ const directory=path.join(workspace,'.claude');
+ if(!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
+ const info=fs.lstatSync(directory);
+ if(!info.isDirectory()||info.uid!==process.getuid()||(info.mode&0o022)||fs.realpathSync(directory)!==directory)throw coded('unsafe_path','Unsafe workspace Claude settings directory');
+ const settingsPath=path.join(directory,'settings.local.json');
+ let settings={};
+ if(fs.existsSync(settingsPath)){
+  const st=fs.lstatSync(settingsPath);
+  if(!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe Claude settings');
+  settings=JSON.parse(fs.readFileSync(settingsPath,'utf8'));
+ }
+ if(!settings||typeof settings!=='object'||Array.isArray(settings)||
+   (settings.hooks&& (typeof settings.hooks!=='object'||Array.isArray(settings.hooks))))throw coded('invalid_settings','Invalid Claude hook settings');
+ const command=`${shellQuote(localCli)} discovery-hook --config ${shellQuote(configPath)}`;
+ settings.hooks??={};
+ for(const event of ['SessionStart','SessionEnd','UserPromptSubmit']){
+  const entries=settings.hooks[event]??[];
+  if(!Array.isArray(entries))throw coded('invalid_settings','Invalid lifecycle hook list');
+  if(!entries.some(entry=>entry.hooks?.some(hook=>hook.type==='command'&&hook.command===command)))entries.push({hooks:[{type:'command',command,timeout:5}]});
+  settings.hooks[event]=entries;
+ }
+ // Install capability first and enable host config last. A partial setup cannot
+ // grant message authority, and rerunning setup never duplicates the hooks.
+ writePrivateJson(integrationPath,integration);
+ const temp=path.join(directory,`.triangle-settings-${randomUUID()}`);
+ let fd;
+ try{
+  fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
+  fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+  fs.renameSync(temp,settingsPath);
+ }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+ writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath,workspace}});
+ return {workspace,settingsPath,requiresServiceRestart:true,requiresHarnessHookApproval:true,discoveryOnly:true};
+}
+
+export function disableSessionDiscovery(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
+ const integrationPath=config.discovery?.integrationPath||path.join(config.stateRoot,'session-discovery.json');
+ let integration=null;
+ try{integration=readPrivateJson(integrationPath);}catch{/* Missing or corrupt capabilities cannot admit new reports. */}
+ if(integration)writePrivateJson(integrationPath,{...integration,enabled:false});
+ const workspace=options.workspace||config.discovery?.workspace||integration?.workspace;
+ let hooksCleanupRequired=false;
+ try{
+  if(typeof workspace!=='string')throw coded('workspace_unknown','Workspace required for hook cleanup');
+  const directory=path.join(workspace,'.claude'),settingsPath=path.join(directory,'settings.local.json');
+  if(!fs.existsSync(workspace))throw coded('workspace_missing','Workspace moved or missing');
+  if(fs.existsSync(settingsPath)){
+   const dir=fs.lstatSync(directory),file=fs.lstatSync(settingsPath);
+   if(fs.realpathSync(workspace)!==workspace||fs.realpathSync(directory)!==directory||!dir.isDirectory()||dir.uid!==process.getuid()||(dir.mode&0o022)||
+     !file.isFile()||file.uid!==process.getuid()||file.nlink!==1||file.size>1024*1024)throw coded('unsafe_path','Unsafe Claude hook settings');
+   const settings=JSON.parse(fs.readFileSync(settingsPath,'utf8'));
+   const suffix=` discovery-hook --config ${shellQuote(configPath)}`;
+   for(const event of ['SessionStart','SessionEnd','UserPromptSubmit']){
+    if(!Array.isArray(settings.hooks?.[event]))continue;
+    settings.hooks[event]=settings.hooks[event].flatMap(entry=>{
+     if(!Array.isArray(entry?.hooks))return [entry];
+     const hooks=entry.hooks.filter(hook=>!(hook.type==='command'&&typeof hook.command==='string'&&hook.command.endsWith(suffix)));
+     return hooks.length===entry.hooks.length?[entry]:hooks.length?[{...entry,hooks}]:[];
+    });
+    if(!settings.hooks[event].length)delete settings.hooks[event];
+   }
+   if(settings.hooks&&!Object.keys(settings.hooks).length)delete settings.hooks;
+   const temp=path.join(directory,`.triangle-disable-${randomUUID()}`);let fd;
+   try{
+    fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
+    fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,settingsPath);
+   }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+  }
+ }catch{hooksCleanupRequired=true;}
+ // Always remove the optional key, even if hook cleanup needs an explicit moved workspace.
+ const {discovery,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
+ return {discoveryEnabled:false,hooksCleanupRequired};
+}
+
+export async function runSessionDiscoveryHook({configPath,input,stderr=process.stderr}){
+ try{
+  let text='';for await(const chunk of input){text+=chunk;if(Buffer.byteLength(text)>65536)throw coded('invalid_hook','Hook input exceeds metadata limit');}
+  const payload=JSON.parse(text);
+  if(!UUID_PATTERN.test(payload.session_id)||typeof payload.cwd!=='string')throw coded('invalid_hook','Missing own-session lifecycle context');
+  const kinds={SessionStart:'start',SessionEnd:'end',UserPromptSubmit:'activity'};
+  const kind=kinds[payload.hook_event_name];if(!kind)throw coded('invalid_hook','Unsupported lifecycle event');
+  const config=readPrivateJson(configPath);if(!config.discovery?.enabled)return 0;
+  const integration=readPrivateJson(config.discovery.integrationPath);if(!integration.enabled)return 0;
+  const workspace=fs.realpathSync(payload.cwd);if(workspace!==integration.workspace)return 0;
+  const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now()};
+  const client=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,timeoutMs:1500,connectTimeoutMs:1500});
+  try{
+   const auth={installationId:integration.installationId,secret:integration.secret};
+   const {nonce}=await client.discoveryChallenge({...auth,event});
+   await client.reportDiscovery({...auth,nonce,event});
+  }finally{await client.close();}
+ }catch(error){stderr.write(`Triangle discovery unavailable (${typeof error?.code==='string'&&/^[a-z_]+$/.test(error.code)?error.code:'hook_error'})\n`);}
+ // Hook failure must not block a conversation or leak hook input in diagnostics.
+ return 0;
+}
+
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='setup-discovery'){output.write(JSON.stringify(setupSessionDiscovery(options,env))+'\n');return 0;}
+ if(command==='discovery-hook')return runSessionDiscoveryHook({configPath:options.config||defaultLocalConfigPath(env),input});
+ if(command==='disable-discovery'){output.write(JSON.stringify(disableSessionDiscovery(options,env))+'\n');return 0;}
  if(command==='reconcile-wake'){
   output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;
  }
