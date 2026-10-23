@@ -93,3 +93,28 @@ The disposable staged application root is
 `/private/tmp/triangle-claude-v11-candidate`. This is not the installed production
 application root. Claude owner pairing, activation of the existing supervisor,
 and real bidirectional Claude/Codex/Antigravity canaries remain unclosed gates.
+
+## Installed checkpoint — 2026-10-22
+
+Installed the verified public-ad-hoc/file-custody helper and Triangle Client,
+staged and validated supervisor manifest v11, and restarted the existing
+`dev.thetriangle.client` service. Installed `triangle-local status` reports
+running, zero executing/queued work, and the preserved 20 completed / 2 held /
+14 pending historical replies. Discovery includes the distinct Claude identity.
+No second supervisor was started and no historical tasks were retried.
+
+The scratch project's own MCP probe reconnected and exported a nonce-bound,
+UUID-only owner pairing handoff. The separate Claude binding was created disabled,
+then explicitly activated at generation 2. Its socket token was never exported.
+Only the disposable project's `.mcp.json` was changed to the installed
+`triangle-local claude-session-mcp --expected-version 2.1.307` entry; the previous
+probe configuration and owner local config have private rollback copies.
+
+**Remaining live gate:** the already-running Claude Desktop scratch session still
+exposes its original `triangle-session-probe` tools. A real model tool lookup
+reported `TRIANGLE_TOOL_UNAVAILABLE`; Desktop View > Reload did not refresh the
+backend MCP set. Full adapter messaging/push has not passed. Restart/reopen the
+scratch session's backend, verify the inherited UUID still matches the explicit
+binding, then prove status, inbox/claim/reply, outbound worker reply, wake/ack and
+restart behavior. Do not silently rebind a changed session UUID. No canary was
+queued into the unready Claude inbox.
