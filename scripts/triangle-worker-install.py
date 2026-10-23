@@ -68,7 +68,31 @@ WORKLOAD_CORE_ARTIFACTS = [
     "packages/triangle-cli/src/protocol.mjs",
     "packages/triangle-cli/src/workload.mjs",
 ]
-CURRENT_MANIFEST_VERSION = 8
+LOCAL_MESSAGING_ARTIFACTS = [
+    "packages/agent-worker/src/local-messaging-acl.mjs",
+    "packages/agent-worker/src/local-messaging-address.mjs",
+    "packages/agent-worker/src/local-messaging-client.mjs",
+    "packages/agent-worker/src/local-messaging-credentials.mjs",
+    "packages/agent-worker/src/local-messaging-errors.mjs",
+    "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+    "packages/agent-worker/src/local-messaging-mcp-adapter.mjs",
+    "packages/agent-worker/src/local-messaging-protocol.mjs",
+    "packages/agent-worker/src/local-messaging-rate-limiter.mjs",
+    "packages/agent-worker/src/local-messaging-server.mjs",
+    "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+    "packages/agent-worker/src/shared-delivery-journal.mjs",
+    "packages/agent-worker/src/delivery-private-path.mjs",
+    "packages/agent-worker/src/local-messaging-journal.mjs",
+    "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+    "packages/agent-worker/src/local-messaging-auth-broker.mjs",
+    "packages/agent-worker/src/local-messaging-host.mjs",
+    "packages/agent-worker/src/local-messaging-cli.mjs",
+]
+WAKE_NOTIFICATION_ARTIFACTS = [
+    "packages/agent-worker/src/codex-wake-adapter.mjs",
+    "packages/agent-worker/src/local-messaging-notifier.mjs",
+]
+CURRENT_MANIFEST_VERSION = 10
 CODEX_HEADLESS_ARTIFACTS = [
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
@@ -211,25 +235,27 @@ def copy_regular(source, destination, destination_mode=0o600):
 
 def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     if agent == "supervisor":
-        if version != CURRENT_MANIFEST_VERSION:
+        if version not in {8, 9, 10}:
             fail("unsupported supervisor manifest version")
         return expected_artifacts("codex", version)[:-2]
     if agent not in AGENTS:
         fail("invalid worker kind")
     if version == 3:
         common = LEGACY_COMMON_ARTIFACTS
-    elif version in {4, 5, 6, 7, 8}:
+    elif version in {4, 5, 6, 7, 8, 9, 10}:
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7, 8} else [])
+    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7, 8, 9, 10} else [])
     # The coordinator (client-supervisor-cli.mjs) may launch from any worker's
     # bundle and statically imports codex-runtime/headless-drain-service.mjs, so
     # v7 ships codex-runtime in every bundle; v5/v6 keep their exact sets.
-    extras += CODEX_HEADLESS_ARTIFACTS if (version in {7, 8} or (version in {5, 6} and agent == "codex")) else []
-    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7, 8} else []
-    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version in {7, 8} else []
-    extras += WORKLOAD_CORE_ARTIFACTS if version == 8 else []
+    extras += CODEX_HEADLESS_ARTIFACTS if (version in {7, 8, 9, 10} or (version in {5, 6} and agent == "codex")) else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7, 8, 9, 10} else []
+    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version in {7, 8, 9, 10} else []
+    extras += WORKLOAD_CORE_ARTIFACTS if version >= 8 else []
+    extras += LOCAL_MESSAGING_ARTIFACTS if version >= 9 else []
+    extras += WAKE_NOTIFICATION_ARTIFACTS if version >= 10 else []
     return common + extras + [
         f"packages/agent-worker/runners/{agent}-runner.mjs",
         f"agents/{agent}/worker/agent-worker.json",
@@ -372,7 +398,7 @@ def strict_manifest(path, agent):
     }
     if agent == "supervisor":
         expected_environment = {"PATH", "LANG", "LC_ALL"}
-    if value["version"] not in {3, 4, 5, 6, 7, 8} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in {3, 4, 5, 6, 7, 8, 9, 10} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")
@@ -612,9 +638,59 @@ def ensure_tree(home):
     print(root)
 
 
+LOCAL_WRAPPER_MARKER = b"# TRIANGLE_MANAGED_LOCAL_WRAPPER_V1\n"
+
+
+def run_local_wrapper():
+    # The wrapper is a frozen copy of these validators, not a shell launcher.
+    root = checked_dir(TRIANGLE_LOCAL_APPLICATION_ROOT, exact_mode=0o700)
+    checked_dir(os.path.join(root, "worker-runtime"), exact_mode=0o700)
+    manifest = strict_manifest(os.path.join(root, "worker-runtime", "supervisor.manifest.json"), "supervisor")
+    if manifest["version"] < 9:
+        fail("installed local messaging requires manifest v9")
+    node = os.path.join(manifest["projectRoot"], "bin", "node")
+    entry = os.path.join(manifest["projectRoot"], "packages/agent-worker/src/local-messaging-cli.mjs")
+    os.execve(node, [node, entry, *sys.argv[1:]], dict(os.environ))
+
+
+def wrapper_interpreter(executable=None):
+    # The wrapper embeds a frozen copy of this installer, so it runs under the interpreter that validated it.
+    executable = sys.executable if executable is None else executable
+    if (
+        not isinstance(executable, str)
+        or not os.path.isabs(executable)
+        or len(executable) > 200
+        or re.search(r"[\s\x00-\x1f\x7f]", executable)
+        or not os.path.isfile(executable)
+        or not os.access(executable, os.X_OK)
+    ):
+        fail("triangle-local needs an absolute, whitespace-free interpreter path; run the installer with such a Python")
+    return executable
+
+
+def install_local_wrapper(application_root):
+    root = checked_dir(application_root, exact_mode=0o700)
+    bin_root = ensure_dir(os.path.join(root, "bin"))
+    target = os.path.join(bin_root, "triangle-local")
+    if os.path.lexists(target):
+        checked_file(target, mode=0o700, executable=True)
+        with open(target, "rb") as current:
+            if LOCAL_WRAPPER_MARKER not in current.read(512):
+                fail("refusing unrelated triangle-local replacement")
+    with open(__file__, "rb") as source_file:
+        source = source_file.read()
+    source = source.replace(b"#!/usr/bin/env python3\n", b"", 1)
+    header = b"#!" + wrapper_interpreter().encode() + b"\n" + LOCAL_WRAPPER_MARKER
+    header += ("TRIANGLE_LOCAL_APPLICATION_ROOT = " + repr(root) + "\n").encode()
+    atomic_write(target, header + source, mode=0o700)
+    fsync_dir(bin_root)
+    print(target)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
+    local = sub.add_parser("install-local-wrapper"); local.add_argument("--application-root", required=True)
     stage = sub.add_parser("stage-runtime")
     stage.add_argument("--application-root", required=True); stage.add_argument("--project-root", required=True)
     stage.add_argument("--agent", choices=sorted(AGENTS | {"supervisor"}), required=True); stage.add_argument("--node", required=True)
@@ -626,7 +702,8 @@ def main():
     activate = sub.add_parser("activate-plist"); activate.add_argument("--target", required=True); activate.add_argument("--staged", required=True)
     tree = sub.add_parser("ensure-tree"); tree.add_argument("--home", required=True)
     args = parser.parse_args()
-    if args.command == "stage-runtime": stage_runtime(args)
+    if args.command == "install-local-wrapper": install_local_wrapper(args.application_root)
+    elif args.command == "stage-runtime": stage_runtime(args)
     elif args.command == "validate-runtime": strict_manifest(args.manifest, args.agent)
     elif args.command == "commit-runtime": finish_runtime(args.record, False)
     elif args.command == "rollback-runtime": finish_runtime(args.record, True)
@@ -637,4 +714,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "TRIANGLE_LOCAL_APPLICATION_ROOT" in globals():
+        run_local_wrapper()
+    else:
+        main()

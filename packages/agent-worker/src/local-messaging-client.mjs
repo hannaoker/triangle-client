@@ -134,7 +134,7 @@ export function createLocalControlClient({
     return connectingPromise;
   }
 
-  async function callRpc(method, params = {}, { timeout = timeoutMs, credential = turnCredential } = {}) {
+  async function callRpc(method, params = {}, { timeout = timeoutMs, credential = activeTurnCredential } = {}) {
     if (isClosed) throw coded("client_closed", "Client is closed");
     const sock = await ensureConnection(timeout);
     const id = crypto.randomUUID();
@@ -167,7 +167,20 @@ export function createLocalControlClient({
     });
   }
 
+  let activeTurnCredential = turnCredential;
+
   return {
+    setTurnCredential(cred) {
+      activeTurnCredential = cred;
+    },
+    async localStatus(options = {}) { return callRpc("local_status", {}, options); },
+    async exchangeTurnBinding(binding) {
+      const grant = await callRpc("issue_turn", binding);
+      if (grant?.credential) {
+        activeTurnCredential = grant.credential;
+      }
+      return grant;
+    },
     async discoverRecipients(options = {}) {
       const res = await callRpc("discover_recipients", {}, options);
       return res.recipients || [];
@@ -180,7 +193,6 @@ export function createLocalControlClient({
       requestId = crypto.randomUUID(),
       inReplyTo = null,
       metadata = {},
-      loopCount = null,
     }, options = {}) {
       return await callRpc("send_message", {
         to,
@@ -189,7 +201,6 @@ export function createLocalControlClient({
         requestId,
         inReplyTo,
         metadata,
-        loopCount,
       }, options);
     },
 
@@ -206,6 +217,17 @@ export function createLocalControlClient({
       return await callRpc("consume_reply", { messageId }, options);
     },
 
+    async ackNotification({ wakeId, generation }, options = {}) {
+      if (!wakeId || typeof generation !== "number") {
+        throw coded("invalid_params", "wakeId and generation are required");
+      }
+      return await callRpc("ack_notification", { wakeId, generation }, options);
+    },
+
+    async ackWake({ wakeId, generation }, options = {}) {
+      return await this.ackNotification({ wakeId, generation }, options);
+    },
+
     async cancelMessage({ messageId }, options = {}) {
       return await callRpc("cancel_message", { messageId }, options);
     },
@@ -215,6 +237,7 @@ export function createLocalControlClient({
       inReplyTo = null,
       timeoutMs: waitTimeoutMs = 10000,
       pollIntervalMs = 50,
+      credential = activeTurnCredential,
     } = {}) {
       const deadline = Date.now() + waitTimeoutMs;
       while (Date.now() < deadline) {
@@ -224,7 +247,7 @@ export function createLocalControlClient({
 
         const replies = await this.listReplies(
           { requestId, inReplyTo, limit: 1 },
-          { timeout: boundedRpcTimeout },
+          { timeout: boundedRpcTimeout, credential },
         );
         if (replies.length > 0) {
           return replies[0];

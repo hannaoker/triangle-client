@@ -1,0 +1,60 @@
+client methods  brew-exp: 172  bundled-exp: 172
+only in brew   : []
+only in bundled: []
+queue methods (bundled): ['thread/queue/add', 'thread/queue/delete', 'thread/queue/list', 'thread/queue/reorder', 'thread/queue/start', 'thread/queue/update']
+
+[QueuedSubmission]  { clientUserMessageId: string; id: string; input: [{ text: string; text_elements?: [<TextElement>]; type: enum["text"] } | { url: string } | { fileId: string } | { detail?: <ImageDetail> | null; path: string; type: enum["localImage"] } | { type: enum["audio"]; url: string } | { path: string; type: enum["localAudio"] } | { name: string; path: string; type: enum["skill"] } | { name: string; path: string; type: enum["mention"] }] }
+
+[ThreadQueueAddParams]  { clientUserMessageId: string; input: [{ text: string; text_elements?: [<TextElement>]; type: enum["text"] } | { url: string } | { fileId: string } | { detail?: <ImageDetail> | null; path: string; type: enum["localImage"] } | { type: enum["audio"]; url: string } | { path: string; type: enum["localAudio"] } | { name: string; path: string; type: enum["skill"] } | { name: string; path: string; type: enum["mention"] }]; threadId: string }
+
+[ThreadQueueAddResponse]  { queuedSubmission: { clientUserMessageId: string; id: string; input: [<UserInput>] } }
+
+[ThreadQueueChangedNotification]  { threadId: string }
+
+[ThreadQueueDeleteParams]  { queuedSubmissionId: string; threadId: string }
+
+[ThreadQueueDeleteResponse]  { deleted: boolean }
+
+[ThreadQueueListParams]  { cursor?: ["string", "null"]; limit?: ["integer", "null"]; threadId: string }
+
+[ThreadQueueListResponse]  { data: [{ clientUserMessageId: string; id: string; input: [<UserInput>] }]; nextCursor?: ["string", "null"] }
+
+[ThreadQueueReorderParams]  { queuedSubmissionIds: [string]; threadId: string }
+
+[ThreadQueueReorderResponse]  {  }
+
+[ThreadQueueStartParams]  { queuedSubmissionId?: ["string", "null"]; threadId: string }
+
+[ThreadQueueStartResponse]  { turn: { completedAt?: ["integer", "null"]; durationMs?: ["integer", "null"]; error?: <TurnError> | null; id: string; items: [<ThreadItem>]; itemsView?: null; rootTurnId?: ["string", "null"]; startedAt?: ["integer", "null"]; status: <TurnStatus> } }
+
+[ThreadQueueUpdateParams]  { input: [{ text: string; text_elements?: [<TextElement>]; type: enum["text"] } | { url: string } | { fileId: string } | { detail?: <ImageDetail> | null; path: string; type: enum["localImage"] } | { type: enum["audio"]; url: string } | { path: string; type: enum["localAudio"] } | { name: string; path: string; type: enum["skill"] } | { name: string; path: string; type: enum["mention"] }]; queuedSubmissionId: string; threadId: string }
+
+[ThreadQueueUpdateResponse]  { queuedSubmission: { clientUserMessageId: string; id: string; input: [<UserInput>] } }
+
+================ core shapes ================
+
+[InitializeParams]  { capabilities?: { experimentalApi?: boolean; explicitGatewayOauth?: boolean; extensions?: ["object", "null"]; mcpServerOpenaiFormElicitation?: boolean; optOutNotificationMethods?: ["array", "null"]; requestAttestation?: boolean } | null; clientInfo: { name: string; title?: ["string", "null"]; version: string } }
+
+[ThreadStartParams]  { allowProviderModelFallback?: boolean; approvalPolicy?: enum["untrusted", "on-request", "never"] | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } } | null; approvalsReviewer?: enum["user", "auto_review", "guardian_subagent"] | null; baseInstructions?: ["string", "null"]; config?: ["object", "null"]; cwd?: ["string", "null"]; daybreakEnabled?: ["boolean", "null"]; developerInstructions?: ["string", "null"]; dynamicTools?: ["array", "null"]; environments?: ["array", "null"]; ephemeral?: ["boolean", "null"]; experimentalRawEvents?: boolean; historyMode?: enum["legacy", "paginated"] | null; mockExperimentalField?: ["string", "null"]; model?: ["string", "null"]; modelProvider?: ["string", "null"]; multiAgentMode?: enum["explicitRequestOnly", "proactive"] | { custom: string } | null; permissions?: ["string", "null"]; personality?: enum["none", "friendly", "pragmatic"] | null; projectId?: ["string", "null"]; runtimeWorkspaceRoots?: ["array", "null"]; sandbox?: enum["read-only", "workspace-write", "danger-full-access"] | null; selectedCapabilityRoots?: ["array", "null"]; serviceName?: ["string", "null"]; serviceTier?: ["string", "null"]; sessionStartSource?: enum["startup", "clear"] | null; th
+
+[ThreadStartResponse]  { activePermissionProfile?: { extends?: ["string", "null"]; id: string } | null; approvalPolicy: enum["untrusted", "on-request", "never"] | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } }; approvalsReviewer: null; cwd: string; disabledPluginIds?: [string]; instructionSources?: [string]; model: string; modelProvider: string; multiAgentMode?: null; reasoningEffort?: string | null; runtimeWorkspaceRoots?: [string]; sandbox: null; serviceTier?: ["string", "null"]; thread: { agentNickname?: ["string", "null"]; agentRole?: ["string", "null"]; canAcceptDirectInput?: ["boolean", "null"]; cliVersion: string; createdAt: integer; cwd: null; daybreakEnabled?: ["boolean", "null"]; environments?: ["array", "null"]; ephemeral: boolean; extra?: <ThreadExtra> | null; forkedFromId?: ["string", "null"]; gitInfo?: <GitInfo> | null; historyMode?: null; id: string; model?: ["string", "null"]; modelProvider: string; name?: ["string", "null"]; originator?: ["string", "null"]; parentThreadId?: ["string", "null"]; path?: ["string", "null"]; preview: string; projectId: ["string", "null"]; reasoningEffort?: <ReasoningEffort> | null; recencyAt?: ["integer", "null"]; section?: <ThreadSection> | null; sectionEntered
+
+[ThreadResumeParams]  { approvalPolicy?: enum["untrusted", "on-request", "never"] | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } } | null; approvalsReviewer?: enum["user", "auto_review", "guardian_subagent"] | null; baseInstructions?: ["string", "null"]; config?: ["object", "null"]; cwd?: ["string", "null"]; developerInstructions?: ["string", "null"]; excludeTurns?: boolean; history?: ["array", "null"]; initialTurnsPage?: { itemsView?: <TurnItemsView> | null; limit?: ["integer", "null"]; sortDirection?: <SortDirection> | null } | null; model?: ["string", "null"]; modelProvider?: ["string", "null"]; path?: ["string", "null"]; permissions?: ["string", "null"]; personality?: enum["none", "friendly", "pragmatic"] | null; runtimeWorkspaceRoots?: ["array", "null"]; sandbox?: enum["read-only", "workspace-write", "danger-full-access"] | null; serviceTier?: ["string", "null"]; threadId: string }
+
+[ThreadResumeResponse]  { activePermissionProfile?: { extends?: ["string", "null"]; id: string } | null; approvalPolicy: enum["untrusted", "on-request", "never"] | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } }; approvalsReviewer: null; collaborationMode?: { mode: <ModeKind>; settings: <Settings> } | null; cwd: string; disabledPluginIds?: [string]; initialTurnsPage?: { backwardsCursor?: ["string", "null"]; data: [<Turn>]; nextCursor?: ["string", "null"] } | null; instructionSources?: [string]; itemsBackwardsCursor?: ["string", "null"]; model: string; modelProvider: string; multiAgentMode?: null; reasoningEffort?: string | null; runtimeWorkspaceRoots?: [string]; sandbox: null; serviceTier?: ["string", "null"]; thread: { agentNickname?: ["string", "null"]; agentRole?: ["string", "null"]; canAcceptDirectInput?: ["boolean", "null"]; cliVersion: string; createdAt: integer; cwd: null; daybreakEnabled?: ["boolean", "null"]; environments?: ["array", "null"]; ephemeral: boolean; extra?: <ThreadExtra> | null; forkedFromId?: ["string", "null"]; gitInfo?: <GitInfo> | null; historyMode?: null; id: string; model?: ["string", "null"]; modelProvider: string; name?: ["string", "null"]; originator?: ["string", "null"]; parent
+
+[TurnStartParams]  { additionalContext?: ["object", "null"]; approvalPolicy?: enum["untrusted", "on-request", "never"] | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } } | null; approvalsReviewer?: enum["user", "auto_review", "guardian_subagent"] | null; clientUserMessageId?: ["string", "null"]; collaborationMode?: { mode: <ModeKind>; settings: <Settings> } | null; cwd?: ["string", "null"]; cyberAccessProgram?: enum["standard", "daybreakBlue", "daybreakRed"] | null; disabledPluginIds?: ["array", "null"]; effort?: string | null; environments?: ["array", "null"]; input: [{ text: string; text_elements?: [<TextElement>]; type: enum["text"] } | { url: string } | { fileId: string } | { detail?: <ImageDetail> | null; path: string; type: enum["localImage"] } | { type: enum["audio"]; url: string } | { path: string; type: enum["localAudio"] } | { name: string; path: string; type: enum["skill"] } | { name: string; path: string; type: enum["mention"] }]; model?: ["string", "null"]; multiAgentMode?: enum["explicitRequestOnly", "proactive"] | { custom: string } | null; outputSchema?: null; parentTurnId?: ["string", "null"]; permissions?: ["string", "null"]; personality?: enum["none", "friendly", "pragmatic"] | null; re
+
+[TurnStartResponse]  { turn: { completedAt?: ["integer", "null"]; durationMs?: ["integer", "null"]; error?: <TurnError> | null; id: string; items: [<ThreadItem>]; itemsView?: null; rootTurnId?: ["string", "null"]; startedAt?: ["integer", "null"]; status: <TurnStatus> } }
+
+[ThreadLoadedListParams]  { cursor?: ["string", "null"]; limit?: ["integer", "null"] }
+
+[ThreadLoadedListResponse]  { data: [string]; nextCursor?: ["string", "null"] }
+
+[ThreadAttachmentOwnerListParams]  { archived?: ["boolean", "null"]; attachmentType: string; cursor?: ["string", "null"]; identityKey: string; limit?: ["integer", "null"] }
+
+[ThreadAttachmentOwnerListResponse]  { data: [{ archived: boolean; threadId: string }]; nextCursor?: ["string", "null"] }
+
+[ThreadAttachmentAddParams]  { attachmentType: string; identityKey: string; payload: true; threadId: string }
+
+server notifications (85): error, thread/started, thread/status/changed, thread/readState/changed, thread/archived, thread/deleted, thread/unarchived, thread/closed, thread/reverted, thread/name/updated, thread/attachment/updated, thread/goal/updated, thread/prediction/updated, thread/goal/cleared, thread/queue/changed, thread/project/updated, thread/environment/connected, thread/environment/disconnected, thread/settings/updated, thread/tokenUsage/updated, turn/started, turn/completed, turn/diff/updated, turn/plan/updated, item/started, item/completed, thread/compacted, turn/moderationMetadata, thread/realtime/started, thread/realtime/itemAdded, thread/realtime/item/started, thread/realtime/item/transcript/delta, thread/realtime/item/completed, thread/realtime/transcript/delta, thread/realtime/transcript/done, thread/realtime/outputAudio/delta, thread/realtime/sdp, thread/realtime/error, thread/realtime/closed

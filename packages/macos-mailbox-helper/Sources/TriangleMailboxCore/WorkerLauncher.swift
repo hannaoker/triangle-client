@@ -165,7 +165,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if (5...8).contains(manifestVersion) {
+        if (5...10).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -203,7 +203,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             }
             // v8 (permissions v1): the workload-key credential loader and the
             // shared triangle-cli protocol core the mailbox client imports.
-            if manifestVersion == 8 {
+            if manifestVersion >= 8 {
                 artifacts.formUnion([
                     "packages/agent-worker/src/workload-credential.mjs",
                     "packages/triangle-cli/src/canonical.mjs",
@@ -211,6 +211,36 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                     "packages/triangle-cli/src/keys.mjs",
                     "packages/triangle-cli/src/protocol.mjs",
                     "packages/triangle-cli/src/workload.mjs",
+                ])
+            }
+            // v9 installs local agent messaging; earlier exact sets remain valid.
+            if manifestVersion >= 9 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/local-messaging-acl.mjs",
+                    "packages/agent-worker/src/local-messaging-address.mjs",
+                    "packages/agent-worker/src/local-messaging-client.mjs",
+                    "packages/agent-worker/src/local-messaging-credentials.mjs",
+                    "packages/agent-worker/src/local-messaging-errors.mjs",
+                    "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+                    "packages/agent-worker/src/local-messaging-mcp-adapter.mjs",
+                    "packages/agent-worker/src/local-messaging-protocol.mjs",
+                    "packages/agent-worker/src/local-messaging-rate-limiter.mjs",
+                    "packages/agent-worker/src/local-messaging-server.mjs",
+                    "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+                    "packages/agent-worker/src/shared-delivery-journal.mjs",
+                    "packages/agent-worker/src/delivery-private-path.mjs",
+                    "packages/agent-worker/src/local-messaging-journal.mjs",
+                    "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+                    "packages/agent-worker/src/local-messaging-auth-broker.mjs",
+                    "packages/agent-worker/src/local-messaging-host.mjs",
+                    "packages/agent-worker/src/local-messaging-cli.mjs",
+                ])
+            }
+            // v10 adds wake notification modules without changing old exact sets.
+            if manifestVersion >= 10 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/codex-wake-adapter.mjs",
+                    "packages/agent-worker/src/local-messaging-notifier.mjs",
                 ])
             }
             // The coordinator can run from any worker bundle and imports
@@ -402,10 +432,10 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let manifest: WorkerInstallManifest
         do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
         catch { throw WorkerLauncherError.invalidManifest }
-        let required = Self.artifactPaths(for: .codex, manifestVersion: 8)!.subtracting([
+        let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
-        guard manifest.version == 8, Set(manifest.artifacts.keys) == required,
+        guard (8...10).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
               manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
         else { throw WorkerLauncherError.invalidManifest }
         let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)

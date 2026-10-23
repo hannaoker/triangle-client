@@ -1,0 +1,13 @@
+smoke exit=0 seconds=1
+nosrv exit=0 seconds=2
+twoowners exit=0 seconds=2
+idle exit=0 seconds=15
+busy exit=0 seconds=23
+absent exit=0 seconds=14
+remote exit=0 seconds=4
+latency exit=0 seconds=51
+multi exit=0 seconds=68
+dedupehist exit=0 seconds=3
+daemonabsent exit=0 seconds=28
+discover exit=0 seconds=15
+topology exit=0 seconds=13

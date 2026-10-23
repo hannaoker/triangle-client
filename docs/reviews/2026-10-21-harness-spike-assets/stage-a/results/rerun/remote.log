@@ -1,0 +1,7 @@
+[   0.1s] mock: mock listening 47624
+[   0.2s] remote server socket exists: true
+[   0.2s] initialize over websocket-on-unix -> {"userAgent":"stagea-driver/0.163.0-alpha.11.1 (Mac OS 27.0.1; arm64) unknown (stagea-driver; 0)","codexHome":"$WORK
+[   2.2s] queue result: {"exit":{"code":0,"sig":null},"ms":27,"stdout":"Queued message 01a1624e-0ba2-7e51-8992-b20636c04deb for thread 01a1624e-09ce-72d2-8a21-4fe4ed950889.","stderr":"","spawned":[],"survivors":[]}
+[   2.7s] server auto-dispatched CANARY-REMOTE within 15s: true
+[   2.7s] events seen by the websocket client: +0.1s thread/queue/changed(0889) > +0.1s warning(0889) > +0.1s thread/queue/changed(0889) > +0.1s thread/status/changed(0889) > +0.1s turn/started(0889) > +0.1s item/started(0889) > +0.1s item/completed(0889) > +0.1s item/started(0889) > +0.1s item/completed(0889) > +0.1s thread/tokenUsage/updated(0889) > +0.1s account/rateLimits/updated > +0.1s thread/readState/changed(0889) > +0.1s thread/status/changed(0889) > +0.1s turn/completed(0889)
+[   2.7s] queue -> []

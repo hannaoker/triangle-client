@@ -1,0 +1,7 @@
+[   0.0s] mock: mock listening 47498
+[   0.9s] A holds lock: [28663] (A pid 28663)
+[   1.0s] B thread/resume -> {"code":-32600,"message":"thread 01a16225-3465-7f23-864a-9a597dc5412a already has an active writer"}
+[   1.3s] lock holders after B resume attempt: [28663]
+[   1.3s] B loaded list: {"data":[],"nextCursor":null}
+[   1.4s] A can still run a turn: true
+[   1.4s] B events: +0.0s remoteControl/status/changed > +0.0s deprecationNotice

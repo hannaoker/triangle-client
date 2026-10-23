@@ -1,6 +1,7 @@
 import Darwin
 import CryptoKit
 import Foundation
+import CoreFoundation
 
 public enum ClientSupervisorError: Error, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     case invalidInstances
@@ -134,6 +135,7 @@ public struct ClientSupervisor: Sendable {
     private let cursorAcpRuntimeBindingURL: URL
     private let isDedicatedHeadlessDrainLoaded: @Sendable (String) -> Bool
     private let isDedicatedCursorAcpDrainLoaded: @Sendable (String) -> Bool
+    private let localMessagingConfigURL: URL
     private let parentEnvironment: [String: String]
 
     public init(
@@ -156,6 +158,7 @@ public struct ClientSupervisor: Sendable {
         cursorAcpRuntimeBindingURL: URL? = nil,
         isDedicatedHeadlessDrainLoaded: (@Sendable (String) -> Bool)? = nil,
         isDedicatedCursorAcpDrainLoaded: (@Sendable (String) -> Bool)? = nil,
+        localMessagingConfigURL: URL? = nil,
         parentEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.instanceStore = instanceStore
@@ -190,7 +193,56 @@ public struct ClientSupervisor: Sendable {
             ?? clientRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
         self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
         self.isDedicatedCursorAcpDrainLoaded = isDedicatedCursorAcpDrainLoaded ?? Self.probeDedicatedCursorAcpDrain
+        self.localMessagingConfigURL = localMessagingConfigURL ?? clientRoot.appendingPathComponent("local-messaging.json")
         self.parentEnvironment = parentEnvironment
+    }
+
+    /// An existing but unsafe or invalid owner file only disables the local
+    /// route. It must never stop the MESH, headless or ACP lanes, so the reason
+    /// is recorded as a bounded omission instead of failing the bootstrap.
+    private func preparedLocalMessaging(omitted: inout [OmittedClientSupervisorInstance]) -> PreparedLocalMessagingBootstrap? {
+        do { return try strictLocalMessaging() }
+        catch {
+            omitted.append(.init(instanceID: "local-messaging", reasonCode: "local_messaging_invalid"))
+            return nil
+        }
+    }
+
+    /// Forward only an opted-in owner file path. Secrets stay in Node's private
+    /// configuration loader, never in the Swift bootstrap or diagnostics.
+    private func strictLocalMessaging() throws -> PreparedLocalMessagingBootstrap? {
+        let url = localMessagingConfigURL
+        var metadata = stat()
+        if lstat(url.path, &metadata) != 0 {
+            if errno == ENOENT { return nil }
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        let parent = url.deletingLastPathComponent()
+        var parentMetadata = stat()
+        guard url.path.hasPrefix("/"), url.standardizedFileURL.path == url.path,
+              url.resolvingSymlinksInPath().path == url.path,
+              lstat(parent.path, &parentMetadata) == 0,
+              (parentMetadata.st_mode & S_IFMT) == S_IFDIR,
+              parentMetadata.st_uid == getuid(), (parentMetadata.st_mode & 0o777) == 0o700
+        else { throw ClientSupervisorError.invalidBootstrap }
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { throw ClientSupervisorError.invalidBootstrap }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        guard fstat(fd, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG, metadata.st_uid == getuid(),
+              (metadata.st_mode & 0o777) == 0o600, metadata.st_nlink == 1,
+              metadata.st_size > 0, metadata.st_size <= 65_536
+        else { throw ClientSupervisorError.invalidBootstrap }
+        do {
+            let data = try handle.read(upToCount: 65_537) ?? Data()
+            guard data.count <= 65_536,
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let enabled = object["enabled"] as? NSNumber,
+                  CFGetTypeID(enabled) == CFBooleanGetTypeID()
+            else { throw ClientSupervisorError.invalidBootstrap }
+            return enabled.boolValue ? PreparedLocalMessagingBootstrap(configPath: url.path) : nil
+        } catch { throw ClientSupervisorError.invalidBootstrap }
     }
 
     private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
@@ -476,7 +528,8 @@ public struct ClientSupervisor: Sendable {
             appServerWake: appServerWake,
             grokBotWake: grokBotWake,
             headlessWakes: headlessWakes,
-            cursorAcpWakes: cursorAcpWakes
+            cursorAcpWakes: cursorAcpWakes,
+            localMessaging: preparedLocalMessaging(omitted: &omitted)
         )
         let data: Data
         do {
@@ -1184,7 +1237,8 @@ public struct ClientSupervisor: Sendable {
 
     public func preflight() async throws {
         let launch = try await prepareEnabledInstances()
-        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") }) else {
+        // The local route is isolated: its omission never blocks the MESH lanes.
+        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") && !$0.reasonCode.hasPrefix("local_messaging_") }) else {
             throw ClientSupervisorError.invalidBootstrap
         }
     }
@@ -1224,6 +1278,10 @@ public struct ClientSupervisor: Sendable {
     }
 }
 
+private struct PreparedLocalMessagingBootstrap: Encodable {
+    let configPath: String
+}
+
 private struct PreparedBootstrap: Encodable {
     let version: Int
     let maxConcurrentReasoners: Int
@@ -1233,9 +1291,10 @@ private struct PreparedBootstrap: Encodable {
     let grokBotWake: PreparedGrokBotWakeBootstrap?
     let headlessWakes: [PreparedHeadlessWakeBootstrap]
     let cursorAcpWakes: [PreparedCursorAcpWakeBootstrap]
+    let localMessaging: PreparedLocalMessagingBootstrap?
 
     private enum CodingKeys: String, CodingKey {
-        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes
+        case version, maxConcurrentReasoners, instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes, localMessaging
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1248,6 +1307,7 @@ private struct PreparedBootstrap: Encodable {
         try container.encodeIfPresent(grokBotWake, forKey: .grokBotWake)
         try container.encode(headlessWakes, forKey: .headlessWakes)
         try container.encode(cursorAcpWakes, forKey: .cursorAcpWakes)
+        try container.encodeIfPresent(localMessaging, forKey: .localMessaging)
     }
 }
 private struct PreparedBootstrapInstance: Encodable {

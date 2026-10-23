@@ -1,0 +1,7 @@
+[   0.1s] mock: mock listening 47089
+[  10.2s] trial {"i":0,"cliMs":52,"exit":0,"changedAfterMs":8892,"turnStartedAfterMs":8917}
+[  20.3s] trial {"i":1,"cliMs":43,"exit":0,"changedAfterMs":6653,"turnStartedAfterMs":6694}
+[  30.3s] trial {"i":2,"cliMs":48,"exit":0,"changedAfterMs":7742,"turnStartedAfterMs":7800}
+[  40.3s] trial {"i":3,"cliMs":45,"exit":0,"changedAfterMs":5214,"turnStartedAfterMs":5292}
+[  50.3s] trial {"i":4,"cliMs":45,"exit":0,"changedAfterMs":8407,"turnStartedAfterMs":8502}
+[  50.3s] turn-start latency ms: min 5292 max 8917 values [8917,6694,7800,5292,8502]

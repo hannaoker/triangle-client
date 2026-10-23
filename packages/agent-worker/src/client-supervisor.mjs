@@ -1,3 +1,4 @@
+import { createInstalledLocalMessagingHost } from "./local-messaging-host.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -15,7 +16,7 @@ import {
 import path from "node:path";
 
 import { createCommandRunner, createRunnerEnvironment } from "./command-runner.mjs";
-import { createConcurrencyGate } from "./concurrency-gate.mjs";
+import { createProfiledReasonerGate } from "./concurrency-gate.mjs";
 import {
   createHelperWatchTransport,
   createInstallationWatchTransportFactory,
@@ -605,6 +606,7 @@ export function createClientSupervisor({
   headlessWakes = null,
   cursorAcpWakes = null,
   peerWakes = null,
+  localMessaging = null,
   headlessWake = LEGACY_HEADLESS_WAKE_UNSET,
   createDeliveryClient = createMailboxClient,
   createRunner = createCommandRunner,
@@ -625,6 +627,7 @@ export function createClientSupervisor({
   createCursorAcpClaimer = createCursorAcpClaimerGuard,
   createInstallDispatcher = createInstallWatchDispatcher,
   createPeerLane = null,
+  createLocalMessagingHost = createInstalledLocalMessagingHost,
   resolveDelivery,
   maxConcurrentReasoners = 2,
   pollIntervalMs = 15_000,
@@ -691,7 +694,8 @@ export function createClientSupervisor({
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
-  const gate = createConcurrencyGate({ limit: maxConcurrentReasoners });
+  const gate = createProfiledReasonerGate({ limit: maxConcurrentReasoners });
+  const localRunners = new Map();
   const seen = new Set();
   // One MESH held poll per installation: lanes that share an installationId
   // coalesce onto a single watch-poll.
@@ -774,11 +778,12 @@ export function createClientSupervisor({
     if (!adapterRunner || typeof adapterRunner.run !== "function") {
       throw new TypeError("createRunner must return a runner");
     }
+    localRunners.set(instance.instanceId, adapterRunner);
     const runner = Object.freeze({
       run(request, options = {}) {
         return gate.run(
           () => adapterRunner.run(request, options),
-          { signal: options.signal },
+          { signal: options.signal, instanceId: instance.instanceId },
         );
       },
     });
@@ -816,6 +821,7 @@ export function createClientSupervisor({
       }
       clients.set(drain.instanceId, deliveryClient);
       runners.set(drain.instanceId, adapterRunner);
+      localRunners.set(drain.instanceId, adapterRunner);
     }
   }
 
@@ -1060,6 +1066,43 @@ export function createClientSupervisor({
     }
   }
 
+  // Local messaging is optional. Its failures stay inside the local route: the
+  // MESH, headless and ACP lanes keep running while watch() retries the host
+  // and localStatus() reports the failure code.
+  let localHost = null;
+  let localFailure = null;
+  let localClosed = false;
+  let pendingLocalError = null;
+  function openLocalHost() {
+    localHost = createLocalMessagingHost({
+      configPath: localMessaging.configPath, runners: localRunners, gate, logger,
+    });
+    return localHost;
+  }
+  function recordLocalFailure(error) {
+    const code = typeof error?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.code)
+      ? error.code
+      : "local_messaging_failed";
+    localFailure = { code, at: now(), attempts: (localFailure?.attempts ?? 0) + 1 };
+  }
+  async function stopLocalHost() {
+    const host = localHost;
+    localHost = null;
+    try {
+      await host?.stop();
+    } catch {
+      logger.error?.("triangle_client_local_messaging_stop_failed", { error: "Local messaging host stop failed" });
+    }
+  }
+  if (localMessaging) {
+    try {
+      openLocalHost();
+    } catch (error) {
+      pendingLocalError = error;
+      recordLocalFailure(error);
+    }
+  }
+
   const peerLane = createPeerLane && peerConfigs.length > 0
     ? createPeerLane({
         peerConfigs,
@@ -1233,7 +1276,25 @@ export function createClientSupervisor({
       }
       return peerLane.resolvePeerRecord(options);
     },
+    localStatus() {
+      if (!localMessaging) return { enabled: false, route: "same-device" };
+      let hostStatus = null;
+      try {
+        hostStatus = localHost?.status() ?? null;
+      } catch {
+        hostStatus = null;
+      }
+      // Healthy only when the host says it runs and no failure is outstanding.
+      const status = { route: "same-device", ...hostStatus, enabled: true };
+      if (localFailure) {
+        return { ...status, running: false, state: "failed", failure: { ...localFailure } };
+      }
+      const running = !localClosed && hostStatus?.running === true;
+      return { ...status, running, state: localClosed ? "stopped" : running ? "running" : "starting" };
+    },
     async close() {
+      localClosed = true;
+      await stopLocalHost();
       if (peerLane) {
         await peerLane.close();
       }
@@ -1652,6 +1713,30 @@ export function createClientSupervisor({
         ? peerLane.watch({ signal, sleep, runDurableWakeLoop })
         : Promise.resolve([]);
 
+      localClosed = false;
+      const localLoop = localMessaging
+        ? runDurableWakeLoop({
+          start: async () => {
+            // A construction failure was recorded when the supervisor was built.
+            if (pendingLocalError) {
+              const error = pendingLocalError;
+              pendingLocalError = null;
+              throw error;
+            }
+            try {
+              const host = localHost ?? openLocalHost();
+              return await host.watch({ signal, onStarted: () => { localFailure = null; } });
+            } catch (error) {
+              if (!signal?.aborted) recordLocalFailure(error);
+              throw error;
+            }
+          },
+          // Each retry rebuilds the host so it rereads repaired owner files.
+          stop: stopLocalHost,
+          logEvent: "triangle_client_local_messaging_failed",
+          logMessage: "Local messaging host failed",
+        })
+        : Promise.resolve(null);
       let settled;
       try {
         settled = await Promise.all([
@@ -1662,10 +1747,13 @@ export function createClientSupervisor({
           headlessLoop,
           cursorAcpLoop,
           peerLoop,
+          localLoop,
         ]);
       } finally {
         proactiveController.abort();
         await Promise.allSettled(proactiveRenewals);
+        localClosed = true;
+        await stopLocalHost();
       }
       const [instances, wakeResult, installResult, appServerResult, headlessResult, cursorAcpResult, peerResult] = settled;
       return {

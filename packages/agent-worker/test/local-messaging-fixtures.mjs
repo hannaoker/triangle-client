@@ -9,8 +9,9 @@ import { coded } from "../src/local-messaging-errors.mjs";
  * CUSTODY SEMANTICS DISCLAIMER:
  * These journal implementations (Memory and SQLite) are strictly test fixtures designed
  * to verify the local messaging server, client, protocol, and adapter contract.
- * They do NOT represent the production peer recovery state machine, peer drain queues,
- * or shared durability pipeline. Production requires an injected shared-journal adapter.
+ * They do NOT represent the production SQLite journal's durability or schema. They do
+ * implement the journal contract, including the execution transitions (claim, complete,
+ * hold, recover) that keep finished work from running again after a restart.
  */
 
 export function deterministicMetadataEqual(a, b) {
@@ -50,6 +51,7 @@ export function createTestMemoryJournal() {
   const records = new Map(); // messageId -> record
   const replies = new Map(); // messageId -> replyRecord
   const executions = new Map(); // messageId -> status
+  const wakeBindings = new Map(); // targetIdentity -> binding
   let isClosed = false;
 
   return {
@@ -139,6 +141,51 @@ export function createTestMemoryJournal() {
       return { ...reply, isDuplicate: false };
     },
 
+    async claimExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record || record.phase !== "queued_local") return null;
+      record.phase = "executing";
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async completeExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record) return null;
+      record.phase = "completed";
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async holdExecution(messageId, reason = "held") {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const record = records.get(messageId);
+      if (!record) return null;
+      record.phase = "held";
+      record.reason = reason;
+      record.updatedAt = Date.now();
+      return { ...record };
+    },
+
+    async recoverQueued() {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const toRun = [];
+      const uncertain = [];
+      for (const record of records.values()) {
+        if (record.phase === "executing" || record.phase === "started") {
+          // Outcome unknown after a restart: hold it, never replay it.
+          record.phase = "held";
+          record.reason = "crash_recovery";
+          record.updatedAt = Date.now();
+        }
+        if (record.phase === "queued_local") toRun.push({ ...record });
+        else if (record.phase === "held" && record.reason === "crash_recovery") uncertain.push({ ...record });
+      }
+      return { toRun, uncertain };
+    },
+
     async recordExecutionFailure({ messageId, reason, runtimeError = null }) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       const record = records.get(messageId);
@@ -188,26 +235,131 @@ export function createTestMemoryJournal() {
       return records.get(messageId) ?? null;
     },
 
+    async initWakeBinding({ targetIdentity, bindingId, threadId, generation }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      let binding = wakeBindings.get(targetIdentity);
+      const now = Date.now();
+      if (!binding) {
+        binding = {
+          targetIdentity,
+          bindingId,
+          threadId,
+          generation,
+          deliveryState: "idle",
+          activeWakeId: null,
+          activeFingerprint: null,
+          lastAcknowledgedFingerprint: null,
+          lastAcknowledgedWakeId: null,
+          receiptQueuedId: null,
+          receiptThreadId: null,
+          lastSubmittedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        wakeBindings.set(targetIdentity, binding);
+      } else {
+        const rebind = binding.generation !== generation || binding.bindingId !== bindingId || binding.threadId !== threadId;
+        if (rebind) {
+          binding.bindingId = bindingId;
+          binding.threadId = threadId;
+          binding.generation = generation;
+          binding.deliveryState = (binding.deliveryState !== "idle") ? "stale_held" : "idle";
+          binding.updatedAt = now;
+        }
+      }
+      return { ...binding };
+    },
+
+    async getWakeBinding(targetIdentity) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      return b ? { ...b } : null;
+    },
+
+    async getWakeObligations(targetIdentity) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const unreadReplies = Array.from(replies.values())
+        .filter((r) => r.recipient === targetIdentity && !r.consumed)
+        .sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+      const heldMessages = Array.from(records.values())
+        .filter((m) => m.sender === targetIdentity && m.phase === "held")
+        .sort((a, b) => a.createdAt - b.createdAt || a.messageId.localeCompare(b.messageId));
+      const hasLateResult = heldMessages.some((m) => m.lateResultText || m.hasLateResult);
+
+      const replyIds = unreadReplies.map((r) => r.messageId).sort();
+      const replyTimestamps = unreadReplies.map((r) => r.createdAt);
+      const heldIds = heldMessages.map((m) => m.messageId).sort();
+      const heldTimestamps = heldMessages.map((m) => m.updatedAt || m.createdAt);
+
+      const crypto = await import("node:crypto");
+      const fingerprint = crypto.createHash("sha256").update(JSON.stringify({
+        replyIds,
+        replyTimestamps,
+        heldIds,
+        heldTimestamps,
+        hasLateResult,
+      })).digest("hex");
+
+      return {
+        unreadReplies: unreadReplies.map((r) => ({ ...r })),
+        heldMessages: heldMessages.map((m) => ({ ...m })),
+        hasLateResult,
+        snapshotFingerprint: fingerprint,
+      };
+    },
+
+    async setWakeSubmitting({ targetIdentity, wakeId, fingerprint, submittedAt = Date.now() }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      if (!b) throw coded("unknown_wake_target", "Target identity has no wake binding");
+      if (b.deliveryState !== "idle") throw coded("wake_state_conflict", "Cannot submit wake: state is " + b.deliveryState);
+      b.deliveryState = "submitting";
+      b.activeWakeId = wakeId;
+      b.activeFingerprint = fingerprint;
+      b.lastSubmittedAt = submittedAt;
+      b.updatedAt = submittedAt;
+      return { ...b };
+    },
+
+    async setWakeAccepted({ targetIdentity, wakeId, receipt }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      b.deliveryState = "accepted_awaiting_ack";
+      b.receiptQueuedId = receipt.queuedId;
+      b.receiptThreadId = receipt.threadId;
+      b.updatedAt = Date.now();
+      return { ...b };
+    },
+
+    async setWakeUncertain({ targetIdentity, wakeId, reason = "uncertain" }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(targetIdentity);
+      b.deliveryState = "uncertain";
+      b.updatedAt = Date.now();
+      return { ...b };
+    },
+
+    async ackWake({ requester, wakeId, generation }) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      const b = wakeBindings.get(requester);
+      if (!b) throw coded("foreign_access_denied", "No bound wake target");
+      if (b.generation !== generation) throw coded("stale_wake_generation", "Generation mismatch");
+      if (b.activeWakeId !== wakeId) throw coded("stale_wake_id", "WakeId mismatch");
+      b.deliveryState = "idle";
+      b.lastAcknowledgedFingerprint = b.activeFingerprint;
+      b.lastAcknowledgedWakeId = b.activeWakeId;
+      b.activeWakeId = null;
+      b.activeFingerprint = null;
+      b.updatedAt = Date.now();
+      return { acknowledged: true, wakeId, generation };
+    },
+
     trackExecution(messageId, status) {
       executions.set(messageId, { status, updatedAt: Date.now() });
     },
 
     getActiveExecutions() {
       return Array.from(executions.entries()).map(([messageId, val]) => ({ messageId, ...val }));
-    },
-
-    async resumeQueuedRecords() {
-      // Returns records queued for execution; uncertain started executions are flagged, not rerun
-      const toRun = [];
-      const uncertain = [];
-      for (const rec of records.values()) {
-        if (rec.phase === "queued_local") {
-          toRun.push(rec);
-        } else if (rec.phase === "executing" || rec.phase === "started") {
-          uncertain.push(rec);
-        }
-      }
-      return { toRun, uncertain };
     },
 
     async close() {
@@ -276,6 +428,8 @@ export function createTestSqliteJournal({ dbPath }) {
     INSERT INTO local_replies (message_id, sender, recipient, request_id, in_reply_to, text, metadata, consumed, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
   `);
+  const stmtClaim = db.prepare("UPDATE local_messages SET phase = 'executing', updated_at = ? WHERE message_id = ? AND phase = 'queued_local'");
+  const stmtSetPhase = db.prepare("UPDATE local_messages SET phase = ?, reason = COALESCE(?, reason), updated_at = ? WHERE message_id = ?");
   const stmtGetReply = db.prepare("SELECT * FROM local_replies WHERE message_id = ?");
   const stmtConsumeReply = db.prepare("UPDATE local_replies SET consumed = 1, updated_at = ? WHERE message_id = ?");
 
@@ -441,6 +595,37 @@ export function createTestSqliteJournal({ dbPath }) {
       };
     },
 
+    async claimExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      if (stmtClaim.run(Date.now(), messageId).changes === 0) return null;
+      return this.getRecord(messageId);
+    },
+
+    async completeExecution(messageId) {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      stmtSetPhase.run("completed", null, Date.now(), messageId);
+      return this.getRecord(messageId);
+    },
+
+    async holdExecution(messageId, reason = "held") {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      stmtSetPhase.run("held", reason, Date.now(), messageId);
+      return this.getRecord(messageId);
+    },
+
+    async recoverQueued() {
+      if (isClosed) throw coded("journal_closed", "Journal is closed");
+      // Outcome unknown after a restart: hold it, never replay it.
+      db.prepare("UPDATE local_messages SET phase = 'held', reason = 'crash_recovery', updated_at = ? WHERE phase IN ('executing', 'started')").run(Date.now());
+      const toRun = [];
+      const uncertain = [];
+      for (const row of db.prepare("SELECT message_id, phase, reason FROM local_messages WHERE phase = 'queued_local' OR (phase = 'held' AND reason = 'crash_recovery') ORDER BY created_at").all()) {
+        const record = await this.getRecord(row.message_id);
+        (row.phase === "queued_local" ? toRun : uncertain).push(record);
+      }
+      return { toRun, uncertain };
+    },
+
     async recordExecutionFailure({ messageId, reason, runtimeError = null }) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       stmtUpdateFail.run(reason, runtimeError, Date.now(), messageId);
@@ -518,35 +703,6 @@ export function createTestSqliteJournal({ dbPath }) {
       };
     },
 
-    async resumeQueuedRecords() {
-      if (isClosed) throw coded("journal_closed", "Journal is closed");
-      const rows = db.prepare("SELECT * FROM local_messages WHERE phase IN ('queued_local', 'executing', 'started')").all();
-      const toRun = [];
-      const uncertain = [];
-      for (const r of rows) {
-        let meta = {};
-        try {
-          meta = JSON.parse(r.metadata || "{}");
-        } catch {}
-        const rec = {
-          messageId: r.message_id,
-          sender: r.sender,
-          recipient: r.recipient,
-          requestId: r.request_id,
-          inReplyTo: r.in_reply_to,
-          text: r.text,
-          metadata: meta,
-          phase: r.phase,
-        };
-        if (r.phase === "queued_local") {
-          toRun.push(rec);
-        } else {
-          uncertain.push(rec);
-        }
-      }
-      return { toRun, uncertain };
-    },
-
     async close() {
       if (isClosed) return;
       isClosed = true;
@@ -562,9 +718,11 @@ export function createTestSqliteJournal({ dbPath }) {
  * Test fixture demonstrating host-owned recoverable dispatcher contract.
  *
  * Implements:
- * - start/recover: claims queued records on start, holds uncertain started executions.
- * - notifyAdmission/admitExecution: dedupes notifications; prevents concurrent overlap.
- * - stop/wait: awaits active executions to complete before shutdown.
+ * - start: recovers queued records on start; uncertain executions are held, not rerun.
+ * - notifyAdmission: dedupes notifications, prevents concurrent overlap, and
+ *   claims each message in the journal first, so claimed, finished or held work never runs
+ *   again, including after a restart. Finished work is marked completed.
+ * - stop: awaits active executions to complete before shutdown.
  */
 export function createTestRecoverableDispatcher({
   execute = async () => {},
@@ -574,6 +732,7 @@ export function createTestRecoverableDispatcher({
   const running = new Map();
   const completed = new Set();
   const uncertainHeld = new Set();
+  let activeJournal = journal;
   let recoveryCount = 0;
   let isClosing = false;
 
@@ -596,12 +755,19 @@ export function createTestRecoverableDispatcher({
       return;
     }
 
-    dispatched.push(job);
-
     const promise = (async () => {
       try {
-        await execute(job);
+        // One claimant per message: work that is claimed, finished or held is skipped.
+        if (activeJournal && !(await activeJournal.claimExecution(messageId))) return;
+        dispatched.push(job);
+        try {
+          await execute(job);
+        } catch (error) {
+          await activeJournal?.holdExecution(messageId, "runtime_error");
+          throw error;
+        }
         completed.add(messageId);
+        await activeJournal?.completeExecution(messageId);
       } finally {
         running.delete(messageId);
       }
@@ -628,11 +794,11 @@ export function createTestRecoverableDispatcher({
       return recoveryCount;
     },
 
-    async start({ journal: activeJournal } = {}) {
-      const j = activeJournal || journal;
+    async start({ journal: startJournal } = {}) {
+      activeJournal = startJournal || journal;
       recoveryCount++;
-      if (j && typeof j.resumeQueuedRecords === "function") {
-        const { toRun = [], uncertain = [] } = await j.resumeQueuedRecords();
+      if (activeJournal) {
+        const { toRun = [], uncertain = [] } = await activeJournal.recoverQueued();
         for (const rec of uncertain) {
           uncertainHeld.add(rec.messageId);
         }
@@ -642,21 +808,9 @@ export function createTestRecoverableDispatcher({
       }
     },
 
-    async recover(options = {}) {
-      return this.start(options);
-    },
-
     async notifyAdmission(job) {
       if (isClosing) return;
       return runJob(job);
-    },
-
-    async admitExecution(job) {
-      return this.notifyAdmission(job);
-    },
-
-    async dispatch(job) {
-      return this.notifyAdmission(job);
     },
 
     async stop() {
@@ -665,11 +819,19 @@ export function createTestRecoverableDispatcher({
         await Promise.allSettled(Array.from(running.values()));
       }
     },
-
-    async wait() {
-      if (running.size > 0) {
-        await Promise.allSettled(Array.from(running.values()));
-      }
-    },
   };
+}
+
+/**
+ * Polls until the predicate is truthy. Dispatcher tests use this instead of
+ * stop(), which no longer drains queued work.
+ */
+export async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 5, message = "condition" } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await predicate();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${message}`);
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }

@@ -1,0 +1,5 @@
+[   0.1s] mock: mock listening 47895
+[   2.3s] queue result: {"exit":{"code":0,"sig":null},"ms":45,"stdout":"Queued message 01a16250-665a-74b1-975c-44b7b18edef2 for thread 01a16250-6411-7930-ab8a-a8fbe032d6a2.","stderr":"","spawned":[],"survivors":[]}
+[  13.9s] queue result: {"exit":{"code":1,"sig":null},"ms":10037,"stdout":"","stderr":"Error: cannot queue through an embedded app server while a local app-server daemon is running; remove configuration overrides or use --remote","spawned":[],"survivors":[]}
+[  13.9s] connections accepted by the black hole: 3
+[  13.9s] queued rows for thread: 1

@@ -1,0 +1,17 @@
+#!/bin/bash
+# Prints the pins for this experiment: OS, tools and the exact Codex builds (version and SHA-256 of each binary).
+CLIENT_BIN="${CLIENT_BIN:-/opt/homebrew/Caskroom/codex/0.163.0/bin/codex}"
+OWNER_BIN="${OWNER_BIN:-/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex}"
+echo "date            : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "macOS           : $(sw_vers -productVersion) ($(uname -m))"
+echo "node            : $(node --version)"
+echo "python3         : $(python3 --version 2>&1)"
+echo "sqlite3         : $(/usr/bin/sqlite3 --version | cut -d' ' -f1)"
+echo "sandbox-exec    : $(command -v sandbox-exec)"
+echo "client binary   : $CLIENT_BIN"
+echo "  version       : $("$CLIENT_BIN" --version)"
+echo "  sha256        : $(shasum -a 256 "$CLIENT_BIN" | cut -d' ' -f1)"
+echo "owner binary    : $OWNER_BIN"
+echo "  version       : $("$OWNER_BIN" --version)"
+echo "  sha256        : $(shasum -a 256 "$OWNER_BIN" | cut -d' ' -f1)"
+echo "ChatGPT app     : $(defaults read /Applications/ChatGPT.app/Contents/Info CFBundleShortVersionString 2>/dev/null) (build $(defaults read /Applications/ChatGPT.app/Contents/Info CFBundleVersion 2>/dev/null))"

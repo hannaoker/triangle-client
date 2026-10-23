@@ -1,0 +1,9 @@
+[   0.1s] mock: mock listening 47831
+[   1.5s] persistent server pid 81913 | locks before: t1 null t2 null
+[   3.1s] queue result: {"exit":{"code":0,"sig":null},"ms":30,"stdout":"Queued message 01a1624f-fc8b-7313-9764-51d5cef70b3e for thread 01a1624f-f749-7cc0-8f6c-2832dcc919f8.","stderr":"","spawned":[],"survivors":[]}
+[  11.2s] (a) explicit --remote: lock holders t1 null | persistent server holds locks: 0 | turn ran (mock saw canary): false
+[  11.2s] (a) db rows for t1: 1
+[  12.8s] queue result: {"exit":{"code":0,"sig":null},"ms":21,"stdout":"Queued message 01a16250-223f-7290-8bf8-5e6435aad576 for thread 01a1624f-f9d2-77f1-b16b-f147d6d0f427.","stderr":"","spawned":[],"survivors":[]}
+[  26.8s] (b) default transport: lock holders t2 null | persistent server holds locks: 0 | turn ran (mock saw canary): false
+[  26.9s] (b) db rows for t2: 1
+[  26.9s] late owner thread/resume t2 -> "ok"

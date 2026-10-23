@@ -220,7 +220,7 @@ export function createProfileScheduler({
           state.backoffMs = initialBackoffMs;
           state.failureCount = 0;
           state.nextEligibleAt = 0;
-        }, { signal });
+        }, { signal, instanceId: state.instanceId });
       } catch (error) {
         if (error?.name !== "AbortError" && !stopped) {
           state.failureCount += 1;

@@ -1,0 +1,13 @@
+[   0.1s] mock: mock listening 47498
+[   1.0s] ABSENT: owner stopped; lock holders: null | rollout {"size":35651}
+[   2.8s] queue result: {"exit":{"code":0,"sig":null},"ms":227,"stdout":"Queued message 01a16227-f228-74d2-a821-8784f97e4eec for thread 01a16227-ee3e-79a2-9c4b-6ea3c2a774a3.","stderr":"","spawned":[],"survivors":[]}
+[   5.3s] lock holders after queue: null
+[   5.3s] mock saw CANARY-ABSENT (a turn ran with no owner): false | mock requests total 1
+[   6.3s] db queued_items: 01a16227-ee3e-79a2-9c4b-6ea3c2a774a3|0|{"UserInput":{"content":[{"type":"text","text":"CANARY-ABSENT [slow:0]","text_elements":[]}],"client_id":"01a16227-f21b-70b0-8b8f-7b18147f41fe"}}
+[   6.3s] rollout size before/after: 35651 / 35651
+[   6.3s] home diff: {"added":[".tmp/git-b8klqe/",".tmp/git-b8klqe/HEAD",".tmp/git-b8klqe/objects/",".tmp/git-b8klqe/refs/"],"removed":[]}
+[   6.3s] daemon dir diff: {"added":[],"removed":[]}
+[   6.4s] owner2 thread/resume -> "ok"
+[  14.4s] owner2 events after resume: +0.0s remoteControl/status/changed > +0.0s deprecationNotice > +0.0s thread/status/changed(74a3) > +0.0s thread/tokenUsage/updated(74a3) > +0.0s thread/goal/cleared(74a3) > +0.0s warning(74a3) > +0.0s thread/queue/changed(74a3) > +0.0s thread/status/changed(74a3) > +0.0s turn/started(74a3) > +0.0s item/started(74a3) > +0.0s item/completed(74a3) > +0.0s item/started(74a3) > +0.0s item/completed(74a3) > +0.0s thread/tokenUsage/updated(74a3) > +0.0s account/rateLimits/updated > +0.0s thread/readState/changed(74a3) > +0.0s thread/status/changed(74a3) > +0.0s turn/completed(74a3)
+[  14.4s] queue after resume -> []
+[  14.4s] mock saw CANARY-ABSENT after owner2 resumed: true

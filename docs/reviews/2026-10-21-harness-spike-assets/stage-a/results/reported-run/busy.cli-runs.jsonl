@@ -1,0 +1,1 @@
+{"label":"queue-busy","argv":["codex","queue","--thread","01a16226-d749-7fe3-8ebb-d45cd9c9f4dd","--message","CANARY-BUSY [slow:0]"],"exit":{"code":0,"sig":null},"durationMs":366,"stdout":"Queued message 01a16226-e65f-7f02-affb-bc8bea33a38b for thread 01a16226-d749-7fe3-8ebb-d45cd9c9f4dd.","stderr":"","spawned":[],"survivors":[]}

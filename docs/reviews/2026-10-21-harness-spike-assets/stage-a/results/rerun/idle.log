@@ -1,0 +1,17 @@
+[   0.1s] mock: mock listening 47707
+[   1.1s] IDLE: lock holders [74969] owner pid 74969
+[   2.7s] queue result: {"exit":{"code":0,"sig":null},"ms":50,"stdout":"Queued message 01a1624d-40b4-7e72-9381-473c098cb4d1 for thread 01a1624d-3cc3-7202-a4d3-b9d2f3f63649.","stderr":"","spawned":[],"survivors":[]}
+[  10.3s] owner auto-dispatched CANARY-IDLE within 20s: true
+[  10.3s] owner events since queue: +9.0s thread/queue/changed(3649) > +9.1s warning(3649) > +9.1s thread/queue/changed(3649) > +9.1s thread/status/changed(3649) > +9.1s turn/started(3649) > +9.1s item/started(3649) > +9.1s item/completed(3649) > +9.1s item/started(3649) > +9.1s item/completed(3649) > +9.1s thread/tokenUsage/updated(3649) > +9.1s account/rateLimits/updated > +9.1s thread/readState/changed(3649) > +9.1s thread/status/changed(3649) > +9.1s turn/completed(3649)
+[  10.3s] db queued_items: 
+[  10.4s] db revisions: 2|01a1624d-3cc3-7202-a4d3-b9d2f3f63649
+[  10.4s] thread/queue/list -> {"data":[],"nextCursor":null}
+[  11.9s] queue result: {"exit":{"code":0,"sig":null},"ms":41,"stdout":"Queued message 01a1624d-64b2-79b0-a19e-20aa1a3a2329 for thread 01a1624d-3cc3-7202-a4d3-b9d2f3f63649.","stderr":"","spawned":[],"survivors":[]}
+[  14.4s] queue after flagged add -> {"data":[{"id":"01a1624d-64b2-79b0-a19e-20aa1a3a2329","input":[{"type":"text","text":"CANARY-FLAGS [slow:0]","text_elements":[]}],"clientUserMessageId":"01a1624d-64b2-79b0-a19e-20955b55d829"}],"nextCursor":null}
+[  14.5s] db payload of flagged item: {"UserInput":{"content":[{"type":"text","text":"CANARY-FLAGS [slow:0]","text_elements":[]}],"client_id":"01a1624d-64b2-79b0-a19e-20955b55d829"}}
+[  14.6s] flagged turn request: model = mock-model | mentions danger-full-access: false | mentions other-model: false | mentions read-only: true
+[  14.6s] add dup-1 #1 -> {"queuedSubmission":{"id":"01a1624d-7512-7c21-a8ec-f04866f8a8dd","input":[{"type":"text","text":"DUP-A","text_elements":[]}],"clientUserMessageId":"dup-1"}}
+[  14.6s] add dup-1 #2 -> {"queuedSubmission":{"id":"01a1624d-7514-72e0-9eed-2c4c6fc8f221","input":[{"type":"text","text":"DUP-B","text_elements":[]}],"clientUserMessageId":"dup-1"}}
+[  14.6s] list after dup adds -> [{"id":"c8f221","cid":"dup-1","text":"DUP-B"}]
+[  14.6s] delete -> {"deleted":true}
+[  14.6s] daemon dir diff: {"added":[],"removed":[]}

@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 import { sanitizeError } from "./local-messaging-errors.mjs";
 import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH } from "./local-messaging-protocol.mjs";
 
@@ -13,14 +14,14 @@ export const MCP_TOOLS = [
   },
   {
     name: "triangle_send_message",
-    description: "Send a message to an authorized local recipient agent on this host.",
+    description: "Send a message to an authorized local recipient agent on this host. The result, and any error, carries messageId and requestId. If a call fails or times out the message may already be admitted: retry with the SAME messageId and requestId so it is recognised as a duplicate instead of running the task twice. Never send a new message just to retry.",
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Target agent profile or ID" },
         text: { type: "string", description: "Message body text" },
-        messageId: { type: "string", description: "Stable message ID for idempotency" },
-        requestId: { type: "string", description: "Correlation request ID" },
+        messageId: { type: "string", description: "Stable message ID for idempotency. Optional on the first call (one is generated and returned); on a retry always pass the messageId returned by the earlier attempt." },
+        requestId: { type: "string", description: "Correlation request ID. Optional on the first call (one is generated and returned); on a retry always pass the requestId returned by the earlier attempt." },
         inReplyTo: { type: "string", description: "Message ID being replied to" },
       },
       required: ["to", "text"],
@@ -60,6 +61,18 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "triangle_ack_notification",
+    description: "Acknowledge a wake notification delivered to this desktop session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        wakeId: { type: "string", description: "Wake ID to acknowledge" },
+        generation: { type: "integer", description: "Binding generation number" },
+      },
+      required: ["wakeId", "generation"],
+    },
+  },
+  {
     name: "triangle_cancel_message",
     description: "Signal cancellation of a sent message (unsupported on local route).",
     inputSchema: {
@@ -72,6 +85,17 @@ export const MCP_TOOLS = [
   },
 ];
 
+// Transport failures leave the outcome unknown: the server may already have admitted the message.
+const UNKNOWN_OUTCOME_CODES = new Set(["timeout", "disconnected", "connection_error", "connection_timeout", "client_closed"]);
+
+// IDs are quoted so no trailing punctuation can be mistaken for part of one.
+function errorText(code, message, retryIds) {
+  const text = `Error (${code}): ${message}`;
+  if (!retryIds) return text;
+  const unknown = UNKNOWN_OUTCOME_CODES.has(code) ? "Outcome unknown: the message may already have been admitted. " : "";
+  return `${text.replace(/[.\s]+$/, "")}. ${unknown}To retry, call triangle_send_message again with the same text and these exact IDs: messageId="${retryIds.messageId}" requestId="${retryIds.requestId}". An exact retry is an idempotent duplicate and never runs the work twice.`;
+}
+
 /**
  * createLocalMessagingMcpHandler:
  *
@@ -82,10 +106,8 @@ export const MCP_TOOLS = [
  */
 export function createLocalMessagingMcpHandler({
   client,
-  credentialValidator,
   turnCredential = null,
   turnCredentialProvider = null,
-  senderId,
 }) {
   async function resolveActiveTurnCredential() {
     if (typeof turnCredentialProvider === "function") {
@@ -100,9 +122,8 @@ export function createLocalMessagingMcpHandler({
     if (!cred) {
       throw new Error("unauthorized: missing injected turn credential");
     }
-    if (credentialValidator) {
-      credentialValidator.validate({ credential: cred, expectedSenderId: senderId });
-    }
+    // The server validates every RPC. The validator holds the signing secret and
+    // must never reach this agent-side process, so none is accepted here.
     return cred;
   }
 
@@ -178,14 +199,23 @@ export function createLocalMessagingMcpHandler({
               }
 
               case "triangle_send_message": {
-                const res = await client.sendMessage({
-                  to: args.to,
-                  text: args.text,
-                  messageId: args.messageId,
-                  requestId: args.requestId,
-                  inReplyTo: args.inReplyTo,
-                }, rpcOptions);
-                resultData = res;
+                // Generated here, not by the client, so even a failed call can say what to retry with.
+                const messageId = args.messageId || randomUUID();
+                const requestId = args.requestId || randomUUID();
+                try {
+                  const res = await client.sendMessage({
+                    to: args.to,
+                    text: args.text,
+                    messageId,
+                    requestId,
+                    inReplyTo: args.inReplyTo,
+                  }, rpcOptions);
+                  resultData = { messageId, requestId, ...res };
+                } catch (sendError) {
+                  const failure = sendError instanceof Error ? sendError : new Error(String(sendError));
+                  failure.retryIds = { messageId, requestId };
+                  throw failure;
+                }
                 break;
               }
 
@@ -206,6 +236,15 @@ export function createLocalMessagingMcpHandler({
 
               case "triangle_consume_reply": {
                 const res = await client.consumeReply({ messageId: args.messageId }, rpcOptions);
+                resultData = res;
+                break;
+              }
+
+              case "triangle_ack_notification": {
+                const res = await client.ackNotification({
+                  wakeId: args.wakeId,
+                  generation: args.generation,
+                }, rpcOptions);
                 resultData = res;
                 break;
               }
@@ -255,7 +294,7 @@ export function createLocalMessagingMcpHandler({
               content: [
                 {
                   type: "text",
-                  text: `Error (${code}): ${message}`,
+                  text: errorText(code, message, err?.retryIds),
                 },
               ],
               isError: true,

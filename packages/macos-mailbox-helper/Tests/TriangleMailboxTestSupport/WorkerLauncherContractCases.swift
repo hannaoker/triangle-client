@@ -283,7 +283,8 @@ public enum WorkerLauncherContractCases {
 
     public static func standaloneSupervisorResolvesCursorAndRejectsCorruption() throws {
         let cursor = try ClientInstance(profile: ProfileName("cursor-only"), runtimeAdapter: .cursorAcp)
-        let fixture = try ResolverFixture(manifestVersion: 8, supervisor: true); defer { fixture.cleanup() }
+        for version in [8, 9, 10] {
+        let fixture = try ResolverFixture(manifestVersion: version, supervisor: true); defer { fixture.cleanup() }
         let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
         let coordinator = try resolver.resolveCoordinator(for: [cursor])
         let drain = try resolver.resolveCursorAcpDrain(for: cursor)
@@ -298,6 +299,7 @@ public enum WorkerLauncherContractCases {
             _ = try resolver.resolveCursorAcpDrain(for: cursor)
             throw WorkerContractFailure("Cursor accepted corrupted standalone supervisor")
         } catch is WorkerLauncherError {}
+        }
     }
 
     public static func cursorAcpReadinessResolvesDrain() throws {
@@ -543,7 +545,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -559,7 +561,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -594,19 +596,47 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 {
+        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 || manifestVersion == 8 {
+        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",
             ]
         }
-        if manifestVersion == 8 {
+        if manifestVersion >= 8 {
             artifactNames += ["packages/agent-worker/src/workload-credential.mjs", "packages/triangle-cli/src/canonical.mjs", "packages/triangle-cli/src/errors.mjs", "packages/triangle-cli/src/keys.mjs", "packages/triangle-cli/src/protocol.mjs", "packages/triangle-cli/src/workload.mjs"]
+        }
+        if manifestVersion >= 9 {
+            artifactNames += [
+                "packages/agent-worker/src/local-messaging-acl.mjs",
+                "packages/agent-worker/src/local-messaging-address.mjs",
+                "packages/agent-worker/src/local-messaging-client.mjs",
+                "packages/agent-worker/src/local-messaging-credentials.mjs",
+                "packages/agent-worker/src/local-messaging-errors.mjs",
+                "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+                "packages/agent-worker/src/local-messaging-mcp-adapter.mjs",
+                "packages/agent-worker/src/local-messaging-protocol.mjs",
+                "packages/agent-worker/src/local-messaging-rate-limiter.mjs",
+                "packages/agent-worker/src/local-messaging-server.mjs",
+                "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+                "packages/agent-worker/src/shared-delivery-journal.mjs",
+                "packages/agent-worker/src/delivery-private-path.mjs",
+                "packages/agent-worker/src/local-messaging-journal.mjs",
+                "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+                "packages/agent-worker/src/local-messaging-auth-broker.mjs",
+                "packages/agent-worker/src/local-messaging-host.mjs",
+                "packages/agent-worker/src/local-messaging-cli.mjs",
+            ]
+        }
+        if manifestVersion >= 10 {
+            artifactNames += [
+                "packages/agent-worker/src/codex-wake-adapter.mjs",
+                "packages/agent-worker/src/local-messaging-notifier.mjs",
+            ]
         }
         if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]

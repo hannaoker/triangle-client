@@ -1,0 +1,10 @@
+[   0.1s] mock: mock listening 47400
+[   0.6s] BUSY turn started; status: "inProgress"
+[   5.2s] queue result: {"exit":{"code":0,"sig":null},"ms":41,"stdout":"Queued message 01a1624d-8563-7dc2-ad0c-bf7d08d79555 for thread 01a1624d-77bf-7300-9721-1322c4b51987.","stderr":"","spawned":[],"survivors":[]}
+[   5.2s] queue while busy -> ["CANARY-BUSY [slow:0]"]
+[   5.2s] owner events since queue (while busy): (none)
+[  22.7s] busy turn completed at +22.0s
+[  23.2s] owner auto-dispatched CANARY-BUSY after the busy turn within 25s: true
+[  23.2s] owner events after busy turn: (none)
+[  23.2s] queue after busy turn -> []
+[  23.2s] daemon dir diff: {"added":[],"removed":[]}
