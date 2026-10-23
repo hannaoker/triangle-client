@@ -172,3 +172,14 @@ host can read the configuration. Additive SQLite metadata can remain. No existin
 messages, bindings, claims or unrelated agent settings are reset. Metadata has a
 128-session cap and eight-day cleanup on subsequent reports. One installation
 supports one workspace; a different workspace requires a separate explicit scope.
+
+If the discovery integration is missing/corrupt or its workspace has moved,
+configured recipients still list normally while discovered entries are hidden.
+`disable-discovery` still removes the optional host config key for rollback.
+Check its `hooksCleanupRequired` result: if true, supply the actual moved workspace
+with `disable-discovery --workspace /absolute/moved/workspace` to finish hook
+cleanup. The command does not follow unsafe paths or pretend a valid capability
+was disabled when its file cannot be updated. Base setup preserves existing
+optional integrations. At the 128-row limit, discovery evicts the oldest ended
+row and retains its end marker; it does not evict observed sessions. Local status
+reports directory `used` and `capacity` so an all-observed full directory is visible.

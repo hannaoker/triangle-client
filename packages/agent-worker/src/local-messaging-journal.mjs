@@ -184,6 +184,10 @@ export function createLocalMessagingJournal({
       session_id TEXT NOT NULL, lifecycle TEXT NOT NULL, generation INTEGER NOT NULL,
       event_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS local_discovery_ended (
+      id TEXT PRIMARY KEY, event_at INTEGER NOT NULL, generation INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS local_discovery_events (
       event_id TEXT PRIMARY KEY, digest TEXT NOT NULL, result_json TEXT NOT NULL,
       received_at INTEGER NOT NULL
@@ -1556,17 +1560,30 @@ export function createLocalMessagingJournal({
       const cutoff=receivedAt-RETENTION_MS;
       db.prepare('DELETE FROM local_discovery_events WHERE received_at < ?').run(cutoff);
       db.prepare('DELETE FROM local_discovered_sessions WHERE last_seen_at < ?').run(cutoff);
-      const old=db.prepare('SELECT * FROM local_discovered_sessions WHERE id=?').get(id);
+      db.prepare('DELETE FROM local_discovery_ended WHERE last_seen_at < ?').run(cutoff);
+      const stored=db.prepare('SELECT * FROM local_discovered_sessions WHERE id=?').get(id);
+      const tombstone=stored?null:db.prepare('SELECT * FROM local_discovery_ended WHERE id=?').get(id);
+      const old=stored||(tombstone?{...tombstone,lifecycle:'ended'}:null);
       const stale=!!old&&(event.observedAt<old.event_at||
         (event.observedAt===old.event_at&&event.kind!=='end')||
         (old.lifecycle==='ended'&&event.kind==='activity'));
-      if(!old&&db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n>=128)throw coded('directory_full','Session directory is full');
+      if(!stored&&!stale&&db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n>=128){
+        const ended=db.prepare("SELECT * FROM local_discovered_sessions WHERE lifecycle='ended' ORDER BY last_seen_at,id LIMIT 1").get();
+        if(!ended)throw coded('directory_full','Session directory is full');
+        db.prepare('INSERT OR REPLACE INTO local_discovery_ended(id,event_at,generation,last_seen_at) VALUES(?,?,?,?)').run(ended.id,ended.event_at,ended.generation,ended.last_seen_at);
+        db.prepare('DELETE FROM local_discovered_sessions WHERE id=?').run(ended.id);
+      }
       const generation=old ? old.generation+(old.lifecycle==='ended'&&event.kind==='start'&&!stale?1:0) : 1;
       if(!stale){
         db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at)
           VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
           generation=excluded.generation,session_id=excluded.session_id,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at`)
           .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt);
+      }
+      if(!stale){
+        if(event.kind==='end')db.prepare(`INSERT INTO local_discovery_ended(id,event_at,generation,last_seen_at) VALUES(?,?,?,?)
+          ON CONFLICT(id) DO UPDATE SET event_at=excluded.event_at,generation=excluded.generation,last_seen_at=excluded.last_seen_at`).run(id,event.observedAt,generation,receivedAt);
+        else db.prepare('DELETE FROM local_discovery_ended WHERE id=?').run(id);
       }
       const result={id,generation,stale,duplicate:false};
       db.prepare('INSERT INTO local_discovery_events(event_id,digest,result_json,received_at) VALUES(?,?,?,?)').run(event.eventId,digest,JSON.stringify(result),receivedAt);
@@ -1592,6 +1609,7 @@ export function createLocalMessagingJournal({
 
   return {
     hasDurablePairLimiter: true,
+    discoveryUsage: async()=>{assertNotClosed();return {used:db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n};},
     recordDiscoveryEvent,
     listDiscoveredSessions,
     recordSend,

@@ -57,10 +57,11 @@ export function createDesktopCredentialBroker({bindingPath,integrationPath,recip
 
 // Discovery credentials admit lifecycle metadata only. They never issue a turn
 // credential or alter a messaging ACL. Same-account shell isolation is not claimed.
-export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>Date.now()}) {
+export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>Date.now(),logger={}}) {
  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  const hex=/^[a-f0-9]{64}$/;
  const pending=new Map();
+ let warned=false;
  let windowStart=clock(),attempts=0;
  function current(){
   const c=readPrivateJson(integrationPath);
@@ -98,13 +99,19 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
    return journal.recordDiscoveryEvent({installationId:c.installationId,event,digest:digest(event,c.installationId),receivedAt:clock()});
   },
   async status(){
-   try{const c=current();return {enabled:c.enabled,mode:'visibility-only',sessions:c.enabled?(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).length:0};}
+   try{const c=current();return {enabled:c.enabled,mode:'visibility-only',sessions:c.enabled?(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).length:0,capacity:128,...(journal.discoveryUsage?await journal.discoveryUsage():{})};}
    catch{return {enabled:false,mode:'visibility-only',error:'invalid_discovery_config'};}
   },
   async listFor(readerId){
-   const c=current();
-   if(!c.enabled||!c.readerIds.includes(readerId))return [];
-   return journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
+   try{
+    const c=current();
+    if(!c.enabled||!c.readerIds.includes(readerId))return [];
+    const rows=await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
+    warned=false;return rows;
+   }catch{
+    if(!warned){warned=true;try{logger?.warn?.('Session discovery unavailable; configured recipients remain available');}catch{}}
+    return [];
+   }
   },
  };
 }

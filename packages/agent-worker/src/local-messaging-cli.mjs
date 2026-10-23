@@ -50,7 +50,9 @@ export function setupLocalMessaging(options,env=process.env){
   if(existing.senderId===senderId&&existing.threadId===threadId)secret=existing.secret;
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
- writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:3600000});
+ const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
+ const optional=Object.fromEntries(['wake','interactive','discovery'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
  return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
 }
 const KNOWN_SETUP_KEYS = new Set([
@@ -277,38 +279,48 @@ export function setupSessionDiscovery(options,env=process.env){
   fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
   fs.renameSync(temp,settingsPath);
  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
- writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath}});
+ writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath,workspace}});
  return {workspace,settingsPath,requiresServiceRestart:true,requiresHarnessHookApproval:true,discoveryOnly:true};
 }
 
 export function disableSessionDiscovery(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
- if(!config.discovery)return {discoveryEnabled:false};
- const integration=readPrivateJson(config.discovery.integrationPath);
- writePrivateJson(config.discovery.integrationPath,{...integration,enabled:false});
- const workspace=integration.workspace,directory=path.join(workspace,'.claude'),settingsPath=path.join(directory,'settings.local.json');
- if(fs.existsSync(settingsPath)){
-  const dir=fs.lstatSync(directory),file=fs.lstatSync(settingsPath);
-  if(fs.realpathSync(workspace)!==workspace||fs.realpathSync(directory)!==directory||!dir.isDirectory()||dir.uid!==process.getuid()||(dir.mode&0o022)||
-    !file.isFile()||file.uid!==process.getuid()||file.nlink!==1||file.size>1024*1024)throw coded('unsafe_path','Unsafe Claude hook settings');
-  const settings=JSON.parse(fs.readFileSync(settingsPath,'utf8'));
-  const suffix=` discovery-hook --config ${shellQuote(configPath)}`;
-  for(const event of ['SessionStart','SessionEnd','UserPromptSubmit']){
-   if(!settings.hooks?.[event])continue;
-   settings.hooks[event]=settings.hooks[event].map(entry=>({...entry,hooks:entry.hooks.filter(hook=>!(hook.type==='command'&&typeof hook.command==='string'&&hook.command.endsWith(suffix)))})).filter(entry=>entry.hooks.length);
-   if(!settings.hooks[event].length)delete settings.hooks[event];
+ const integrationPath=config.discovery?.integrationPath||path.join(config.stateRoot,'session-discovery.json');
+ let integration=null;
+ try{integration=readPrivateJson(integrationPath);}catch{/* Missing or corrupt capabilities cannot admit new reports. */}
+ if(integration)writePrivateJson(integrationPath,{...integration,enabled:false});
+ const workspace=options.workspace||config.discovery?.workspace||integration?.workspace;
+ let hooksCleanupRequired=false;
+ try{
+  if(typeof workspace!=='string')throw coded('workspace_unknown','Workspace required for hook cleanup');
+  const directory=path.join(workspace,'.claude'),settingsPath=path.join(directory,'settings.local.json');
+  if(!fs.existsSync(workspace))throw coded('workspace_missing','Workspace moved or missing');
+  if(fs.existsSync(settingsPath)){
+   const dir=fs.lstatSync(directory),file=fs.lstatSync(settingsPath);
+   if(fs.realpathSync(workspace)!==workspace||fs.realpathSync(directory)!==directory||!dir.isDirectory()||dir.uid!==process.getuid()||(dir.mode&0o022)||
+     !file.isFile()||file.uid!==process.getuid()||file.nlink!==1||file.size>1024*1024)throw coded('unsafe_path','Unsafe Claude hook settings');
+   const settings=JSON.parse(fs.readFileSync(settingsPath,'utf8'));
+   const suffix=` discovery-hook --config ${shellQuote(configPath)}`;
+   for(const event of ['SessionStart','SessionEnd','UserPromptSubmit']){
+    if(!Array.isArray(settings.hooks?.[event]))continue;
+    settings.hooks[event]=settings.hooks[event].flatMap(entry=>{
+     if(!Array.isArray(entry?.hooks))return [entry];
+     const hooks=entry.hooks.filter(hook=>!(hook.type==='command'&&typeof hook.command==='string'&&hook.command.endsWith(suffix)));
+     return hooks.length===entry.hooks.length?[entry]:hooks.length?[{...entry,hooks}]:[];
+    });
+    if(!settings.hooks[event].length)delete settings.hooks[event];
+   }
+   if(settings.hooks&&!Object.keys(settings.hooks).length)delete settings.hooks;
+   const temp=path.join(directory,`.triangle-disable-${randomUUID()}`);let fd;
+   try{
+    fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
+    fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,settingsPath);
+   }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
   }
-  if(settings.hooks&&!Object.keys(settings.hooks).length)delete settings.hooks;
-  const temp=path.join(directory,`.triangle-disable-${randomUUID()}`);
-  let fd;
-  try{
-   fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
-   fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,settingsPath);
-  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
- }
- // Remove the optional key so an older host can read the configuration again.
+ }catch{hooksCleanupRequired=true;}
+ // Always remove the optional key, even if hook cleanup needs an explicit moved workspace.
  const {discovery,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
- return {discoveryEnabled:false};
+ return {discoveryEnabled:false,hooksCleanupRequired};
 }
 
 export async function runSessionDiscoveryHook({configPath,input,stderr=process.stderr}){

@@ -58,7 +58,7 @@ test('nonce binds event; duplicate retry is durable; invalid secret, scope and d
  }finally{await f.close();}
 });
 
-import {setupLocalMessaging,setupSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
+import {setupLocalMessaging,setupSessionDiscovery,disableSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
 import {spawn} from 'node:child_process';
@@ -110,6 +110,11 @@ test('owner opt-in preserves settings; real hook/host/CLI discovers existing and
   assert.equal(executions,0);
   await invokeHook(configPath,{session_id:ids[0],cwd:workspace,hook_event_name:'SessionEnd'});
   sessions=(await run(['sessions'])).sessions;assert.equal(sessions.filter(row=>row.presence==='offline').length,1);
+  fs.renameSync(workspace,workspace+'-moved');
+  assert.equal((await run(['sessions'])).sessions.length,1,'B1: configured recipient still lists when workspace is gone');
+  fs.renameSync(workspace+'-moved',workspace);
+  fs.unlinkSync(config.discovery.integrationPath);
+  assert.equal((await run(['sessions'])).sessions.length,1,'B1: missing integration cannot break existing directory');
   await run(['disable-discovery']);assert.equal((await run(['sessions'])).sessions.filter(row=>row.harness==='claude').length,0);
   assert.deepEqual(JSON.parse(fs.readFileSync(settingsPath,'utf8')),prior,'disable removes only managed hooks');
   assert.equal('discovery' in JSON.parse(fs.readFileSync(configPath,'utf8')),false,'old hosts accept rollback configuration');
@@ -140,5 +145,67 @@ test('compaction/resume with same identity retains handle and delayed end cannot
   const resumed=await f.report(b,f.event(sid,'start',now-60));assert.equal(resumed.id,first.id);assert.equal(resumed.generation,2);
   const late=await f.report(b,f.event(sid,'end',now-70));assert.equal(late.stale,true);
   const rows=await b.listFor(f.reader);assert.equal(rows.length,1);assert.equal(rows[0].presence,'unknown');assert.equal(rows[0].generation,2);
+ }finally{await f.close();}
+});
+
+test('B1: missing workspace or invalid integration hides discovery without failing listing',async()=>{
+ const f=fixture();try{
+  const b=f.broker();fs.renameSync(f.workspace,f.workspace+'-moved');
+  assert.deepEqual(await b.listFor(f.reader),[]);
+  fs.unlinkSync(f.integrationPath);assert.deepEqual(await b.listFor(f.reader),[]);
+  fs.writeFileSync(f.integrationPath,'not JSON',{mode:0o600});assert.deepEqual(await b.listFor(f.reader),[]);
+ }finally{await f.close();}
+});
+
+function ownerFixture(){
+ const root=fs.mkdtempSync('/private/tmp/triangle-discovery-recovery-'),workspace=path.join(root,'workspace');
+ fs.mkdirSync(workspace,{mode:0o700});
+ const wrapper=path.join(root,'triangle-local');fs.writeFileSync(wrapper,'#!/bin/sh\nexit 0\n',{mode:0o700});
+ const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+ writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'recovery-thread',enabled:false});
+ const setup={config:configPath,'desktop-binding':bindingPath,'thread-id':'recovery-thread',recipients:['gravity2']};
+ setupLocalMessaging(setup);setupSessionDiscovery({config:configPath,workspace,'local-cli':wrapper});
+ return {root,workspace,configPath,setup,settingsPath:path.join(workspace,'.claude/settings.local.json'),integrationPath:path.join(root,'local/session-discovery.json')};
+}
+
+test('B1/R1: disable repairs missing/corrupt integration and key loss, preserving unrelated hooks',()=>{
+ for(const failure of ['missing','corrupt','key-loss']){
+  const f=ownerFixture();try{
+   const config=JSON.parse(fs.readFileSync(f.configPath));
+   if(failure==='missing')fs.unlinkSync(f.integrationPath);
+   if(failure==='corrupt')fs.writeFileSync(f.integrationPath,'not JSON');
+   if(failure==='key-loss'){delete config.discovery;writePrivateJson(f.configPath,config);}
+   const result=disableSessionDiscovery({config:f.configPath});
+   assert.equal(result.discoveryEnabled,false);
+   assert.equal('discovery' in JSON.parse(fs.readFileSync(f.configPath)),false);
+   assert.ok(!JSON.parse(fs.readFileSync(f.settingsPath)).hooks,'managed hooks removed despite damaged state');
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+ }
+});
+
+test('R1: base setup preserves optional integrations so disable can remove managed hooks',()=>{
+ const f=ownerFixture();try{
+  const before=JSON.parse(fs.readFileSync(f.configPath));
+  setupLocalMessaging(f.setup);
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.configPath)).discovery,before.discovery);
+  disableSessionDiscovery({config:f.configPath});
+  assert.ok(!JSON.parse(fs.readFileSync(f.settingsPath)).hooks);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('R2: full directory evicts oldest ended row, retaining its end fence across restart',async()=>{
+ const f=fixture();try{
+  let n=0;const now=Date.now(),ended=randomUUID();
+  const report=(sid,kind,at)=>f.journal.recordDiscoveryEvent({installationId:f.integration.installationId,event:f.event(sid,kind,at),digest:'test-'+n++,receivedAt:now});
+  const old=await report(ended,'end',now-100);
+  for(let i=1;i<128;i++)await report(randomUUID(),'start',now-90);
+  await report(randomUUID(),'start',now-50);
+  let rows=await f.journal.listDiscoveredSessions({installationId:f.integration.installationId,workspace:f.workspace});
+  assert.equal(rows.length,128);assert.ok(!rows.some(row=>row.id===old.id));
+  await f.reopen();
+  const stale=await report(ended,'activity',now-10);assert.equal(stale.stale,true);
+  rows=await f.journal.listDiscoveredSessions({installationId:f.integration.installationId,workspace:f.workspace});assert.equal(rows.length,128);
+  await assert.rejects(report(randomUUID(),'start',now),{code:'directory_full'});
+  const status=await f.broker().status();assert.equal(status.used,128);assert.equal(status.capacity,128);
  }finally{await f.close();}
 });

@@ -21,7 +21,7 @@ export function loadLocalMessagingConfig(configPath) {
  }
  if(config.discovery!==undefined){
   const d=config.discovery;
-  if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['enabled','integrationPath'].includes(k))||typeof d.enabled!=='boolean'||
+  if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['enabled','integrationPath','workspace'].includes(k))||typeof d.enabled!=='boolean'||
     (d.enabled&&(typeof d.integrationPath!=='string'||!d.integrationPath.startsWith('/')||d.integrationPath.includes('\0'))))throw coded('invalid_local_config','Invalid discovery configuration');
  }
  if(config.wake!==undefined){
@@ -147,7 +147,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      timerIntervalMs:timerIntervalMs??config.wake?.timerIntervalMs??5000,
      clock:clock??{now:()=>Date.now()},
     });
-    const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal}):null;
+    const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
     subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,recipientDirectory,discoveryBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}

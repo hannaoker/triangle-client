@@ -90,3 +90,31 @@ non-retention regression check. The final privacy-adjusted candidate also passed
 the complete suite: 915 passed, zero failed, three skipped (918 total, about 172
 seconds, cross-file concurrency two). Bundle closure checks passed all 14 tests.
 No independent code review or production activation is claimed.
+
+## Review-fix batch: B1, R1 and R2
+
+Claude's static review of 0239c46 identified one production blocker, independently
+reproduced before edits: missing workspace/integration metadata broke the readable
+directory and disable/rollback. The candidate now hides unavailable discovery
+entries without failing configured-recipient listing; it emits one generic
+warning per unavailable episode without exposing private paths. Disable removes
+the optional config key even when discovery metadata is missing/corrupt. Setup
+records the workspace in owner config as a cleanup fallback. A moved or unknown
+workspace yields hooksCleanupRequired=true; the owner can provide --workspace to
+clean the moved hooks without editing files by hand. Unsafe hook paths are never
+followed. A valid capability that cannot be disabled still raises an error rather
+than falsely claiming revocation.
+
+Base setup preserves optional wake/interactive/discovery settings. Disable also
+finds a valid default integration when the config key has been lost. It preserves
+unrelated empty/malformed hook entries rather than removing them incidentally.
+
+At capacity the journal evicts the oldest ended directory entry, keeping a
+separate durable end marker for the retention window so late activity cannot
+resurrect it. Observed entries are not evicted; an all-observed full directory
+still reports directory_full. Status exposes used/capacity. End markers also
+cover ended entries created before the new table existed.
+
+The expanded discovery suite has ten tests; 32 focused discovery/host/socket tests
+passed with zero failures. Full-suite and focused independent re-review results
+follow when complete. R3-R10 are not collectively claimed resolved by this batch.
