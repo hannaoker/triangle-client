@@ -87,3 +87,10 @@ The desktop probe ran in a tool child, not a session-installed Triangle MCP
 child; even a later successful scratch wake would not close MCP registration,
 scoped identity or bidirectional-message gates. Production Triangle configuration
 and Codex–Antigravity wake remain unchanged by this source-only branch.
+
+The desktop UI subsequently showed the owner's explicit message, "I've allowed
+that command. Run the metadata script again." Claude retried the identical
+command once, and its Auto classifier denied it again with the same reason.
+The parent did not retry through another tool or inspect other processes'
+credentials. The owner was asked to use Ask mode in this scratch session and
+approve the exact command there; no permission-mode change was made by Codex.
