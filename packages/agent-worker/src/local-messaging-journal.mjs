@@ -801,6 +801,60 @@ export function createLocalMessagingJournal({
     return mapWakeBindingRow(row);
   }
 
+  // Wake state of an attached session belongs to its address and lifecycle generation, not to the MCP
+  // child process. A replacement child inherits an outstanding wake instead of holding it stale (session
+  // addresses have no operator reconcile path), and a new lifecycle generation starts a fresh wake epoch.
+  // Legacy single-session bindings keep using initInteractiveWakeBinding.
+  async function bindAttachedSessionWake({ senderId, sessionId, generation, bindingId }) {
+    assertNotClosed();
+    if (!senderId || !sessionId || !bindingId || !Number.isSafeInteger(generation) || generation < 1) {
+      throw coded("invalid_params", "senderId, sessionId, bindingId, and a positive generation are required");
+    }
+    const canonicalBindingId = bindingId.toLowerCase();
+    const threadId = `claude-session:${sessionId}`;
+    const read = () => db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(senderId);
+    const isCurrent = (row) => Boolean(row) && row.binding_id === canonicalBindingId &&
+      row.generation === generation && row.thread_id === threadId && row.delivery_state !== "stale_held";
+
+    // Heartbeats re-attach every few seconds: the unchanged case must not write.
+    const quick = read();
+    if (isCurrent(quick)) return mapWakeBindingRow(quick);
+
+    return withImmediateTransaction(() => {
+      const now = Date.now();
+      const existing = read();
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO local_wake_bindings (
+            target_identity, binding_id, thread_id, generation, delivery_state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'idle', ?, ?)
+        `).run(senderId, canonicalBindingId, threadId, generation, now, now);
+      } else if (!isCurrent(existing)) {
+        if (existing.generation === generation && existing.thread_id === threadId && existing.delivery_state !== "stale_held") {
+          // Same lifecycle, new MCP child: keep the delivery state and carry the wake history over.
+          db.prepare("UPDATE local_wake_bindings SET binding_id = ?, updated_at = ? WHERE target_identity = ?")
+            .run(canonicalBindingId, now, senderId);
+          db.prepare(`
+            UPDATE local_interactive_wake_history SET binding_id = ?
+            WHERE target_identity = ? AND session_id = ? AND generation = ? AND binding_id = ?
+          `).run(canonicalBindingId, senderId, sessionId, generation, existing.binding_id);
+        } else {
+          // New lifecycle generation, or a hold left by an earlier build: a fresh wake epoch. The old wake can
+          // no longer be acknowledged (acks are fenced by generation), so keeping it would block this session's
+          // wakes forever. Acknowledgement fingerprints and the minimum wake interval carry over.
+          db.prepare(`
+            UPDATE local_wake_bindings
+            SET binding_id = ?, thread_id = ?, generation = ?, delivery_state = 'idle',
+                active_wake_id = NULL, active_fingerprint = NULL,
+                receipt_queued_id = NULL, receipt_thread_id = NULL, updated_at = ?
+            WHERE target_identity = ?
+          `).run(canonicalBindingId, threadId, generation, now, senderId);
+        }
+      }
+      return mapWakeBindingRow(read());
+    });
+  }
+
   async function reserveInteractiveWake({ targetIdentity, reservationId, sessionId, generation, bindingId, now = Date.now() }) {
     assertNotClosed();
     if (
@@ -1657,6 +1711,7 @@ export function createLocalMessagingJournal({
     ackWake,
     reconcileStaleWake,
     initInteractiveWakeBinding,
+    bindAttachedSessionWake,
     reserveInteractiveWake,
     reportInteractiveWakeResult,
     ackInteractiveWake,

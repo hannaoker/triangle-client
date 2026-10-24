@@ -199,6 +199,16 @@ policy permits only the bound Codex sender; attached sessions can initiate sends
 only to configured workers. Replies follow the original sender and claim.
 This does not add an incoming Codex inbox or Claude-to-Claude permission.
 
+The policy file is a ceiling, not a mirror of the owner config. Effective
+authority is the policy intersected with the owner config the supervisor loaded:
+a worker removed from `recipients` stops being reachable from attached sessions
+at the next supervisor restart, while a worker added later needs
+`setup-session-messaging` to be run again. The policy names the Codex sender
+that was bound when it was written. Re-running `setup` with a replacement sender
+revokes participation (policy disabled, managed MCP entry removed, config key
+dropped); run `setup-session-messaging` again to authorize the new sender. A
+thread-only `--rebind-thread` keeps the same sender and keeps participation.
+
 MCP initializes before attachment: Claude may fire SessionStart only after MCP
 initialization finishes. First tool call/heartbeat attaches only after matching
 lifecycle registration. The child uses its own exported session/socket/token;
@@ -208,6 +218,9 @@ stale inherited identities after `/clear`.
 Use exact `session-...` IDs. A child renews a durable 30-second lease every five
 seconds. Clean close detaches; a crash becomes offline after expiry. Restart
 preserves custody; competing children cannot replace an unexpired lease.
+Wake state belongs to the session address and lifecycle generation, not to the
+child process: a replacement child inherits an outstanding wake and can
+acknowledge it, while a new lifecycle generation starts a fresh wake epoch.
 Capability rotation/disable fences prior credentials. Presence means a recent
 child heartbeat, not that the model is free. Wake remains unsupported and pinned
 to Claude 2.1.307; write acceptance alone is not visible-delivery proof.

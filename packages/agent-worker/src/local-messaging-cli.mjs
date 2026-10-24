@@ -55,8 +55,20 @@ export function setupLocalMessaging(options,env=process.env){
  const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
+ // Session participation authorizes one specific Codex sender, so a replacement sender must be re-authorized
+ // explicitly. A thread-only rebind keeps the sender and therefore keeps participation.
+ let sessionMessagingDisabled=false,mcpCleanupRequired=false;
+ if(optional.sessionMessaging){
+  let authorized=false;
+  try{authorized=readPrivateJson(optional.sessionMessaging.integrationPath).allowedSenders?.includes(senderId)===true;}catch{}
+  if(!authorized){
+   // Fail closed: the new config omits the key, and the old capability is fenced and its managed MCP entry removed when possible.
+   delete optional.sessionMessaging;sessionMessagingDisabled=true;
+   try{mcpCleanupRequired=disableWorkspaceMessaging({config:configPath},env).mcpCleanupRequired;}catch{mcpCleanupRequired=true;}
+  }
+ }
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
- return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
+ return {configPath,senderId,threadId,recipients,requiresServiceRestart:true,...(sessionMessagingDisabled?{sessionMessagingDisabled,mcpCleanupRequired}:{})};
 }
 const KNOWN_SETUP_KEYS = new Set([
  'configPath',

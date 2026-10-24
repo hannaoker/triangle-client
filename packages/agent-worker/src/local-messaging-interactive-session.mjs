@@ -196,12 +196,19 @@ export function attachedSessionIdentity(installationId,sessionId){
  const pseudo=`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`;
  return {sessionHash,pseudoSessionId:pseudo};
 }
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now()}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
+ // The policy file is the ceiling the owner granted at setup; it never widens what the live owner
+ // configuration allows. A replaced Codex sender or a removed worker loses session access immediately.
+ const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId]);
+ const liveRecipients=configuredRecipients===null?null:new Set(configuredRecipients);
  function policy(){const c=readSessionMessagingPolicy(policyPath),d=readPrivateJson(discoveryPath);
-  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');return c;}
+  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
+  return {...c,
+   allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
+   allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
  async function rows(){const c=policy();return journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});}
  async function current(id){
   const c=policy(),r=(await rows()).find(r=>r.id===id);
@@ -223,7 +230,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
    await journal.attachDiscoveredSession({id,childId:request.childId,generation:r.generation,installationId:policyScope(c),wakeCapable:request.wakeCapable===true,now:clock()});
-   await journal.initInteractiveWakeBinding({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
+   await journal.bindAttachedSessionWake({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients]})};
   },
