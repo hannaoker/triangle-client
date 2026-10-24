@@ -1016,3 +1016,30 @@ test("binding origin overrides are checked on the raw path, before URL normaliza
     }
   }
 });
+
+
+test("doctor accepts supported worker manifests through v11 but rejects future versions", () => {
+ const f=mixedFixture();try {
+  const file=path.join(f.client,'../worker-runtime/antigravity.manifest.json');
+  const base=JSON.parse(readFileSync(file,'utf8'));
+  for(const version of [9,10,11,12]){
+   writeJson(file,{...base,version});
+   const inv=readInstallationInventory({clientRoot:f.client,now:NOW,pidAlive:()=>true,advisoryHeldAt:()=>true});
+   const row=inv.profiles.find(p=>p.profile==='gravity2');
+   assert.equal(row.binding.status,version===12?'invalid':'bound');
+  }
+ }finally{rmSync(f.root,{recursive:true,force:true});}
+});
+
+test("same-process same-family compatibility locks are one claimer; distinct owners still conflict", () => {
+ const f=mixedFixture();try {
+  const existing=JSON.parse(readFileSync(path.join(f.client,'cursor-acp-claimer.ghost.json'),'utf8'));
+  const alias=path.join(f.client,'headless-claimer.ghost.json');
+  for(const overrides of [{},{pid:610},{family:'codex'},{owner:'other-owner'},{family:null}]){
+   writeJson(alias,{...existing,...overrides});
+   const inv=readInstallationInventory({clientRoot:f.client,now:NOW,pidAlive:()=>true,advisoryHeldAt:()=>true});
+   const row=inv.profiles.find(p=>p.profile==='ghost');
+   assert.equal(row.faults.includes('dual_claimer_conflict'),Object.keys(overrides).length>0);
+  }
+ }finally{rmSync(f.root,{recursive:true,force:true});}
+});
