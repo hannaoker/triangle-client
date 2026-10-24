@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import {
   SUPERVISOR_TUNING_FILE,
@@ -26,10 +26,16 @@ function capture() {
   };
 }
 
+const roots = [];
+after(() => {
+  for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+});
+
 function tempRoot() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "triangle-tuning-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "triangle-tuning-")));
   fs.chmodSync(root, 0o700);
-  return fs.realpathSync(root);
+  roots.push(root);
+  return root;
 }
 
 function writeTuning(root, content, mode = 0o600) {
