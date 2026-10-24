@@ -43,6 +43,7 @@ export function createLocalControlServer({
   recipientDirectory = [],
   discoveryBroker = null,
   sessionBroker = null,
+  inboxBroker = null,
   rateLimiter,
   exchangeLimiter = null,
   loopTracker,
@@ -174,6 +175,10 @@ export function createLocalControlServer({
         }
       }
 
+      if(claims?.senderType==='desktop-inbox'||(inboxBroker?.isDesktopSender(senderId)&&['list_inbox','claim_inbox_message','send_reply'].includes(method))){
+        if(!inboxBroker)throw coded('unauthorized','Desktop inbox is not supported');
+        await inboxBroker.validateRequest({claims,senderId});
+      }
       switch (method) {
         case "attach_session":
         case "detach_session": {
@@ -397,6 +402,8 @@ export function createLocalControlServer({
               inFlightExecutions.add(execPromise);
               execPromise.finally(() => inFlightExecutions.delete(execPromise));
             }
+
+            notifier?.notifyObligationChange?.();
 
             // 8. Return custody receipt promptly carrying original stored requestId
             const resp = createSuccessResponse(

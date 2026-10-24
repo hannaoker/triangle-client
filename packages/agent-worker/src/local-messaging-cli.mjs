@@ -15,8 +15,8 @@ import {coded} from './local-messaging-errors.mjs';
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging']);
- while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor']);
+ while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -53,9 +53,10 @@ export function setupLocalMessaging(options,env=process.env){
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
- const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging','inbox'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
+ if(optional.inbox&&bindingChanged)optional.inbox={...optional.inbox,enabled:false,bindingId:randomUUID()};
  // Session participation authorizes one specific Codex sender, so a replacement sender must be re-authorized
  // explicitly. A thread-only rebind keeps the sender and therefore keeps participation.
  let sessionMessagingDisabled=false,mcpCleanupRequired=false;
@@ -364,7 +365,9 @@ export async function runSessionDiscoveryHook({configPath,input,stderr=process.s
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
+ if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
  if(command==='disable-session-messaging'){output.write(JSON.stringify(disableWorkspaceMessaging(options,env))+'\n');return 0;}
  if(command==='setup-discovery'){output.write(JSON.stringify(setupSessionDiscovery(options,env))+'\n');return 0;}
@@ -408,7 +411,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   return 0;
  }
- if(!['status','discover','sessions','send','replies','consume','ack-wake','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
+ if(!['status','discover','sessions','send','replies','consume','ack-wake','inbox','claim','reply','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
  const binding=readPrivateJson(config.integrationPath);
@@ -427,6 +430,20 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   const rpcOptions={credential:await credential()};let result;
   if(command==='status')result=options['message-id'] ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);
+  if(command==='inbox'){const rows=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpcOptions);result={items:[...rows],nextCursor:rows.nextCursor??null};}
+  if(command==='claim'){
+   if(!options['message-id']||!options['claim-id'])throw coded('invalid_arguments','Stable message-id and claim-id required');
+   result=await client.claimInboxMessage({messageId:options['message-id'],claimId:options['claim-id']},rpcOptions);
+  }
+  if(command==='reply'){
+   if(!options['claim-file']||!options['message-id']||!options['reply-id'])throw coded('invalid_arguments','Private claim-file, message-id and stable reply-id required');
+   const claim=readPrivateJson(options['claim-file']);
+   if(claim.messageId!==options['message-id']||typeof claim.claimToken!=='string')throw coded('invalid_arguments','Claim file must match the message');
+   if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
+   const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;
+   if(typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>128*1024)throw coded('invalid_message','Bounded nonempty reply required');
+   result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text},rpcOptions);
+  }
   if(command==='sessions')result={sessions:await client.listSessions(rpcOptions)};
   if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,recipients:await client.discoverRecipients(rpcOptions)};
   if(command==='replies')result={senderId:binding.senderId,replies:await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to']},rpcOptions)};
@@ -495,7 +512,7 @@ export function setupWorkspaceMessaging(options,env=process.env){
  if(fs.realpathSync(wrapper)!==wrapper||!st.isFile()||st.uid!==process.getuid()||(st.mode&0o022)||!(st.mode&0o100))throw coded('unsafe_path','Owner installed wrapper required');
  const integrationPath=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
  const old=fs.existsSync(integrationPath)?readPrivateJson(integrationPath):null;
- const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:old?.enabled===true&&old?.installationId===d.installationId?old.secret:randomBytes(32).toString('hex'),allowedSenders:[readPrivateJson(config.integrationPath).senderId],allowedRecipients:config.recipients.map(r=>r.instanceId)};
+ const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:old?.enabled===true&&old?.installationId===d.installationId?old.secret:randomBytes(32).toString('hex'),allowedSenders:[readPrivateJson(config.integrationPath).senderId],allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[readPrivateJson(config.integrationPath).senderId]:[])]};
  const file=path.join(d.workspace,'.mcp.json');
  let mcp={};
  if(fs.existsSync(file)){
@@ -542,4 +559,23 @@ export function disableWorkspaceMessaging(options,env=process.env){
   }
  }catch{mcpCleanupRequired=true;}
  return {sessionMessagingEnabled:false,mcpCleanupRequired};
+}
+
+
+export function setupDesktopInbox(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath),desktop=readPrivateJson(config.integrationPath);
+ const allowedSenders=options.senders;
+ if(!Array.isArray(allowedSenders)||!allowedSenders.length||allowedSenders.length>64||new Set(allowedSenders).size!==allowedSenders.length||allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)||id===desktop.senderId))throw coded('invalid_arguments','Choose explicit distinct sender IDs with --sender');
+ // Workspace participation remains its own capability ceiling; add only the receiver destination.
+ if(config.sessionMessaging?.enabled){const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:[...new Set([...policy.allowedRecipients,desktop.senderId])]});}
+ writePrivateJson(configPath,{...config,inbox:{enabled:true,bindingId:randomUUID(),allowedSenders}});
+ return {inboxEnabled:true,senderId:desktop.senderId,allowedSenders,automaticWake:config.wake?.enabled===true,requiresServiceRestart:true};
+}
+export function disableDesktopInbox(options,env=process.env){
+ const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath),desktop=readPrivateJson(config.integrationPath);
+ // Revoke receiver authority first. A missing workspace policy cannot preserve inbox permission.
+ const {inbox,...rest}=config;writePrivateJson(configPath,rest);
+ let policyCleanupRequired=false;
+ if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});}catch{policyCleanupRequired=true;}}
+ return {inboxEnabled:false,policyCleanupRequired,requiresServiceRestart:true};
 }

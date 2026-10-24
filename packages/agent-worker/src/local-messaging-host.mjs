@@ -1,14 +1,14 @@
 import {randomUUID as cryptoRandomId,createHash} from 'node:crypto';
 import {createDesktopCredentialBroker,readPrivateJson,createSessionDiscoveryBroker} from './local-messaging-auth-broker.mjs';
 import {createOwnerAcl} from './local-messaging-acl.mjs';
-import {createWorkspaceSessionBroker,validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
+import {UUID_PATTERN,createWorkspaceSessionBroker,validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
 import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.mjs';
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging','inbox'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
@@ -19,6 +19,10 @@ export function loadLocalMessagingConfig(configPath) {
   if(config.interactive.enabled){
    if(typeof config.interactive.integrationPath!=='string'||!config.interactive.integrationPath.startsWith('/')||config.interactive.integrationPath.includes('\0'))throw coded('invalid_local_config','Interactive integrationPath must be absolute');
   }
+ }
+ if(config.inbox!==undefined){
+  const i=config.inbox;
+  if(!i||Object.keys(i).sort().join(',')!=='allowedSenders,bindingId,enabled'||typeof i.enabled!=='boolean'||!UUID_PATTERN.test(i.bindingId)||!Array.isArray(i.allowedSenders)||i.allowedSenders.length>64||new Set(i.allowedSenders).size!==i.allowedSenders.length||i.allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_local_config','Invalid desktop inbox policy');
  }
  if(config.sessionMessaging!==undefined){
   const m=config.sessionMessaging;
@@ -59,6 +63,16 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  for(const r of config.recipients)if(typeof runners.get(r.instanceId)?.run!=='function')throw coded('local_recipient_unavailable',`Recipient runtime unavailable: ${r.profile}`);
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
+ const inboxEnabled=config.inbox?.enabled===true;
+ const inboxPolicy=()=>{try{const current=loadLocalMessagingConfig(configPath).inbox;return inboxEnabled&&current?.enabled?current:null;}catch{return null;}};
+ const receivesFrom=sender=>!!inboxPolicy()?.allowedSenders.includes(sender);
+ const desktopEpoch=()=>{const c=readPrivateJson(config.integrationPath);return createHash('sha256').update(c.bindingId+'\0'+c.secret+'\0'+c.threadId).digest('hex');};
+ const desktopClaims=()=>{const policy=inboxPolicy();if(!policy)throw coded('inbox_disabled','Desktop inbox is disabled');return {senderType:'desktop-inbox',sessionId:policy.bindingId,generation:1,bindingId:desktopEpoch()};};
+ const inboxBroker={
+  isDesktopSender:id=>id===integration.senderId,
+  validateRequest({claims,senderId}){const current=readPrivateJson(config.integrationPath),expected=desktopClaims();if(senderId!==integration.senderId||current.senderId!==integration.senderId||current.threadId!==integration.threadId||claims.senderType!==expected.senderType||claims.sessionId!==expected.sessionId||claims.generation!==expected.generation||claims.bindingId!==expected.bindingId)throw coded('binding_changed','Desktop inbox binding changed');},
+ };
+
 
  let interactiveIntegration=null;
  if(config.interactive?.enabled){
@@ -87,7 +101,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
   const claudeId=interactiveIntegration.senderId;
   codexAllowedRecipients.push(claudeId);
   registry.push(claudeId);
-  aclRules[claudeId]=[...recipientIds];
+  aclRules[claudeId]=[...recipientIds,...(inboxEnabled&&receivesFrom(claudeId)?[integration.senderId]:[])];
   for(const id of recipientIds){
    if(aclRules[id]&&!aclRules[id].includes(claudeId))aclRules[id].push(claudeId);
   }
@@ -112,7 +126,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     const {createInteractiveSessionBroker}=await import('./local-messaging-interactive-session.mjs');
     interactiveBroker=createInteractiveSessionBroker({
      integrationPath:config.interactive.integrationPath,
-     recipients:recipientIds,
+     recipients:[...recipientIds,...(inboxEnabled&&receivesFrom(interactiveIntegration.senderId)?[integration.senderId]:[])],
      issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts),
     });
     interactiveRecipients.add(interactiveBroker.senderId);
@@ -128,7 +142,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    }
    if(config.sessionMessaging?.enabled){
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
-     ownerSenderId:integration.senderId,configuredRecipients:recipientIds,logger,
+     ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],logger,
      issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
     const legacy=interactiveBroker;
     interactiveBroker={
@@ -138,15 +152,16 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     };
    }
    const baseAcl=createOwnerAcl({rules:aclRules});
-   const ownerAcl=sessionBroker?{
-    async listAuthorizedRecipients(sender){return [...new Set([...baseAcl.listAuthorizedRecipients(sender),...await sessionBroker.recipientIds(sender),...(sessionBroker.isInteractiveSender(sender)?sessionBroker.allowedRecipients():[])])];},
+   const ownerAcl={
+    async listAuthorizedRecipients(sender){return [...new Set([...baseAcl.listAuthorizedRecipients(sender),...(sessionBroker?await sessionBroker.recipientIds(sender):[]),...(sessionBroker?.isInteractiveSender(sender)?sessionBroker.allowedRecipients():[])])].filter(id=>id!==integration.senderId||receivesFrom(sender));},
     async checkAllowed(sender,to){
-     if(sessionBroker.isInteractiveSender(to)){await sessionBroker.checkRecipient(sender,to);return;}
-     if(sessionBroker.isInteractiveSender(sender)&&sessionBroker.allowedRecipients().includes(to))return;
+     if(to===integration.senderId){if(!inboxEnabled||!receivesFrom(sender))throw coded('recipient_not_allowed','Desktop inbox receiver policy denies sender');return;}
+     if(sessionBroker?.isInteractiveSender(to)){await sessionBroker.checkRecipient(sender,to);return;}
+     if(sessionBroker?.isInteractiveSender(sender)&&sessionBroker.allowedRecipients().includes(to))return;
      baseAcl.checkAllowed(sender,to);
     },
-   }:baseAcl;
-   const sessionRecipients={has:id=>interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
+   };
+   const sessionRecipients={has:id=>(inboxEnabled&&id===integration.senderId)||interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
    try {
     dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
      const runner=runners.get(job.recipient);
@@ -162,6 +177,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     }});
     notifier=createLocalMessagingNotifier({
      journal,
+     inboxEnabled,
      targetIdentity:broker.senderId,
      threadId:broker.threadId,
      bindingId:integration.bindingId,
@@ -175,11 +191,11 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory,discoveryBroker,sessionBroker,ownerAcl,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory,discoveryBroker,sessionBroker,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
-     return {credential:sessionBroker?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1}):broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
+     return {credential:sessionBroker?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):inboxEnabled?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
     }});
     await subsystem.start();
     try {

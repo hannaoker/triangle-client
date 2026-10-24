@@ -250,3 +250,26 @@ redirects work to another chat, or launches a replacement. Existing
 claim/retention behavior is unchanged; this adds no new task expiry contract.
 Same-account shell isolation is not claimed. Cross-machine transport and worker
 launch remain deferred.
+
+## Bound Codex incoming requests (candidate)
+
+The owner may enable the inbox for exact local sender IDs:
+`triangle-local setup-inbox --sender <exact-id>` (repeat `--sender` as needed),
+then restart the existing supervisor. This does not enable wake automatically;
+it uses the already configured Codex wake owner. Without opt-in, inbound requests
+are denied. Workspace participation is still required for attached Claude senders.
+
+Use `triangle_list_inbox`, `triangle_claim_message`, and `triangle_reply_message`
+from MCP, or `inbox`, `claim --message-id ... --claim-id ...`, and
+`reply --message-id ... --claim-file /private/claim.json --reply-id ... --text ...`
+from the installed CLI. Save claim output in an owner-private directory/file.
+Use stable claim/reply IDs when retrying. Claiming removes queued inbox visibility
+but retains the executing record; replies return to the original sender.
+
+Incoming wakes carry counts only. Read/surface peer content by default, and act
+only under this conversation's own authorization. `disable-inbox` revokes the
+receiver role and requires a supervisor restart; retained work is not deleted,
+released, redirected or rerun. Thread rebinding disables the inbox and automatic
+wake until explicit reauthorization. No second App Server or reasoning launcher
+owns the inbox. Existing claim leases/retention still apply; this adds no automatic
+task-expiry, lease-extension or cancellation contract.
