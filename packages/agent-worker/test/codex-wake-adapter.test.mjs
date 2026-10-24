@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -48,6 +49,24 @@ async function withTempDir(fn) {
     return await fn(dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// SIGKILL is asynchronous: a node process can take several hundred ms to finish
+// exiting when the machine is saturated, which can outlast the adapter's own bounded
+// wait after SIGKILL. Poll until the pid is gone (true) or `timeoutMs` elapses (false)
+// instead of checking once.
+async function waitForProcessGone(pid, { timeoutMs = 10_000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return true;
+      throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
 
@@ -333,6 +352,16 @@ test("output overflow / truncation cannot be accepted and yields uncertain", asy
 });
 
 test("timeout cleanup terminates process group and settles promptly even if descendant survives leader", async () => {
+  // The adapter's clock starts at spawn, and the descendant only becomes ready (SIGTERM
+  // handler installed, ready file written) after two cold node starts: leader, then
+  // descendant. Those take a few hundred ms on a loaded machine, so the budget must be
+  // far larger than that or SIGTERM lands before the descendant exists and the scenario
+  // under test never happens.
+  const TIMEOUT_MS = 3_000;
+  // How long after the timer fires the adapter may take to settle: the same 2100 ms of
+  // headroom the original fixed 2500 ms bound allowed over its 400 ms budget (the adapter
+  // itself waits at most ABORT_GRACE_MS plus a 500 ms SIGKILL window).
+  const SETTLE_HEADROOM_MS = 2_100;
   for (const descendantStdio of ["ignore", "inherit"]) {
     await withTempDir(async (dir) => {
       const readyFile = path.join(dir, "descendant.ready");
@@ -377,7 +406,7 @@ setInterval(() => {}, 1000);
 
       const start = Date.now();
       const result = await notify(binding, snapshot, {
-        timeoutMs: 400,
+        timeoutMs: TIMEOUT_MS,
       });
       const duration = Date.now() - start;
 
@@ -385,16 +414,23 @@ setInterval(() => {}, 1000);
       assert.equal(result.status, "uncertain");
       assert.equal(result.reason, "timeout");
       assert.equal(result.code, "EXECUTION_TIMEOUT");
-      assert.ok(duration >= 200, `duration ${duration}ms should be >= 200ms`);
-      assert.ok(duration < 2500, `duration ${duration}ms should settle promptly under 2500ms`);
+      assert.ok(duration >= TIMEOUT_MS / 2, `duration ${duration}ms should be >= ${TIMEOUT_MS / 2}ms`);
+      assert.ok(
+        duration < TIMEOUT_MS + SETTLE_HEADROOM_MS,
+        `duration ${duration}ms should settle promptly under ${TIMEOUT_MS + SETTLE_HEADROOM_MS}ms`,
+      );
 
       // Confirm descendant PID is gone
+      assert.ok(
+        existsSync(readyFile),
+        `descendant never became ready: the ${TIMEOUT_MS}ms timeout fired before the leader and descendant finished starting`,
+      );
       const { readFile } = await import("node:fs/promises");
       const descendantPid = parseInt((await readFile(readyFile, "utf8")).trim(), 10);
       assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
-      assert.throws(
-        () => process.kill(descendantPid, 0),
-        (err) => err.code === "ESRCH",
+      assert.equal(
+        await waitForProcessGone(descendantPid),
+        true,
         `Descendant PID ${descendantPid} with stdio ${descendantStdio} must be gone after SIGKILL escalation`,
       );
     });

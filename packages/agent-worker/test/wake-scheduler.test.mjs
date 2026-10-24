@@ -36,6 +36,20 @@ function tempCursorPath() {
   };
 }
 
+// The atomic cursor store only reports a value once its write (temp file, fsync,
+// rename, directory fsync) has fully landed, and that latency depends on machine
+// load. Poll until the store reports `expected`, bounded by `timeoutMs`, and return
+// the last value read so the caller's assertion fails with the actual cursor.
+async function waitForCursor(store, expected, { timeoutMs = 10_000, intervalMs = 5 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let cursor = await store.read();
+  while (cursor !== expected && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    cursor = await store.read();
+  }
+  return cursor;
+}
+
 test("wake client coalesces bursts and persists the newest cursor per profile", async () => {
   const wakes = [];
   let cursor = 0;
@@ -535,8 +549,10 @@ test("crash after onWake and before cursor persist leaves cursor unadvanced (D5)
     releaseDrain.resolve();
     await run;
     // Coalesce flush continues after runOnce returns when pending was scheduled.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(await store.read(), 9);
+    // Wait for the durable write instead of sleeping a fixed time: fsync latency
+    // varies with machine load.
+    assert.equal(await waitForCursor(store, 9), 9);
+    assert.equal(await createAtomicFileCursorStore({ filePath: fixture.filePath }).read(), 9);
     await client.stop();
   } finally {
     fixture.cleanup();
@@ -564,6 +580,9 @@ test("cursor persists only after onWake completes (D5 commit barrier)", async ()
           return store.read();
         },
         async write(next) {
+          // Recorded when the write is invoked, not when it settles: the barrier
+          // is about when persisting may begin, so a write started before (or
+          // without waiting for) onWake must show up ahead of "onWake:9".
           order.push(`write:${next}`);
           return store.write(next);
         },
@@ -574,11 +593,12 @@ test("cursor persists only after onWake completes (D5 commit barrier)", async ()
       },
     });
     await client.runOnce();
-    for (let i = 0; i < 20 && order.length < 2; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
+    // The flush runs on the coalesce timer after runOnce returns. Wait for the
+    // durable write to land, not merely to start: the store reports the new
+    // cursor only once it has been persisted.
+    assert.equal(await waitForCursor(store, 9), 9);
     assert.deepEqual(order, ["onWake:9", "write:9"]);
-    assert.equal(await store.read(), 9);
+    assert.equal(await createAtomicFileCursorStore({ filePath: fixture.filePath }).read(), 9);
     await client.stop();
   } finally {
     fixture.cleanup();
