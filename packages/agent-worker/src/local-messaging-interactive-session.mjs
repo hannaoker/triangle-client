@@ -181,11 +181,16 @@ export function createInteractiveSessionBroker({
 }
 
 
+// A moved or removed workspace is a readable failure of its own, not a raw ENOENT from realpath.
+function resolvedWorkspace(workspace) {
+ try { return fs.realpathSync(workspace); }
+ catch { throw coded('workspace_missing','Opted-in workspace is missing or was moved'); }
+}
 // Workspace participation is a distinct owner capability. Discovery credentials never authorize messaging.
 export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
  if(!c||Object.keys(c).sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||
-   !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||fs.realpathSync(c.workspace)!==c.workspace||
+   !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
  return c;
@@ -196,10 +201,19 @@ export function attachedSessionIdentity(installationId,sessionId){
  const pseudo=`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`;
  return {sessionHash,pseudoSessionId:pseudo};
 }
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,logger=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
+ // A broken policy or journal hides the sessions and leaves only the configured recipients. Say so once per
+ // failure (and again once it has recovered) instead of failing silently; codes only, never contents or paths.
+ let degradedCode=null;
+ const degraded=error=>{
+  const code=typeof error?.code==='string'&&/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.code)?error.code:'broker_error';
+  if(code===degradedCode)return;degradedCode=code;
+  try{logger?.warn?.(`Workspace session messaging unavailable (${code}); configured recipients remain available`);}catch{}
+ };
+ const healthy=()=>{degradedCode=null;};
  // The policy file is the ceiling the owner granted at setup; it never widens what the live owner
  // configuration allows. A replaced Codex sender or a removed worker loses session access immediately.
  const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId]);
@@ -227,8 +241,8 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   limiter.checkAndConsume(addressOf(c,request.sessionId));return c;}
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
-  allowedSender(id){try{return policy().allowedSenders.includes(id);}catch{return false;}},
-  allowedRecipients(){try{return [...policy().allowedRecipients];}catch{return [];}},
+  allowedSender(id){try{const allowed=policy().allowedSenders.includes(id);healthy();return allowed;}catch(error){degraded(error);return false;}},
+  allowedRecipients(){try{const list=[...policy().allowedRecipients];healthy();return list;}catch(error){degraded(error);return [];}},
   async attach(request){
    const c=verify(request),identity=attachedSessionIdentity(c.installationId,request.sessionId);
    const id=addressOf(c,request.sessionId);
@@ -244,10 +258,14 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c}=await current(to);if(!c.allowedSenders.includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
-  async listFor(reader){let result=[];try{if(!policy().allowedSenders.includes(reader))return [];for(const row of await rows()){
-    let online=false,wake=false;try{const {a}=await current(row.id);online=true;wake=!!a.wake_capable;}catch{}
-    result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&wake}});
-   }}catch{}return result;},
+  async listFor(reader){let result=[],clean=true;try{
+    const allowed=policy().allowedSenders.includes(reader); // a reader outside the policy is simply shown nothing
+    if(allowed)for(const row of await rows()){
+     let online=false,wake=false;
+     try{const {a}=await current(row.id);online=true;wake=!!a.wake_capable;}catch(error){if(error?.code!=='session_offline'){clean=false;degraded(error);}}
+     result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&wake}});
+    }
+    if(clean)healthy();}catch(error){degraded(error);}return result;},
   async recipientIds(reader){return (await this.listFor(reader)).filter(r=>r.capabilities.reachable).map(r=>r.id);},
  };
 }

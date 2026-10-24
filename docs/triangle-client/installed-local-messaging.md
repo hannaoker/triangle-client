@@ -209,6 +209,12 @@ revokes participation (policy disabled, managed MCP entry removed, config key
 dropped); run `setup-session-messaging` again to authorize the new sender. A
 thread-only `--rebind-thread` keeps the same sender and keeps participation.
 
+If the policy file is damaged or the opted-in workspace is missing or moved,
+attached sessions disappear from listings and the supervisor logs
+`Workspace session messaging unavailable (<code>)` once per failure, for example
+`invalid_private_file` or `workspace_missing`, again after a recovery. Configured
+workers stay available throughout.
+
 MCP initializes before attachment: Claude may fire SessionStart only after MCP
 initialization finishes. First tool call/heartbeat attaches only after matching
 lifecycle registration. The child uses its own exported session/socket/token;

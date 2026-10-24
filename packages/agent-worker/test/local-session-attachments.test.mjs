@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {randomUUID} from 'node:crypto';
-import {Readable} from 'node:stream';
-import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,disableSessionDiscovery,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
+import {randomUUID,createHash} from 'node:crypto';
+import {Readable,PassThrough} from 'node:stream';
+import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,disableSessionDiscovery,runSessionDiscoveryHook,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
@@ -26,16 +26,18 @@ function ownerFiles(){
 }
 async function fixture(){
  const {root,workspace,wrapper,configPath,bindingPath}=ownerFiles();
- const config=readPrivateJson(configPath);let desktop=readPrivateJson(config.integrationPath),host;const clients=[],children=[];
+ const config=readPrivateJson(configPath);let desktop=readPrivateJson(config.integrationPath),host;const clients=[],children=[],runs=[],logs=[];
  // Runners follow the owner config as it is now; extra ids model a supervisor that still holds a runner for a removed profile.
- const start=async(extraRunnerIds=[])=>{const runner={run:async()=>({status:'completed',text:'worker result'})};
-  host=createInstalledLocalMessagingHost({configPath,runners:new Map([...readPrivateJson(configPath).recipients.map(r=>r.instanceId),...extraRunnerIds].map(id=>[id,runner])),gate:createProfiledReasonerGate()});await host.start();};await start();
+ // `runs` records what workers were asked to do, `logs` what the host warned about.
+ const start=async(extraRunnerIds=[])=>{const runner={run:async request=>{runs.push(request);return {status:'completed',text:'worker result'};}};
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map([...readPrivateJson(configPath).recipients.map(r=>r.instanceId),...extraRunnerIds].map(id=>[id,runner])),gate:createProfiledReasonerGate(),
+   logger:{info(){},error(){},warn:message=>logs.push(message)}});await host.start();};await start();
  const client=(senderId)=>{const c=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId});clients.push(c);return c;};
  let owner=client(desktop.senderId);
  const grant=async()=> (await owner.exchangeTurnBinding({bindingId:desktop.bindingId,threadId:desktop.threadId,secret:desktop.secret})).credential;
  const lifecycle=async(sessionId,kind)=>runSessionDiscoveryHook({configPath,input:Readable.from([JSON.stringify({session_id:sessionId,cwd:workspace,hook_event_name:kind})]),stderr:{write(){}}});
- const child=async(sessionId)=>{const c=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sessionId},wakeIntervalMs:0});children.push(c);return c;};
- return {root,workspace,wrapper,bindingPath,configPath,config,client,get owner(){return owner;},grant,lifecycle,child,
+ const child=async(sessionId,extra={})=>{const c=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sessionId},wakeIntervalMs:0,...extra});children.push(c);return c;};
+ return {root,workspace,wrapper,bindingPath,configPath,config,runs,logs,client,get owner(){return owner;},get desktop(){return desktop;},grant,lifecycle,child,
   async restart(extraRunnerIds=[]){await owner.close();await host.stop();desktop=readPrivateJson(readPrivateJson(configPath).integrationPath);await start(extraRunnerIds);owner=client(desktop.senderId);},async close(){for(const c of children)await c.close();for(const c of clients)await c.close();await host?.stop();fs.rmSync(root,{recursive:true,force:true});}};
 }
 async function tool(child,name,args={}){const r=await child.handleRequest({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:args}});if(r.result.isError)throw new Error(r.result.content[0].text);return JSON.parse(r.result.content[0].text);}
@@ -47,7 +49,7 @@ test('two own-session MCP children route and reply independently, including afte
   for(let i=0;i<2;i++)await f.owner.sendMessage({to:status[i].senderId,text:'task '+i,messageId:'task-'+i,requestId:'request-'+i},{credential});
   for(let i=0;i<2;i++){
    const inbox=await tool(children[i],'triangle_list_inbox');assert.equal(inbox.items.length,1);assert.equal(inbox.items[0].messageId,'task-'+i);
-   await assert.rejects(tool(children[1-i],'triangle_claim_message',{messageId:'task-'+i,claimId:'foreign-'+i}));
+   await assert.rejects(tool(children[1-i],'triangle_claim_message',{messageId:'task-'+i,claimId:'foreign-'+i}),/foreign_access_denied/);
    const claim=await tool(children[i],'triangle_claim_message',{messageId:'task-'+i,claimId:'claim-'+i});
    await tool(children[i],'triangle_reply_message',{messageId:'task-'+i,claimToken:claim.claimToken,text:'answer '+i,replyId:'reply-'+i});
   }
@@ -119,7 +121,7 @@ test('missing workspace hides attachments without disrupting configured recipien
   const sid=randomUUID();await f.lifecycle(sid,'SessionStart');const child=await f.child(sid);await tool(child,'triangle_get_status');
   fs.renameSync(f.workspace,f.workspace+'-moved');
   const credential=await f.grant(),rows=await f.owner.listSessions({credential});assert.deepEqual(rows.map(r=>r.label),['gravity2']);
-  await assert.rejects(tool(child,'triangle_get_status'));
+  await assert.rejects(tool(child,'triangle_get_status'),/workspace_missing/);
  }finally{await f.close();}
 });
 
@@ -313,4 +315,96 @@ test('disable-session-messaging needs no cleanup when it was never enabled',()=>
   setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'attachment-test-thread',recipients:['gravity2']});
   assert.deepEqual(disableWorkspaceMessaging({config:configPath}),{sessionMessagingEnabled:false,mcpCleanupRequired:false});
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+// Polls with real timers and a bounded count (never the clock, which some tests freeze).
+const eventually=async(check,what)=>{for(let i=0;i<150;i++){if(await check())return;await new Promise(resolve=>setTimeout(resolve,20));}assert.fail('timed out waiting for '+what);};
+
+test('the heartbeat keeps a session reachable past the lease without any tool call, and closing the child ends it',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.now()}); // freezes the lease clock only; real timers still drive the heartbeat
+ const f=await fixture();try{
+  const [beating,silent]=[randomUUID(),randomUUID()];for(const id of [beating,silent])await f.lifecycle(id,'SessionStart');
+  const policy=readPrivateJson(f.config.sessionMessaging.integrationPath);
+  const addressOf=sessionId=>'session-'+createHash('sha256').update(policy.installationId+'\0'+policy.workspace+'\0'+sessionId).digest('hex');
+  const reachable=async()=>(await f.owner.listSessions({credential:await f.grant()})).filter(r=>r.id.startsWith('session-')&&r.capabilities?.reachable).map(r=>r.id).sort();
+  const settle=()=>new Promise(resolve=>setTimeout(resolve,150)); // several 25ms heartbeats
+  // One child only heartbeats (every 25ms, no tool call ever); the other attaches once through a tool call and then stays silent.
+  const heart=await f.child(beating,{wakeIntervalMs:25,input:new PassThrough(),output:new PassThrough()}),running=heart.run();
+  await tool(await f.child(silent),'triangle_get_status');
+  await eventually(async()=>(await reachable()).length===2,'both sessions to become reachable');
+  // Three 20s steps are 60s on the lease clock, twice the 30s lease: only the heartbeat renews it.
+  for(let step=0;step<3;step++){t.mock.timers.tick(20000);await settle();}
+  await eventually(async()=>(await reachable()).includes(addressOf(beating)),'the heartbeat to renew the lease');
+  assert.deepEqual(await reachable(),[addressOf(beating)]);
+  await heart.close();await running;
+  assert.deepEqual(await reachable(),[]);
+ }finally{await f.close();}
+});
+
+test('an attached session may send to a configured worker, and to nothing else',async()=>{
+ const f=await fixture();try{
+  const worker=f.config.recipients[0].instanceId,[a,b]=[randomUUID(),randomUUID()];for(const id of [a,b])await f.lifecycle(id,'SessionStart');
+  const [childA,childB]=await Promise.all([a,b].map(id=>f.child(id)));
+  const [addressA,addressB]=await Promise.all([childA,childB].map(async child=>(await tool(child,'triangle_get_status')).senderId));
+  const send=(to,n)=>tool(childA,'triangle_send_message',{to,text:'ping '+n,messageId:'out-'+n,requestId:'out-'+n});
+  // The configured worker accepts the request and sees the attached session as its sender.
+  assert.equal((await send(worker,1)).accepted,true);
+  await eventually(()=>f.runs.length===1,'the worker to run');
+  assert.deepEqual([f.runs[0].senderId,f.runs[0].text],[addressA,'ping 1']);
+  // Another reachable session, itself, the Codex owner and an unknown recipient are all refused by the ACL.
+  for(const [n,to] of [[2,addressB],[3,addressA],[4,f.desktop.senderId],[5,'e'.repeat(64)]])await assert.rejects(send(to,n),/recipient_not_allowed/);
+  assert.deepEqual((await tool(childB,'triangle_list_inbox')).items,[]);
+  assert.equal(f.runs.length,1);
+ }finally{await f.close();}
+});
+
+test('triangle-local send reaches a reachable attached session and refuses addresses that are not',async()=>{
+ const f=await fixture();try{
+  const sid=randomUUID();await f.lifecycle(sid,'SessionStart');
+  const child=await f.child(sid),address=(await tool(child,'triangle_get_status')).senderId;
+  const send=async to=>{const out=[];const code=await runLocalMessagingCLI(['send','--config',f.configPath,'--to',to,'--text','from the CLI'],{output:{write:chunk=>out.push(chunk)}});return {code,result:JSON.parse(out.join(''))};};
+  const sent=await send(address);
+  assert.equal(sent.code,0);assert.equal(sent.result.admission.accepted,true);
+  assert.equal((await tool(child,'triangle_list_inbox')).items[0].messageId,sent.result.admission.messageId);
+  // A well-formed address nobody holds, a malformed one, and an address whose child has gone away are refused up front.
+  await assert.rejects(send('session-'+'0'.repeat(64)),{code:'recipient_not_allowed'});
+  await assert.rejects(send('session-not-an-address'),{code:'recipient_not_allowed'});
+  await child.close();
+  await assert.rejects(send(address),{code:'recipient_not_allowed'});
+ }finally{await f.close();}
+});
+
+test('swallowed broker failures are logged once per failure and again after recovery, with codes only',async()=>{
+ const {root,configPath}=ownerFiles();let j;try{
+  const config=readPrivateJson(configPath),policyPath=config.sessionMessaging.integrationPath,discoveryPath=config.discovery.integrationPath;
+  const good=fs.readFileSync(policyPath,'utf8'),owner=JSON.parse(good).allowedSenders[0],real=JSON.parse(good).workspace;
+  j=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  const warnings=[];
+  const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:j,issue(){},logger:{warn:message=>warnings.push(message)}});
+  const probe=async()=>[await broker.listFor(owner),broker.allowedRecipients().length,broker.allowedSender(owner)];
+  const unavailable=code=>`Workspace session messaging unavailable (${code}); configured recipients remain available`;
+  assert.deepEqual(await probe(),[[],1,true]);assert.deepEqual(warnings,[]);
+  // A damaged policy hides everything and says why, once, however often it is asked.
+  fs.writeFileSync(policyPath,'{ not json');
+  assert.deepEqual(await probe(),[[],0,false]);await probe();
+  assert.deepEqual(warnings,[unavailable('invalid_private_file')]);
+  // Recovery is silent; a different failure is reported on its own; the first one is reported again after a recovery.
+  fs.writeFileSync(policyPath,good);
+  assert.deepEqual(await probe(),[[],1,true]);
+  fs.renameSync(real,real+'-moved');await probe();
+  assert.deepEqual(warnings,[unavailable('invalid_private_file'),unavailable('workspace_missing')]);
+  fs.renameSync(real+'-moved',real);
+  assert.deepEqual(await probe(),[[],1,true]);
+  fs.writeFileSync(policyPath,'{ not json');await probe();
+  assert.deepEqual(warnings.slice(2),[unavailable('invalid_private_file')]);
+  assert.ok(warnings.every(message=>!/not json|tri-attach|secret|[a-f0-9]{64}/.test(message)),'codes only: no contents, paths or identifiers');
+ }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('the host hands its logger to the session broker, so a damaged policy is reported once',async()=>{
+ const f=await fixture();try{
+  fs.writeFileSync(f.config.sessionMessaging.integrationPath,'{ not json');
+  for(let i=0;i<2;i++)await f.owner.listSessions({credential:await f.grant()});
+  assert.deepEqual(f.logs.filter(message=>/session messaging/i.test(message)),['Workspace session messaging unavailable (invalid_private_file); configured recipients remain available']);
+ }finally{await f.close();}
 });
