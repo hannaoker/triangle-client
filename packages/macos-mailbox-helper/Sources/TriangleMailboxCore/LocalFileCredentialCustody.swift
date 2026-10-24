@@ -41,6 +41,16 @@ public enum LocalCredentialStores {
     /// Read-only workload keys, resolved through the profile binding (never stored here).
     public static func workload() -> any WorkloadKeyStore { V1WorkloadKeyStore(resolver: agents()) }
 
+    /// Workload access tokens shared between helper processes (0600 files, always file
+    /// custody: the token is bound to the agent key, which is a file in every mode).
+    public static func workloadTokens() -> any WorkloadTokenCache { FileWorkloadTokenCache() }
+
+    /// The gate every long-running or per-command helper entry point uses, so a fresh
+    /// process reuses a still-valid token instead of exchanging a new one.
+    public static func credentialGate(transport: any MeshTransport) -> VerifiedCredentialGate {
+        VerifiedCredentialGate(resolver: agents(), transport: transport, tokenCache: workloadTokens())
+    }
+
     public static func watchGrant() -> any WatchGrantStore {
         #if canImport(Security)
         if fileCredentialsEnabled { return FileWatchGrantStore(root: rootURL) }

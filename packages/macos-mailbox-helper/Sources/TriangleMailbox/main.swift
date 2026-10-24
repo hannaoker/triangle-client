@@ -42,7 +42,7 @@ enum TriangleMailboxCLI {
             case .mcp:
                 guard let profile = command.profile else { throw CommandParseError.missingRequiredFlag }
                 let transport = URLSessionMeshTransport()
-                let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+                let gate = LocalCredentialStores.credentialGate(transport: transport)
                 let result = await MCPProxy(
                     gate: gate,
                     transport: transport,
@@ -68,13 +68,13 @@ enum TriangleMailboxCLI {
             case .runWorker:
                 guard let profile = command.profile, let worker = command.worker else { throw CommandParseError.missingRequiredFlag }
                 let transport = URLSessionMeshTransport()
-                let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+                let gate = LocalCredentialStores.credentialGate(transport: transport)
                 try await WorkerLauncher(
                     gate: gate, resolver: FileWorkerCommandResolver(), executor: ExecWorkerExecutor()
                 ).launch(profile: profile, worker: worker)
             case .runSupervisor:
                 let transport = URLSessionMeshTransport()
-                let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+                let gate = LocalCredentialStores.credentialGate(transport: transport)
                 try await ClientSupervisor(
                     instanceStore: FileClientInstanceStore(),
                     gate: gate,
@@ -84,7 +84,7 @@ enum TriangleMailboxCLI {
                 ).run()
             case .preflightSupervisor:
                 let transport = URLSessionMeshTransport()
-                let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+                let gate = LocalCredentialStores.credentialGate(transport: transport)
                 try await ClientSupervisor(
                     instanceStore: FileClientInstanceStore(),
                     gate: gate,
@@ -185,7 +185,7 @@ enum TriangleMailboxCLI {
 
         let instanceID = ClientInstanceID.derive(profile: profile)
         let transport = URLSessionMeshTransport()
-        let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+        let gate = LocalCredentialStores.credentialGate(transport: transport)
         let credential = try await gate.credential(for: profile)
         let workloadAuth: WorkloadTokenManager
         do {
@@ -195,7 +195,7 @@ enum TriangleMailboxCLI {
         }
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
-            transport: transport,
+            transport: workloadAuth.observingRefusals(of: transport),
             actorID: credential.agentID
         ) { method, url in
             try await workloadAuth.authorizationHeaders(method: method, url: url)
@@ -355,7 +355,7 @@ enum TriangleMailboxCLI {
         watchConfiguration.timeoutIntervalForRequest = 60
         watchConfiguration.timeoutIntervalForResource = 60
         let transport = URLSessionMeshTransport(configuration: watchConfiguration)
-        let gate = VerifiedCredentialGate(resolver: LocalCredentialStores.agents(), transport: transport)
+        let gate = LocalCredentialStores.credentialGate(transport: transport)
         let service = WatchGrantService(
             store: LocalCredentialStores.watchGrant(),
             transport: transport,

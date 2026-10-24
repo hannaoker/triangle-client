@@ -117,6 +117,7 @@ public final class FakeV1Mesh: MeshTransport, @unchecked Sendable {
     private var challenges: [String: String] = [:]
     private var counter = 0
     private var _mode: Mode = .normal
+    private var _tokenLifetime = 300
     private var _requests: [MeshHTTPRequest] = []
     public let fallback: (@Sendable (MeshHTTPRequest) async throws -> MeshHTTPResponse)?
 
@@ -128,6 +129,17 @@ public final class FakeV1Mesh: MeshTransport, @unchecked Sendable {
     public var mode: Mode {
         get { lock.withLock { _mode } }
         set { lock.withLock { _mode = newValue } }
+    }
+
+    /// `expires_in` of the tokens this fake issues (seconds).
+    public var tokenLifetime: Int {
+        get { lock.withLock { _tokenLifetime } }
+        set { lock.withLock { _tokenLifetime = newValue } }
+    }
+
+    /// Forget every issued token, as a server-side revocation would: they now get 401.
+    public func revokeIssuedTokens() {
+        lock.withLock { tokens.removeAll() }
     }
 
     public func update(_ workloadID: WorkloadID, _ change: (inout AgentState) -> Void) {
@@ -198,7 +210,7 @@ public final class FakeV1Mesh: MeshTransport, @unchecked Sendable {
             counter += 1
             let token = "at_test_\(counter)_" + UUID().uuidString.lowercased()
             tokens[token] = workloadID
-            return Self.json(200, ["access_token": token, "token_type": "DPoP", "expires_in": 300], request)
+            return Self.json(200, ["access_token": token, "token_type": "DPoP", "expires_in": _tokenLifetime], request)
         }
     }
 

@@ -17,6 +17,13 @@ enum TriangleMailboxHostTests {
                 }
                 return
             }
+            if ProcessInfo.processInfo.environment["TRIANGLE_CONTRACT_FILTER"] == "workload-token-cache" {
+                for contractCase in WorkloadTokenCacheContractCases.all {
+                    try await contractCase.run()
+                    print("PASS \(contractCase.name)")
+                }
+                return
+            }
             for contractCase in ModelContractCases.all {
                 try contractCase.run()
                 print("PASS \(contractCase.name)")
@@ -30,6 +37,10 @@ enum TriangleMailboxHostTests {
                 print("PASS \(contractCase.name)")
             }
             for contractCase in V1ProfileContractCases.all {
+                try await contractCase.run()
+                print("PASS \(contractCase.name)")
+            }
+            for contractCase in WorkloadTokenCacheContractCases.all {
                 try await contractCase.run()
                 print("PASS \(contractCase.name)")
             }
