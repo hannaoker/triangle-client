@@ -164,6 +164,11 @@ function scrub(text, sentinel) {
   return text.replaceAll(sentinel, "[REDACTED]");
 }
 
+// The supervisor honours an attach grant for 30s and re-checks the lease, the child and the generation on every
+// request, so tool calls reuse the grant of the latest attach (the heartbeat renews it every few seconds) for half
+// that time instead of attaching again for each call.
+const ATTACHED_GRANT_REUSE_MS = 15000;
+
 export function createClaudeSessionMcpChild({
   configPath,
   integrationPath: explicitIntegrationPath = null,
@@ -232,15 +237,19 @@ export function createClaudeSessionMcpChild({
   let wakeAbortController = null;
   let inFlightWakePromise = null;
 
-  async function getValidCredential() {
+  // `renew` forces a fresh attach (the heartbeat, which keeps the lease alive); `onReuse` tells the caller it got a
+  // grant from an earlier attach, which a supervisor restart may have outdated.
+  async function getValidCredential({ renew = false, onReuse = null } = {}) {
     if (closed) throw coded("client_closed", "MCP child is closed");
     const now = Date.now();
     if(attachment){
       const policy=readSessionMessagingPolicy(attachment.policyPath);
       if(!policy.enabled||policy.secret!==pinnedSecret)throw coded('session_revoked','Workspace participation was disabled or rotated');
+      if(!renew&&activeGrant?.credential&&now-grantIssuedAt<ATTACHED_GRANT_REUSE_MS){onReuse?.();return activeGrant.credential;}
       const grant=await client.attachSession({...attachment.tuple,...(pinnedGeneration===null?{}:{generation:pinnedGeneration})});
       if(pinnedGeneration===null)pinnedGeneration=grant.generation;
       if(grant.senderId!==pinnedSenderId||grant.sessionId!==pinnedSessionId||grant.bindingId!==pinnedBindingId||grant.generation!==pinnedGeneration)throw coded('session_fenced','Session lifecycle changed; reconnect this MCP child');
+      activeGrant=grant;grantIssuedAt=now;
       return grant.credential;
     }
     if (activeGrant?.credential && (now - grantIssuedAt < 240000)) {
@@ -284,7 +293,7 @@ export function createClaudeSessionMcpChild({
     if(!pushSupported||!delivery){
       if(attachment){
         // Tracked like a wake poll: close() waits for it, so a heartbeat can never land after the detach and revive the lease.
-        const heartbeat=getValidCredential().catch(()=>{});
+        const heartbeat=getValidCredential({renew:true}).catch(()=>{});
         inFlightWakePromise=heartbeat;
         try{await heartbeat;}finally{if(inFlightWakePromise===heartbeat)inFlightWakePromise=null;}
       }
@@ -295,7 +304,7 @@ export function createClaudeSessionMcpChild({
     const wakePromise = (async () => {
       try {
         if (closed || ac.signal.aborted) return;
-        const credential = await getValidCredential();
+        const credential = await getValidCredential({ renew: true });
         if (closed || ac.signal.aborted) return;
         const reservationId = randomUUID();
         const res = await client.reserveWakeNotification({ reservationId }, { credential });
@@ -366,7 +375,7 @@ export function createClaudeSessionMcpChild({
     }
   }
 
-  async function handleMcpRequest(req) {
+  async function handleMcpRequest(req, { fresh = false } = {}) {
     if (!req || typeof req !== "object" || Array.isArray(req)) {
       return {
         jsonrpc: "2.0",
@@ -380,6 +389,7 @@ export function createClaudeSessionMcpChild({
       return null;
     }
 
+    let reusedGrant = false;
     try {
       switch (method) {
         case "initialize":
@@ -406,7 +416,7 @@ export function createClaudeSessionMcpChild({
           };
 
         case "tools/call": {
-          const credential = await getValidCredential();
+          const credential = await getValidCredential({ renew: fresh, onReuse: () => { reusedGrant = true; } });
           const { name, arguments: args = {} } = params;
 
           if (!args || typeof args !== "object") {
@@ -550,6 +560,11 @@ export function createClaudeSessionMcpChild({
           };
       }
     } catch (err) {
+      // A reused attach grant can predate a supervisor restart, which re-keys credentials. The refusal comes before
+      // anything is processed, so one fresh attach and a single retry of the whole call is safe.
+      if (reusedGrant && !fresh && (err?.code === "unauthorized" || err?.code === "credential_expired")) {
+        return handleMcpRequest(req, { fresh: true });
+      }
       const { code, message } = sanitizeError(err);
       if (method === "tools/call") {
         return {

@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import net from 'node:net';
+import {createRequire} from 'node:module';
 import {Readable,PassThrough} from 'node:stream';
-import {encodeFrame,createMessageParser,createSuccessResponse} from '../src/local-messaging-protocol.mjs';
+import {encodeFrame,createMessageParser,createSuccessResponse,createErrorResponse} from '../src/local-messaging-protocol.mjs';
 import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,disableSessionDiscovery,runSessionDiscoveryHook,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
@@ -16,6 +17,7 @@ import {createAttachedClaudeSessionMcpChild} from '../src/claude-session-mcp-chi
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
 import {createWorkspaceSessionBroker,sessionAddress,attachedSessionIdentity,UUID_PATTERN} from '../src/local-messaging-interactive-session.mjs';
 import {SUPPORTED_CLAUDE_VERSION} from '../src/claude-session-delivery.mjs';
+const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite');
 // Owner-side files only (no host): base config, lifecycle discovery and workspace messaging for a disposable workspace.
 function ownerFiles(){
  const root=fs.mkdtempSync('/private/tmp/tri-attach-'),workspace=path.join(root,'workspace');fs.mkdirSync(workspace,{mode:0o700});
@@ -437,29 +439,44 @@ test('the pseudonymous session identity depends on the session id alone',()=>{
  assert.notEqual(identity.pseudoSessionId,sid,'the raw harness id is never what gets stored');
 });
 
-test('close() waits for an in-flight heartbeat before it detaches, so the detach is the last word on the lease',async()=>{
- const {root,workspace,configPath}=ownerFiles();let server;try{
-  const config=readPrivateJson(configPath),policy=readPrivateJson(config.sessionMessaging.integrationPath),sid=randomUUID(),events=[];
-  // A stand-in supervisor whose attach answers slowly, so a heartbeat is still in flight when the child closes.
-  server=net.createServer(socket=>{
-   const parser=createMessageParser({onError:()=>socket.destroy(),onMessage:async message=>{
-    events.push(message.method+' received');
+// A stand-in supervisor socket that answers attach and detach the way the real one does, so an attached child can
+// run against it, and hands every other request to `handle`. `observe` sees every message first; `onAttach` may stall.
+async function standInSupervisor(config,sessionId,{observe=()=>{},onAttach=async()=>{},handle=async()=>({})}={}){
+ const policy=readPrivateJson(config.sessionMessaging.integrationPath);let attaches=0;
+ const server=net.createServer(socket=>{
+  const parser=createMessageParser({onError:()=>socket.destroy(),onMessage:async message=>{
+   try{
+    observe(message);
+    let result;
     if(message.method==='attach_session'){
-     await new Promise(resolve=>setTimeout(resolve,150));
-     socket.write(encodeFrame(createSuccessResponse(message.id,{senderId:sessionAddress(policy.installationId,policy.workspace,sid),sessionId:attachedSessionIdentity(sid).pseudoSessionId,generation:1,bindingId:message.params.childId,credential:'stand-in'})));
-    }else socket.write(encodeFrame(createSuccessResponse(message.id,{detached:true})));
-    events.push(message.method+' answered');
-   }});
-   socket.on('data',chunk=>parser.feed(chunk));socket.on('error',()=>{});
+     await onAttach(message);
+     result={senderId:sessionAddress(policy.installationId,policy.workspace,sessionId),sessionId:attachedSessionIdentity(sessionId).pseudoSessionId,generation:1,bindingId:message.params.childId,credential:'grant-'+(++attaches)};
+    }else if(message.method==='detach_session')result={detached:true};
+    else result=await handle(message);
+    socket.write(encodeFrame(createSuccessResponse(message.id,result)));
+   }catch(error){socket.write(encodeFrame(createErrorResponse(message.id,error)));}
+  }});
+  socket.on('data',chunk=>parser.feed(chunk));socket.on('error',()=>{});
+ });
+ await new Promise(resolve=>server.listen(resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,resolve));
+ return {get attaches(){return attaches;},close:()=>new Promise(resolve=>server.close(resolve))};
+}
+
+test('close() waits for an in-flight heartbeat before it detaches, so the detach is the last word on the lease',async()=>{
+ const {root,workspace,configPath}=ownerFiles();let supervisor,child;try{
+  const config=readPrivateJson(configPath),sid=randomUUID(),events=[];
+  // The attach answers slowly, so a heartbeat is still in flight when the child closes.
+  supervisor=await standInSupervisor(config,sid,{
+   observe:message=>events.push(message.method+' received'),
+   onAttach:async()=>{await new Promise(resolve=>setTimeout(resolve,150));events.push('attach_session answered');},
   });
-  await new Promise(resolve=>server.listen(resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,resolve));
-  const child=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sid},input:new PassThrough(),output:new PassThrough(),wakeIntervalMs:20});
+  child=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sid},input:new PassThrough(),output:new PassThrough(),wakeIntervalMs:20});
   const running=child.run();
   await eventually(()=>events.includes('attach_session received'),'the first heartbeat to arrive');
   await child.close();await running;
   // A heartbeat answered after the detach would have renewed the lease the close had just released.
   assert.deepEqual(events.slice(0,3),['attach_session received','attach_session answered','detach_session received']);
- }finally{await new Promise(resolve=>server?server.close(resolve):resolve());fs.rmSync(root,{recursive:true,force:true});}
+ }finally{await child?.close();await supervisor?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 
 test('the managed MCP entry pins the supported Claude version instead of a copy of it',()=>{
@@ -490,4 +507,138 @@ test('workspace files are replaced atomically and flushed first: a failed flush 
   assert.ok(flushed.some(name=>/^\.mcp\.json\.triangle-/.test(name))&&flushed.some(name=>/^settings\.local\.json\.triangle-/.test(name)),'each replacement is flushed before it is renamed into place');
   for(const directory of [workspace,path.dirname(settings)])assert.deepEqual(fs.readdirSync(directory).filter(name=>/\.triangle-/.test(name)),[]);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('listing and looking up sessions costs the same few reads however many sessions there are',async t=>{
+ const {root,configPath}=ownerFiles();let j;try{
+  const config=readPrivateJson(configPath),policyPath=config.sessionMessaging.integrationPath,discoveryPath=config.discovery.integrationPath;
+  const policy=readPrivateJson(policyPath),discovery=readPrivateJson(discoveryPath),owner=policy.allowedSenders[0];
+  j=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  const calls={};
+  const counted=new Proxy(j,{get:(target,name)=>typeof target[name]==='function'?(...args)=>{calls[name]=(calls[name]??0)+1;return target[name](...args);}:target[name]});
+  const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:counted,issue:(senderId,options)=>JSON.stringify({senderId,...options})});
+  const tuple=sessionId=>({installationId:policy.installationId,secret:policy.secret,sessionId,childId:randomUUID(),wakeCapable:false});
+  const ids=Array.from({length:40},()=>randomUUID()),tuples=ids.map(tuple);
+  for(const [index,sessionId] of ids.entries()){
+   await j.recordDiscoveryEvent({installationId:discovery.installationId,event:{eventId:randomUUID(),sessionId,kind:'start',workspace:discovery.workspace,observedAt:Date.now()},digest:'cost-'+index,receivedAt:Date.now()});
+   await broker.attach(tuples[index]);
+  }
+  // Count the opens of the two owner files and the journal calls made by one operation.
+  let opens=0;const realOpen=fs.openSync;
+  t.mock.method(fs,'openSync',(file,...rest)=>{if(file===policyPath||file===discoveryPath)opens++;return realOpen(file,...rest);});
+  const measure=async operation=>{opens=0;for(const name of Object.keys(calls))delete calls[name];const result=await operation();return {result,opens,calls:{...calls}};};
+  const address=sessionAddress(policy.installationId,policy.workspace,ids[7]);
+  // All 40 sessions listed: the policy and the discovery file once each, one directory listing, one attachment listing.
+  const listing=await measure(()=>broker.listFor(owner));
+  assert.equal(listing.result.filter(row=>row.capabilities.reachable).length,40);
+  assert.equal(listing.opens,2);assert.deepEqual(listing.calls,{listDiscoveredSessions:1,listSessionAttachments:1});
+  // One session checked: the same two reads and two primary-key lookups, not a scan.
+  const lookup=await measure(()=>broker.checkRecipient(owner,address));
+  assert.equal(lookup.opens,2);assert.deepEqual(lookup.calls,{getDiscoveredSession:1,getSessionAttachment:1});
+  // A renewal reads the owner files once, not twice.
+  const renewal=await measure(()=>broker.attach(tuples[7]));
+  assert.equal(renewal.opens,2);assert.deepEqual(renewal.calls,{getDiscoveredSession:1,attachDiscoveredSession:1,bindAttachedSessionWake:1});
+ }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('tool calls reuse the latest attach grant, and a grant that a supervisor restart outdated is replaced once',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ const {root,workspace,configPath}=ownerFiles();let supervisor,child;try{
+  const config=readPrivateJson(configPath),policyPath=config.sessionMessaging.integrationPath,sid=randomUUID(),presented=[];
+  let refuse=null; // which presented credentials the supervisor currently refuses, as it would after a restart re-keyed them
+  supervisor=await standInSupervisor(config,sid,{handle:async message=>{
+   presented.push(message.credential);
+   if(refuse?.(message.credential))throw Object.assign(new Error('Turn credential signature verification failed'),{code:'unauthorized'});
+   return {credential:message.credential};
+  }});
+  child=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sid},input:new PassThrough(),output:new PassThrough(),wakeIntervalMs:0});
+  const status=async()=>(await tool(child,'triangle_get_status')).credential;
+  // Calls reuse the grant of the one attach instead of attaching each time.
+  assert.deepEqual([await status(),await status(),await status()],['grant-1','grant-1','grant-1']);assert.equal(supervisor.attaches,1);
+  // A restart re-keys credentials: the refused call is replaced by one fresh attach and retried.
+  refuse=credential=>credential==='grant-1';
+  assert.equal(await status(),'grant-2');assert.equal(supervisor.attaches,2);
+  refuse=null;assert.equal(await status(),'grant-2');
+  // A refusal that persists is retried once, not forever, and then reaches the caller.
+  presented.length=0;refuse=()=>true;
+  await assert.rejects(status(),/unauthorized/);
+  assert.equal(supervisor.attaches,3);assert.deepEqual(presented,['grant-2','grant-3']);
+  refuse=null;
+  // A grant older than half its life is not reused.
+  t.mock.timers.tick(16000);
+  assert.equal(await status(),'grant-4');
+  // Reuse never outlives a revocation: the policy is checked on every call before any grant is considered.
+  presented.length=0;writePrivateJson(policyPath,{...readPrivateJson(policyPath),secret:'f'.repeat(64)});
+  await assert.rejects(status(),/session_revoked/);assert.deepEqual(presented,[]);
+ }finally{await child?.close();await supervisor?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('the heartbeat attaches on every tick, even while the latest grant is still fresh enough for tool calls to reuse',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.now()}); // frozen: no grant ever ages, so only the heartbeat can cause an attach
+ const {root,workspace,configPath}=ownerFiles();let supervisor,child;try{
+  const config=readPrivateJson(configPath),sid=randomUUID();
+  supervisor=await standInSupervisor(config,sid);
+  child=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sid},input:new PassThrough(),output:new PassThrough(),wakeIntervalMs:20});
+  const running=child.run();
+  await eventually(()=>supervisor.attaches>=4,'the heartbeat to attach again and again');
+  await child.close();await running;
+ }finally{await child?.close();await supervisor?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('custody, wake binding and wake history go when their discovery row ages out, and only then',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-prune-');let j,inspect;try{
+  j=createLocalMessagingJournal({stateRoot:root});
+  inspect=new DatabaseSync(path.join(root,'local-messaging.sqlite'),{readOnly:true});
+  const installationId=randomUUID(),workspace='/private/tmp/tri-prune-workspace',day=24*60*60*1000,t0=Date.UTC(2026,0,1);
+  const event=(sessionId,at,kind='start')=>j.recordDiscoveryEvent({installationId,event:{eventId:randomUUID(),sessionId,kind,workspace,observedAt:at},digest:randomUUID(),receivedAt:at});
+  // A session with everything a live attach leaves behind: a custody lease, a wake binding and one wake in the history.
+  const adopt=async(sessionId,at)=>{
+   const id=sessionAddress(installationId,workspace,sessionId),pseudo=attachedSessionIdentity(sessionId).pseudoSessionId,childId=randomUUID();
+   const {generation}=await event(sessionId,at);
+   await j.attachDiscoveredSession({id,childId,generation,installationId:'scope',wakeCapable:true,now:at});
+   await j.bindAttachedSessionWake({senderId:id,sessionId:pseudo,generation,bindingId:childId});
+   await j.recordSend({sender:'a'.repeat(64),recipient:id,recipientType:'interactive',messageId:'prune-'+sessionId,requestId:'prune-'+sessionId,text:'task',metadata:{}});
+   assert.equal((await j.reserveInteractiveWake({targetIdentity:id,reservationId:randomUUID(),sessionId:pseudo,generation,bindingId:childId,now:at})).deliveryAllowed,true);
+   return id;
+  };
+  const counts=()=>Object.fromEntries(['local_session_attachments','local_wake_bindings','local_interactive_wake_history'].map(table=>[table,inspect.prepare(`SELECT count(*) AS n FROM ${table}`).get().n]));
+  const legacy='f'.repeat(64);await j.initInteractiveWakeBinding({senderId:legacy,sessionId:randomUUID(),generation:1,bindingId:randomUUID()});
+  const addressA=await adopt(randomUUID(),t0),addressB=await adopt(randomUUID(),t0+5*day);
+  assert.deepEqual(counts(),{local_session_attachments:2,local_wake_bindings:3,local_interactive_wake_history:2});
+  // Nine days on, A has aged out of the directory (eight days of retention) and B has not.
+  await event(randomUUID(),t0+9*day);
+  assert.equal(await j.getSessionAttachment(addressA),null);assert.equal(await j.getWakeBinding(addressA),null);
+  assert.ok(await j.getSessionAttachment(addressB));assert.ok(await j.getWakeBinding(addressB));
+  assert.ok(await j.getWakeBinding(legacy),'a legacy binding is not session state');
+  assert.deepEqual(counts(),{local_session_attachments:1,local_wake_bindings:2,local_interactive_wake_history:1});
+  // State orphaned some other way (an older build, a restored file) is collected by the periodic compaction.
+  const orphan='session-'+'9'.repeat(64);
+  await j.attachDiscoveredSession({id:orphan,childId:randomUUID(),generation:1,installationId:'scope',wakeCapable:false,now:t0});
+  await j.bindAttachedSessionWake({senderId:orphan,sessionId:randomUUID(),generation:1,bindingId:randomUUID()});
+  assert.deepEqual(counts(),{local_session_attachments:2,local_wake_bindings:3,local_interactive_wake_history:1});
+  await j.compact({now:t0+9*day});
+  assert.deepEqual(counts(),{local_session_attachments:1,local_wake_bindings:2,local_interactive_wake_history:1});
+ }finally{inspect?.close();await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('evicting an ended session from a full directory takes its custody and wake state with it',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-evict-');let j,inspect;try{
+  j=createLocalMessagingJournal({stateRoot:root});
+  inspect=new DatabaseSync(path.join(root,'local-messaging.sqlite'),{readOnly:true});
+  const installationId=randomUUID(),workspace='/private/tmp/tri-evict-workspace',t0=Date.UTC(2026,0,1);
+  const event=(sessionId,at,kind='start')=>j.recordDiscoveryEvent({installationId,event:{eventId:randomUUID(),sessionId,kind,workspace,observedAt:at},digest:randomUUID(),receivedAt:at});
+  const counts=()=>Object.fromEntries(['local_session_attachments','local_wake_bindings'].map(table=>[table,inspect.prepare(`SELECT count(*) AS n FROM ${table}`).get().n]));
+  const sessions=Array.from({length:128},()=>randomUUID()),addresses=[];
+  for(const [index,sessionId] of sessions.entries()){
+   const id=sessionAddress(installationId,workspace,sessionId),at=t0+index*1000,{generation}=await event(sessionId,at),childId=randomUUID();
+   await j.attachDiscoveredSession({id,childId,generation,installationId:'scope',wakeCapable:false,now:at});
+   await j.bindAttachedSessionWake({senderId:id,sessionId:attachedSessionIdentity(sessionId).pseudoSessionId,generation,bindingId:childId});
+   await event(sessionId,at+500,'end');addresses.push(id);
+  }
+  assert.deepEqual(counts(),{local_session_attachments:128,local_wake_bindings:128});
+  // A 129th session needs room: the oldest ended one is evicted and its state goes with its discovery row.
+  await event(randomUUID(),t0+200000);
+  assert.deepEqual(counts(),{local_session_attachments:127,local_wake_bindings:127});
+  assert.equal(await j.getSessionAttachment(addresses[0]),null);assert.ok(await j.getSessionAttachment(addresses[1]));
+ }finally{inspect?.close();await j?.close();fs.rmSync(root,{recursive:true,force:true});}
 });

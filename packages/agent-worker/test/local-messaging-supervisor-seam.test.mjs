@@ -462,3 +462,31 @@ test("the seam and the fixture dispatcher use one name per hook: start, stop, no
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
 });
+
+test("session credentials are issued for session addresses only and leave the profile registry alone", { skip: process.platform === "win32" }, async () => {
+  const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-session-credential-"));
+  fs.chmodSync(stateRoot, 0o700);
+  const journal = createTestMemoryJournal();
+  const subsystem = createLocalMessagingSubsystem({
+    stateRoot, journal, dispatcher: createTestRecoverableDispatcher({ journal }), registry: ["desktop-codex"],
+  });
+  try {
+    const address = `session-${"a".repeat(64)}`;
+    const credential = subsystem.issueSessionCredential(address, { sessionId: "pseudonym", generation: 1, bindingId: "child", ttlMs: 30000 });
+    const claims = JSON.parse(Buffer.from(credential.split(".")[0], "base64url").toString("utf8"));
+    assert.deepEqual([claims.senderId, claims.senderType, claims.generation], [address, "interactive", 1]);
+
+    // Dynamic principals never enter the profile registry, however many come and go.
+    for (let i = 0; i < 200; i += 1) subsystem.issueSessionCredential(`session-${i.toString(16).padStart(64, "0")}`);
+    assert.deepEqual(subsystem.status().registeredProfiles, ["desktop-codex"]);
+
+    // Only session addresses qualify: a profile or a malformed address is refused, and the ordinary path still wants registration.
+    for (const refused of ["desktop-codex", "session-short", `session-${"A".repeat(64)}`, `Session-${"a".repeat(64)}`, 42]) {
+      assert.throws(() => subsystem.issueSessionCredential(refused), (err) => err.code === "invalid_sender_id");
+    }
+    assert.throws(() => subsystem.issueTurnCredential(address), (err) => err instanceof LocalMessagingError && err.code === "unknown_profile");
+  } finally {
+    await subsystem.stop();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});

@@ -227,8 +227,15 @@ preserves custody; competing children cannot replace an unexpired lease.
 Wake state belongs to the session address and lifecycle generation, not to the
 child process: a replacement child inherits an outstanding wake and can
 acknowledge it, while a new lifecycle generation starts a fresh wake epoch.
-Attach requests (one per tool call plus the heartbeat) are budgeted per
-session, 240 a minute, so a busy session cannot starve another's lease.
+The heartbeat attaches every five seconds; tool calls reuse the grant of the
+latest attach for up to 15 seconds (the supervisor still checks lease, child and
+generation on every request, and the policy is checked before every call) and
+attach afresh once, transparently, when a reused grant is refused, for example
+after a supervisor restart. Attach requests are budgeted per session, 240 a
+minute, so a busy session cannot starve another's lease.
+A session's custody lease, wake binding and wake history live exactly as long as
+its directory entry: they are removed when the entry ages out (eight days) or is
+evicted from a full directory, and by the periodic compaction.
 Capability rotation/disable fences prior credentials. Presence means a recent
 child heartbeat, not that the model is free. Wake remains unsupported and pinned
 to Claude 2.1.307; write acceptance alone is not visible-delivery proof.
