@@ -65,3 +65,17 @@ Official hook schema reference: https://learn.chatgpt.com/docs/hooks (retrieved 
 Live preparation checkpoint: candidate configuration and an isolated host are at `/private/tmp/triangle-codex-discovery-d3-20261024`; the scratch workspace's existing probe hooks were preserved and three candidate hooks were added. A fresh desktop metadata call still succeeded but no Codex directory row appeared. The standalone hook-review UI explicitly reported three new/changed hooks requiring review; they were left untrusted. This is an observed trust gate, not a successful registration. The production supervisor/configuration has not been changed. The isolated host has no executable worker implementation and cannot launch a coding agent.
 
 Final regression result: 250 tests passed, zero failures or skips.
+
+## Owner-approved live follow-up — 2026-10-24
+
+The owner explicitly approved the three disposable discovery hooks. Codex 0.164.0's normal trust UI showed exactly three new/changed hooks; “Trust all and continue” was selected for those hooks. No bypass flag or trust-file edit was used.
+
+The two already-loaded desktop probe chats were prompted again. Their metadata calls completed, but no directory registration appeared. This is a measured existing-session reload limitation; caching is the working explanation, not independently proven internals.
+
+A fresh no-tools standalone lifecycle canary returned `DISCOVERY_LIFECYCLE_OK` and automatically registered handle `session-eb61367afaf7d746d604d997517c4d060be29ea878cf640a74b62cc4188a51a5`, label suffix `5e76fdf2`. Its end hook marked it offline at generation 1. Reopening that completed canary through the desktop app and submitting a follow-up produced a fresh SessionStart/resume hook at epoch milliseconds 1792875600051; Triangle recorded the same handle at generation 2 with `lastSeenAt` 1792875600068. The 17 ms difference is a single same-host hook-log-to-journal observation, not a five-trial attachment latency claim. Receive/wake capabilities stayed false.
+
+The new desktop follow-up returned the prior sentinel rather than executing the requested metadata probe. It therefore does not count as another fresh per-call metadata result. The registration/resume conclusion relies on the independent lifecycle log and directory journal; the earlier two desktop metadata proofs remain the per-call identity evidence.
+
+This establishes automatic registration for one fresh CLI session and the same session resumed in the desktop app. It also demonstrates why the interactive/headless eligibility boundary remains a release blocker for general workspace enablement. Two already-open desktop registrations, five future-session timing trials, fork/compaction lifecycle and real sleep/wake acceptance remain open. PR #118 remains draft.
+
+After the bounded run, candidate discovery was disabled and its three managed hooks removed from the disposable workspace (`hooksCleanupRequired: false`). Existing probe hooks were preserved. The isolated test host was stopped; the production supervisor and configuration were untouched. Journal evidence remains under the private test root for follow-up.
