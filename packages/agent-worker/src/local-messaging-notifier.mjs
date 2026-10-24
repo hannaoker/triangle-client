@@ -1,3 +1,4 @@
+import { wakeSnapshotCovered } from "./local-messaging-journal.mjs";
 import { randomUUID } from "node:crypto";
 import { coded } from "./local-messaging-errors.mjs";
 
@@ -78,7 +79,7 @@ export function createLocalMessagingNotifier({
       }
 
       // 3. Store prior acknowledged fingerprint so unchanged unread backlog never loops
-      if (binding.lastAcknowledgedFingerprint === snapshotFingerprint) {
+      if (wakeSnapshotCovered(snapshotFingerprint, binding.lastAcknowledgedFingerprint)) {
         return;
       }
 

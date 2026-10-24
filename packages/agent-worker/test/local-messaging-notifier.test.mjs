@@ -1456,3 +1456,32 @@ test("Backward compatibility: production wake off with omitted or disabled wake 
 
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+
+test("acknowledged backlog reductions and empty inbox mode changes stay quiet across restart", async () => {
+ const stateRoot=createIsolatedDir();let journal=createLocalMessagingJournal({stateRoot});
+ const targetIdentity='shrink-owner',threadId='shrink-thread',bindingId=randomUUID();
+ let now=100000,calls=0,notifier;
+ const options={targetIdentity,threadId,bindingId,wakeConfig:{enabled:true},minIntervalMs:15000,timerIntervalMs:1000000,clock:{now:()=>now},adapter:{notify:async b=>{calls++;return {state:'accepted',receipt:{queuedId:randomUUID(),threadId:b.threadId}};}}};
+ try {
+  for(const id of ['one','two']){
+   await journal.recordSend({sender:targetIdentity,recipient:'worker',messageId:id,requestId:id,text:id});
+   await journal.recordReply({sender:'worker',recipient:targetIdentity,messageId:'reply-'+id,requestId:id,inReplyTo:id,text:'ok'});
+  }
+  await journal.recordSend({sender:'claude',recipient:targetIdentity,recipientType:'interactive',messageId:'incoming',requestId:'incoming',text:'ping'});
+  notifier=createLocalMessagingNotifier({...options,journal,inboxEnabled:true});await notifier.start();
+  const binding=await journal.getWakeBinding(targetIdentity);
+  await journal.recordSend({sender:targetIdentity,recipient:'worker',messageId:'three',requestId:'three',text:'three'});
+  await journal.recordReply({sender:'worker',recipient:targetIdentity,messageId:'reply-three',requestId:'three',inReplyTo:'three',text:'ok'});
+  await notifier.ackNotification({requester:targetIdentity,wakeId:binding.activeWakeId,generation:1});
+  now+=16000;await notifier.evaluateObligations();assert.equal(calls,2,'new reply during outstanding wake is not hidden');
+  const next=await journal.getWakeBinding(targetIdentity);
+  await notifier.ackNotification({requester:targetIdentity,wakeId:next.activeWakeId,generation:1});
+  await journal.claimInboxMessage({requester:targetIdentity,messageId:'incoming',sessionId:'owner-session',generation:1,claimId:'claim-incoming'});
+  await journal.consumeReply({requester:targetIdentity,messageId:'reply-one'});
+  now+=16000;await notifier.evaluateObligations();assert.equal(calls,2,'consuming one reply does not renotify remaining replies');
+  await notifier.stop();await journal.close();journal=createLocalMessagingJournal({stateRoot});
+  notifier=createLocalMessagingNotifier({...options,journal,inboxEnabled:false});await notifier.start();
+  assert.equal(calls,2,'restart and empty inbox mode change preserve coverage');
+ } finally {await notifier?.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});

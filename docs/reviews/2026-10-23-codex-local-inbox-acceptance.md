@@ -91,3 +91,26 @@ the original service restarted. Installed manifest validation passed. Status
 shows discovery disabled, no queued/executing work, 30 completed, and the same
 14 older replies and two held tasks. Those older peer contents were not executed.
 The candidate remains a draft for review; the installed runtime is #111.
+
+## Follow-up: repeated backlog wakes
+
+The old notifier compared whole snapshot hashes. Removing an incoming request by
+claiming it, consuming a reply, or toggling inclusion of an empty inbox changed
+the hash even when remaining work had already been announced. These were fresh
+wake IDs for old obligations, rather than retries of one wake ID.
+
+Wake fingerprints now store a versioned set of per-obligation hashes in the same
+opaque durable fingerprint fields. A snapshot fully covered by the acknowledged
+snapshot stays quiet. New replies, incoming requests and changed held/late-result
+records still notify; acknowledgment covers only the submitted snapshot, so a
+new arrival while a wake is outstanding is not swallowed. The same comparison
+also applies to Claude's interactive wake reservation. No database schema changes
+or message consumption are required.
+
+A regression fails against the prior source (three notifications instead of two)
+and passes after the fix. All 49 affected notifier, journal, Codex inbox and
+packaging tests pass. Coverage survives journal reopen and empty inbox mode
+changes. Legacy hash-only fingerprints keep exact matching; upgrading an older
+journal can emit one conservative notification to establish versioned coverage.
+The patch is source-verified and pushed with #113; the installed #111 runtime has
+not been changed by this follow-up.
