@@ -146,7 +146,7 @@ export function validateSnapshot(snapshot) {
     throw new TypeError("Snapshot must be a non-null object");
   }
 
-  const allowedKeys = new Set(["wakeId", "wakeUuid", "replyCount", "heldCount", "lateResult"]);
+  const allowedKeys = new Set(["wakeId", "wakeUuid", "replyCount", "heldCount", "lateResult", "inboxCount"]);
   for (const key of Object.keys(snapshot)) {
     if (!allowedKeys.has(key)) {
       throw new TypeError(`Snapshot contains forbidden or unknown property: ${key}`);
@@ -168,6 +168,7 @@ export function validateSnapshot(snapshot) {
     throw new TypeError("Snapshot heldCount must be a safe integer >= 0");
   }
 
+  if(snapshot.inboxCount!==undefined&&(!Number.isSafeInteger(snapshot.inboxCount)||snapshot.inboxCount<0))throw new TypeError("Snapshot inboxCount must be a nonnegative safe integer");
   const lateResult = snapshot.lateResult;
   if (typeof lateResult !== "boolean") {
     throw new TypeError("Snapshot lateResult must be a boolean");
@@ -176,6 +177,7 @@ export function validateSnapshot(snapshot) {
   return Object.freeze({
     wakeId: wakeId.toLowerCase(),
     replyCount,
+    ...(snapshot.inboxCount!==undefined?{inboxCount:snapshot.inboxCount}:{}),
     heldCount,
     lateResult,
   });
@@ -191,6 +193,7 @@ export function formatNotificationTemplate(binding, snapshot) {
     `Wake ID: ${snapshot.wakeId}`,
     `Binding generation: ${binding.generation}`,
     `Pending replies: ${snapshot.replyCount}`,
+    ...(snapshot.inboxCount!==undefined?[`Pending incoming requests: ${snapshot.inboxCount}`]:[]),
     `Held tasks: ${snapshot.heldCount}`,
     `Late result: ${snapshot.lateResult ? "true" : "false"}`,
     "Action: Retrieve and acknowledge messages using authorized Triangle tools.",

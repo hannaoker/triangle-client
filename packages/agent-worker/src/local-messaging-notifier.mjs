@@ -1,3 +1,4 @@
+import { wakeSnapshotCovered } from "./local-messaging-journal.mjs";
 import { randomUUID } from "node:crypto";
 import { coded } from "./local-messaging-errors.mjs";
 
@@ -26,6 +27,7 @@ export function createLocalMessagingNotifier({
   bindingId,
   generation = 1,
   wakeConfig = null,
+  inboxEnabled = false,
   adapter = null,
   runner = null,
   logger = { info() {}, warn() {}, error() {} },
@@ -67,17 +69,17 @@ export function createLocalMessagingNotifier({
       }
 
       // 2. Query canonical obligations
-      const obligations = await journal.getWakeObligations(targetIdentity);
+      const obligations = await journal.getWakeObligations(targetIdentity,{isInteractive:inboxEnabled});
       if (stopped || !obligations) return;
-      const { unreadReplies, heldMessages, hasLateResult, snapshotFingerprint } = obligations;
+      const { unreadReplies, heldMessages, hasLateResult, snapshotFingerprint,queuedMessages=[] } = obligations;
 
       // If no unread replies and no held messages, nothing to notify
-      if (unreadReplies.length === 0 && heldMessages.length === 0) {
+      if (unreadReplies.length === 0 && heldMessages.length === 0 && queuedMessages.length === 0) {
         return;
       }
 
       // 3. Store prior acknowledged fingerprint so unchanged unread backlog never loops
-      if (binding.lastAcknowledgedFingerprint === snapshotFingerprint) {
+      if (wakeSnapshotCovered(snapshotFingerprint, binding.lastAcknowledgedFingerprint)) {
         return;
       }
 
@@ -96,6 +98,7 @@ export function createLocalMessagingNotifier({
         replyCount: unreadReplies.length,
         heldCount: heldMessages.length,
         lateResult: hasLateResult,
+        ...(inboxEnabled?{inboxCount:queuedMessages.length}:{}),
       };
 
       const adapterBinding = {
@@ -247,7 +250,7 @@ export function createLocalMessagingNotifier({
   async function status() {
     const binding = await journal.getWakeBinding(targetIdentity);
     if (!binding) return null;
-    const obligations = await journal.getWakeObligations(targetIdentity).catch(() => null);
+    const obligations = await journal.getWakeObligations(targetIdentity,{isInteractive:inboxEnabled}).catch(() => null);
 
     return {
       deliveryState: binding.deliveryState,
@@ -256,6 +259,7 @@ export function createLocalMessagingNotifier({
       receiptQueuedId: binding.receiptQueuedId,
       receiptThreadId: binding.receiptThreadId,
       pendingRepliesCount: obligations?.unreadReplies?.length ?? 0,
+      ...(inboxEnabled?{pendingInboxCount:obligations?.queuedMessages?.length??0}:{}),
       heldMessagesCount: obligations?.heldMessages?.length ?? 0,
       hasLateResult: obligations?.hasLateResult ?? false,
     };

@@ -14,6 +14,18 @@ const LEGACY_DB_NAME = "peer-drain.sqlite";
 const LEGACY_OWNER_DB_NAME = "peer-drain-owner.sqlite";
 // Finished records are compacted after the same eight days as the peer drain's.
 const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+// Fingerprints are opaque journal strings. V2 retains per-obligation hashes so
+// removing handled work cannot turn the remaining backlog into a new event.
+export function wakeSnapshotCovered(current, acknowledged) {
+  if (current === acknowledged) return true;
+  try {
+    const now = JSON.parse(current), prior = JSON.parse(acknowledged);
+    if (now?.v !== 2 || prior?.v !== 2 || !Array.isArray(now.items) || !Array.isArray(prior.items)) return false;
+    const covered = new Set(prior.items);
+    return now.items.every(item => covered.has(item));
+  } catch { return false; } // Legacy hash-only fingerprints retain exact matching.
+}
+
 export const DEFAULT_MAX_PAIR_EXCHANGES = 10;
 export const DEFAULT_PAIR_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -706,40 +718,20 @@ export function createLocalMessagingJournal({
     ).get(targetIdentity);
     const hasLateResult = lateRow !== undefined;
 
-    const replyIds = unreadReplies.map((r) => r.message_id).sort();
-    const replyTimestamps = unreadReplies.map((r) => r.created_at);
-    const heldIds = heldMessages.map((m) => m.message_id).sort();
-    const heldTimestamps = heldMessages.map((m) => m.updated_at || m.created_at);
-    const heldLateFlags = heldMessages.map((m) => ({
-      id: m.message_id,
-      hasLate: Boolean(m.late_result_text),
-    })).sort((a, b) => a.id.localeCompare(b.id));
-
     let queuedMessages = [];
-    let queuedIds = [];
-    let queuedTimestamps = [];
     if (isInteractive) {
       queuedMessages = db.prepare(
         "SELECT * FROM local_messages WHERE recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive' ORDER BY created_at ASC, message_id ASC"
       ).all(targetIdentity);
-      queuedIds = queuedMessages.map((m) => m.message_id).sort();
-      queuedTimestamps = queuedMessages.map((m) => m.updated_at || m.created_at);
     }
 
-    const fingerprintPayload = {
-      replyIds,
-      replyTimestamps,
-      heldIds,
-      heldTimestamps,
-      hasLateResult,
-      heldLateFlags,
-    };
-    if (isInteractive) {
-      fingerprintPayload.queuedIds = queuedIds;
-      fingerprintPayload.queuedTimestamps = queuedTimestamps;
-    }
-
-    const fingerprint = createHash("sha256").update(JSON.stringify(fingerprintPayload)).digest("hex");
+    const itemHash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const items = [
+      ...unreadReplies.map(r => itemHash(["reply", r.message_id, r.created_at])),
+      ...heldMessages.map(m => itemHash(["held", m.message_id, m.updated_at || m.created_at, Boolean(m.late_result_text)])),
+      ...queuedMessages.map(m => itemHash(["queued", m.message_id, m.updated_at || m.created_at])),
+    ].sort();
+    const fingerprint = JSON.stringify({ v: 2, items });
 
     return {
       unreadReplies: unreadReplies.map(mapReplyRow),
@@ -954,7 +946,7 @@ export function createLocalMessagingJournal({
         };
       }
 
-      if (obligations.snapshotFingerprint === binding.last_acknowledged_fingerprint) {
+      if (wakeSnapshotCovered(obligations.snapshotFingerprint, binding.last_acknowledged_fingerprint)) {
         return {
           reserved: false,
           deliveryAllowed: false,

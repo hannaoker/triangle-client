@@ -175,12 +175,15 @@ test("lost send, claim and reply responses retain exact IDs for safe retries", a
   }
 });
 
-test("Codex MCP retains legacy tools and adds read-only directory without interactive inbox tools", () => {
+test("Codex MCP retains legacy tools and exposes explicitly scoped inbox operations", () => {
   const toolNames = MCP_TOOLS.map((t) => t.name);
-  assert.equal(toolNames.includes("triangle_list_inbox"), false);
-  assert.equal(toolNames.includes("triangle_claim_message"), false);
-  assert.equal(toolNames.includes("triangle_reply_message"), false);
+  assert.equal(toolNames.includes("triangle_list_inbox"), true);
+  assert.equal(toolNames.includes("triangle_claim_message"), true);
+  assert.equal(toolNames.includes("triangle_reply_message"), true);
   assert.deepEqual(toolNames.sort(), [
+    "triangle_claim_message",
+    "triangle_list_inbox",
+    "triangle_reply_message",
     "triangle_ack_notification",
     "triangle_cancel_message",
     "triangle_consume_reply",
