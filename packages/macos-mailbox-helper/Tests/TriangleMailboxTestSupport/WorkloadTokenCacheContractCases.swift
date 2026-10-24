@@ -454,24 +454,33 @@ public enum WorkloadTokenCacheContractCases {
             ], "per-run requests with a shared token: \(mesh.counts)")
         }
 
-        // One hour of the idle Cursor lane: a run about every 35 s (30 s poll + the
-        // run itself), 103 runs, tokens of 300 s reused until 30 s before expiry.
-        let runs = 103
-        func hour(_ cache: (any WorkloadTokenCache)?) async throws -> CountingMailboxMesh {
+        // One hour of the idle Cursor lane before wake-driven claiming: a run about
+        // every 35 s (30 s poll + the run itself), 103 runs, tokens of 300 s reused
+        // until 30 s before expiry.
+        func hour(spacing: Int, runs: Int, _ cache: (any WorkloadTokenCache)?) async throws -> CountingMailboxMesh {
             let mesh = CountingMailboxMesh(agents: [agent])
-            clock.set(1_800_000_000)
             for index in 0..<runs {
-                clock.set(1_800_000_000 + TimeInterval(index * 35))
+                clock.set(1_800_000_000 + TimeInterval(index * spacing))
                 try await run(mesh, cache)
             }
             return mesh
         }
-        let before = try await hour(nil)
-        let after = try await hour(FileWorkloadTokenCache(root: home.appendingPathComponent("hour")))
+        let runs = 103
+        let before = try await hour(spacing: 35, runs: runs, nil)
+        let after = try await hour(spacing: 35, runs: runs, FileWorkloadTokenCache(root: home.appendingPathComponent("hour")))
         try expect(before.total == runs * 4, "without a shared token an hour is \(before.total) requests, expected \(runs * 4)")
         // 13 exchanges (every 8th run) at 2 requests, plus gate + list per run.
         try expect(after.counts["POST /api/v1/identity/tokens"] == 13, "tokens exchanged per hour: \(after.counts)")
         try expect(after.total == runs * 2 + 13 * 2, "with a shared token an hour is \(after.total) requests, expected \(runs * 2 + 13 * 2)")
+
+        // At the wake-driven safety cadence (a run about every 330 s) a 300 s token has
+        // always expired before the next run, so every safety run exchanges its own: the
+        // shared token saves nothing for an idle lane there. That saving comes from
+        // fewer runs; the shared token pays off for bursts (claim, reply, ack, MCP sessions).
+        let safetyRuns = 11
+        let safetyBare = try await hour(spacing: 330, runs: safetyRuns, nil)
+        let safetyShared = try await hour(spacing: 330, runs: safetyRuns, FileWorkloadTokenCache(root: home.appendingPathComponent("safety")))
+        try expect(safetyBare.total == safetyRuns * 4 && safetyShared.total == safetyRuns * 4, "safety-cadence hour: \(safetyBare.total) / \(safetyShared.total)")
     }
 
     // MARK: Fixtures
