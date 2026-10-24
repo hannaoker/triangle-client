@@ -230,3 +230,104 @@ test('R2: full directory evicts oldest ended row, retaining its end fence across
   const status=await f.broker().status();assert.equal(status.used,128);assert.equal(status.capacity,128);
  }finally{await f.close();}
 });
+
+test('Codex opt-in is explicit, namespaces equal UUIDs and binds harness into the challenge',async()=>{
+ const f=fixture();try{
+  const b=f.broker(),sid=randomUUID(),e={...f.event(sid,'start'),harness:'codex'};
+  assert.throws(()=>b.challenge({installationId:f.integration.installationId,secret:f.integration.secret,event:e}),{code:'invalid_discovery_event'});
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['claude','codex']});
+  const auth={installationId:f.integration.installationId,secret:f.integration.secret};
+  const challenge=b.challenge({...auth,event:e});
+  await assert.rejects(b.report({...auth,nonce:challenge.nonce,event:{...e,harness:'claude'}}),{code:'unauthorized'});
+  const codex=await f.report(b,e),claude=await f.report(b,f.event(sid,'start'));
+  assert.notEqual(codex.id,claude.id);
+  let rows=await b.listFor(f.reader);assert.deepEqual(new Set(rows.map(r=>r.harness)),new Set(['claude','codex']));
+  assert.ok(rows.find(r=>r.id===codex.id).label.startsWith('Codex · '));
+  assert.ok(rows.every(r=>!r.capabilities.reachable&&!r.capabilities.wakeCapable));
+  await f.report(b,{...f.event(sid,'end'),harness:'codex'});
+  rows=await b.listFor(f.reader);assert.equal(rows.find(r=>r.id===claude.id).presence,'unknown');
+  await f.reopen();rows=await f.broker().listFor(f.reader);assert.equal(rows.find(r=>r.id===codex.id).presence,'offline');
+  writePrivateJson(f.integrationPath,f.integration);rows=await f.broker().listFor(f.reader);
+  assert.deepEqual(rows.map(r=>r.harness),['claude'],'removing opt-in hides retained Codex metadata');
+ }finally{await f.close();}
+});
+
+test('Codex and Claude hook setup coexist, preserve unrelated settings, and disable together',()=>{
+ const f=ownerFixture();try{
+  const codexDir=path.join(f.workspace,'.codex');fs.mkdirSync(codexDir,{mode:0o700});
+  const codexFile=path.join(codexDir,'hooks.json');
+  const prior={description:'owner hooks',hooks:{SessionStart:[{hooks:[{type:'command',command:'echo owner'}]}]}};
+  fs.writeFileSync(codexFile,JSON.stringify(prior),{mode:0o600});
+  const args={config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local'),harness:'codex'};
+  setupSessionDiscovery(args);setupSessionDiscovery(args);
+  const after=JSON.parse(fs.readFileSync(codexFile));
+  assert.deepEqual(after.hooks.SessionStart[0],prior.hooks.SessionStart[0]);
+  assert.equal(after.hooks.SessionStart.length,2);assert.equal(after.hooks.SessionEnd[0].hooks[0].timeout,3);
+  assert.ok(after.hooks.SessionStart[1].hooks[0].command.endsWith('--harness codex'));
+  assert.deepEqual(new Set(JSON.parse(fs.readFileSync(f.integrationPath)).harnesses),new Set(['claude','codex']));
+  assert.throws(()=>setupSessionDiscovery({...args,harness:'unknown'}),{code:'invalid_arguments'});
+  const result=disableSessionDiscovery({config:f.configPath});assert.equal(result.hooksCleanupRequired,false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(codexFile)),prior);
+  assert.ok(!JSON.parse(fs.readFileSync(f.settingsPath)).hooks);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('Codex hook reaches real isolated host with payload identity, not inherited process identity',async()=>{
+ const f=ownerFixture();let host;
+ try{
+  setupSessionDiscovery({config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local'),harness:'codex'});
+  const config=JSON.parse(fs.readFileSync(f.configPath));
+  let executions=0;
+  host=createInstalledLocalMessagingHost({configPath:f.configPath,runners:new Map([[config.recipients[0].instanceId,{run:async()=>{executions++;return {status:'completed',text:'unexpected'};}}]]),gate:createProfiledReasonerGate()});
+  await host.start();
+  const ids=[randomUUID(),randomUUID()];
+  for(const sid of ids){
+   const result=await new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[cli,'discovery-hook','--config',f.configPath,'--harness','codex'],{env:{...process.env,CODEX_THREAD_ID:randomUUID()}});
+    let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
+    child.once('error',reject);child.once('exit',code=>resolve({code,stdout,stderr}));
+    child.stdin.end(JSON.stringify({session_id:sid,cwd:f.workspace,hook_event_name:'SessionStart',source:'startup',prompt:'DO_NOT_RETAIN',transcript_path:'DO_NOT_READ'}));
+   });assert.deepEqual(result,{code:0,stdout:'',stderr:''});
+  }
+  let output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
+  const sessions=JSON.parse(output).sessions.filter(r=>r.harness==='codex');assert.equal(sessions.length,2);
+  assert.ok(sessions.every(r=>ids.some(id=>r.label.endsWith(createHash('sha256').update(id).digest('hex').slice(0,8)))));
+  for(const row of sessions){
+   await assert.rejects(runLocalMessagingCLI(['send','--config',f.configPath,'--to',row.id,'--text','must not run'],{output:{write(){}}}),/recipient|authorized|allowed/i);
+  }
+  const bytes=fs.readFileSync(path.join(config.stateRoot,'local-messaging.sqlite'));
+  for(const sid of ids)assert.equal(bytes.includes(Buffer.from(sid)),false);
+  assert.equal(bytes.includes(Buffer.from('DO_NOT_RETAIN')),false);assert.equal(executions,0);
+ }finally{await host?.stop();fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+import {DatabaseSync} from 'node:sqlite';
+test('pre-Codex journal migration keeps Claude handles and lifecycle across reopen',async()=>{
+ const f=fixture();try{
+  const sid=randomUUID(),b=f.broker();const original=await f.report(b,f.event(sid,'start'));
+  await f.journal.close();
+  const db=new DatabaseSync(path.join(f.root,'journal/local-messaging.sqlite'));
+  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN harness');db.close();
+  await f.reopen();
+  const rows=await f.broker().listFor(f.reader);
+  assert.equal(rows.length,1);assert.equal(rows[0].id,original.id);assert.equal(rows[0].harness,'claude');assert.equal(rows[0].generation,1);
+ }finally{await f.close();}
+});
+
+test('twenty mixed sessions retain distinct handles across end/resume and journal restart',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['claude','codex']});
+  const sessions=Array.from({length:20},(_,i)=>({sid:randomUUID(),harness:i%2?'codex':'claude'}));
+  const now=Date.now();const event=(s,kind,offset)=>({...f.event(s.sid,kind,now+offset),harness:s.harness});
+  let b=f.broker();
+  for(const s of sessions)await f.report(b,event(s,'start',-30));
+  const before=await b.listFor(f.reader);assert.equal(new Set(before.map(r=>r.id)).size,20);
+  for(const s of sessions)await f.report(b,event(s,'end',-20));
+  assert.ok((await b.listFor(f.reader)).every(r=>r.presence==='offline'));
+  await f.reopen();b=f.broker();
+  for(const s of sessions)await f.report(b,event(s,'start',-10));
+  const after=await b.listFor(f.reader);assert.deepEqual(after.map(r=>r.id),before.map(r=>r.id));
+  assert.ok(after.every(r=>r.generation===2&&!r.capabilities.reachable&&!r.capabilities.wakeCapable));
+  assert.equal(after.filter(r=>r.harness==='codex').length,10);
+ }finally{await f.close();}
+});

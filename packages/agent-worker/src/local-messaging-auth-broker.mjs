@@ -65,8 +65,9 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
  let windowStart=clock(),attempts=0;
  function current(){
   const c=readPrivateJson(integrationPath);
-  if(Object.keys(c).sort().join(',')!=='enabled,installationId,readerIds,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||!uuid.test(c.installationId)||!hex.test(c.secret)||
+  if(Object.keys(c).filter(k=>k!=='harnesses').sort().join(',')!=='enabled,installationId,readerIds,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||!uuid.test(c.installationId)||!hex.test(c.secret)||
      typeof c.workspace!=='string'||/[\u0000-\u001f\u007f]/.test(c.workspace)||Buffer.byteLength(JSON.stringify(c.workspace))>512||fs.realpathSync(c.workspace)!==c.workspace||
+     (c.harnesses!==undefined&&(!Array.isArray(c.harnesses)||!c.harnesses.length||new Set(c.harnesses).size!==c.harnesses.length||c.harnesses.some(h=>!['claude','codex'].includes(h))))||
      !Array.isArray(c.readerIds)||c.readerIds.length>64||c.readerIds.some(id=>!hex.test(id)))throw coded('invalid_discovery_config','Invalid discovery integration');
   return c;
  }
@@ -78,10 +79,12 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
   return c;
  }
  function normalize(event,c){
-  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
+  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).filter(k=>k!=='harness').sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
+    (event.harness!==undefined&&!['claude','codex'].includes(event.harness))||
+    !(c.harnesses||['claude']).includes(event.harness||'claude')||
     !uuid.test(event.eventId)||!uuid.test(event.sessionId)||!['start','activity','end'].includes(event.kind)||
     event.workspace!==c.workspace||!Number.isSafeInteger(event.observedAt)||event.observedAt>clock()+1000||event.observedAt<clock()-30000)throw coded('invalid_discovery_event','Invalid or stale lifecycle metadata');
-  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt};
+  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt,...(event.harness==='codex'?{harness:'codex'}:{})};
  }
  const digest=(event,installationId)=>createHash('sha256').update(installationId+'\0'+JSON.stringify(event)).digest('hex');
  return {
@@ -99,7 +102,7 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
    return journal.recordDiscoveryEvent({installationId:c.installationId,event,digest:digest(event,c.installationId),receivedAt:clock()});
   },
   async status(){
-   try{const c=current();return {enabled:c.enabled,mode:'visibility-only',sessions:c.enabled?(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).length:0,capacity:128,...(journal.discoveryUsage?await journal.discoveryUsage():{})};}
+   try{const c=current();return {enabled:c.enabled,mode:'visibility-only',harnesses:c.harnesses||['claude'],sessions:c.enabled?(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(r=>(c.harnesses||['claude']).includes(r.harness)).length:0,capacity:128,...(journal.discoveryUsage?await journal.discoveryUsage():{})};}
    catch{return {enabled:false,mode:'visibility-only',error:'invalid_discovery_config'};}
   },
   async listFor(readerId){
@@ -107,7 +110,7 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
     const c=current();
     if(!c.enabled||!c.readerIds.includes(readerId))return [];
     const rows=await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
-    warned=false;return rows;
+    warned=false;return rows.filter(r=>(c.harnesses||['claude']).includes(r.harness));
    }catch{
     if(!warned){warned=true;try{logger?.warn?.('Session discovery unavailable; configured recipients remain available');}catch{}}
     return [];
