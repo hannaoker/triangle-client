@@ -61,3 +61,7 @@ Hook metadata does not currently provide a verified distinction between every in
 Automatic Codex attachment, arbitrary Codex receive/wake, and full multi-harness delivery parity are not supplied by this slice. Existing bound Codex messaging and Claude attachment behavior are preserved.
 
 Official hook schema reference: https://learn.chatgpt.com/docs/hooks (retrieved 2026-10-24). Documentation supports the hook configuration shape; the desktop observations above are the evidence for this installed surface.
+
+Live preparation checkpoint: candidate configuration and an isolated host are at `/private/tmp/triangle-codex-discovery-d3-20261024`; the scratch workspace's existing probe hooks were preserved and three candidate hooks were added. A fresh desktop metadata call still succeeded but no Codex directory row appeared. The standalone hook-review UI explicitly reported three new/changed hooks requiring review; they were left untrusted. This is an observed trust gate, not a successful registration. The production supervisor/configuration has not been changed. The isolated host has no executable worker implementation and cannot launch a coding agent.
+
+Final regression result: 250 tests passed, zero failures or skips.
