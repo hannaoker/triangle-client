@@ -1,7 +1,7 @@
 import readline from "node:readline";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID,createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readPrivateJson } from "./local-messaging-auth-broker.mjs";
 import { resolveLocalSocketAddress } from "./local-messaging-address.mjs";
 import { createLocalControlClient } from "./local-messaging-client.mjs";
@@ -15,6 +15,7 @@ import {
   UUID_PATTERN,
   readSessionMessagingPolicy,
   attachedSessionIdentity,
+  sessionAddress,
 } from "./local-messaging-interactive-session.mjs";
 import { sanitizeError, coded } from "./local-messaging-errors.mjs";
 import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH } from "./local-messaging-protocol.mjs";
@@ -280,7 +281,15 @@ export function createClaudeSessionMcpChild({
 
   async function pollWake() {
     if (closed || inFlightWakePromise) return;
-    if(!pushSupported||!delivery){if(attachment)await getValidCredential().catch(()=>{});return;}
+    if(!pushSupported||!delivery){
+      if(attachment){
+        // Tracked like a wake poll: close() waits for it, so a heartbeat can never land after the detach and revive the lease.
+        const heartbeat=getValidCredential().catch(()=>{});
+        inFlightWakePromise=heartbeat;
+        try{await heartbeat;}finally{if(inFlightWakePromise===heartbeat)inFlightWakePromise=null;}
+      }
+      return;
+    }
     const ac = new AbortController();
     wakeAbortController = ac;
     const wakePromise = (async () => {
@@ -642,14 +651,14 @@ export function createClaudeSessionMcpChild({
 
 // Only this MCP child's own exported context is used; never enumerate session token files.
 export async function createAttachedClaudeSessionMcpChild(options){
- const {configPath,policyPath,expectedVersion,env=process.env}=options;
- const c=readPrivateJson(configPath),policy=readSessionMessagingPolicy(policyPath);
+ const {policyPath,expectedVersion,env=process.env}=options;
+ const policy=readSessionMessagingPolicy(policyPath);
  if(fs.realpathSync(options.cwd||process.cwd())!==policy.workspace)throw coded('workspace_mismatch','Own MCP workspace does not match owner opt-in');
  if(!policy.enabled||!UUID_PATTERN.test(env.CLAUDE_CODE_SESSION_ID))throw coded('session_disabled','Own-session context and owner opt-in required');
  const probe=probeClaudeSession({env,version:expectedVersion});
  const tuple={installationId:policy.installationId,secret:policy.secret,sessionId:env.CLAUDE_CODE_SESSION_ID.toLowerCase(),childId:randomUUID(),wakeCapable:probe.supported===true};
- const id='session-'+createHash('sha256').update(policy.installationId+'\0'+policy.workspace+'\0'+tuple.sessionId).digest('hex');
- const identity=attachedSessionIdentity(policy.installationId,tuple.sessionId);
+ const id=sessionAddress(policy.installationId,policy.workspace,tuple.sessionId);
+ const identity=attachedSessionIdentity(tuple.sessionId);
  // Initialize MCP immediately. Claude may wait for MCP initialization before
  // firing SessionStart. First tool call / heartbeat attaches after that hook.
  return createClaudeSessionMcpChild({...options,attachment:{policyPath,tuple,integration:{senderId:id,sessionId:identity.pseudoSessionId,bindingId:tuple.childId,generation:null,enabled:true,revoked:false,secret:policy.secret}}});

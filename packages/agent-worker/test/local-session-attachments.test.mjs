@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
+import net from 'node:net';
 import {Readable,PassThrough} from 'node:stream';
+import {encodeFrame,createMessageParser,createSuccessResponse} from '../src/local-messaging-protocol.mjs';
 import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,disableSessionDiscovery,runSessionDiscoveryHook,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
@@ -12,7 +14,8 @@ import {createLocalControlClient} from '../src/local-messaging-client.mjs';
 import {resolveLocalSocketAddress} from '../src/local-messaging-address.mjs';
 import {createAttachedClaudeSessionMcpChild} from '../src/claude-session-mcp-child.mjs';
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
-import {createWorkspaceSessionBroker} from '../src/local-messaging-interactive-session.mjs';
+import {createWorkspaceSessionBroker,sessionAddress,attachedSessionIdentity,UUID_PATTERN} from '../src/local-messaging-interactive-session.mjs';
+import {SUPPORTED_CLAUDE_VERSION} from '../src/claude-session-delivery.mjs';
 // Owner-side files only (no host): base config, lifecycle discovery and workspace messaging for a disposable workspace.
 function ownerFiles(){
  const root=fs.mkdtempSync('/private/tmp/tri-attach-'),workspace=path.join(root,'workspace');fs.mkdirSync(workspace,{mode:0o700});
@@ -381,20 +384,20 @@ test('swallowed broker failures are logged once per failure and again after reco
   j=createLocalMessagingJournal({stateRoot:config.stateRoot});
   const warnings=[];
   const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:j,issue(){},logger:{warn:message=>warnings.push(message)}});
-  const probe=async()=>[await broker.listFor(owner),broker.allowedRecipients().length,broker.allowedSender(owner)];
+  const probe=async()=>[await broker.listFor(owner),broker.allowedRecipients().length];
   const unavailable=code=>`Workspace session messaging unavailable (${code}); configured recipients remain available`;
-  assert.deepEqual(await probe(),[[],1,true]);assert.deepEqual(warnings,[]);
+  assert.deepEqual(await probe(),[[],1]);assert.deepEqual(warnings,[]);
   // A damaged policy hides everything and says why, once, however often it is asked.
   fs.writeFileSync(policyPath,'{ not json');
-  assert.deepEqual(await probe(),[[],0,false]);await probe();
+  assert.deepEqual(await probe(),[[],0]);await probe();
   assert.deepEqual(warnings,[unavailable('invalid_private_file')]);
   // Recovery is silent; a different failure is reported on its own; the first one is reported again after a recovery.
   fs.writeFileSync(policyPath,good);
-  assert.deepEqual(await probe(),[[],1,true]);
+  assert.deepEqual(await probe(),[[],1]);
   fs.renameSync(real,real+'-moved');await probe();
   assert.deepEqual(warnings,[unavailable('invalid_private_file'),unavailable('workspace_missing')]);
   fs.renameSync(real+'-moved',real);
-  assert.deepEqual(await probe(),[[],1,true]);
+  assert.deepEqual(await probe(),[[],1]);
   fs.writeFileSync(policyPath,'{ not json');await probe();
   assert.deepEqual(warnings.slice(2),[unavailable('invalid_private_file')]);
   assert.ok(warnings.every(message=>!/not json|tri-attach|secret|[a-f0-9]{64}/.test(message)),'codes only: no contents, paths or identifiers');
@@ -407,4 +410,84 @@ test('the host hands its logger to the session broker, so a damaged policy is re
   for(let i=0;i<2;i++)await f.owner.listSessions({credential:await f.grant()});
   assert.deepEqual(f.logs.filter(message=>/session messaging/i.test(message)),['Workspace session messaging unavailable (invalid_private_file); configured recipients remain available']);
  }finally{await f.close();}
+});
+
+test('a session has one address: discovery, the broker and the MCP child agree on it, and it is pinned',async()=>{
+ // Known answer: changing the derivation would silently orphan every stored address, lease and wake binding.
+ const [installation,workspace,session]=['11111111-1111-4111-8111-111111111111','/private/tmp/example-workspace','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'];
+ assert.equal(sessionAddress(installation,workspace,session),'session-0cb12e86aa3fd9e5ef02a9b8e8bda7af11ab31592992b1f9b40b0187d8eec5e6');
+ assert.equal(sessionAddress(installation,workspace,session.toUpperCase()),sessionAddress(installation,workspace,session));
+ assert.notEqual(sessionAddress(installation,workspace+'-other',session),sessionAddress(installation,workspace,session));
+ const f=await fixture();try{
+  const sid=randomUUID(),policy=readPrivateJson(f.config.sessionMessaging.integrationPath),expected=sessionAddress(policy.installationId,policy.workspace,sid);
+  await f.lifecycle(sid,'SessionStart');
+  // The journal's discovery row, the broker's grant and the child's own pin are three independent derivations.
+  const discovered=(await f.owner.listSessions({credential:await f.grant()})).filter(r=>r.id.startsWith('session-')).map(r=>r.id);
+  const attached=(await tool(await f.child(sid),'triangle_get_status')).senderId;
+  assert.deepEqual(discovered,[expected]);assert.equal(attached,expected);
+ }finally{await f.close();}
+});
+
+test('the pseudonymous session identity depends on the session id alone',()=>{
+ const sid=randomUUID(),identity=attachedSessionIdentity(sid);
+ assert.deepEqual(Object.keys(identity),['pseudoSessionId']);
+ assert.match(identity.pseudoSessionId,UUID_PATTERN);
+ assert.equal(attachedSessionIdentity(sid.toUpperCase()).pseudoSessionId,identity.pseudoSessionId);
+ assert.notEqual(attachedSessionIdentity(randomUUID()).pseudoSessionId,identity.pseudoSessionId);
+ assert.notEqual(identity.pseudoSessionId,sid,'the raw harness id is never what gets stored');
+});
+
+test('close() waits for an in-flight heartbeat before it detaches, so the detach is the last word on the lease',async()=>{
+ const {root,workspace,configPath}=ownerFiles();let server;try{
+  const config=readPrivateJson(configPath),policy=readPrivateJson(config.sessionMessaging.integrationPath),sid=randomUUID(),events=[];
+  // A stand-in supervisor whose attach answers slowly, so a heartbeat is still in flight when the child closes.
+  server=net.createServer(socket=>{
+   const parser=createMessageParser({onError:()=>socket.destroy(),onMessage:async message=>{
+    events.push(message.method+' received');
+    if(message.method==='attach_session'){
+     await new Promise(resolve=>setTimeout(resolve,150));
+     socket.write(encodeFrame(createSuccessResponse(message.id,{senderId:sessionAddress(policy.installationId,policy.workspace,sid),sessionId:attachedSessionIdentity(sid).pseudoSessionId,generation:1,bindingId:message.params.childId,credential:'stand-in'})));
+    }else socket.write(encodeFrame(createSuccessResponse(message.id,{detached:true})));
+    events.push(message.method+' answered');
+   }});
+   socket.on('data',chunk=>parser.feed(chunk));socket.on('error',()=>{});
+  });
+  await new Promise(resolve=>server.listen(resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,resolve));
+  const child=await createAttachedClaudeSessionMcpChild({configPath,cwd:workspace,policyPath:config.sessionMessaging.integrationPath,expectedVersion:'2.1.307',env:{CLAUDE_CODE_SESSION_ID:sid},input:new PassThrough(),output:new PassThrough(),wakeIntervalMs:20});
+  const running=child.run();
+  await eventually(()=>events.includes('attach_session received'),'the first heartbeat to arrive');
+  await child.close();await running;
+  // A heartbeat answered after the detach would have renewed the lease the close had just released.
+  assert.deepEqual(events.slice(0,3),['attach_session received','attach_session answered','detach_session received']);
+ }finally{await new Promise(resolve=>server?server.close(resolve):resolve());fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('the managed MCP entry pins the supported Claude version instead of a copy of it',()=>{
+ const {root,workspace}=ownerFiles();try{
+  const args=JSON.parse(fs.readFileSync(path.join(workspace,'.mcp.json'))).mcpServers['triangle-session'].args;
+  assert.equal(args[args.indexOf('--expected-version')+1],SUPPORTED_CLAUDE_VERSION);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('workspace files are replaced atomically and flushed first: a failed flush keeps the old file and leaves no debris',t=>{
+ const {root,workspace,configPath,wrapper}=ownerFiles();try{
+  const mcp=path.join(workspace,'.mcp.json'),settings=path.join(workspace,'.claude','settings.local.json');
+  const before=[mcp,settings].map(file=>fs.readFileSync(file,'utf8'));
+  // Fail the flush of exactly the replacement temp files; everything else (policy and config writes included) behaves normally.
+  const opened=new Map(),flushed=[],realOpen=fs.openSync,realFsync=fs.fsyncSync;
+  t.mock.method(fs,'openSync',(file,...rest)=>{const fd=realOpen(file,...rest);opened.set(fd,String(file));return fd;});
+  t.mock.method(fs,'fsyncSync',fd=>{const file=opened.get(fd)??'';flushed.push(path.basename(file));
+   if(/(mcp\.json|settings\.local\.json)\.triangle-/.test(file))throw Object.assign(new Error('no space left on device'),{code:'ENOSPC'});return realFsync(fd);});
+  // Disabling reports the managed entry it could not rewrite, and the file is exactly as it was.
+  assert.equal(disableWorkspaceMessaging({config:configPath}).mcpCleanupRequired,true);
+  assert.equal(fs.readFileSync(mcp,'utf8'),before[0]);
+  // Setting the entry up again fails loudly instead of leaving a half-written file.
+  assert.throws(()=>setupWorkspaceMessaging({config:configPath,workspace,'local-cli':wrapper}),{code:'ENOSPC'});
+  assert.equal(fs.readFileSync(mcp,'utf8'),before[0]);
+  // The Claude hook settings take the same path.
+  assert.equal(disableSessionDiscovery({config:configPath}).hooksCleanupRequired,true);
+  assert.equal(fs.readFileSync(settings,'utf8'),before[1]);
+  assert.ok(flushed.some(name=>/^\.mcp\.json\.triangle-/.test(name))&&flushed.some(name=>/^settings\.local\.json\.triangle-/.test(name)),'each replacement is flushed before it is renamed into place');
+  for(const directory of [workspace,path.dirname(settings)])assert.deepEqual(fs.readdirSync(directory).filter(name=>/\.triangle-/.test(name)),[]);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

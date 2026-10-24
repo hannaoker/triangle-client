@@ -195,11 +195,16 @@ export function readSessionMessagingPolicy(file) {
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
  return c;
 }
-export function attachedSessionIdentity(installationId,sessionId){
- // Separate pseudonymous UUID for the existing journal binding protocol.
+// A session's address: derived from the installation, the opted-in workspace and the harness session id, so it is
+// stable across MCP children and restarts and the raw id is never stored. Lifecycle discovery (journal), the broker
+// and the MCP child must all agree on it, so there is exactly one definition.
+export function sessionAddress(installationId,workspace,sessionId){
+ return 'session-'+createHash('sha256').update(installationId+'\0'+workspace+'\0'+sessionId.toLowerCase()).digest('hex');
+}
+// Separate pseudonymous UUID for the existing journal binding protocol, derived from the session id alone.
+export function attachedSessionIdentity(sessionId){
  const sessionHash=createHash('sha256').update(sessionId.toLowerCase()).digest('hex');
- const pseudo=`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`;
- return {sessionHash,pseudoSessionId:pseudo};
+ return {pseudoSessionId:`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`};
 }
 export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,logger=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
@@ -231,21 +236,19 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   if(!a||a.installation_id!==policyScope(c)||a.generation!==r.generation||a.expires_at<=clock())throw coded('session_offline','Session MCP child is offline');
   return {c,r,a};
  }
- const addressOf=(c,sessionId)=>'session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+sessionId.toLowerCase()).digest('hex');
  let lastSweep=0;
  function verify(request){let c;try{c=policy();if(!equalSecret(request?.secret,c.secret)||request.installationId!==c.installationId||!UUID_PATTERN.test(request.childId)||!UUID_PATTERN.test(request.sessionId))throw coded('unauthorized','Invalid session attachment capability');}
   catch(error){failures.checkAndConsume('failed');throw error;}
   // Every session has its own budget (one attach per tool call plus the heartbeat): a chatty session must not
   // starve the other sessions' leases. Only authenticated callers reach this, and idle buckets are swept.
   const now=Date.now();if(now-lastSweep>=60000){lastSweep=now;limiter.sweep();}
-  limiter.checkAndConsume(addressOf(c,request.sessionId));return c;}
+  limiter.checkAndConsume(sessionAddress(c.installationId,c.workspace,request.sessionId));return c;}
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
-  allowedSender(id){try{const allowed=policy().allowedSenders.includes(id);healthy();return allowed;}catch(error){degraded(error);return false;}},
   allowedRecipients(){try{const list=[...policy().allowedRecipients];healthy();return list;}catch(error){degraded(error);return [];}},
   async attach(request){
-   const c=verify(request),identity=attachedSessionIdentity(c.installationId,request.sessionId);
-   const id=addressOf(c,request.sessionId);
+   const c=verify(request),identity=attachedSessionIdentity(request.sessionId);
+   const id=sessionAddress(c.installationId,c.workspace,request.sessionId);
    const r=(await rows()).find(r=>r.id===id);
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
@@ -254,7 +257,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients]})};
   },
-  async detach(request){const c=verify(request);const id=addressOf(c,request.sessionId);await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
+  async detach(request){const c=verify(request);const id=sessionAddress(c.installationId,c.workspace,request.sessionId);await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c}=await current(to);if(!c.allowedSenders.includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},

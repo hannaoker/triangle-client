@@ -5,6 +5,7 @@ import path from "node:path";
 import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
 import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
+import { sessionAddress } from "./local-messaging-interactive-session.mjs";
 
 const DB_NAME = "local-messaging.sqlite";
 const OWNER_DB_NAME = "local-messaging-owner.sqlite";
@@ -1607,7 +1608,7 @@ export function createLocalMessagingJournal({
 
   async function recordDiscoveryEvent({installationId,event,digest,receivedAt}) {
     assertNotClosed();
-    const id='session-'+createHash('sha256').update(`${installationId}\0${event.workspace}\0${event.sessionId}`).digest('hex');
+    const id=sessionAddress(installationId,event.workspace,event.sessionId);
     db.exec('BEGIN IMMEDIATE');
     try {
       const previous=db.prepare('SELECT * FROM local_discovery_events WHERE event_id=?').get(event.eventId);
