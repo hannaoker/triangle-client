@@ -153,7 +153,14 @@ export function createLocalMessagingSubsystem({
       logger.info?.("Local messaging subsystem stopped");
     },
 
-    registerInteractiveIdentity(id) { knownProfiles.add(id); },
+    // Attached sessions are dynamic principals: the workspace broker derives their address from an authenticated attach
+    // and issues for it directly, so nothing accumulates in the profile registry as chats come and go.
+    issueSessionCredential(senderId, options = {}) {
+      if (typeof senderId !== "string" || !/^session-[a-f0-9]{64}$/.test(senderId)) {
+        throw coded("invalid_sender_id", "A session address is required");
+      }
+      return issuer.issue({ senderId, ...options, senderType: "interactive" });
+    },
 
     issueTurnCredential(senderId, options = {}) {
       if (!senderId || typeof senderId !== "string") {

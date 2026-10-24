@@ -5,6 +5,7 @@ import path from "node:path";
 import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
 import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
+import { sessionAddress } from "./local-messaging-interactive-session.mjs";
 
 const DB_NAME = "local-messaging.sqlite";
 const OWNER_DB_NAME = "local-messaging-owner.sqlite";
@@ -614,6 +615,9 @@ export function createLocalMessagingJournal({
     const pairCutoff = Math.min(cutoff, now - pairWindowMs);
     db.prepare("DELETE FROM local_pair_admissions WHERE created_at <= ?").run(pairCutoff);
 
+    // Per-session custody and wake state outlives nothing: it goes once its discovery row is gone.
+    pruneOrphanedSessionState();
+
     return { messages: Number(messages.changes), replies: Number(replies.changes) };
   }
 
@@ -799,6 +803,60 @@ export function createLocalMessagingJournal({
     }
     const row = db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(senderId);
     return mapWakeBindingRow(row);
+  }
+
+  // Wake state of an attached session belongs to its address and lifecycle generation, not to the MCP
+  // child process. A replacement child inherits an outstanding wake instead of holding it stale (session
+  // addresses have no operator reconcile path), and a new lifecycle generation starts a fresh wake epoch.
+  // Legacy single-session bindings keep using initInteractiveWakeBinding.
+  async function bindAttachedSessionWake({ senderId, sessionId, generation, bindingId }) {
+    assertNotClosed();
+    if (!senderId || !sessionId || !bindingId || !Number.isSafeInteger(generation) || generation < 1) {
+      throw coded("invalid_params", "senderId, sessionId, bindingId, and a positive generation are required");
+    }
+    const canonicalBindingId = bindingId.toLowerCase();
+    const threadId = `claude-session:${sessionId}`;
+    const read = () => db.prepare("SELECT * FROM local_wake_bindings WHERE target_identity = ?").get(senderId);
+    const isCurrent = (row) => Boolean(row) && row.binding_id === canonicalBindingId &&
+      row.generation === generation && row.thread_id === threadId && row.delivery_state !== "stale_held";
+
+    // Heartbeats re-attach every few seconds: the unchanged case must not write.
+    const quick = read();
+    if (isCurrent(quick)) return mapWakeBindingRow(quick);
+
+    return withImmediateTransaction(() => {
+      const now = Date.now();
+      const existing = read();
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO local_wake_bindings (
+            target_identity, binding_id, thread_id, generation, delivery_state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'idle', ?, ?)
+        `).run(senderId, canonicalBindingId, threadId, generation, now, now);
+      } else if (!isCurrent(existing)) {
+        if (existing.generation === generation && existing.thread_id === threadId && existing.delivery_state !== "stale_held") {
+          // Same lifecycle, new MCP child: keep the delivery state and carry the wake history over.
+          db.prepare("UPDATE local_wake_bindings SET binding_id = ?, updated_at = ? WHERE target_identity = ?")
+            .run(canonicalBindingId, now, senderId);
+          db.prepare(`
+            UPDATE local_interactive_wake_history SET binding_id = ?
+            WHERE target_identity = ? AND session_id = ? AND generation = ? AND binding_id = ?
+          `).run(canonicalBindingId, senderId, sessionId, generation, existing.binding_id);
+        } else {
+          // New lifecycle generation, or a hold left by an earlier build: a fresh wake epoch. The old wake can
+          // no longer be acknowledged (acks are fenced by generation), so keeping it would block this session's
+          // wakes forever. Acknowledgement fingerprints and the minimum wake interval carry over.
+          db.prepare(`
+            UPDATE local_wake_bindings
+            SET binding_id = ?, thread_id = ?, generation = ?, delivery_state = 'idle',
+                active_wake_id = NULL, active_fingerprint = NULL,
+                receipt_queued_id = NULL, receipt_thread_id = NULL, updated_at = ?
+            WHERE target_identity = ?
+          `).run(canonicalBindingId, threadId, generation, now, senderId);
+        }
+      }
+      return mapWakeBindingRow(read());
+    });
   }
 
   async function reserveInteractiveWake({ targetIdentity, reservationId, sessionId, generation, bindingId, now = Date.now() }) {
@@ -1553,7 +1611,7 @@ export function createLocalMessagingJournal({
 
   async function recordDiscoveryEvent({installationId,event,digest,receivedAt}) {
     assertNotClosed();
-    const id='session-'+createHash('sha256').update(`${installationId}\0${event.workspace}\0${event.sessionId}`).digest('hex');
+    const id=sessionAddress(installationId,event.workspace,event.sessionId);
     db.exec('BEGIN IMMEDIATE');
     try {
       const previous=db.prepare('SELECT * FROM local_discovery_events WHERE event_id=?').get(event.eventId);
@@ -1563,7 +1621,7 @@ export function createLocalMessagingJournal({
       }
       const cutoff=receivedAt-RETENTION_MS;
       db.prepare('DELETE FROM local_discovery_events WHERE received_at < ?').run(cutoff);
-      db.prepare('DELETE FROM local_discovered_sessions WHERE last_seen_at < ?').run(cutoff);
+      let removed=Number(db.prepare('DELETE FROM local_discovered_sessions WHERE last_seen_at < ?').run(cutoff).changes);
       db.prepare('DELETE FROM local_discovery_ended WHERE last_seen_at < ?').run(cutoff);
       const stored=db.prepare('SELECT * FROM local_discovered_sessions WHERE id=?').get(id);
       const tombstone=stored?null:db.prepare('SELECT * FROM local_discovery_ended WHERE id=?').get(id);
@@ -1576,6 +1634,7 @@ export function createLocalMessagingJournal({
         if(!ended)throw coded('directory_full','Session directory is full');
         db.prepare('INSERT OR REPLACE INTO local_discovery_ended(id,event_at,generation,last_seen_at) VALUES(?,?,?,?)').run(ended.id,ended.event_at,ended.generation,ended.last_seen_at);
         db.prepare('DELETE FROM local_discovered_sessions WHERE id=?').run(ended.id);
+        removed++;
       }
       const generation=old ? old.generation+(old.lifecycle==='ended'&&event.kind==='start'&&!stale?1:0) : 1;
       if(!stale){
@@ -1589,20 +1648,28 @@ export function createLocalMessagingJournal({
           ON CONFLICT(id) DO UPDATE SET event_at=excluded.event_at,generation=excluded.generation,last_seen_at=excluded.last_seen_at`).run(id,event.observedAt,generation,receivedAt);
         else db.prepare('DELETE FROM local_discovery_ended WHERE id=?').run(id);
       }
+      if(removed>0)pruneOrphanedSessionState();
       const result={id,generation,stale,duplicate:false};
       db.prepare('INSERT INTO local_discovery_events(event_id,digest,result_json,received_at) VALUES(?,?,?,?)').run(event.eventId,digest,JSON.stringify(result),receivedAt);
       db.exec('COMMIT');return result;
     }catch(error){db.exec('ROLLBACK');throw error;}
   }
 
-  async function listDiscoveredSessions({installationId,workspace}) {
-    assertNotClosed();
-    return db.prepare('SELECT * FROM local_discovered_sessions WHERE installation_id=? AND workspace=? ORDER BY id').all(installationId,workspace).map(row=>({
+  const discoveredSessionView=(row,workspace)=>({
       id:row.id,label:`Claude · ${path.basename(workspace).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,48)} · ${row.session_id.slice(0,8)}`,
       kind:'conversation',harness:'claude',workspace,generation:row.generation,
       presence:row.lifecycle==='ended'?'offline':'unknown',lifecycle:row.lifecycle,lastSeenAt:row.last_seen_at,
       capabilities:{visible:true,reachable:false,wakeCapable:false},
-    }));
+    });
+  async function listDiscoveredSessions({installationId,workspace}) {
+    assertNotClosed();
+    return db.prepare('SELECT * FROM local_discovered_sessions WHERE installation_id=? AND workspace=? ORDER BY id').all(installationId,workspace).map(row=>discoveredSessionView(row,workspace));
+  }
+  // One session by address, for the paths that already know which one they want (no scan of the whole directory).
+  async function getDiscoveredSession({id,installationId,workspace}) {
+    assertNotClosed();
+    const row=db.prepare('SELECT * FROM local_discovered_sessions WHERE id=? AND installation_id=? AND workspace=?').get(id,installationId,workspace);
+    return row?discoveredSessionView(row,workspace):null;
   }
 
   // Attachment custody is durable across supervisor restart; no raw session UUID is stored.
@@ -1616,7 +1683,18 @@ export function createLocalMessagingJournal({
       .run(id,childId,generation,installationId,now+30000,wakeCapable?1:0);
   }
   async function getSessionAttachment(id){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments WHERE id=?').get(id)??null;}
+  async function listSessionAttachments(){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments').all();}
   async function detachDiscoveredSession({id,childId}){assertNotClosed();db.prepare('UPDATE local_session_attachments SET expires_at=0 WHERE id=? AND child_id=?').run(id,childId);}
+
+  // A session address exists only while its discovery row does. Once the row has aged out or been evicted nothing
+  // can address the session (reachability needs the row first) and a resumed one attaches afresh, so its custody
+  // lease, wake binding and wake history go with it. Legacy bindings (hex senders) are never touched.
+  function pruneOrphanedSessionState() {
+    const live="(SELECT id FROM local_discovered_sessions)";
+    db.prepare(`DELETE FROM local_interactive_wake_history WHERE target_identity LIKE 'session-%' AND target_identity NOT IN ${live}`).run();
+    db.prepare(`DELETE FROM local_wake_bindings WHERE target_identity LIKE 'session-%' AND target_identity NOT IN ${live}`).run();
+    db.prepare(`DELETE FROM local_session_attachments WHERE id NOT IN ${live}`).run();
+  }
 
   async function close() {
     if (closed) return;
@@ -1629,6 +1707,8 @@ export function createLocalMessagingJournal({
     discoveryUsage: async()=>{assertNotClosed();return {used:db.prepare('SELECT count(*) AS n FROM local_discovered_sessions').get().n};},
     attachDiscoveredSession,
     getSessionAttachment,
+    listSessionAttachments,
+    getDiscoveredSession,
     detachDiscoveredSession,
     recordDiscoveryEvent,
     listDiscoveredSessions,
@@ -1657,6 +1737,7 @@ export function createLocalMessagingJournal({
     ackWake,
     reconcileStaleWake,
     initInteractiveWakeBinding,
+    bindAttachedSessionWake,
     reserveInteractiveWake,
     reportInteractiveWakeResult,
     ackInteractiveWake,

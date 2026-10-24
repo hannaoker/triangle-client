@@ -181,60 +181,100 @@ export function createInteractiveSessionBroker({
 }
 
 
+// A moved or removed workspace is a readable failure of its own, not a raw ENOENT from realpath.
+function resolvedWorkspace(workspace) {
+ try { return fs.realpathSync(workspace); }
+ catch { throw coded('workspace_missing','Opted-in workspace is missing or was moved'); }
+}
 // Workspace participation is a distinct owner capability. Discovery credentials never authorize messaging.
 export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
  if(!c||Object.keys(c).sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||
-   !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||fs.realpathSync(c.workspace)!==c.workspace||
+   !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
  return c;
 }
-export function attachedSessionIdentity(installationId,sessionId){
- // Separate pseudonymous UUID for the existing journal binding protocol.
- const sessionHash=createHash('sha256').update(sessionId.toLowerCase()).digest('hex');
- const pseudo=`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`;
- return {sessionHash,pseudoSessionId:pseudo};
+// A session's address: derived from the installation, the opted-in workspace and the harness session id, so it is
+// stable across MCP children and restarts and the raw id is never stored. Lifecycle discovery (journal), the broker
+// and the MCP child must all agree on it, so there is exactly one definition.
+export function sessionAddress(installationId,workspace,sessionId){
+ return 'session-'+createHash('sha256').update(installationId+'\0'+workspace+'\0'+sessionId.toLowerCase()).digest('hex');
 }
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now()}) {
+// Separate pseudonymous UUID for the existing journal binding protocol, derived from the session id alone.
+export function attachedSessionIdentity(sessionId){
+ const sessionHash=createHash('sha256').update(sessionId.toLowerCase()).digest('hex');
+ return {pseudoSessionId:`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`};
+}
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,logger=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
+ // A broken policy or journal hides the sessions and leaves only the configured recipients. Say so once per
+ // failure (and again once it has recovered) instead of failing silently; codes only, never contents or paths.
+ let degradedCode=null;
+ const degraded=error=>{
+  const code=typeof error?.code==='string'&&/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.code)?error.code:'broker_error';
+  if(code===degradedCode)return;degradedCode=code;
+  try{logger?.warn?.(`Workspace session messaging unavailable (${code}); configured recipients remain available`);}catch{}
+ };
+ const healthy=()=>{degradedCode=null;};
+ // The policy file is the ceiling the owner granted at setup; it never widens what the live owner
+ // configuration allows. A replaced Codex sender or a removed worker loses session access immediately.
+ const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId]);
+ const liveRecipients=configuredRecipients===null?null:new Set(configuredRecipients);
  function policy(){const c=readSessionMessagingPolicy(policyPath),d=readPrivateJson(discoveryPath);
-  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');return c;}
- async function rows(){const c=policy();return journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});}
+  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
+  return {...c,
+   allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
+   allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
+ // Why a session cannot be reached right now, judged from data already loaded (no I/O); null when it can be.
+ const offlineReason=(c,r,a,scope=policyScope(c))=>!r||r.lifecycle==='ended'?'Session has ended or is not discovered'
+  :!a||a.installation_id!==scope||a.generation!==r.generation||a.expires_at<=clock()?'Session MCP child is offline':null;
+ // One policy read, then primary-key lookups: no scan of the directory for a single session.
  async function current(id){
-  const c=policy(),r=(await rows()).find(r=>r.id===id);
-  if(!r||r.lifecycle==='ended')throw coded('session_offline','Session has ended or is not discovered');
-  const a=await journal.getSessionAttachment(id);
-  if(!a||a.installation_id!==policyScope(c)||a.generation!==r.generation||a.expires_at<=clock())throw coded('session_offline','Session MCP child is offline');
+  const c=policy(),r=await journal.getDiscoveredSession({id,installationId:c.installationId,workspace:c.workspace});
+  const a=r&&r.lifecycle!=='ended'?await journal.getSessionAttachment(id):null;
+  const reason=offlineReason(c,r,a);
+  if(reason)throw coded('session_offline',reason);
   return {c,r,a};
  }
+ let lastSweep=0;
  function verify(request){let c;try{c=policy();if(!equalSecret(request?.secret,c.secret)||request.installationId!==c.installationId||!UUID_PATTERN.test(request.childId)||!UUID_PATTERN.test(request.sessionId))throw coded('unauthorized','Invalid session attachment capability');}
-  catch(error){failures.checkAndConsume('failed');throw error;}limiter.checkAndConsume('workspace');return c;}
+  catch(error){failures.checkAndConsume('failed');throw error;}
+  // Every session has its own budget (the heartbeat plus the occasional fresh grant for tool calls): a chatty session
+  // must not starve the other sessions' leases. Only authenticated callers reach this, and idle buckets are swept.
+  const now=Date.now();if(now-lastSweep>=60000){lastSweep=now;limiter.sweep();}
+  limiter.checkAndConsume(sessionAddress(c.installationId,c.workspace,request.sessionId));return c;}
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
-  allowedSender(id){try{return policy().allowedSenders.includes(id);}catch{return false;}},
-  allowedRecipients(){try{return [...policy().allowedRecipients];}catch{return [];}},
+  allowedRecipients(){try{const list=[...policy().allowedRecipients];healthy();return list;}catch(error){degraded(error);return [];}},
   async attach(request){
-   const c=verify(request),identity=attachedSessionIdentity(c.installationId,request.sessionId);
-   const id='session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+request.sessionId.toLowerCase()).digest('hex');
-   const r=(await rows()).find(r=>r.id===id);
+   const c=verify(request),identity=attachedSessionIdentity(request.sessionId);
+   const id=sessionAddress(c.installationId,c.workspace,request.sessionId);
+   const r=await journal.getDiscoveredSession({id,installationId:c.installationId,workspace:c.workspace});
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
    await journal.attachDiscoveredSession({id,childId:request.childId,generation:r.generation,installationId:policyScope(c),wakeCapable:request.wakeCapable===true,now:clock()});
-   await journal.initInteractiveWakeBinding({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
+   await journal.bindAttachedSessionWake({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients]})};
   },
-  async detach(request){const c=verify(request);const id='session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+request.sessionId.toLowerCase()).digest('hex');await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
+  async detach(request){const c=verify(request);const id=sessionAddress(c.installationId,c.workspace,request.sessionId);await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c}=await current(to);if(!c.allowedSenders.includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
-  async listFor(reader){let result=[];try{if(!policy().allowedSenders.includes(reader))return [];for(const row of await rows()){
-    let online=false,wake=false;try{const {a}=await current(row.id);online=true;wake=!!a.wake_capable;}catch{}
-    result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&wake}});
-   }}catch{}return result;},
+  // One policy read, one directory listing and one attachment listing however many sessions there are.
+  async listFor(reader){let result=[];try{
+    const c=policy();
+    if(c.allowedSenders.includes(reader)){ // a reader outside the policy is simply shown nothing
+     const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
+     for(const row of await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})){
+      const a=attachments.get(row.id),online=offlineReason(c,row,a,scope)===null;
+      result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&!!a.wake_capable}});
+     }
+    }
+    healthy();}catch(error){degraded(error);}return result;},
   async recipientIds(reader){return (await this.listFor(reader)).filter(r=>r.capabilities.reachable).map(r=>r.id);},
  };
 }

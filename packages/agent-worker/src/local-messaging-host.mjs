@@ -128,7 +128,8 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    }
    if(config.sessionMessaging?.enabled){
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
-     issue:(sender,opts)=>{subsystem.registerInteractiveIdentity(sender);return subsystem.issueTurnCredential(sender,opts);}});
+     ownerSenderId:integration.senderId,configuredRecipients:recipientIds,logger,
+     issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
     const legacy=interactiveBroker;
     interactiveBroker={
      isInteractiveSender:id=>sessionBroker.isInteractiveSender(id)||!!legacy?.isInteractiveSender(id),

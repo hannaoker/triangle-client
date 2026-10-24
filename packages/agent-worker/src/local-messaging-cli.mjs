@@ -9,6 +9,7 @@ import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messaging-mcp-adapter.mjs';
 import {validateInteractiveIntegration,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
+import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
@@ -55,8 +56,20 @@ export function setupLocalMessaging(options,env=process.env){
  const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
+ // Session participation authorizes one specific Codex sender, so a replacement sender must be re-authorized
+ // explicitly. A thread-only rebind keeps the sender and therefore keeps participation.
+ let sessionMessagingDisabled=false,mcpCleanupRequired=false;
+ if(optional.sessionMessaging){
+  let authorized=false;
+  try{authorized=readPrivateJson(optional.sessionMessaging.integrationPath).allowedSenders?.includes(senderId)===true;}catch{}
+  if(!authorized){
+   // Fail closed: the new config omits the key, and the old capability is fenced and its managed MCP entry removed when possible.
+   delete optional.sessionMessaging;sessionMessagingDisabled=true;
+   try{mcpCleanupRequired=disableWorkspaceMessaging({config:configPath},env).mcpCleanupRequired;}catch{mcpCleanupRequired=true;}
+  }
+ }
  writePrivateJson(configPath,{version:1,enabled:true,stateRoot,bindingPath,integrationPath,recipients,runnerTimeoutMs:previous.runnerTimeoutMs??3600000,...optional});
- return {configPath,senderId,threadId,recipients,requiresServiceRestart:true};
+ return {configPath,senderId,threadId,recipients,requiresServiceRestart:true,...(sessionMessagingDisabled?{sessionMessagingDisabled,mcpCleanupRequired}:{})};
 }
 const KNOWN_SETUP_KEYS = new Set([
  'configPath',
@@ -234,6 +247,16 @@ export async function reconcileWakeOffline(options,env=process.env){
 
 // Local discovery is an owner-installed hook integration, not an agent tool.
 const shellQuote=value=>"'"+value.replace(/'/g,"'\\''")+"'";
+// Owner-installed workspace files (Claude hook settings, .mcp.json) are replaced atomically: a private temp file
+// beside the target, flushed before the rename, so a crash leaves the old file or the new one and never a torn one.
+function replaceJsonFile(file,value){
+ const temp=`${file}.triangle-${randomUUID()}`;let fd;
+ try{
+  fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
+  fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+  fs.renameSync(temp,file);
+ }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+}
 export function setupSessionDiscovery(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
@@ -275,13 +298,7 @@ export function setupSessionDiscovery(options,env=process.env){
  // Install capability first and enable host config last. A partial setup cannot
  // grant message authority, and rerunning setup never duplicates the hooks.
  writePrivateJson(integrationPath,integration);
- const temp=path.join(directory,`.triangle-settings-${randomUUID()}`);
- let fd;
- try{
-  fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
-  fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
-  fs.renameSync(temp,settingsPath);
- }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+ replaceJsonFile(settingsPath,settings);
  writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath,workspace}});
  return {workspace,settingsPath,requiresServiceRestart:true,requiresHarnessHookApproval:true,discoveryOnly:true};
 }
@@ -314,17 +331,13 @@ export function disableSessionDiscovery(options,env=process.env){
     if(!settings.hooks[event].length)delete settings.hooks[event];
    }
    if(settings.hooks&&!Object.keys(settings.hooks).length)delete settings.hooks;
-   const temp=path.join(directory,`.triangle-disable-${randomUUID()}`);let fd;
-   try{
-    fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
-    fs.writeFileSync(fd,JSON.stringify(settings,null,2)+'\n');fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,settingsPath);
-   }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+   replaceJsonFile(settingsPath,settings);
   }
  }catch{hooksCleanupRequired=true;}
- // Always remove the optional key, even if hook cleanup needs an explicit moved workspace.
- if(config.sessionMessaging?.enabled)disableWorkspaceMessaging({config:configPath},env);
+ // Always remove the optional keys, even if hook or MCP cleanup needs an explicit moved workspace.
+ const messaging=config.sessionMessaging!==undefined?disableWorkspaceMessaging({config:configPath,workspace:options.workspace},env):null;
  const {discovery,sessionMessaging,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
- return {discoveryEnabled:false,hooksCleanupRequired};
+ return {discoveryEnabled:false,hooksCleanupRequired,...(messaging?{mcpCleanupRequired:messaging.mcpCleanupRequired}:{})};
 }
 
 export async function runSessionDiscoveryHook({configPath,input,stderr=process.stderr}){
@@ -492,32 +505,39 @@ export function setupWorkspaceMessaging(options,env=process.env){
  }
  if(!mcp||typeof mcp!=='object'||Array.isArray(mcp)||mcp.mcpServers&&(typeof mcp.mcpServers!=='object'||Array.isArray(mcp.mcpServers)))throw coded('invalid_settings','Invalid MCP configuration');
  const name='triangle-session';
- const entry={command:wrapper,args:['claude-session-mcp','--config',configPath,'--workspace-messaging',integrationPath,'--expected-version','2.1.307']};
+ const entry={command:wrapper,args:['claude-session-mcp','--config',configPath,'--workspace-messaging',integrationPath,'--expected-version',SUPPORTED_CLAUDE_VERSION]};
  if(mcp.mcpServers?.[name]&&JSON.stringify(mcp.mcpServers[name])!==JSON.stringify(entry))throw coded('integration_exists','Preserve existing Triangle MCP configuration; choose a disposable workspace');
  writePrivateJson(integrationPath,policy);
  // Workspace config is not a credential; preserve unrelated MCP entries atomically.
- const temp=file+'.triangle-'+randomUUID();
- try{fs.writeFileSync(temp,JSON.stringify({...mcp,mcpServers:{...mcp.mcpServers,[name]:entry}},null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,file);}finally{try{fs.unlinkSync(temp);}catch{}}
+ replaceJsonFile(file,{...mcp,mcpServers:{...mcp.mcpServers,[name]:entry}});
  writePrivateJson(configPath,{...config,sessionMessaging:{enabled:true,integrationPath}});
  return {workspace:d.workspace,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false};
 }
 export function disableWorkspaceMessaging(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
- if(fs.existsSync(file)){const policy=readPrivateJson(file);writePrivateJson(file,{...policy,enabled:false});}
+ // Fence the capability first. A missing or unreadable policy cannot admit anyone (the broker and the MCP
+ // children read it through the same private reader), so disabling must still converge without it.
+ let policy=null;
+ try{policy=readPrivateJson(file);}catch{}
+ if(policy)writePrivateJson(file,{...policy,enabled:false});
  const {sessionMessaging,...rest}=config;writePrivateJson(configPath,rest);
  let mcpCleanupRequired=false;
  try{
-  const policy=readPrivateJson(file),mcpPath=path.join(policy.workspace,'.mcp.json');
-  if(fs.existsSync(mcpPath)){
-   const st=fs.lstatSync(mcpPath);
-   if(fs.realpathSync(policy.workspace)!==policy.workspace||!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe MCP settings');
-   const mcp=JSON.parse(fs.readFileSync(mcpPath,'utf8')),entry=mcp.mcpServers?.['triangle-session'];
-   const args=entry?.args;
-   if(Array.isArray(args)&&args[0]==='claude-session-mcp'&&args[1]==='--config'&&args[2]===configPath&&args[3]==='--workspace-messaging'&&args[4]===file){
-    delete mcp.mcpServers['triangle-session'];
-    const temp=mcpPath+'.triangle-'+randomUUID();
-    try{fs.writeFileSync(temp,JSON.stringify(mcp,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,mcpPath);}finally{try{fs.unlinkSync(temp);}catch{}}
+  // The policy names the workspace and discovery records it too, so a damaged policy does not strand the managed entry.
+  const workspace=options.workspace||policy?.workspace||config.discovery?.workspace;
+  if(typeof workspace!=='string')mcpCleanupRequired=Boolean(policy||sessionMessaging);
+  else{
+   const mcpPath=path.join(workspace,'.mcp.json');
+   if(fs.existsSync(mcpPath)){
+    const st=fs.lstatSync(mcpPath);
+    if(fs.realpathSync(workspace)!==workspace||!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe MCP settings');
+    const mcp=JSON.parse(fs.readFileSync(mcpPath,'utf8')),entry=mcp.mcpServers?.['triangle-session'];
+    const args=entry?.args;
+    if(Array.isArray(args)&&args[0]==='claude-session-mcp'&&args[1]==='--config'&&args[2]===configPath&&args[3]==='--workspace-messaging'&&args[4]===file){
+     delete mcp.mcpServers['triangle-session'];
+     replaceJsonFile(mcpPath,mcp);
+    }
    }
   }
  }catch{mcpCleanupRequired=true;}

@@ -1,7 +1,7 @@
 import readline from "node:readline";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID,createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readPrivateJson } from "./local-messaging-auth-broker.mjs";
 import { resolveLocalSocketAddress } from "./local-messaging-address.mjs";
 import { createLocalControlClient } from "./local-messaging-client.mjs";
@@ -15,6 +15,7 @@ import {
   UUID_PATTERN,
   readSessionMessagingPolicy,
   attachedSessionIdentity,
+  sessionAddress,
 } from "./local-messaging-interactive-session.mjs";
 import { sanitizeError, coded } from "./local-messaging-errors.mjs";
 import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH } from "./local-messaging-protocol.mjs";
@@ -163,6 +164,11 @@ function scrub(text, sentinel) {
   return text.replaceAll(sentinel, "[REDACTED]");
 }
 
+// The supervisor honours an attach grant for 30s and re-checks the lease, the child and the generation on every
+// request, so tool calls reuse the grant of the latest attach (the heartbeat renews it every few seconds) for half
+// that time instead of attaching again for each call.
+const ATTACHED_GRANT_REUSE_MS = 15000;
+
 export function createClaudeSessionMcpChild({
   configPath,
   integrationPath: explicitIntegrationPath = null,
@@ -231,15 +237,19 @@ export function createClaudeSessionMcpChild({
   let wakeAbortController = null;
   let inFlightWakePromise = null;
 
-  async function getValidCredential() {
+  // `renew` forces a fresh attach (the heartbeat, which keeps the lease alive); `onReuse` tells the caller it got a
+  // grant from an earlier attach, which a supervisor restart may have outdated.
+  async function getValidCredential({ renew = false, onReuse = null } = {}) {
     if (closed) throw coded("client_closed", "MCP child is closed");
     const now = Date.now();
     if(attachment){
       const policy=readSessionMessagingPolicy(attachment.policyPath);
       if(!policy.enabled||policy.secret!==pinnedSecret)throw coded('session_revoked','Workspace participation was disabled or rotated');
+      if(!renew&&activeGrant?.credential&&now-grantIssuedAt<ATTACHED_GRANT_REUSE_MS){onReuse?.();return activeGrant.credential;}
       const grant=await client.attachSession({...attachment.tuple,...(pinnedGeneration===null?{}:{generation:pinnedGeneration})});
       if(pinnedGeneration===null)pinnedGeneration=grant.generation;
       if(grant.senderId!==pinnedSenderId||grant.sessionId!==pinnedSessionId||grant.bindingId!==pinnedBindingId||grant.generation!==pinnedGeneration)throw coded('session_fenced','Session lifecycle changed; reconnect this MCP child');
+      activeGrant=grant;grantIssuedAt=now;
       return grant.credential;
     }
     if (activeGrant?.credential && (now - grantIssuedAt < 240000)) {
@@ -280,13 +290,21 @@ export function createClaudeSessionMcpChild({
 
   async function pollWake() {
     if (closed || inFlightWakePromise) return;
-    if(!pushSupported||!delivery){if(attachment)await getValidCredential().catch(()=>{});return;}
+    if(!pushSupported||!delivery){
+      if(attachment){
+        // Tracked like a wake poll: close() waits for it, so a heartbeat can never land after the detach and revive the lease.
+        const heartbeat=getValidCredential({renew:true}).catch(()=>{});
+        inFlightWakePromise=heartbeat;
+        try{await heartbeat;}finally{if(inFlightWakePromise===heartbeat)inFlightWakePromise=null;}
+      }
+      return;
+    }
     const ac = new AbortController();
     wakeAbortController = ac;
     const wakePromise = (async () => {
       try {
         if (closed || ac.signal.aborted) return;
-        const credential = await getValidCredential();
+        const credential = await getValidCredential({ renew: true });
         if (closed || ac.signal.aborted) return;
         const reservationId = randomUUID();
         const res = await client.reserveWakeNotification({ reservationId }, { credential });
@@ -357,7 +375,7 @@ export function createClaudeSessionMcpChild({
     }
   }
 
-  async function handleMcpRequest(req) {
+  async function handleMcpRequest(req, { fresh = false } = {}) {
     if (!req || typeof req !== "object" || Array.isArray(req)) {
       return {
         jsonrpc: "2.0",
@@ -371,6 +389,7 @@ export function createClaudeSessionMcpChild({
       return null;
     }
 
+    let reusedGrant = false;
     try {
       switch (method) {
         case "initialize":
@@ -397,7 +416,7 @@ export function createClaudeSessionMcpChild({
           };
 
         case "tools/call": {
-          const credential = await getValidCredential();
+          const credential = await getValidCredential({ renew: fresh, onReuse: () => { reusedGrant = true; } });
           const { name, arguments: args = {} } = params;
 
           if (!args || typeof args !== "object") {
@@ -541,6 +560,11 @@ export function createClaudeSessionMcpChild({
           };
       }
     } catch (err) {
+      // A reused attach grant can predate a supervisor restart, which re-keys credentials. The refusal comes before
+      // anything is processed, so one fresh attach and a single retry of the whole call is safe.
+      if (reusedGrant && !fresh && (err?.code === "unauthorized" || err?.code === "credential_expired")) {
+        return handleMcpRequest(req, { fresh: true });
+      }
       const { code, message } = sanitizeError(err);
       if (method === "tools/call") {
         return {
@@ -642,14 +666,14 @@ export function createClaudeSessionMcpChild({
 
 // Only this MCP child's own exported context is used; never enumerate session token files.
 export async function createAttachedClaudeSessionMcpChild(options){
- const {configPath,policyPath,expectedVersion,env=process.env}=options;
- const c=readPrivateJson(configPath),policy=readSessionMessagingPolicy(policyPath);
+ const {policyPath,expectedVersion,env=process.env}=options;
+ const policy=readSessionMessagingPolicy(policyPath);
  if(fs.realpathSync(options.cwd||process.cwd())!==policy.workspace)throw coded('workspace_mismatch','Own MCP workspace does not match owner opt-in');
  if(!policy.enabled||!UUID_PATTERN.test(env.CLAUDE_CODE_SESSION_ID))throw coded('session_disabled','Own-session context and owner opt-in required');
  const probe=probeClaudeSession({env,version:expectedVersion});
  const tuple={installationId:policy.installationId,secret:policy.secret,sessionId:env.CLAUDE_CODE_SESSION_ID.toLowerCase(),childId:randomUUID(),wakeCapable:probe.supported===true};
- const id='session-'+createHash('sha256').update(policy.installationId+'\0'+policy.workspace+'\0'+tuple.sessionId).digest('hex');
- const identity=attachedSessionIdentity(policy.installationId,tuple.sessionId);
+ const id=sessionAddress(policy.installationId,policy.workspace,tuple.sessionId);
+ const identity=attachedSessionIdentity(tuple.sessionId);
  // Initialize MCP immediately. Claude may wait for MCP initialization before
  // firing SessionStart. First tool call / heartbeat attaches after that hook.
  return createClaudeSessionMcpChild({...options,attachment:{policyPath,tuple,integration:{senderId:id,sessionId:identity.pseudoSessionId,bindingId:tuple.childId,generation:null,enabled:true,revoked:false,secret:policy.secret}}});
