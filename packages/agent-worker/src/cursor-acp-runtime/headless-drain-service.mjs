@@ -525,6 +525,8 @@ export function createInstalledCursorAcpDrain(config, {
   env = process.env,
   /** Optional `{ record(phase) }` progress recorder for this profile. */
   progress = null,
+  /** Optional wake-driven idle cadence (createDrainIdlePolicy); null keeps the poll timer. */
+  idlePolicy = null,
 } = {}) {
   env = runtimeEnvForCursorAcpWake(env);
   const normalized = normalizeCursorAcpWakeConfig(config);
@@ -584,6 +586,7 @@ export function createInstalledCursorAcpDrain(config, {
     resolveDelivery,
     profileInstanceId: normalized.profileInstanceId,
     pollIntervalMs: normalized.pollIntervalMs,
+    idlePolicy,
     onDeliveryFailure: async (error) => {
       const reason = String(error?.code ?? "cursor_acp_delivery_failed")
         .toLowerCase()

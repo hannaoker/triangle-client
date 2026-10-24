@@ -23,9 +23,13 @@ import {
   ensureHelperWatchGrant,
 } from "./helper-watch-transport.mjs";
 import {
+  DEFAULT_CLAIM_SAFETY_POLL_MS,
   INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+  createDrainIdlePolicy,
   createInstallWatchDispatcher,
   resolveInstallWatchCursorPath,
+  validateClaimSafetyPollIntervalMs,
+  validateWatchIdlePollIntervalMs,
 } from "./install-watch-dispatcher.mjs";
 import { createMailboxClient, validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createMailboxHarness, createWakeRuntime } from "./profile-scheduler.mjs";
@@ -634,6 +638,16 @@ export function createClientSupervisor({
   maxIdlePollIntervalMs = 300_000,
   maxBackoffMs = 300_000,
   idleJitterRatio = 0.1,
+  /**
+   * Safety interval between claims for an idle Cursor ACP / headless Codex lane that
+   * is a member of the install watch while that watch is delivering (see
+   * createDrainIdlePolicy in install-watch-dispatcher.mjs). The watch hint is the
+   * primary trigger; this is only the net under it. 0 keeps every lane on its own
+   * pollIntervalMs timer.
+   */
+  claimSafetyPollIntervalMs = DEFAULT_CLAIM_SAFETY_POLL_MS,
+  /** Idle sleep between install-watch polls (one `watch-poll` helper run each). */
+  watchIdlePollIntervalMs = INSTALL_WATCH_SAFE_IDLE_POLL_MS,
   random = Math.random,
   logger = console,
   /** Clock for watch-grant expiry scheduling (tests inject a virtual clock). */
@@ -694,6 +708,8 @@ export function createClientSupervisor({
     throw new TypeError("instances must contain between 1 and 100 entries");
   }
   positiveInteger(maxConcurrentReasoners, "maxConcurrentReasoners");
+  const claimSafetyPollMs = validateClaimSafetyPollIntervalMs(claimSafetyPollIntervalMs);
+  const watchIdlePollMs = validateWatchIdlePollIntervalMs(watchIdlePollIntervalMs);
   const gate = createProfiledReasonerGate({ limit: maxConcurrentReasoners });
   const localRunners = new Map();
   const seen = new Set();
@@ -966,6 +982,33 @@ export function createClientSupervisor({
     }
   }
 
+  // The install watch dispatcher is built after the drains (it needs their kick
+  // handlers); lanes read its health lazily, so declare it first.
+  let installDispatcher = null;
+
+  // A lane leans on wake hints, and may stretch its claim timer, only when it is a
+  // member of the install watch (it carries an agentId and the dispatcher exists).
+  // The policy claims as before whenever the watch is not delivering.
+  function idlePolicyFor(config) {
+    if (
+      claimSafetyPollMs === 0
+      || claimSafetyPollMs <= config.pollIntervalMs
+      || !installDispatcherEnabled
+      || !hasInstallDispatcherAnchor
+      || typeof config.agentId !== "string"
+      || config.agentId.length === 0
+    ) {
+      return null;
+    }
+    return createDrainIdlePolicy({
+      pollIntervalMs: config.pollIntervalMs,
+      safetyPollIntervalMs: claimSafetyPollMs,
+      wakeChannelHealthy: () => installDispatcher?.wakeChannelHealthy?.() === true,
+      random,
+      now,
+    });
+  }
+
   const headlessEntries = [];
   const headlessWakeSkipReasons = {};
   const headlessAdmissions = [];
@@ -1004,9 +1047,11 @@ export function createClientSupervisor({
     }
   } else {
     for (const { config: headlessConfig, claimer: headlessClaimer } of headlessAdmissions) {
+      const idlePolicy = idlePolicyFor(headlessConfig);
       const drain = createHeadlessDrain(headlessConfig, {
         logger,
         ownerInstanceId: `client-supervisor-${process.pid}`,
+        ...(idlePolicy ? { idlePolicy } : {}),
       });
       if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
         throw new TypeError("createHeadlessDrain must return a drain");
@@ -1054,10 +1099,12 @@ export function createClientSupervisor({
   } else {
     for (const { config: cursorAcpConfig, claimer: cursorAcpClaimer } of cursorAcpAdmissions) {
       const cursorAcpProgress = progressJournal?.forProfile(cursorAcpConfig.profile, "cursor-acp") ?? null;
+      const idlePolicy = idlePolicyFor(cursorAcpConfig);
       const drain = createCursorAcpDrain(cursorAcpConfig, {
         logger,
         ownerInstanceId: `client-supervisor-${process.pid}`,
         ...(cursorAcpProgress ? { progress: cursorAcpProgress } : {}),
+        ...(idlePolicy ? { idlePolicy } : {}),
       });
       if (!drain || typeof drain.start !== "function" || typeof drain.stop !== "function") {
         throw new TypeError("createCursorAcpDrain must return a drain");
@@ -1112,7 +1159,6 @@ export function createClientSupervisor({
       })
     : null;
 
-  let installDispatcher = null;
   if (installDispatcherEnabled && hasInstallDispatcherAnchor) {
     const dispatcherProfiles = [];
     const dispatcherHandlers = new Map();
@@ -1218,7 +1264,7 @@ export function createClientSupervisor({
       // ~12–22 GB-hrs/day depending on server poll timeout. This is the
       // selected M0a operating cadence; INSTALL_WATCH_HELD_POLL_IDLE_MS (2s)
       // stays a distinct opt-in and is not used by the supervisor.
-      idlePollIntervalMs: INSTALL_WATCH_SAFE_IDLE_POLL_MS,
+      idlePollIntervalMs: watchIdlePollMs,
       logger,
     });
     if (!installDispatcher || typeof installDispatcher.start !== "function") {

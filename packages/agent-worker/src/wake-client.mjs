@@ -190,6 +190,12 @@ export function createWakeClient({
   let pending = new Map();
   let flushTimer = null;
   let stopped = false;
+  // The watch is "delivering" while a poll has succeeded within a few idle
+  // cycles (cycle = idle sleep + jitter + the helper's own poll time, which a
+  // held poll can stretch to a minute). Drains that lean on wake hints read it
+  // through health() so an unhealthy watch sends them back to polling.
+  const healthyWithinMs = Math.ceil(idlePollIntervalMs * (1 + idleJitterRatio)) * 3 + 60_000;
+  let lastPollOkAt = null;
 
   async function flush() {
     flushTimer = null;
@@ -254,13 +260,18 @@ export function createWakeClient({
           }
           await cursorStore.write(error.restartCursor);
           logger.error?.("triangle_wake_resync", { restartCursor: error.restartCursor });
+          // MESH answered and every lane was told to reconcile: the channel works.
+          lastPollOkAt = now();
           return { resync: true, restartCursor: error.restartCursor, events: 0 };
         }
+        lastPollOkAt = null;
         throw error;
       }
       if (!response || typeof response !== "object") {
+        lastPollOkAt = null;
         throw new TypeError("wake poll response is invalid");
       }
+      lastPollOkAt = now();
       const events = Array.isArray(response.events) ? response.events : [];
       // Advance on empty polls and on non-empty batches that match zero local
       // profiles. Shared installation grants fan out events for every agent on
@@ -298,8 +309,22 @@ export function createWakeClient({
       return { profiles: byAgent.size, cursor };
     },
 
+    /**
+     * Whether the watch is delivering: a poll succeeded within `healthyWithinMs`.
+     * Never true before the first successful poll, after a failed one, or after stop().
+     */
+    health({ at = now() } = {}) {
+      const age = lastPollOkAt === null ? null : at - lastPollOkAt;
+      return Object.freeze({
+        healthy: age !== null && age >= 0 && age <= healthyWithinMs,
+        lastPollOkAt,
+        healthyWithinMs,
+      });
+    },
+
     async stop() {
       stopped = true;
+      lastPollOkAt = null;
       if (flushTimer) {
         await flushTimer.catch(() => {});
         flushTimer = null;

@@ -431,6 +431,22 @@ export function resolveTrustedTransactionProxy({
 }
 
 /**
+ * True when `transaction-claim-next` listed the mailbox and found nothing to
+ * claim, resume or settle: no open transaction, no receipt just settled (more
+ * may be queued behind it), nothing stuck, no model turn to start. Deliveries the
+ * policy suppressed stay listed and are not work, so they do not count.
+ */
+export function isEmptyMailboxStatus(status) {
+  return Boolean(status)
+    && typeof status === "object"
+    && !Array.isArray(status)
+    && (status.open === null || status.open === undefined)
+    && status.receiptOnly !== true
+    && status.transactionStuck !== true
+    && status.shouldStartModel !== true;
+}
+
+/**
  * Production App Server `resolveDelivery`: reconcile the durable helper
  * transaction store (Slice 6) without inventing a Node `mesh_` credential path.
  *
@@ -495,13 +511,19 @@ export function createHelperDurableDeliveryResolver({
     }
   }
 
-  return Object.freeze(async function resolveDelivery({ signal } = {}) {
+  return Object.freeze(async function resolveDelivery({ signal, outcome } = {}) {
     let status = await claimNextStatus({ signal });
     if (!status || typeof status !== "object") {
       return null;
     }
     if (status.transactionStuck === true) {
       throw createCodedError("transaction_stuck", "transaction is stuck");
+    }
+    // A null result alone cannot tell an empty mailbox from "a receipt was just
+    // settled, more may follow" or "an open claim exists". Callers that want to
+    // slow down only when nothing is pending pass `outcome` and read `empty`.
+    if (outcome && typeof outcome === "object" && isEmptyMailboxStatus(status)) {
+      outcome.empty = true;
     }
 
     // Reply already durable in the helper: ack before admitting new work.
