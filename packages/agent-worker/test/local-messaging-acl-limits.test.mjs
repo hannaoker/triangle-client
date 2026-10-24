@@ -56,6 +56,32 @@ test("rate limiter enforces per-sender limit and tracks quota only after admissi
   assert.equal(limiter.check("agent-bob"), true);
 });
 
+test("rate limiter sweep forgets idle senders but keeps those still inside their window", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const limiter = createPerSenderRateLimiter({ maxRequestsPerWindow: 2, windowMs: 1000 });
+  limiter.checkAndConsume("agent-alice");
+  limiter.checkAndConsume("agent-alice");
+
+  t.mock.timers.tick(400);
+  limiter.checkAndConsume("agent-bob");
+  limiter.sweep();
+  assert.equal(limiter.trackedSenders, 2, "senders inside their window are kept");
+  assert.throws(
+    () => limiter.check("agent-alice"),
+    (err) => err instanceof LocalMessagingError && err.code === "rate_limit_exceeded",
+    "sweeping never loosens an active limit",
+  );
+
+  t.mock.timers.tick(700); // alice's window has elapsed, bob's has not
+  limiter.sweep();
+  assert.equal(limiter.trackedSenders, 1);
+  assert.equal(limiter.check("agent-alice"), true);
+
+  t.mock.timers.tick(1000);
+  limiter.sweep();
+  assert.equal(limiter.trackedSenders, 0, "everything idle is forgotten, including a sender that only called check()");
+});
+
 test("conversation loop tracker supports 8-hop alternating chain with distinct UUIDs and prevents caller reset", async () => {
   const journal = createTestMemoryJournal();
   const tracker = createConversationLoopTracker({ maxLoopDepth: 10, journal });

@@ -1,13 +1,14 @@
-import {createHash} from 'node:crypto';
+import {randomUUID as cryptoRandomId,createHash} from 'node:crypto';
 import {createDesktopCredentialBroker,readPrivateJson,createSessionDiscoveryBroker} from './local-messaging-auth-broker.mjs';
-import {validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
+import {createOwnerAcl} from './local-messaging-acl.mjs';
+import {createWorkspaceSessionBroker,validateInteractiveIntegration} from './local-messaging-interactive-session.mjs';
 import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.mjs';
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
@@ -18,6 +19,11 @@ export function loadLocalMessagingConfig(configPath) {
   if(config.interactive.enabled){
    if(typeof config.interactive.integrationPath!=='string'||!config.interactive.integrationPath.startsWith('/')||config.interactive.integrationPath.includes('\0'))throw coded('invalid_local_config','Interactive integrationPath must be absolute');
   }
+ }
+ if(config.sessionMessaging!==undefined){
+  const m=config.sessionMessaging;
+  if(!m||Object.keys(m).sort().join(',')!=='enabled,integrationPath'||typeof m.enabled!=='boolean'||typeof m.integrationPath!=='string'||!m.integrationPath.startsWith('/')||m.integrationPath.includes('\0'))throw coded('invalid_local_config','Invalid workspace messaging config');
+  if(m.enabled&&!config.discovery?.enabled)throw coded('invalid_local_config','Workspace messaging requires lifecycle discovery');
  }
  if(config.discovery!==undefined){
   const d=config.discovery;
@@ -100,7 +106,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    const {createLocalMessagingJournal}=await import('./local-messaging-journal.mjs');
    const {createLocalMessagingDispatcher}=await import('./local-messaging-dispatcher.mjs');
    const {createLocalMessagingNotifier}=await import('./local-messaging-notifier.mjs');
-   let interactiveBroker=null;
+   let interactiveBroker=null,sessionBroker=null;
    const interactiveRecipients=new Set();
    if(interactiveIntegration){
     const {createInteractiveSessionBroker}=await import('./local-messaging-interactive-session.mjs');
@@ -120,6 +126,27 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      bindingId:interactiveIntegration.bindingId,
     });
    }
+   if(config.sessionMessaging?.enabled){
+    sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
+     ownerSenderId:integration.senderId,configuredRecipients:recipientIds,logger,
+     issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
+    const legacy=interactiveBroker;
+    interactiveBroker={
+     isInteractiveSender:id=>sessionBroker.isInteractiveSender(id)||!!legacy?.isInteractiveSender(id),
+     validateRequest:args=>sessionBroker.isInteractiveSender(args.senderId)?sessionBroker.validateRequest(args):legacy.validateRequest(args),
+     exchange:args=>{if(!legacy)throw coded('unsupported','No paired session configured');return legacy.exchange(args);},
+    };
+   }
+   const baseAcl=createOwnerAcl({rules:aclRules});
+   const ownerAcl=sessionBroker?{
+    async listAuthorizedRecipients(sender){return [...new Set([...baseAcl.listAuthorizedRecipients(sender),...await sessionBroker.recipientIds(sender),...(sessionBroker.isInteractiveSender(sender)?sessionBroker.allowedRecipients():[])])];},
+    async checkAllowed(sender,to){
+     if(sessionBroker.isInteractiveSender(to)){await sessionBroker.checkRecipient(sender,to);return;}
+     if(sessionBroker.isInteractiveSender(sender)&&sessionBroker.allowedRecipients().includes(to))return;
+     baseAcl.checkAllowed(sender,to);
+    },
+   }:baseAcl;
+   const sessionRecipients={has:id=>interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
    try {
     dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
      const runner=runners.get(job.recipient);
@@ -148,11 +175,11 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients,recipientDirectory,discoveryBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory,discoveryBroker,sessionBroker,ownerAcl,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
-     return {credential:broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
+     return {credential:sessionBroker?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1}):broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
     }});
     await subsystem.start();
     try {
