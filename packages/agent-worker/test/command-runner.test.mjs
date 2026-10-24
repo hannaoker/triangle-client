@@ -17,6 +17,19 @@ const request = {
   replyRequired: true,
 };
 
+// Poll `read` until it returns something truthy; give up with undefined once
+// `timeoutMs` has elapsed. Returns as soon as the condition holds, so a generous
+// bound costs nothing on a healthy machine.
+async function pollFor(read, { timeoutMs, intervalMs = 10 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (value) return value;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 test("command runner sends normalized JSON on stdin and accepts one result", async () => {
   const script = [
     "let input='';",
@@ -201,21 +214,32 @@ for (const mode of ["abort", "timeout"]) {
     const adapterPath = path.join(directory, "adapter.mjs");
     const reasoner = `const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));setInterval(()=>{},1000)`;
     await fs.writeFile(adapterPath, `import { invoke } from ${JSON.stringify(commonUrl)}; await invoke(process.execPath,["-e",${JSON.stringify(reasoner)}],{sandbox:(command,args)=>({command,args})});`);
-    const runner = createCommandRunner({ command: process.execPath, args: [adapterPath], timeoutMs: mode === "timeout" ? 100 : 10_000 });
+    // The runner's clock starts at spawn, and the reasoner only exists after two cold
+    // node starts (adapter, then reasoner). The timeout budget must outlast both on a
+    // loaded machine or the runner kills the group before the reasoner writes its pid;
+    // it is still short enough that only the timeout can be what ends the run.
+    const runnerTimeoutMs = mode === "timeout" ? 1_500 : 10_000;
+    const runner = createCommandRunner({ command: process.execPath, args: [adapterPath], timeoutMs: runnerTimeoutMs });
     const controller = new AbortController();
     const running = runner.run(request, { signal: controller.signal });
-    let pid;
-    for (let attempt = 0; attempt < 100 && !pid; attempt += 1) {
-      try { pid = Number(await fs.readFile(pidPath, "utf8")); } catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
-    }
-    assert.equal(Number.isSafeInteger(pid), true);
+    // An early rejection must surface through the pid assertion below, not as an
+    // unhandled rejection while we are still waiting for the reasoner.
+    running.catch(() => {});
+    const pid = await pollFor(async () => {
+      try {
+        const text = (await fs.readFile(pidPath, "utf8")).trim();
+        return /^[1-9]\d*$/.test(text) ? Number(text) : undefined; // skip an empty or partly written file
+      } catch { return undefined; }
+    }, { timeoutMs: runnerTimeoutMs });
+    assert.equal(Number.isSafeInteger(pid), true, `reasoning process did not write its pid within the ${runnerTimeoutMs}ms runner budget`);
     if (mode === "abort") controller.abort();
     await assert.rejects(running, mode === "abort" ? { name: "AbortError" } : /timed out/);
-    let gone = false;
-    for (let attempt = 0; attempt < 100 && !gone; attempt += 1) {
-      try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 10)); }
-      catch (error) { if (error?.code === "ESRCH") gone = true; else throw error; }
-    }
+    // The group is SIGKILLed, but a node process can take a while to finish exiting
+    // when the machine is saturated: poll for it to disappear.
+    const gone = await pollFor(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error) { if (error?.code === "ESRCH") return true; throw error; }
+    }, { timeoutMs: 10_000 });
     assert.equal(gone, true, `reasoning descendant ${pid} was not reaped`);
   });
 }
