@@ -3,6 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
+import {createRequire} from 'node:module';
+import {ancestors} from './delivery-private-path.mjs';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import {readPrivateJson,writePrivateJson} from './local-messaging-auth-broker.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
@@ -350,7 +352,34 @@ export function disableSessionDiscovery(options,env=process.env){
  return {discoveryEnabled:false,hooksCleanupRequired,...(messaging?{mcpCleanupRequired:messaging.mcpCleanupRequired}:{})};
 }
 
-export async function runSessionDiscoveryHook({configPath,input,harness='claude',stderr=process.stderr}){
+// Codex 0.164/state_5 compatibility adapter: inspect only this hook's own
+// session metadata. Never enumerate rows or open transcript_path. Unknown schemas
+// and sources are ineligible; process originator is not sufficient (Desktop can
+// resume an exec-origin thread without changing its source).
+export function codexDiscoveryEligibility(sessionId,env=process.env){
+ if(!UUID_PATTERN.test(sessionId))return {eligible:false,reason:'invalid_session'};
+ let db;
+ try{
+  const home=env.CODEX_HOME||path.join(env.HOME||os.homedir(),'.codex');
+  if(!path.isAbsolute(home)||fs.realpathSync(home)!==home)return {eligible:false,reason:'metadata_unavailable'};
+  ancestors(home);
+  const directory=fs.lstatSync(home),file=path.join(home,'state_5.sqlite');
+  if(!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o022))return {eligible:false,reason:'metadata_unavailable'};
+  const stat=fs.lstatSync(file,{throwIfNoEntry:false});
+  // Codex normally creates 0755/0644 metadata paths. Require owned, canonical,
+  // non-writable-by-others paths without changing the owner's permissions.
+  if(!stat||!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o022))return {eligible:false,reason:'metadata_unavailable'};
+  const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite');
+  db=new DatabaseSync(file,{readOnly:true});
+  db.exec('PRAGMA busy_timeout=100');
+  const row=db.prepare('SELECT source FROM threads WHERE id=?').get(sessionId.toLowerCase());
+  if(!row)return {eligible:false,reason:'metadata_unavailable'};
+  return ['cli','vscode'].includes(row.source)?{eligible:true}:{eligible:false,reason:'unsupported_session_source'};
+ }catch{return {eligible:false,reason:'metadata_unavailable'};}
+ finally{try{db?.close();}catch{}}
+}
+
+export async function runSessionDiscoveryHook({configPath,input,harness='claude',stderr=process.stderr,env=process.env}){
  try{
   let text='';for await(const chunk of input){text+=chunk;if(Buffer.byteLength(text)>65536)throw coded('invalid_hook','Hook input exceeds metadata limit');}
   const payload=JSON.parse(text);
@@ -361,6 +390,10 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
   const config=readPrivateJson(configPath);if(!config.discovery?.enabled)return 0;
   const integration=readPrivateJson(config.discovery.integrationPath);if(!integration.enabled||!(integration.harnesses||['claude']).includes(harness))return 0;
   const workspace=fs.realpathSync(payload.cwd);if(workspace!==integration.workspace)return 0;
+  if(harness==='codex'){
+   const eligibility=codexDiscoveryEligibility(payload.session_id,env);
+   if(!eligibility.eligible){stderr.write(`Triangle discovery skipped (${eligibility.reason})\n`);return 0;}
+  }
   const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now(),...(harness==='codex'?{harness}:{})};
   const client=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,timeoutMs:1500,connectTimeoutMs:1500});
   try{
@@ -381,7 +414,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
  if(command==='disable-session-messaging'){output.write(JSON.stringify(disableWorkspaceMessaging(options,env))+'\n');return 0;}
  if(command==='setup-discovery'){output.write(JSON.stringify(setupSessionDiscovery(options,env))+'\n');return 0;}
- if(command==='discovery-hook')return runSessionDiscoveryHook({configPath:options.config||defaultLocalConfigPath(env),input,harness:options.harness||'claude'});
+ if(command==='discovery-hook')return runSessionDiscoveryHook({configPath:options.config||defaultLocalConfigPath(env),input,harness:options.harness||'claude',env});
  if(command==='disable-discovery'){output.write(JSON.stringify(disableSessionDiscovery(options,env))+'\n');return 0;}
  if(command==='reconcile-wake'){
   output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;

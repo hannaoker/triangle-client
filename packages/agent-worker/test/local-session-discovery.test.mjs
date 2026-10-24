@@ -281,13 +281,19 @@ test('Codex hook reaches real isolated host with payload identity, not inherited
   host=createInstalledLocalMessagingHost({configPath:f.configPath,runners:new Map([[config.recipients[0].instanceId,{run:async()=>{executions++;return {status:'completed',text:'unexpected'};}}]]),gate:createProfiledReasonerGate()});
   await host.start();
   const ids=[randomUUID(),randomUUID()];
+  const codexHome=path.join(f.root,'codex-home');fs.mkdirSync(codexHome,{mode:0o700});
+  const metadata=new DatabaseSync(path.join(codexHome,'state_5.sqlite'));
+  metadata.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,source TEXT)');
+  for(const sid of ids)metadata.prepare('INSERT INTO threads VALUES(?,?)').run(sid,'cli');
+  metadata.close();fs.chmodSync(path.join(codexHome,'state_5.sqlite'),0o600);
   for(const sid of ids){
    const result=await new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[cli,'discovery-hook','--config',f.configPath,'--harness','codex'],{env:{...process.env,CODEX_THREAD_ID:randomUUID()}});
+    const child=spawn(process.execPath,[cli,'discovery-hook','--config',f.configPath,'--harness','codex'],{env:{...process.env,CODEX_HOME:codexHome,CODEX_THREAD_ID:randomUUID()}});
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
     child.once('error',reject);child.once('exit',code=>resolve({code,stdout,stderr}));
     child.stdin.end(JSON.stringify({session_id:sid,cwd:f.workspace,hook_event_name:'SessionStart',source:'startup',prompt:'DO_NOT_RETAIN',transcript_path:'DO_NOT_READ'}));
-   });assert.deepEqual(result,{code:0,stdout:'',stderr:''});
+   });assert.equal(result.code,0);assert.equal(result.stdout,'');
+   assert.equal(result.stderr.replace(/\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/g,''),'');
   }
   let output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
   const sessions=JSON.parse(output).sessions.filter(r=>r.harness==='codex');assert.equal(sessions.length,2);
@@ -330,4 +336,27 @@ test('twenty mixed sessions retain distinct handles across end/resume and journa
   assert.ok(after.every(r=>r.generation===2&&!r.capabilities.reachable&&!r.capabilities.wakeCapable));
   assert.equal(after.filter(r=>r.harness==='codex').length,10);
  }finally{await f.close();}
+});
+
+import {codexDiscoveryEligibility} from '../src/local-messaging-cli.mjs';
+test('Codex own-session metadata gate excludes exec, app-server, subagents, missing and unknown sources',()=>{
+ const root=fs.mkdtempSync('/private/tmp/triangle-codex-source-');
+ try{
+  const file=path.join(root,'state_5.sqlite'),env={CODEX_HOME:root};
+  assert.deepEqual(codexDiscoveryEligibility(randomUUID(),env),{eligible:false,reason:'metadata_unavailable'});
+  assert.equal(fs.existsSync(file),false,'read-only gate never creates a missing database');
+  const db=new DatabaseSync(file);db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY, source TEXT)');
+  const ids={};for(const source of ['cli','vscode','exec','app-server','subagent','future-source']){
+   ids[source]=randomUUID();db.prepare('INSERT INTO threads VALUES(?,?)').run(ids[source],source);
+  }
+  db.close();fs.chmodSync(file,0o600);const before=fs.readFileSync(file);
+  for(const source of ['cli','vscode'])assert.deepEqual(codexDiscoveryEligibility(ids[source],env),{eligible:true});
+  for(const source of ['exec','app-server','subagent','future-source'])assert.deepEqual(codexDiscoveryEligibility(ids[source],env),{eligible:false,reason:'unsupported_session_source'});
+  assert.equal(codexDiscoveryEligibility(randomUUID(),env).eligible,false);
+  assert.equal(codexDiscoveryEligibility('bad',env).eligible,false);
+  assert.deepEqual(fs.readFileSync(file),before,'eligibility queries do not change source database');
+  fs.chmodSync(file,0o666);assert.equal(codexDiscoveryEligibility(ids.cli,env).eligible,false);
+  fs.chmodSync(file,0o600);fs.renameSync(file,file+'.saved');fs.symlinkSync(file+'.saved',file);
+  assert.equal(codexDiscoveryEligibility(ids.cli,env).eligible,false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
