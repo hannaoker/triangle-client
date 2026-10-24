@@ -333,10 +333,10 @@ export function disableSessionDiscovery(options,env=process.env){
    }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
   }
  }catch{hooksCleanupRequired=true;}
- // Always remove the optional key, even if hook cleanup needs an explicit moved workspace.
- if(config.sessionMessaging?.enabled)disableWorkspaceMessaging({config:configPath},env);
+ // Always remove the optional keys, even if hook or MCP cleanup needs an explicit moved workspace.
+ const messaging=config.sessionMessaging!==undefined?disableWorkspaceMessaging({config:configPath,workspace:options.workspace},env):null;
  const {discovery,sessionMessaging,...previousSchema}=config;writePrivateJson(configPath,previousSchema);
- return {discoveryEnabled:false,hooksCleanupRequired};
+ return {discoveryEnabled:false,hooksCleanupRequired,...(messaging?{mcpCleanupRequired:messaging.mcpCleanupRequired}:{})};
 }
 
 export async function runSessionDiscoveryHook({configPath,input,stderr=process.stderr}){
@@ -516,20 +516,29 @@ export function setupWorkspaceMessaging(options,env=process.env){
 export function disableWorkspaceMessaging(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
- if(fs.existsSync(file)){const policy=readPrivateJson(file);writePrivateJson(file,{...policy,enabled:false});}
+ // Fence the capability first. A missing or unreadable policy cannot admit anyone (the broker and the MCP
+ // children read it through the same private reader), so disabling must still converge without it.
+ let policy=null;
+ try{policy=readPrivateJson(file);}catch{}
+ if(policy)writePrivateJson(file,{...policy,enabled:false});
  const {sessionMessaging,...rest}=config;writePrivateJson(configPath,rest);
  let mcpCleanupRequired=false;
  try{
-  const policy=readPrivateJson(file),mcpPath=path.join(policy.workspace,'.mcp.json');
-  if(fs.existsSync(mcpPath)){
-   const st=fs.lstatSync(mcpPath);
-   if(fs.realpathSync(policy.workspace)!==policy.workspace||!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe MCP settings');
-   const mcp=JSON.parse(fs.readFileSync(mcpPath,'utf8')),entry=mcp.mcpServers?.['triangle-session'];
-   const args=entry?.args;
-   if(Array.isArray(args)&&args[0]==='claude-session-mcp'&&args[1]==='--config'&&args[2]===configPath&&args[3]==='--workspace-messaging'&&args[4]===file){
-    delete mcp.mcpServers['triangle-session'];
-    const temp=mcpPath+'.triangle-'+randomUUID();
-    try{fs.writeFileSync(temp,JSON.stringify(mcp,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,mcpPath);}finally{try{fs.unlinkSync(temp);}catch{}}
+  // The policy names the workspace and discovery records it too, so a damaged policy does not strand the managed entry.
+  const workspace=options.workspace||policy?.workspace||config.discovery?.workspace;
+  if(typeof workspace!=='string')mcpCleanupRequired=Boolean(policy||sessionMessaging);
+  else{
+   const mcpPath=path.join(workspace,'.mcp.json');
+   if(fs.existsSync(mcpPath)){
+    const st=fs.lstatSync(mcpPath);
+    if(fs.realpathSync(workspace)!==workspace||!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe MCP settings');
+    const mcp=JSON.parse(fs.readFileSync(mcpPath,'utf8')),entry=mcp.mcpServers?.['triangle-session'];
+    const args=entry?.args;
+    if(Array.isArray(args)&&args[0]==='claude-session-mcp'&&args[1]==='--config'&&args[2]===configPath&&args[3]==='--workspace-messaging'&&args[4]===file){
+     delete mcp.mcpServers['triangle-session'];
+     const temp=mcpPath+'.triangle-'+randomUUID();
+     try{fs.writeFileSync(temp,JSON.stringify(mcp,null,2)+'\n',{mode:0o600,flag:'wx'});fs.renameSync(temp,mcpPath);}finally{try{fs.unlinkSync(temp);}catch{}}
+    }
    }
   }
  }catch{mcpCleanupRequired=true;}

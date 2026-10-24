@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Readable} from 'node:stream';
-import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
+import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableWorkspaceMessaging,disableSessionDiscovery,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
@@ -265,4 +265,52 @@ test('the session policy file never widens the live owner configuration',async()
   await assert.rejects(live.checkRecipient(stranger,grant.senderId),{code:'recipient_not_allowed'});
   assert.deepEqual([await live.recipientIds(stranger),await live.recipientIds(owner)],[[],[grant.senderId]]);
  }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('every attached session has its own attach budget, so one chatty session cannot starve another',async()=>{
+ const {root,configPath}=ownerFiles();let j;try{
+  const config=readPrivateJson(configPath),policyPath=config.sessionMessaging.integrationPath,discoveryPath=config.discovery.integrationPath;
+  const policy=readPrivateJson(policyPath),discovery=readPrivateJson(discoveryPath);
+  j=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  const [a,b]=[randomUUID(),randomUUID()];
+  for(const sessionId of [a,b])await j.recordDiscoveryEvent({installationId:discovery.installationId,event:{eventId:randomUUID(),sessionId,kind:'start',workspace:discovery.workspace,observedAt:Date.now()},digest:'budget-'+sessionId,receivedAt:Date.now()});
+  const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:j,issue:(senderId,options)=>JSON.stringify({senderId,...options})});
+  const tuple=sessionId=>({installationId:policy.installationId,secret:policy.secret,sessionId,childId:randomUUID(),wakeCapable:false});
+  const chatty=tuple(a),quiet=tuple(b);
+  // 240 attaches (tool calls plus heartbeats) fit in a minute; the next one from the same session is refused.
+  for(let i=0;i<240;i++)await broker.attach(chatty);
+  await assert.rejects(broker.attach(chatty),{code:'rate_limit_exceeded'});
+  // Another session's budget is untouched: its heartbeats, tool-call attaches and its close still work.
+  await broker.attach(quiet);await broker.attach(quiet);await broker.detach(quiet);
+ }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('disable-discovery converges with a corrupt session policy and still removes the managed MCP entry',()=>{
+ const {root,workspace,configPath}=ownerFiles();try{
+  const policyPath=readPrivateJson(configPath).sessionMessaging.integrationPath;
+  fs.writeFileSync(policyPath,'{ not json');fs.chmodSync(policyPath,0o600);
+  assert.deepEqual(disableSessionDiscovery({config:configPath}),{discoveryEnabled:false,hooksCleanupRequired:false,mcpCleanupRequired:false});
+  const after=readPrivateJson(configPath);assert.deepEqual(['discovery' in after,'sessionMessaging' in after],[false,false]);
+  const mcp=JSON.parse(fs.readFileSync(path.join(workspace,'.mcp.json')));assert.equal(mcp.mcpServers.unrelated.command,'preserve');assert.equal(mcp.mcpServers['triangle-session'],undefined);
+  // The damaged file cannot admit anyone, and running the disable again converges as well.
+  assert.equal(disableSessionDiscovery({config:configPath}).discoveryEnabled,false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('disable-discovery reports a managed MCP entry it could not remove',()=>{
+ const {root,workspace,configPath}=ownerFiles();try{
+  const mcp=path.join(workspace,'.mcp.json');fs.linkSync(mcp,mcp+'.hardlink'); // a hard-linked settings file is never rewritten
+  const result=disableSessionDiscovery({config:configPath});
+  assert.deepEqual([result.discoveryEnabled,result.mcpCleanupRequired],[false,true]);
+  assert.ok(JSON.parse(fs.readFileSync(mcp)).mcpServers['triangle-session'],'the entry stays in place, and is flagged rather than forgotten');
+  assert.equal('sessionMessaging' in readPrivateJson(configPath),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('disable-session-messaging needs no cleanup when it was never enabled',()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-attach-');try{
+  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');writePrivateJson(bindingPath,{instanceId:'a'.repeat(64)});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'attachment-test-thread',recipients:['gravity2']});
+  assert.deepEqual(disableWorkspaceMessaging({config:configPath}),{sessionMessagingEnabled:false,mcpCleanupRequired:false});
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

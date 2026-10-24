@@ -217,15 +217,21 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   if(!a||a.installation_id!==policyScope(c)||a.generation!==r.generation||a.expires_at<=clock())throw coded('session_offline','Session MCP child is offline');
   return {c,r,a};
  }
+ const addressOf=(c,sessionId)=>'session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+sessionId.toLowerCase()).digest('hex');
+ let lastSweep=0;
  function verify(request){let c;try{c=policy();if(!equalSecret(request?.secret,c.secret)||request.installationId!==c.installationId||!UUID_PATTERN.test(request.childId)||!UUID_PATTERN.test(request.sessionId))throw coded('unauthorized','Invalid session attachment capability');}
-  catch(error){failures.checkAndConsume('failed');throw error;}limiter.checkAndConsume('workspace');return c;}
+  catch(error){failures.checkAndConsume('failed');throw error;}
+  // Every session has its own budget (one attach per tool call plus the heartbeat): a chatty session must not
+  // starve the other sessions' leases. Only authenticated callers reach this, and idle buckets are swept.
+  const now=Date.now();if(now-lastSweep>=60000){lastSweep=now;limiter.sweep();}
+  limiter.checkAndConsume(addressOf(c,request.sessionId));return c;}
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
   allowedSender(id){try{return policy().allowedSenders.includes(id);}catch{return false;}},
   allowedRecipients(){try{return [...policy().allowedRecipients];}catch{return [];}},
   async attach(request){
    const c=verify(request),identity=attachedSessionIdentity(c.installationId,request.sessionId);
-   const id='session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+request.sessionId.toLowerCase()).digest('hex');
+   const id=addressOf(c,request.sessionId);
    const r=(await rows()).find(r=>r.id===id);
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
@@ -234,7 +240,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients]})};
   },
-  async detach(request){const c=verify(request);const id='session-'+createHash('sha256').update(c.installationId+'\0'+c.workspace+'\0'+request.sessionId.toLowerCase()).digest('hex');await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
+  async detach(request){const c=verify(request);const id=addressOf(c,request.sessionId);await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c}=await current(to);if(!c.allowedSenders.includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},

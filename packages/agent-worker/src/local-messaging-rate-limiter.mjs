@@ -81,6 +81,20 @@ export function createPerSenderRateLimiter({
       return true;
     },
 
+    // Forget senders whose whole window has elapsed, so a long-lived limiter keyed by an open-ended
+    // set (one key per session, say) does not keep an entry for every key it has ever seen.
+    sweep() {
+      const cutoff = Date.now() - windowMs;
+      for (const [senderId, history] of senderHistory) {
+        prune(history, cutoff);
+        if (history.length === 0) senderHistory.delete(senderId);
+      }
+    },
+
+    get trackedSenders() {
+      return senderHistory.size;
+    },
+
     reset() {
       senderHistory.clear();
     },

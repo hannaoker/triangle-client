@@ -221,13 +221,19 @@ preserves custody; competing children cannot replace an unexpired lease.
 Wake state belongs to the session address and lifecycle generation, not to the
 child process: a replacement child inherits an outstanding wake and can
 acknowledge it, while a new lifecycle generation starts a fresh wake epoch.
+Attach requests (one per tool call plus the heartbeat) are budgeted per
+session, 240 a minute, so a busy session cannot starve another's lease.
 Capability rotation/disable fences prior credentials. Presence means a recent
 child heartbeat, not that the model is free. Wake remains unsupported and pinned
 to Claude 2.1.307; write acceptance alone is not visible-delivery proof.
 
 `disable-session-messaging` revokes participation and removes only the matching
-managed MCP entry. Disabling discovery also disables participation. Neither
-cancels claimed execution, deletes messages, redirects work to another chat,
-or launches a replacement. Existing claim/retention behavior is unchanged;
-this adds no new task expiry contract. Same-account shell isolation is not
-claimed. Cross-machine transport and worker launch remain deferred.
+managed MCP entry. Disabling discovery also disables participation. Disabling
+always converges, even when the policy file is damaged (an unreadable policy
+cannot admit anyone), and both commands report `mcpCleanupRequired` when the
+managed entry could not be removed, for example after the workspace moved
+(pass `--workspace`). Neither cancels claimed execution, deletes messages,
+redirects work to another chat, or launches a replacement. Existing
+claim/retention behavior is unchanged; this adds no new task expiry contract.
+Same-account shell isolation is not claimed. Cross-machine transport and worker
+launch remain deferred.
