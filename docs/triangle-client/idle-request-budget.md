@@ -62,6 +62,36 @@ is claimed within one watch cycle (about 33 s) of the announcement, as before; o
 that is never announced (a server that failed to emit the event) is claimed by the
 next safety poll, at most 300 s + 20 % + one 30 s tick after the last attempt.
 
+## Owner tuning
+
+Both cadences are owner configuration, read once when the supervisor starts, from
+an optional file next to the other client state:
+
+```bash
+cat > "$HOME/Library/Application Support/The Triangle/client/supervisor-tuning.json" <<'JSON'
+{ "version": 1, "claimSafetyPollMs": 300000, "watchIdlePollMs": 30000 }
+JSON
+chmod 600 "$HOME/Library/Application Support/The Triangle/client/supervisor-tuning.json"
+```
+
+| Key | Meaning | Default | Allowed |
+| --- | --- | --- | --- |
+| `claimSafetyPollMs` | safety interval between claims for an idle lane on the install watch | `300000` (5 min) | `0` (every lane polls on its own timer, as before) or `30000`-`3600000` |
+| `watchIdlePollMs` | idle sleep between install-watch polls (one `watch-poll` run each, ~110 an hour at 30 s) | `30000` | `10000`-`600000` |
+
+`watchIdlePollMs` is the idle sleep of the install watch dispatcher, the one watch the
+supervisor runs for the App Server, headless Codex and Cursor ACP lanes; the older
+per-lane watch loops used when the dispatcher is off keep their own 30 s.
+Raising `watchIdlePollMs` trades wake latency for requests: a new delivery is
+announced by the next watch poll, so it waits up to one cycle longer (60 s halves
+the `watch-poll` runs and adds up to 30 s). Neither key is required, and with no
+file the defaults above apply. The file must be a regular, single-link file you
+own that group and others cannot write, under 1 KiB, with exactly these keys and
+in-range integers. Anything else is ignored **as a whole** (the defaults apply, and
+the supervisor logs one fixed line, `supervisor tuning ignored (<reason>)`, never
+the contents), so a typo can neither stop the supervisor nor half-apply. Restart
+the client service to pick up a change.
+
 ## How to measure
 
 Both layers are reproduced in tests with the real code and a counting fake:
@@ -70,6 +100,8 @@ Both layers are reproduced in tests with the real code and a counting fake:
   "idle claim-next requests per helper run and per hour") counts MESH requests by
   method and path for one idle `transaction-claim-next` process, and for 103 such
   processes at a 35 s cadence, with and without the shared token.
+- `node --test test/supervisor-tuning.test.mjs` covers the owner file: defaults,
+  partial files, bounds, and every way a file is ignored.
 - `node --test test/idle-claim-cadence.test.mjs` runs one virtual hour of the
   real install dispatcher, wake client and Cursor ACP / headless Codex drains and
   prints `claim-next` and `watch-poll` helper runs per hour, before and after,
