@@ -5,10 +5,11 @@ import {UUID_PATTERN,createWorkspaceSessionBroker,validateInteractiveIntegration
 import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.mjs';
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
+import {grokBindings,createGrokBroker} from './grok-local-session.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging','inbox'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging','inbox','grok'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
@@ -55,6 +56,7 @@ export function loadLocalMessagingConfig(configPath) {
   if(!r||Object.keys(r).sort().join(',')!=='instanceId,profile'||typeof r.profile!=='string'||!/^[A-Za-z0-9._-]{1,64}$/.test(r.profile)||!/^[a-f0-9]{64}$/.test(r.instanceId)||ids.has(r.instanceId)||profiles.has(r.profile))throw coded('invalid_local_config','Invalid or duplicate local recipient');
   ids.add(r.instanceId);profiles.add(r.profile);
  }
+ grokBindings(config);
  return config;
 }
 
@@ -88,14 +90,18 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
   }
  }
 
+ const grokEntries=grokBindings(config);
+ const grokIds=grokEntries.map(b=>b.senderId);
+ const reservedIds=[integration.senderId,...recipientIds,...(interactiveIntegration?[interactiveIntegration.senderId]:[])];
+ if(grokIds.some(id=>reservedIds.includes(id)))throw coded('identity_collision','Grok identity collides with existing participant');
  const recipientDirectory=[
   {id:integration.senderId,label:'Codex (paired conversation)',kind:'conversation'},
   ...config.recipients.map(r=>({id:r.instanceId,label:r.profile,kind:'worker'})),
   ...(interactiveIntegration?[{id:interactiveIntegration.senderId,label:'Claude (paired conversation)',kind:'conversation'}]:[]),
  ];
  const codexAllowedRecipients=[...recipientIds];
- const registry=[integration.senderId,...recipientIds];
- const aclRules=Object.fromEntries([[integration.senderId,codexAllowedRecipients],...recipientIds.map(id=>[id,registry.filter(x=>x!==id)])]);
+ const registry=[integration.senderId,...recipientIds,...grokIds];
+ const aclRules=Object.fromEntries([[integration.senderId,codexAllowedRecipients],...recipientIds.map(id=>[id,reservedIds.filter(x=>x!==id)])]);
 
  if(interactiveIntegration){
   const claudeId=interactiveIntegration.senderId;
@@ -121,12 +127,13 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    const {createLocalMessagingDispatcher}=await import('./local-messaging-dispatcher.mjs');
    const {createLocalMessagingNotifier}=await import('./local-messaging-notifier.mjs');
    let interactiveBroker=null,sessionBroker=null;
+   const grokBroker=config.grok?createGrokBroker({config,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)}):null;
    const interactiveRecipients=new Set();
    if(interactiveIntegration){
     const {createInteractiveSessionBroker}=await import('./local-messaging-interactive-session.mjs');
     interactiveBroker=createInteractiveSessionBroker({
      integrationPath:config.interactive.integrationPath,
-     recipients:[...recipientIds,...(inboxEnabled&&receivesFrom(interactiveIntegration.senderId)?[integration.senderId]:[])],
+     recipients:[...recipientIds,...grokEntries.filter(b=>b.allowedSenders.includes(interactiveIntegration.senderId)).map(b=>b.senderId),...(inboxEnabled&&receivesFrom(interactiveIntegration.senderId)?[integration.senderId]:[])],
      issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts),
     });
     interactiveRecipients.add(interactiveBroker.senderId);
@@ -142,7 +149,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    }
    if(config.sessionMessaging?.enabled){
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
-     ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],logger,
+     additionalPrincipals:grokIds,ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],logger,
      issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
     const legacy=interactiveBroker;
     interactiveBroker={
@@ -151,17 +158,35 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      exchange:args=>{if(!legacy)throw coded('unsupported','No paired session configured');return legacy.exchange(args);},
     };
    }
+   if(grokBroker){
+    const existing=interactiveBroker;
+    interactiveBroker={
+     isInteractiveSender:id=>grokBroker.has(id)||!!existing?.isInteractiveSender(id),
+     validateRequest:args=>grokBroker.has(args.senderId)?grokBroker.validateRequest(args):existing.validateRequest(args),
+     exchange:args=>grokEntries.some(b=>b.bindingId===args?.bindingId)?grokBroker.exchange(args):existing?.exchange(args)??Promise.reject(coded('unauthorized','Invalid interactive binding')),
+     filterDirectory:(sender,rows)=>grokBroker.has(sender)?rows.filter(row=>grokBroker.allowedRecipients(sender).includes(row.id)):rows,
+    };
+   }
    const baseAcl=createOwnerAcl({rules:aclRules});
    const ownerAcl={
-    async listAuthorizedRecipients(sender){return [...new Set([...baseAcl.listAuthorizedRecipients(sender),...(sessionBroker?await sessionBroker.recipientIds(sender):[]),...(sessionBroker?.isInteractiveSender(sender)?sessionBroker.allowedRecipients():[])])].filter(id=>id!==integration.senderId||receivesFrom(sender));},
+    async listAuthorizedRecipients(sender){
+     const candidates=[...new Set([...(grokBroker?.has(sender)?grokBroker.allowedRecipients(sender):[]),...grokIds,...baseAcl.listAuthorizedRecipients(sender),...(sessionBroker?await sessionBroker.recipientIds(sender):[]),...(sessionBroker?.isInteractiveSender(sender)?sessionBroker.allowedRecipients():[])])].filter(id=>id!==integration.senderId||receivesFrom(sender));
+     const allowed=[];for(const id of candidates){try{await this.checkAllowed(sender,id);allowed.push(id);}catch{}}return allowed;},
     async checkAllowed(sender,to){
+     const involvesGrok=grokBroker&&(grokBroker.has(sender)||grokBroker.has(to));
+     if(involvesGrok)grokBroker.checkAllowed(sender,to);
      if(to===integration.senderId){if(!inboxEnabled||!receivesFrom(sender))throw coded('recipient_not_allowed','Desktop inbox receiver policy denies sender');return;}
      if(sessionBroker?.isInteractiveSender(to)){await sessionBroker.checkRecipient(sender,to);return;}
      if(sessionBroker?.isInteractiveSender(sender)&&sessionBroker.allowedRecipients().includes(to))return;
+     if(involvesGrok){
+      if(!registry.includes(sender)&&!sessionBroker?.isInteractiveSender(sender))throw coded('recipient_not_allowed','Unknown sender');
+      if(!registry.includes(to))throw coded('recipient_not_allowed','Unknown recipient');
+      return;
+     }
      baseAcl.checkAllowed(sender,to);
     },
    };
-   const sessionRecipients={has:id=>(inboxEnabled&&id===integration.senderId)||interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
+   const sessionRecipients={has:id=>(inboxEnabled&&id===integration.senderId)||!!grokBroker?.has(id)||interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
    try {
     dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
      const runner=runners.get(job.recipient);
@@ -191,11 +216,11 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory,discoveryBroker,sessionBroker,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
-     return {credential:sessionBroker?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):inboxEnabled?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
+     return {credential:(sessionBroker||grokBroker)?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):inboxEnabled?subsystem.issueTurnCredential(broker.senderId,{turnId:cryptoRandomId(),ttlMs:300000,allowedRecipients:await ownerAcl.listAuthorizedRecipients(broker.senderId),conversationId:broker.threadId,loopDepth:1,...(inboxPolicy()?desktopClaims():{})}):broker.issue(),senderId:broker.senderId,threadId:broker.threadId};
     }});
     await subsystem.start();
     try {

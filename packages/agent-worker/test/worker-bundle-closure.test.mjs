@@ -161,7 +161,7 @@ test("v11 adds the Claude session closure and preserves every v10 artifact", () 
     "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [10,11]} for a in ['codex','hermes','antigravity','supervisor']}}))",
   ].join("\n");
   const contract = JSON.parse(execFileSync(python, ["-c", code, installer], {encoding:"utf8"}));
-  assert.equal(contract.version, 11);
+  assert.equal(contract.version, 12);
   const additions = ['local-messaging-interactive-session','claude-session-delivery','claude-session-mcp-child'].map(name=>`packages/agent-worker/src/${name}.mjs`);
   for (const [agent, versions] of Object.entries(contract.sets)) {
     assert.deepEqual(versions[11].filter(p=>!versions[10].includes(p)).sort(), [...additions].sort(), agent);
@@ -266,4 +266,16 @@ test("installer refuses interpreter paths that cannot safely name a shebang", ()
     for (const candidate of candidates) assert.equal(result[candidate], null, `${JSON.stringify(candidate)} must be refused`);
     assert.ok(path.isAbsolute(result.own) && !/\s/.test(result.own), "the running interpreter is accepted");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// v11 must still validate without the prototype module.
+test("v12 adds only the Grok participant module to every exact artifact set", () => {
+ const code = ["import importlib.util,json,sys", "s=importlib.util.spec_from_file_location('twi',sys.argv[1])", "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)", "print(json.dumps({a:{v:m.expected_artifacts(a,v) for v in [11,12]} for a in ['codex','hermes','antigravity','supervisor']}))"].join("\n");
+ const sets=JSON.parse(execFileSync(python,["-c",code,installer],{encoding:"utf8"}));
+ for(const versions of Object.values(sets)){
+  assert.deepEqual(versions[12].filter(p=>!versions[11].includes(p)),['packages/agent-worker/src/grok-local-session.mjs']);
+  assert.deepEqual(versions[11].filter(p=>!versions[12].includes(p)),[]);
+ }
+ const swift=readFileSync(path.join(repoRoot,"packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"),"utf8");
+ assert.match(swift,/if manifestVersion >= 12 \{\s*artifacts\.formUnion\(\["packages\/agent-worker\/src\/grok-local-session\.mjs"\]\)/);
 });
