@@ -600,6 +600,8 @@ export function createInstalledHeadlessDrain(config, {
   logger = console,
   ownerInstanceId = `headless-drain-${process.pid}`,
   runLiveSharedHomeProbe = runSharedHomeConcurrencyProbe,
+  /** Optional wake-driven idle cadence (createDrainIdlePolicy); null keeps the poll timer. */
+  idlePolicy = null,
 } = {}) {
   const normalized = config.profileInstanceId
     ? {
@@ -678,6 +680,7 @@ export function createInstalledHeadlessDrain(config, {
     resolveDelivery,
     profileInstanceId: normalized.profileInstanceId,
     pollIntervalMs: normalized.pollIntervalMs,
+    idlePolicy,
     onDeliveryFailure: async (error) => {
       const reason = String(error?.code ?? "headless_delivery_failed")
         .toLowerCase()

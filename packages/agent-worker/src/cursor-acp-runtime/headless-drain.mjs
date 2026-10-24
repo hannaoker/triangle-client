@@ -28,6 +28,12 @@ export function createHeadlessCursorAcpDrain({
   profileInstanceId,
   pollIntervalMs = 1_000,
   onDeliveryFailure = null,
+  /**
+   * Optional wake-driven idle cadence (createDrainIdlePolicy in
+   * install-watch-dispatcher.mjs). Null keeps the timer claiming every
+   * pollIntervalMs, exactly as before.
+   */
+  idlePolicy = null,
   logger = console,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -50,6 +56,12 @@ export function createHeadlessCursorAcpDrain({
   if (onDeliveryFailure != null && typeof onDeliveryFailure !== "function") {
     throw new TypeError("onDeliveryFailure must be a function");
   }
+  if (
+    idlePolicy != null
+    && (typeof idlePolicy.evaluateTick !== "function" || typeof idlePolicy.recordAttempt !== "function")
+  ) {
+    throw new TypeError("idlePolicy must provide evaluateTick and recordAttempt");
+  }
 
   let started = false;
   let stopping = false;
@@ -62,9 +74,19 @@ export function createHeadlessCursorAcpDrain({
   async function runDrainAttempt(reason = "timer") {
     if (!started || stopping) return Object.freeze({ status: "stopped", reason });
     const operation = (async () => {
-      const delivery = await resolveDelivery();
+      // The resolver says `empty` only when the helper listed the mailbox and
+      // found nothing pending; any other outcome keeps the lane on its poll cadence.
+      const outcome = {};
+      let delivery;
+      try {
+        delivery = await resolveDelivery({ outcome });
+      } catch (error) {
+        idlePolicy?.recordAttempt({ empty: false });
+        throw error;
+      }
       if (delivery == null) {
         lastResult = Object.freeze({ status: "idle", reason });
+        idlePolicy?.recordAttempt({ empty: outcome.empty === true });
         return lastResult;
       }
       try {
@@ -73,8 +95,10 @@ export function createHeadlessCursorAcpDrain({
           ...delivery,
         });
         lastResult = Object.freeze({ ...result, reason });
+        idlePolicy?.recordAttempt({ empty: false });
         return lastResult;
       } catch (error) {
+        idlePolicy?.recordAttempt({ empty: false });
         if (onDeliveryFailure != null) {
           try {
             await onDeliveryFailure(error, delivery);
@@ -173,7 +197,10 @@ export function createHeadlessCursorAcpDrain({
     timer = setTimer(async () => {
       timer = null;
       try {
-        await drainOnce("timer");
+        // Wake-driven idle lanes stay quiet until the safety interval; every
+        // other tick claims as it always did.
+        const tick = idlePolicy ? idlePolicy.evaluateTick() : { skip: false, reason: "timer" };
+        if (!tick.skip) await drainOnce(tick.reason);
       } catch (error) {
         logger.error?.("triangle_cursor_acp_drain_failed", {
           code: error?.code ?? null,
@@ -239,6 +266,7 @@ export function createHeadlessCursorAcpDrain({
       pollIntervalMs,
       profileInstanceId,
       lastResult,
+      idle: idlePolicy?.status?.() ?? null,
     });
   }
 

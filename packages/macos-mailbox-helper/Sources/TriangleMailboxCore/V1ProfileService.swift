@@ -146,10 +146,21 @@ public struct VerifiedCredential: Sendable, CustomStringConvertible, CustomDebug
 public struct VerifiedCredentialGate: Sendable {
     private let resolver: any V1AgentResolver
     private let transport: any MeshTransport
+    /// Where workload tokens are shared between helper processes; nil keeps each
+    /// process's token to itself (every process then exchanges its own).
+    private let tokenCache: (any WorkloadTokenCache)?
+    private let clock: @Sendable () -> TimeInterval
 
-    public init(resolver: any V1AgentResolver, transport: any MeshTransport) {
+    public init(
+        resolver: any V1AgentResolver,
+        transport: any MeshTransport,
+        tokenCache: (any WorkloadTokenCache)? = nil,
+        clock: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }
+    ) {
         self.resolver = resolver
         self.transport = transport
+        self.tokenCache = tokenCache
+        self.clock = clock
     }
 
     public func material(for profile: ProfileName) throws -> V1AgentMaterial {
@@ -166,7 +177,10 @@ public struct VerifiedCredentialGate: Sendable {
         let material = try material(for: profile)
         let manager: WorkloadTokenManager
         do {
-            manager = try WorkloadTokenManager(origin: material.origin, workloadRecord: material.workloadRecord, transport: transport)
+            manager = try WorkloadTokenManager(
+                origin: material.origin, workloadRecord: material.workloadRecord, transport: transport,
+                tokenCache: tokenCache, clock: clock
+            )
         } catch {
             throw VerifiedCredentialGateError.credentialInvalid
         }

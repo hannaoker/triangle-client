@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
@@ -15,6 +15,10 @@ import {
   GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
 } from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
+import {
+  validateClaimSafetyPollIntervalMs,
+  validateWatchIdlePollIntervalMs,
+} from "./install-watch-dispatcher.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
 import { hasHeadlessWakeKeys, normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
@@ -761,6 +765,80 @@ export function sanitizedLogger(stderr, { now = () => Date.now() } = {}) {
   });
 }
 
+/** Owner tuning of the idle request cadence, read once at startup from the client root. */
+export const SUPERVISOR_TUNING_FILE = "supervisor-tuning.json";
+const MAX_TUNING_BYTES = 1024;
+const TUNING_KEYS = new Set(["version", "claimSafetyPollMs", "watchIdlePollMs"]);
+
+/**
+ * Reads the owner's optional `<client root>/supervisor-tuning.json`:
+ *
+ *   { "version": 1, "claimSafetyPollMs": 300000, "watchIdlePollMs": 30000 }
+ *
+ * `claimSafetyPollMs` is the safety interval of a wake-driven lane (0 puts every
+ * lane back on its own poll timer); `watchIdlePollMs` is the idle sleep between
+ * install-watch polls. Either key may be left out. Returns the matching
+ * `createClientSupervisor` options, `{}` when there is no file (the defaults).
+ *
+ * The file is owner configuration, not a secret: it must be a regular, single-link
+ * file this user owns that no one else can write, no larger than 1 KiB, with
+ * exactly these keys and in-range integers. Anything else is ignored as a whole
+ * and the defaults apply, with one fixed stderr line (never the contents): bad
+ * tuning must not stop the supervisor, and a half-applied file is worse than none.
+ */
+export function readSupervisorTuning({ clientRoot, stderr = process.stderr } = {}) {
+  if (typeof clientRoot !== "string" || !clientRoot.startsWith("/") || clientRoot.includes("\0")) return {};
+  const ignored = (reason) => {
+    try { stderr.write(`triangle-client: supervisor tuning ignored (${reason})\n`); } catch {}
+    return {};
+  };
+  let descriptor;
+  try {
+    descriptor = openSync(path.join(clientRoot, SUPERVISOR_TUNING_FILE), constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    return error?.code === "ENOENT" ? {} : ignored("unreadable");
+  }
+  try {
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isFile()
+      || metadata.uid !== process.getuid()
+      || (metadata.mode & 0o022) !== 0
+      || metadata.nlink !== 1
+      || metadata.size > MAX_TUNING_BYTES
+    ) {
+      return ignored("unsafe_file");
+    }
+    const bytes = Buffer.alloc(metadata.size);
+    let filled = 0;
+    while (filled < bytes.length) {
+      const count = readSync(descriptor, bytes, filled, bytes.length - filled, null);
+      if (count === 0) break;
+      filled += count;
+    }
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, filled));
+    assertNoDuplicateJSONKeys(text);
+    const value = JSON.parse(text);
+    if (!isObject(value) || value.version !== 1 || !Object.keys(value).every((key) => TUNING_KEYS.has(key))) {
+      return ignored("invalid");
+    }
+    const options = {};
+    if (Object.hasOwn(value, "claimSafetyPollMs")) {
+      if (typeof value.claimSafetyPollMs !== "number") return ignored("invalid");
+      options.claimSafetyPollIntervalMs = validateClaimSafetyPollIntervalMs(value.claimSafetyPollMs);
+    }
+    if (Object.hasOwn(value, "watchIdlePollMs")) {
+      if (typeof value.watchIdlePollMs !== "number") return ignored("invalid");
+      options.watchIdlePollIntervalMs = validateWatchIdlePollIntervalMs(value.watchIdlePollMs);
+    }
+    return options;
+  } catch {
+    return ignored("invalid");
+  } finally {
+    try { closeSync(descriptor); } catch {}
+  }
+}
+
 async function waitForPrivateActivation({ path: markerPath, generation, parentPid, configDigest, signal }) {
   const safePath = typeof markerPath === "string" && markerPath.startsWith("/") && !markerPath.includes("\0");
   const deadline = Date.now() + ACTIVATION_TIMEOUT_MS;
@@ -889,7 +967,14 @@ export async function runClientSupervisorCLI({
           progressJournal = null;
         }
       }
+      // Owner cadence tuning (claim safety interval, watch idle sleep); absent = defaults.
+      // Read synchronously: a few hundred bytes at startup, and the supervisor's
+      // construction must not move later than the bootstrap parse it follows.
+      const tuning = progressClientRoot != null
+        ? readSupervisorTuning({ clientRoot: progressClientRoot, stderr })
+        : {};
       const supervisor = createSupervisor({
+        ...tuning,
         instances: bootstrap.instances,
         localMessaging: bootstrap.localMessaging ?? null,
         eventWake: bootstrap.eventWake ?? null,

@@ -26,6 +26,19 @@ export const INSTALL_WATCH_SAFE_IDLE_POLL_MS = 30_000;
 /** Short reconnect backoff after Phase 0.5 hold is live (empty tip ≥~20s). */
 export const INSTALL_WATCH_HELD_POLL_IDLE_MS = 2_000;
 
+/** Bounds for the owner-tunable idle sleep between install-watch polls. */
+export const MIN_WATCH_IDLE_POLL_MS = 10_000;
+export const MAX_WATCH_IDLE_POLL_MS = 600_000;
+
+export function validateWatchIdlePollIntervalMs(value) {
+  if (!Number.isSafeInteger(value) || value < MIN_WATCH_IDLE_POLL_MS || value > MAX_WATCH_IDLE_POLL_MS) {
+    throw new TypeError(
+      `watchIdlePollIntervalMs must be between ${MIN_WATCH_IDLE_POLL_MS} and ${MAX_WATCH_IDLE_POLL_MS}`,
+    );
+  }
+  return value;
+}
+
 function positiveInteger(value, name, minimum = 0) {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw new TypeError(`${name} must be an integer >= ${minimum}`);
@@ -236,9 +249,171 @@ export function createInstallWatchDispatcher({
       return { status: "stopped" };
     },
 
+    /**
+     * True while the install watch is demonstrably delivering (a watch poll
+     * succeeded recently). Lanes that lean on wake hints poll as before whenever
+     * this is false: before the first poll, after a failure, while grant ensure
+     * is retrying or backing off, and when a client without health() is injected.
+     */
+    wakeChannelHealthy() {
+      try {
+        return wakeClient?.health?.().healthy === true;
+      } catch {
+        return false;
+      }
+    },
+
     /** Test / recovery: invoke one handler without polling. */
     async handleWake(wake) {
       return dispatchWake(wake);
+    },
+  });
+}
+
+// --- Wake-driven idle cadence for drains ------------------------------------
+
+/**
+ * Wake-driven idle cadence for a supervisor drain (Cursor ACP, headless Codex).
+ *
+ * A drain claims on two triggers: the install-watch hint (`kick`, which also
+ * fires once at startup reconcile) and a poll timer. The timer used to be the
+ * only thing that noticed work the hints missed, so every idle lane ran
+ * `transaction-claim-next` about every `pollIntervalMs`, one helper process and
+ * several MESH requests each, forever. When the lane is a member of the install
+ * watch and that watch is demonstrably delivering, the hint is the primary
+ * trigger and the timer only has to be a safety net.
+ *
+ * The timer keeps ticking every `pollIntervalMs` (a tick costs nothing); this
+ * policy decides whether a tick claims. A tick claims, exactly as before, unless
+ * ALL of these hold:
+ *   - the lane is wake-driven (this policy exists) and the safety interval is
+ *     longer than the poll interval;
+ *   - the last attempt, from a hint or a tick, completed and positively found the
+ *     mailbox empty (`outcome.empty`): a claimed delivery, a settled receipt, a
+ *     failure or an unknown result all keep the existing cadence, so a backlog
+ *     drains and a failed attempt is retried at the same pace as today;
+ *   - the wake channel reports healthy (a watch poll succeeded recently), so an
+ *     install watch that is down, stuck in grant ensure, or backing off after a
+ *     402/429 leaves every lane polling as before;
+ *   - less than the safety interval (plus jitter) has passed since that attempt.
+ * Anything unknown fails open: a missing or throwing health probe, a clock that
+ * moved backwards, a malformed outcome all mean "claim".
+ */
+
+/** Default slow safety interval for a lane that is covered by the install watch. */
+export const DEFAULT_CLAIM_SAFETY_POLL_MS = 300_000;
+/** The safety interval is stretched by up to this fraction so lanes do not line up. */
+export const CLAIM_SAFETY_POLL_JITTER_RATIO = 0.2;
+export const MIN_CLAIM_SAFETY_POLL_MS = 30_000;
+export const MAX_CLAIM_SAFETY_POLL_MS = 3_600_000;
+
+/**
+ * `0` (or null/undefined) disables wake-driven claiming; otherwise a bounded
+ * integer number of milliseconds.
+ */
+export function validateClaimSafetyPollIntervalMs(value) {
+  if (value === 0 || value == null) return 0;
+  if (
+    !Number.isSafeInteger(value)
+    || value < MIN_CLAIM_SAFETY_POLL_MS
+    || value > MAX_CLAIM_SAFETY_POLL_MS
+  ) {
+    throw new TypeError(
+      `claimSafetyPollIntervalMs must be 0 or between ${MIN_CLAIM_SAFETY_POLL_MS} and ${MAX_CLAIM_SAFETY_POLL_MS}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * @param {object} options
+ * @param {number} options.pollIntervalMs the drain's existing timer period
+ * @param {number} options.safetyPollIntervalMs slow interval between claims while idle and wake-driven
+ * @param {() => boolean} options.wakeChannelHealthy true while the install watch is delivering
+ * @param {number} [options.jitterRatio]
+ * @param {() => number} [options.random]
+ * @param {() => number} [options.now] milliseconds
+ */
+export function createDrainIdlePolicy({
+  pollIntervalMs,
+  safetyPollIntervalMs,
+  wakeChannelHealthy,
+  jitterRatio = CLAIM_SAFETY_POLL_JITTER_RATIO,
+  random = Math.random,
+  now = () => Date.now(),
+} = {}) {
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1) {
+    throw new TypeError("pollIntervalMs must be a positive integer");
+  }
+  if (!Number.isSafeInteger(safetyPollIntervalMs) || safetyPollIntervalMs < 1) {
+    throw new TypeError("safetyPollIntervalMs must be a positive integer");
+  }
+  if (typeof wakeChannelHealthy !== "function") {
+    throw new TypeError("wakeChannelHealthy must be a function");
+  }
+  if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
+    throw new TypeError("jitterRatio must be between 0 and 1");
+  }
+
+  // A safety interval at or below the timer period would never skip a tick.
+  const active = safetyPollIntervalMs > pollIntervalMs;
+  let lastAttemptAt = null;
+  let lastAttemptEmpty = false;
+  let safetyDueInMs = safetyPollIntervalMs;
+  let skippedTicks = 0;
+  let safetyPolls = 0;
+
+  function healthy() {
+    try {
+      return wakeChannelHealthy() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  return Object.freeze({
+    active,
+    safetyPollIntervalMs,
+
+    /**
+     * Call when an attempt (hint or tick) has finished. `empty` is true only when
+     * the helper reported an empty mailbox; it is the caller's job to say false
+     * for a failure, a delivery, a settled receipt or an unknown result.
+     */
+    recordAttempt({ empty } = {}) {
+      lastAttemptAt = now();
+      lastAttemptEmpty = empty === true;
+      const jitter = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * safetyPollIntervalMs * jitterRatio);
+      safetyDueInMs = safetyPollIntervalMs + jitter;
+    },
+
+    /**
+     * What a poll-timer tick should do: `{ skip: true }` to stay quiet, or
+     * `{ skip: false, reason }` to claim (`safety_poll` when this tick is the
+     * safety net of a wake-driven idle lane, `timer` otherwise).
+     */
+    evaluateTick() {
+      if (!active || lastAttemptAt === null || !lastAttemptEmpty) {
+        return { skip: false, reason: "timer" };
+      }
+      if (!healthy()) return { skip: false, reason: "timer" };
+      const elapsed = now() - lastAttemptAt;
+      if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= safetyDueInMs) {
+        safetyPolls += 1;
+        return { skip: false, reason: "safety_poll" };
+      }
+      skippedTicks += 1;
+      return { skip: true, reason: "wake_driven_idle" };
+    },
+
+    status() {
+      return Object.freeze({
+        wakeDriven: active,
+        safetyPollIntervalMs,
+        lastAttemptEmpty,
+        skippedTicks,
+        safetyPolls,
+      });
     },
   });
 }

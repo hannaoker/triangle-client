@@ -25,6 +25,37 @@ Handoff to runtimes:
 - Reasoning children (model CLIs) receive neither: the runner environment is an
   allowlist.
 
+## Workload token cache
+
+Every helper command is a new process, so a workload access token held only in
+memory would be exchanged again by every `transaction-*` run and `mcp` session
+(`POST /api/v1/identity/token-challenges` and `POST /api/v1/identity/tokens`)
+although MESH issues it for about five minutes. The helper therefore shares the
+token between processes through one `0600` file per `(origin, workload, key,
+scopes)` under
+`~/Library/Application Support/The Triangle/credentials/local/workload-token/`
+(`WorkloadTokenCache.swift`). It is a cache, not custody:
+
+- The token is DPoP-bound. Every request still carries a fresh DPoP proof signed
+  by the workload key, so the file alone cannot authorize a request. The key
+  stays in `triangle` custody and is never copied here.
+- The directory must be a real `0700` directory owned by this user; each file a
+  regular, single-link, `0600`, owner-owned file opened without following
+  symlinks. Anything else (permissions, owner, symlink, extra hard link, wrong
+  type, oversized, malformed, unknown field, a token that is not header-safe, an
+  entry for another key, origin or scope set, an implausible lifetime) is a cache
+  miss: the helper exchanges a token exactly as it did before and never repairs
+  or follows the unsafe path.
+- A token is reused only while more than 30 seconds of life remain, and is never
+  written when MESH reports a lifetime beyond one hour. Expired entries are
+  deleted when read or when another entry is written.
+- Any `401` to a request that carried the token deletes it from memory and disk
+  (a newer token another process stored is kept).
+- The token is never logged, printed, put in an error or a diagnostic, or written
+  anywhere but this file. `credentials/` is the tree runner sandboxes are denied
+  (`TRIANGLE_CREDENTIAL_ROOT`).
+- Older helpers ignore the directory; deleting it only costs one exchange.
+
 ## Watch grants
 
 Installation-scoped watch-grant credentials (`mesh_watch_…`) are still stored

@@ -52,8 +52,10 @@ public enum MeshWorkloadErrorCode {
     }
 }
 
-public final class WorkloadTokenManager: @unchecked Sendable {
+public final class WorkloadTokenManager: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     private static let proofProfile = "mesh.workload-token-proof/1"
+    /// A token with less than this much life left is exchanged again.
+    static let refreshMargin: TimeInterval = 30
 
     private let origin: MeshOrigin
     private let workloadID: WorkloadID
@@ -62,6 +64,11 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     private let transport: any MeshTransport
     /// v1 scopes: the workload's bounds (`agent.read`, `agent.write`).
     private let requestedScopes: [String]
+    /// Tokens other helper processes exchanged for this exact workload key, shared
+    /// through storage. Nil keeps a token for this process only.
+    private let tokenCache: (any WorkloadTokenCache)?
+    private let cacheKey: WorkloadTokenCacheKey
+    private let clock: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private var cachedToken: String?
     private var cachedTokenExpiresAt: TimeInterval = 0
@@ -70,7 +77,9 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     public init(
         origin: MeshOrigin,
         workloadRecord: WorkloadKeyRecord,
-        transport: any MeshTransport
+        transport: any MeshTransport,
+        tokenCache: (any WorkloadTokenCache)? = nil,
+        clock: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }
     ) throws {
         guard let workloadID = workloadRecord.workloadID else {
             throw WorkloadTokenManagerError.missingWorkloadID
@@ -82,9 +91,15 @@ public final class WorkloadTokenManager: @unchecked Sendable {
         self.transport = transport
         self.requestedScopes = V1AgentMaterial.agentBounds.filter { workloadRecord.scopes.contains($0) }
         guard !requestedScopes.isEmpty else { throw WorkloadTokenManagerError.invalidResponse }
+        self.tokenCache = tokenCache
+        self.clock = clock
+        self.cacheKey = WorkloadTokenCacheKey(
+            origin: origin, workloadID: workloadID, keyThumbprint: publicJWK.jkt, scopes: requestedScopes
+        )
     }
 
-    /// Drop a cached token MESH refused (401) so the next call exchanges a fresh one.
+    /// Drop a token MESH refused (401), here and in the shared cache, so the next call
+    /// exchanges a fresh one. A different token another process stored since stays.
     public func invalidate(_ token: String) {
         lock.withLock {
             if cachedToken == token {
@@ -92,10 +107,24 @@ public final class WorkloadTokenManager: @unchecked Sendable {
                 cachedTokenExpiresAt = 0
             }
         }
+        tokenCache?.remove(for: cacheKey, ifToken: token)
     }
 
     public var activeAccessToken: String? {
         lock.withLock { cachedToken }
+    }
+
+    /// The manager holds a signing key and a live bearer token; neither is ever printed.
+    public var description: String { "WorkloadTokenManager(origin: \(origin.value), key: <redacted>, token: <redacted>)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["origin": origin.value, "key": "<redacted>", "token": "<redacted>"], displayStyle: .class)
+    }
+
+    /// A transport that drops this manager's token whenever MESH answers a request
+    /// that carried it with a 401, whichever call site sent the request.
+    public func observingRefusals(of transport: any MeshTransport) -> any MeshTransport {
+        TokenRefusalObservingTransport(base: transport, auth: self)
     }
 
     public func authorizationHeaders(method: String, url: URL) async throws -> [String: String] {
@@ -111,11 +140,11 @@ public final class WorkloadTokenManager: @unchecked Sendable {
     }
 
     func fetchToken() async throws -> String {
-        let now = Date().timeIntervalSince1970
+        let now = clock()
         // Create/publish the refresh task in one critical section so a finished
         // task cannot clear refreshTask before it is assigned (single-flight race).
         let task: Task<String, Error> = lock.withLock {
-            if let cachedToken, cachedTokenExpiresAt - 30 > now {
+            if let cachedToken, cachedTokenExpiresAt - Self.refreshMargin > now {
                 let token = cachedToken
                 return Task { token }
             }
@@ -124,7 +153,7 @@ public final class WorkloadTokenManager: @unchecked Sendable {
             }
             let created = Task<String, Error> {
                 do {
-                    let token = try await self.exchangeToken()
+                    let token = try await self.sharedTokenOrExchange()
                     self.lock.withLock { self.refreshTask = nil }
                     return token
                 } catch {
@@ -136,6 +165,23 @@ public final class WorkloadTokenManager: @unchecked Sendable {
             return created
         }
         return try await task.value
+    }
+
+    /// A token another helper process already exchanged for this key and that still
+    /// has life left, else a fresh exchange. Anything wrong with the shared cache is
+    /// a miss, so the cost of a bad cache is one exchange: today's behavior.
+    private func sharedTokenOrExchange() async throws -> String {
+        let now = clock()
+        if let tokenCache,
+           let shared = tokenCache.load(for: cacheKey, now: now),
+           shared.isUsable(at: now, margin: Self.refreshMargin) {
+            lock.withLock {
+                cachedToken = shared.accessToken
+                cachedTokenExpiresAt = shared.expiresAt
+            }
+            return shared.accessToken
+        }
+        return try await exchangeToken()
     }
 
     private func exchangeToken() async throws -> String {
@@ -192,9 +238,17 @@ public final class WorkloadTokenManager: @unchecked Sendable {
 
         let payload = try decodeTokenResponse(response.body)
         let lifetime = TimeInterval(payload.expiresIn ?? 300)
+        let issuedAt = clock()
         lock.withLock {
             cachedToken = payload.accessToken
-            cachedTokenExpiresAt = Date().timeIntervalSince1970 + lifetime
+            cachedTokenExpiresAt = issuedAt + lifetime
+        }
+        // Best effort: a token that cannot be shared is still used by this process.
+        // One that would not be reusable anyway (about to expire, or a lifetime
+        // beyond the cache bound) is not written.
+        let shareable = CachedWorkloadToken(accessToken: payload.accessToken, issuedAt: issuedAt, expiresAt: issuedAt + lifetime)
+        if shareable.isUsable(at: issuedAt, margin: Self.refreshMargin) {
+            tokenCache?.store(shareable, for: cacheKey)
         }
         return payload.accessToken
     }
@@ -309,5 +363,27 @@ public final class WorkloadTokenManager: @unchecked Sendable {
         }
         let expiresIn = object["expires_in"] as? Int
         return WorkloadTokenResponsePayload(accessToken: accessToken, expiresIn: expiresIn)
+    }
+}
+
+/// Drops the workload token MESH refused. It wraps the transport requests are sent
+/// on, so every call site is covered without each one handling a 401 itself.
+struct TokenRefusalObservingTransport: MeshTransport {
+    let base: any MeshTransport
+    let auth: WorkloadTokenManager
+
+    func send(_ request: MeshHTTPRequest) async throws -> MeshHTTPResponse {
+        let response = try await base.send(request)
+        if response.statusCode == 401, let token = Self.bearerToken(in: request.headers) {
+            auth.invalidate(token)
+        }
+        return response
+    }
+
+    static func bearerToken(in headers: [String: String]) -> String? {
+        guard let value = headers.first(where: { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame })?.value,
+              value.hasPrefix("Bearer ")
+        else { return nil }
+        return String(value.dropFirst("Bearer ".count))
     }
 }

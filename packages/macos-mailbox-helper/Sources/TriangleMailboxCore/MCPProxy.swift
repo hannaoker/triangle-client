@@ -221,7 +221,7 @@ public struct MCPProxy: Sendable {
                                 "Content-Type": "application/json",
                             ]
                             headers.merge(try await session.authorizationHeaders(method: "POST", url: endpoint)) { _, new in new }
-                            response = try await transport.send(MeshHTTPRequest(
+                            response = try await session.workloadAuth.observingRefusals(of: transport).send(MeshHTTPRequest(
                                 method: "POST",
                                 url: endpoint,
                                 headers: headers,
@@ -278,7 +278,7 @@ public struct MCPProxy: Sendable {
                     "Content-Type": "application/json",
                 ]
                 headers.merge(try await session.authorizationHeaders(method: "POST", url: endpoint)) { _, new in new }
-                response = try await transport.send(MeshHTTPRequest(
+                response = try await session.workloadAuth.observingRefusals(of: transport).send(MeshHTTPRequest(
                     method: "POST",
                     url: endpoint,
                     headers: headers,
@@ -336,7 +336,7 @@ public struct MCPProxy: Sendable {
     ) -> MCPTransactionRewriter {
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
-            transport: transport,
+            transport: workloadAuth.observingRefusals(of: transport),
             actorID: credential.agentID
         ) { method, url in
             try await workloadAuth.authorizationHeaders(method: method, url: url)
