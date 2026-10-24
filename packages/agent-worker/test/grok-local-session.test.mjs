@@ -167,3 +167,16 @@ test('private claim files cannot be reused for another message or through a syml
   await errorCode(f.run(ctxB,['grok','claim','--message-id','two','--claim-id','second','--claim-file',link]),'unsafe_path');
  }finally{await f.close();}
 });
+
+
+test('owner pairs a probed context hash while runtime still requires the actual inherited context',async()=>{
+ const f=fixture();try{
+  const paired=await f.run(undefined,['setup-grok','--alias','hashed','--context-hash',hash(ctxA),'--recipient',f.worker]);
+  assert.equal(paired.senderId,grokId(ctxA));assert.equal(paired.identityMode,'paired-conversation');
+  await f.start();assert.equal((await f.run(ctxA,['grok','status'])).senderId,paired.senderId);
+  await errorCode(f.run(ctxB,['grok','status','--alias','hashed']),'grok_context_mismatch');
+  await errorCode(f.run(undefined,['grok','status','--context-hash',hash(ctxA)]),'grok_context_mismatch');
+  await errorCode(f.run(undefined,['setup-grok','--alias','ambiguous','--context-hash',hash(ctxA),'--conversation-id',ctxB]),'invalid_grok_context');
+  await errorCode(f.run(undefined,['setup-grok','--alias','invalid','--context-hash','not-a-hash']),'invalid_grok_context');
+ }finally{await f.close();}
+});

@@ -1,6 +1,7 @@
 # Grok Bot pull-only local messaging prototype
 
-2026-10-24. Draft, source-tested prototype. Not installed or activated on the Mini.
+2026-10-24. Draft prototype with passed live two-Grok source-host acceptance.
+The production/installed supervisor has not been upgraded or activated for Grok.
 Base: client main `5b6c5c896eeb3e95a82cd2c3f32360e3710e52a4` (#116).
 
 ## Motivation and boundary
@@ -54,9 +55,14 @@ The commands below describe usage; the implementation tests use disposable roots
 ```bash
 node packages/agent-worker/src/local-messaging-cli.mjs setup-grok \
   --config /absolute/private/test/local.json \
-  --alias researcher --conversation-id OWNER_CONFIRMED_CONVERSATION_UUID \
+  --alias researcher --context-hash OWNER_VERIFIED_CONVERSATION_SHA256 \
   --recipient EXACT_PEER_ADDRESS --sender EXACT_PEER_ADDRESS
 ```
+
+The owner can use a hash captured by a metadata-only probe instead of a raw ID.
+`--conversation-id` remains an alternative; the two options cannot be combined.
+A context hash is only a pairing selector, never a substitute for runtime launch
+context or the private capability.
 
 Setup returns the public sender ID, alias, identity mode and restart requirement;
 it never returns the capability. Pairing files are private (0600 in a 0700 directory).
@@ -130,21 +136,24 @@ attached Claude routing, desktop receiver opt-in, context mismatch, capability
 and generation denial, immediate revocation, private claims and uncertain custody.
 Existing local messaging, attachment, notifier and bundle tests run alongside them.
 
-Not yet proven: a live Grok Bot invoking the candidate, cross-bot provider metadata,
-context stability after app restart, a routine's context, app sleep/local approval
-behavior, or idle wake. The UUID context contract is version-pinned installed-source
-and owner-reported probe evidence, not an official provider API guarantee. Re-probe
-on upgrade. No new Grok messages, routines, bindings or production settings were
-activated for this prototype.
+Live Bob ↔ Tech Lead acceptance passed using their actual local command tools,
+the candidate CLI and an isolated source host. Both initiated, claimed, replied,
+retrieved and consumed correlated canaries; queued delivery survived host restart,
+and a wrong-context call was rejected. The fixture worker was never invoked.
+See [the acceptance record](../reviews/2026-10-24-pr117-grok-source-host-acceptance.md).
+The source host is stopped and its pairings revoked.
 
-Before installation approval, run two owner-selected Grok bots against a disposable
-candidate: each sends and retrieves its own reply, each receives queued mail while
-no CLI process exists, and a wrong-context call is rejected. Then test the intended
-Codex and Claude conversations separately. Wake remains a later PR.
+Not yet proven: the installed supervisor path, live Grok-to-Codex/Claude traffic,
+metadata after app restart, routines, background shells, approval denial or app
+sleep. The UUID context contract remains version-pinned installed-source evidence,
+not an official provider API guarantee. Re-probe on upgrade. Wake is a later PR.
+
+Next: independent review, then a reviewed packaged candidate on the existing
+supervisor with explicit rollback and installed acceptance.
 
 ## Prototype verification record
 
-- 359/359 Node tests passed serially across Grok, local messaging, session
+- 360/360 Node tests passed serially across Grok, local messaging, session
   discovery/attachments, Claude adapters, Codex inbox, supervisor, inventory and
   packaging contracts. The existing `/private/var/tmp` fixture required the test
   process to run outside the workspace sandbox.
@@ -154,5 +163,5 @@ Codex and Claude conversations separately. Wake remains a later PR.
   no product worker sandbox setting was changed.
 - All 31 historical exact artifact sets (worker v3–v11, supervisor v8–v11) match
   the base installer byte-for-byte as lists. v12 adds only the new Grok module.
-- `git diff --check` passes. No live Grok acceptance or production installation
-  is claimed by these results.
+- `git diff --check` passes. Automated checks and the separate live source-host result do not establish
+  production installation acceptance.

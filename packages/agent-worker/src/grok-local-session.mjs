@@ -52,8 +52,12 @@ export function setupGrok(options, configPath, env = process.env) {
   const config = readPrivateJson(configPath), entries = grokBindings(config);
   if (config.version !== 1 || config.enabled !== true) throw coded('local_disabled','Enable local messaging first');
   if (!ALIAS.test(options.alias || '') || entries.some(b=>b.alias === options.alias) || entries.length >= 32) throw coded('invalid_grok_alias','Use a new distinct alias');
+  // An owner can pair a metadata-probed hash without disclosing or persisting
+  // the raw provider ID. Runtime selection still hashes its own launch context.
+  const suppliedHash = options['context-hash'];
+  if (suppliedHash !== undefined && (typeof suppliedHash !== 'string' || !HEX64_PATTERN.test(suppliedHash) || options['conversation-id'] !== undefined)) throw coded('invalid_grok_context','Choose one valid context hash or conversation ID');
   const context = options['conversation-id'] ?? env.CURSOR_CONVERSATION_ID;
-  const contextDigest = context === undefined ? null : contextHash(context);
+  const contextDigest = suppliedHash ?? (context === undefined ? null : contextHash(context));
   const allowedSenders = options.senders || [], allowedRecipients = options.recipients || [];
   if (!exactIds(allowedSenders) || !exactIds(allowedRecipients)) throw coded('invalid_grok_grants','Exact recipient and sender addresses required');
   const owner = readPrivateJson(config.integrationPath).senderId;
