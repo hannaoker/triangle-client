@@ -485,7 +485,8 @@ test("Real journal+control socket end-to-end: inbound message -> wake reserve ->
     assert.equal(reserveRes.deliveryAllowed, true);
     assert.equal(reserveRes.reserved, true);
     assert.equal(reserveRes.wakeId, reservationId);
-    assert.equal(reserveRes.snapshot.replyCount, 1);
+    assert.equal(reserveRes.snapshot.replyCount, 0);
+    assert.equal(reserveRes.snapshot.inboxCount, 1);
 
     // 4. Mock socket delivery (simulate delivery primitive write_accepted)
     // 5. Report wake result

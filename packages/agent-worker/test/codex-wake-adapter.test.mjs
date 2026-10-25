@@ -574,3 +574,10 @@ test("probe parses strict bounded codex-cli version line and rejects arbitrary s
   assert.equal(extraProbe.ok, true);
   assert.equal(extraProbe.version, undefined);
 });
+
+ test('incoming requests are labelled separately from replies in the queued hint', async()=>{
+  const calls=[];
+  await notify(sampleBinding(),{...sampleSnapshot(),replyCount:0,inboxCount:1},{runner:async call=>{calls.push(call);return {code:0,signal:null,stdout:`Queued message ${VALID_QUEUED_ID} for thread ${VALID_THREAD_ID}.\n`,stderr:''};}});
+  assert.equal(calls.length,1);
+  assert.match(calls[0].args[4],/Pending replies: 0\nPending incoming requests: 1/);
+ });
