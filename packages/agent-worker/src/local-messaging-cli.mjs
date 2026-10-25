@@ -696,6 +696,8 @@ function replaceTextFile(file,text,mode=0o600){
  const temp=`${file}.triangle-${randomUUID()}`;let fd;
  try{
   fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,mode);
+  // Creation honors the umask; the owner's file keeps exactly the mode it had.
+  fs.fchmodSync(fd,mode);
   fs.writeFileSync(fd,text);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
   fs.renameSync(temp,file);
  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}

@@ -201,7 +201,7 @@ test('Codex setup writes a marked block into the workspace config only, refuses 
  const f=ownerFiles({codexMessaging:false});try{
   const file=path.join(f.workspace,'.codex','config.toml');
   const foreign='[mcp_servers.other]\ncommand = "/bin/other"\n\n[projects."x"]\ntrust_level = "trusted"\n';
-  fs.writeFileSync(file,foreign,{mode:0o640});
+  fs.writeFileSync(file,foreign,{mode:0o640});fs.chmodSync(file,0o640); // the umask must not decide what mode is expected
   const policyFile=readPrivateJson(f.configPath).sessionMessaging?.integrationPath;
   assert.equal(policyFile,undefined,'no workspace messaging yet');
   const result=setupWorkspaceMessaging(f.codexOptions);
