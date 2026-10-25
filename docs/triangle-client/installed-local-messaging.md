@@ -55,7 +55,8 @@ matching updated supervisor; an older server reports an unsupported-method error
 This section does not imply an installed runtime upgrade.
 
 Each entry contains `id`, `label`, `kind` (`worker`, `conversation`, or `unknown`)
-and `presence` (currently always `unknown`). Worker profile names and fixed paired
+and `presence` (always `unknown` for these configured entries; discovered chats carry
+evidence-backed presence, see "Titles and presence"). Worker profile names and fixed paired
 conversation labels come from owner configuration, not transcript scans. Labels
 are untrusted display text; use the exact `id` for routing. The directory lists
 only the intersection of the existing owner ACL and credential recipient scope.
@@ -63,8 +64,9 @@ It neither grants access nor proves that a recipient is online or can wake.
 Legacy `discover` and `triangle_list_recipients` keep their ID-only output.
 
 This is a directory for existing registrations, not automatic discovery of all
-open chats. Automatic registration, lifecycle handoff, liveness and readable
-conversation titles remain separate work. No schema migration is needed. Rolling
+open chats. Automatic registration, liveness evidence and conversation titles come
+from lifecycle discovery (the sections below), not from this directory. This
+directory needs no schema migration. Rolling
 back removes the new read-only method without modifying messaging data or grants.
 
 The CLI is an installed supported path. The MCP stdio entry uses the same socket API and passes subprocess protocol tests, but adding it to an already running Codex conversation may require a host reload. Do not claim native Triangle tools are available until that host actually exposes them.
@@ -160,10 +162,11 @@ The hook never scans other chats or collects prompt text or transcript contents.
 Use `sessions` or `triangle_list_sessions` to inspect exact session handles,
 workspace/session-hash-prefix labels, lifecycle and last-seen metadata. Discovered
 entries explicitly report `visible: true`, `reachable: false`, `wakeCapable:
-false`. They do not acquire a Triangle inbox or messaging permissions. Presence
-is unknown while observed and offline after an end event; missing crash/end
-signals do not establish live status. Actual chat titles and automatic Codex
-registration are not implemented.
+false`. They do not acquire a Triangle inbox or messaging permissions. Titles
+and presence come from evidence the chat's own hook reports ("Titles and
+presence" below); Codex chats are covered under "Codex discovery". A chat that
+was already open when the hooks were installed may need a reload ("What needs a
+reload").
 
 To turn it off or prepare rollback, run `triangle-local disable-discovery` using
 the candidate before restoring older runtime code. It disables the capability,
@@ -184,6 +187,118 @@ optional integrations. At the 128-row limit, discovery evicts the oldest ended
 row and retains its end marker; it does not evict observed sessions. Local status
 reports directory `used` and `capacity` so an all-observed full directory is visible.
 
+### Codex discovery (visibility only)
+
+```text
+triangle-local setup-discovery --harness codex --workspace /absolute/workspace
+```
+
+The command adds the same three lifecycle hooks to `.codex/hooks.json`
+(`SessionStart`, `UserPromptSubmit`, and `SessionEnd` with a three-second
+timeout) and keeps unrelated hooks. The owner reviews and trusts the new hooks in
+Codex's own hook review; trust is recorded per hook definition, so a changed hook
+needs review again, and no trust bypass is used. One workspace capability serves
+both harnesses: `--harness` defaults to `claude`, and setting up the second
+harness keeps the first. `disable-discovery` removes the managed hooks of both.
+
+Codex entries read `Codex · <title> · <workspace> · <hash>` and carry an optional
+descriptive `origin` (`cli`, `vscode`, `exec`, app-server variants, `subagent` or
+`unknown`). Origin says where the chat began, not who runs it now, and nothing is
+excluded by it. They never carry a receive or wake capability (`reachable: false`,
+`wakeCapable: false`): only the one conversation bound with `setup` (and
+`setup-inbox` for incoming requests) can receive and be woken. "All sessions"
+means chats whose hooks report from the opted-in workspace. There is no scan of
+other chats, so a chat that has not run a hook since the hooks were installed is
+not listed.
+
+### Titles and presence
+
+Each lifecycle hook reads metadata about its own session only and reports it with
+the event. Nothing else is read.
+
+**Title**
+
+- Claude: the session name in Claude's own per-process registry,
+  `<claude config>/sessions/<pid>.json` (`CLAUDE_CONFIG_DIR` is honored). The hook
+  walks up its process ancestry and accepts a record only if its pid is an
+  ancestor, its `sessionId` is this session's and its `procStart` equals that
+  process's start time, so a leftover file of a reused pid is ignored. The secret
+  `.key` files beside it are never opened. Claude's hook input carries no title.
+- Codex: `threads.name` (the name the user gave the chat), else `threads.title`,
+  in `state_5.sqlite`: the same read-only lookup of the hook's own row that
+  supplies origin.
+- Both are private, version-specific files (seen on Claude 2.1.308 and Codex
+  0.164.0), not supported APIs. When their layout changes the title is simply
+  absent. A title is refreshed whenever a hook can read it, so a rename shows
+  after the chat's next prompt, and an ended chat keeps its last title.
+- Titles are untrusted display text: one line of at most 80 characters, control
+  and bidirectional characters removed, and key-like runs of 28 or more letters
+  and digits masked. They appear in `label` and in a `title` field, and every
+  configured directory reader sees them. Route by `id`, never by title.
+- To keep titles out of the directory run `triangle-local setup-discovery
+  --no-titles` and restart the service (`discovery.titles: false`; the choice
+  survives rerunning setup for the other harness, and `--titles` turns them back
+  on). Hooks then stop reporting them, and titles already stored are hidden and not
+  stored again; they stay in the journal file only until the entry ages out.
+
+**Presence**
+
+`presence` is `online`, `offline` or `unknown`, and `presenceEvidence.kind` says
+which evidence decided it:
+
+| `presenceEvidence.kind` | Meaning | `presence` |
+| --- | --- | --- |
+| `end-event` | The chat's end hook reported. | `offline` |
+| `mcp-lease` | An attached MCP child holds an unexpired lease (renewed every five seconds, valid 30). | `online` |
+| `host-process` | The process hosting the chat, recorded by its hook with its start time, is alive now. With `scope: session` (one process per chat: Claude, `codex exec` or the Codex CLI) | `online` |
+| `host-process` | The same, with `scope: shared` (Codex Desktop is expected to run chats in one shared app server, so alive means the app is up, not that this chat is open). | `unknown` |
+| `host-process-gone` | That process no longer exists, or its pid now belongs to another process. | `offline` |
+| `none` | No evidence, or the process check could not run. | `unknown` |
+
+Presence is not reachability. `capabilities.reachable` stays false until a chat is
+attached (Claude, with the workspace messaging opt-in), and an online chat can
+still be busy. The supervisor checks the recorded processes with one `ps` listing
+per refresh, cached for five seconds, and never returns a process id to a reader.
+A check that cannot decide is `unknown`, never `offline`. The first live Codex
+Desktop registrations will show which process their hooks actually run under; until
+that is confirmed, treat a `shared` or missing host as "no per-chat evidence".
+
+### What needs a reload
+
+A harness loads hooks and MCP servers when it loads a chat. Triangle cannot change
+that, so it reports what is missing (`attachment` and `attachmentHint` on a
+discovered Claude chat) and this table records what has been measured.
+
+| Added after the chat started | Claude (Desktop, CLI) | Codex (Desktop, CLI) |
+| --- | --- | --- |
+| Discovery hooks (`setup-discovery`) | **No reload.** Open chats registered on their next prompt (measured 2026-10-23, Claude Desktop). Claude Code's documentation says edits to settings-file hooks are normally picked up by a file watcher. | **Reload needed.** Chats that were already loaded kept their old hook set (measured 2026-10-24, Codex 0.164.0). Both desktop chats registered after the owner restarted the Codex app, 1.4 and 1.2 seconds after their MCP launch. Whether reopening a loaded chat without an app restart is enough was not measured. New chats, and finished chats resumed later, register on their own. The hooks must also be trusted. |
+| Messaging MCP entry (`setup-session-messaging`, `.mcp.json`) | **Existing chats do not gain it.** An app restart was required in the 2026-10-23 test, and Claude Code's documentation does not say that a new project server loads into a running session. Approve the project server when Claude asks. | Not offered for arbitrary chats yet; only the one bound conversation can receive and be woken. |
+
+What an operator sees:
+
+- A discovered Claude chat with no MCP child lists as `attachment: "not-attached"`
+  with a hint to reload or restart it, and `presence` follows the other evidence
+  (not `offline`). Once the child connects it lists as `attached`, `presence:
+  "online"` with `mcp-lease`, and `capabilities.reachable: true`.
+- A Codex chat that predates the hooks is not listed at all. Listing it would
+  need a scan of other chats, which discovery does not do. Restart the Codex app
+  or start a new chat.
+
+Not adopted: forcing a reload, and reading the harness thread stores to list chats
+that have not reported. Not yet tested: shipping the session MCP server as a Claude
+Code plugin. Claude Code documents that enabling a plugin mid-session connects its
+MCP servers, which may allow attachment without a restart.
+
+### Rollout and rollback of titles and host evidence
+
+No module file is added, so the supervisor manifest version and the native helper
+are unchanged. The journal gains four nullable columns on first start (additive; an
+older release ignores them). A hook newer than the running supervisor falls back to
+the bare lifecycle event when the older supervisor refuses the optional fields, so
+the order of staging and restarting does not lose registrations. Before restoring
+an older runtime, run `triangle-local disable-discovery`: it removes the optional
+`discovery` configuration key (including `titles`), which an older host rejects.
+
 ## Workspace Claude attachments (candidate)
 
 After installing this feature, enable lifecycle discovery, then run
@@ -192,7 +307,8 @@ Restart the existing supervisor and reconnect/create Claude MCP sessions as
 required by the harness, honoring its approvals. Setup adds only its managed
 `triangle-session` entry to `.mcp.json`, preserving other entries and refusing
 to overwrite an existing different entry. Existing MCP children are not
-retroactively attached.
+retroactively attached: a visible chat that has none is listed as
+`attachment: "not-attached"` with a hint (see "What needs a reload").
 
 Participation is a separate capability from discovery. The initial receiver
 policy permits only the bound Codex sender; attached sessions can initiate sends

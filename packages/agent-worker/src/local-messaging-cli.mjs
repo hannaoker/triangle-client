@@ -6,7 +6,8 @@ import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {ancestors} from './delivery-private-path.mjs';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
-import {readPrivateJson,writePrivateJson} from './local-messaging-auth-broker.mjs';
+import {execFileSync} from 'node:child_process';
+import {readPrivateJson,writePrivateJson,sanitizeSessionTitle} from './local-messaging-auth-broker.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messaging-mcp-adapter.mjs';
@@ -20,7 +21,7 @@ function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
  const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness']);
- while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -312,8 +313,11 @@ export function setupSessionDiscovery(options,env=process.env){
  // grant message authority, and rerunning setup never duplicates the hooks.
  writePrivateJson(integrationPath,integration);
  replaceJsonFile(settingsPath,settings);
- writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath,workspace}});
- return {workspace,settingsPath,harness,requiresServiceRestart:true,requiresHarnessHookApproval:true,discoveryOnly:true};
+ // Conversation titles are shown to every configured directory reader; `--no-titles` keeps them out (the choice
+ // is kept when setup is rerun for another harness, `--titles` turns them back on).
+ const titles=options.titles??config.discovery?.titles;
+ writePrivateJson(configPath,{...config,discovery:{enabled:true,integrationPath,workspace,...(titles===false?{titles:false}:{})}});
+ return {workspace,settingsPath,harness,requiresServiceRestart:true,requiresHarnessHookApproval:true,discoveryOnly:true,titles:titles!==false};
 }
 
 export function disableSessionDiscovery(options,env=process.env){
@@ -356,28 +360,105 @@ export function disableSessionDiscovery(options,env=process.env){
 
 // Optional Codex 0.164/state_5 descriptive metadata, never an admission rule.
 // Read only this hook's own row; missing/changed metadata remains unknown.
-// Origin does not prove current execution owner or delivery permissions.
-export function readCodexSessionOrigin(sessionId,env=process.env){
- if(!UUID_PATTERN.test(sessionId))return 'unknown';
+// Origin does not prove current execution owner or delivery permissions. The title is the name the user gave the
+// chat, else the harness-generated one; it is display text only and is sanitized again before it is stored.
+export function readCodexSessionMetadata(sessionId,env=process.env){
+ const none={origin:'unknown'};
+ if(!UUID_PATTERN.test(sessionId))return none;
  let db;
  try{
   const home=env.CODEX_HOME||path.join(env.HOME||os.homedir(),'.codex');
-  if(!path.isAbsolute(home)||fs.realpathSync(home)!==home)return 'unknown';
+  if(!path.isAbsolute(home)||fs.realpathSync(home)!==home)return none;
   ancestors(home);
   const directory=fs.lstatSync(home),file=path.join(home,'state_5.sqlite');
-  if(!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o022))return 'unknown';
+  if(!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o022))return none;
   const stat=fs.lstatSync(file,{throwIfNoEntry:false});
   // Codex normally creates 0755/0644 metadata paths. Require owned, canonical,
   // non-writable-by-others paths without changing the owner's permissions.
-  if(!stat||!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o022))return 'unknown';
+  if(!stat||!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o022))return none;
   const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite');
   db=new DatabaseSync(file,{readOnly:true});
   db.exec('PRAGMA busy_timeout=100');
-  const row=db.prepare('SELECT source FROM threads WHERE id=?').get(sessionId.toLowerCase());
-  if(!row)return 'unknown';
-  return ['cli','vscode','exec','app-server','appServer','subagent'].includes(row.source)?row.source:'unknown';
- }catch{return 'unknown';}
+  const id=sessionId.toLowerCase();
+  let row;
+  // A schema without the title columns still yields the origin.
+  try{row=db.prepare('SELECT source,name,title FROM threads WHERE id=?').get(id);}
+  catch{row=db.prepare('SELECT source FROM threads WHERE id=?').get(id);}
+  if(!row)return none;
+  const title=[row.name,row.title].find(value=>typeof value==='string'&&value.trim());
+  return {origin:['cli','vscode','exec','app-server','appServer','subagent'].includes(row.source)?row.source:'unknown',...(title?{title}:{})};
+ }catch{return none;}
  finally{try{db?.close();}catch{}}
+}
+export function readCodexSessionOrigin(sessionId,env=process.env){return readCodexSessionMetadata(sessionId,env).origin;}
+
+// The session's host process and, for Claude, its title, found by this hook from its own process ancestry.
+// Everything is best effort and descriptive: a failure means "unknown", never blocks the hook, and nothing is
+// enumerated. The harness registries are private, version-specific files, read by exact key (the pid of an
+// ancestor that provably is this session) and never for another session. Claude's secret `.key` files are never read.
+function psSync(args){
+ for(const bin of ['/bin/ps','/usr/bin/ps']){
+  try{return execFileSync(bin,args,{encoding:'utf8',timeout:1000,maxBuffer:8<<20,stdio:['ignore','pipe','ignore'],env:{PATH:'/usr/bin:/bin',LC_ALL:'C',TZ:'UTC'}});}
+  catch(error){if(error?.code==='ENOENT')continue;return error?.status===1&&typeof error.stdout==='string'?error.stdout:null;}
+ }
+ return null;
+}
+// One process listing, in UTC so start times compare exactly with the harness's own records.
+export function processTable(ps=psSync){
+ const out=ps(['-axo','pid=,ppid=,lstart=,command=']);if(typeof out!=='string')return null;
+ const table=new Map();
+ for(const line of out.split('\n')){
+  const m=/^\s*(\d+)\s+(\d+)\s+(\w{3} \w{3}\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4})\s+(.*)$/.exec(line);
+  if(m)table.set(Number(m[1]),{ppid:Number(m[2]),start:m[3].replace(/\s+/g,' '),command:m[4]});
+ }
+ return table;
+}
+// Ancestors of `startPid`, nearest first; bounded, cycle-safe.
+export function processAncestry(table,startPid=process.ppid){
+ const chain=[];
+ for(let pid=startPid;table&&pid>1&&table.has(pid)&&chain.length<16&&!chain.some(p=>p.pid===pid);pid=table.get(pid).ppid)chain.push({pid,...table.get(pid)});
+ return chain;
+}
+export function readClaudeSessionMetadata(sessionId,env=process.env,table=processTable()){
+ if(!UUID_PATTERN.test(sessionId))return {};
+ const home=env.CLAUDE_CONFIG_DIR||path.join(env.HOME||os.homedir(),'.claude');
+ if(!path.isAbsolute(home))return {};
+ for(const ancestor of processAncestry(table)){
+  let fd;
+  try{
+   fd=fs.openSync(path.join(home,'sessions',`${ancestor.pid}.json`),fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+   const st=fs.fstatSync(fd);
+   if(!st.isFile()||st.uid!==process.getuid()||st.size>65536)continue;
+   const record=JSON.parse(fs.readFileSync(fd,'utf8'));
+   if(record?.pid!==ancestor.pid||typeof record.sessionId!=='string'||record.sessionId.toLowerCase()!==sessionId.toLowerCase())continue;
+   // The record must belong to this very process instance, not to an earlier owner of a reused pid.
+   if(typeof record.procStart!=='string'||record.procStart.replace(/\s+/g,' ').trim()!==ancestor.start)return {};
+   return {...(typeof record.name==='string'&&record.name.trim()?{title:record.name}:{}),host:{pid:ancestor.pid,start:ancestor.start,scope:'session'}};
+  }catch{/* not this session's record */}
+  finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
+ }
+ return {};
+}
+// Codex Desktop runs many conversations in one shared app server, so its liveness says the app is up, not that
+// this conversation is open. A CLI or `exec` run is one process per conversation.
+export function readCodexSessionHost(table=processTable()){
+ for(const ancestor of processAncestry(table)){
+  const m=/^(?:\S*\/)?codex(?:\s+(.*))?$/.exec(ancestor.command);
+  if(m)return {pid:ancestor.pid,start:ancestor.start,scope:/(?:^|\s)app-server(?:\s|$)/.test(m[1]||'')?'shared':'session'};
+ }
+ return undefined;
+}
+
+// A supervisor that predates titles and host evidence refuses those optional fields (its event schema is strict), and
+// a hook can be newer than the running supervisor between a runtime stage and its restart. Fall back to the bare
+// lifecycle event rather than lose the registration; any other failure is reported as it is.
+export async function reportDiscoveryEvent(client,auth,event){
+ const send=async e=>{const {nonce}=await client.discoveryChallenge({...auth,event:e});await client.reportDiscovery({...auth,nonce,event:e});};
+ try{await send(event);}
+ catch(error){
+  if(error?.code!=='invalid_discovery_event'||(!event.title&&!event.host))throw error;
+  const {title,host,...bare}=event;await send(bare);
+ }
 }
 
 export async function runSessionDiscoveryHook({configPath,input,harness='claude',stderr=process.stderr,env=process.env}){
@@ -391,12 +472,20 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
   const config=readPrivateJson(configPath);if(!config.discovery?.enabled)return 0;
   const integration=readPrivateJson(config.discovery.integrationPath);if(!integration.enabled||!(integration.harnesses||['claude']).includes(harness))return 0;
   const workspace=fs.realpathSync(payload.cwd);if(workspace!==integration.workspace)return 0;
-  const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now(),...(harness==='codex'?{harness,origin:readCodexSessionOrigin(payload.session_id,env)}:{})};
+  // Origin is kept current on every event. Title and host process are looked up while the session is running
+  // (not at its end, when its process is going away) and only if the owner has not turned titles off.
+  const codex=harness==='codex'?readCodexSessionMetadata(payload.session_id,env):null;
+  let found={...(codex?.title?{title:codex.title}:{})};
+  if(kind!=='end'){
+   const table=processTable();
+   found=harness==='codex'?{...found,host:readCodexSessionHost(table)}:readClaudeSessionMetadata(payload.session_id,env,table);
+  }
+  const title=config.discovery.titles===false?null:sanitizeSessionTitle(found.title);
+  const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now(),...(harness==='codex'?{harness,origin:codex.origin}:{}),
+   ...(title?{title}:{}),...(found.host?{host:found.host}:{})};
   const client=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,timeoutMs:1500,connectTimeoutMs:1500});
   try{
-   const auth={installationId:integration.installationId,secret:integration.secret};
-   const {nonce}=await client.discoveryChallenge({...auth,event});
-   await client.reportDiscovery({...auth,nonce,event});
+   await reportDiscoveryEvent(client,{installationId:integration.installationId,secret:integration.secret},event);
   }finally{await client.close();}
  }catch(error){stderr.write(`Triangle discovery unavailable (${typeof error?.code==='string'&&/^[a-z_]+$/.test(error.code)?error.code:'hook_error'})\n`);}
  // Hook failure must not block a conversation or leak hook input in diagnostics.

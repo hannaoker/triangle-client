@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID, timingSafeEqual, createHash } from "node:crypto";
-import { readPrivateJson } from "./local-messaging-auth-broker.mjs";
+import { readPrivateJson, withSessionPresence } from "./local-messaging-auth-broker.mjs";
 import { createPerSenderRateLimiter } from "./local-messaging-rate-limiter.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
@@ -207,7 +207,10 @@ export function attachedSessionIdentity(sessionId){
  const sessionHash=createHash('sha256').update(sessionId.toLowerCase()).digest('hex');
  return {pseudoSessionId:`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`};
 }
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],logger=null}) {
+// Harnesses load MCP servers when a chat starts, so a chat that began before the workspace was opted in (or whose
+// server failed to start or was not approved) has no attachment until it is reloaded.
+export const ATTACH_HINT='No Triangle MCP child is attached to this chat. Chats load MCP servers when they start: reload or restart this chat, or start a new one, and check that its MCP server was approved.';
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],logger=null,processProbe=undefined}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -270,11 +273,14 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
     const c=policy();
     if(c.allowedSenders.includes(reader)){ // a reader outside the policy is simply shown nothing
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
-     for(const row of await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})){
-      if(row.harness!=='claude')continue; // Codex discovery never grants a Claude attachment route.
-      const a=attachments.get(row.id),online=offlineReason(c,row,a,scope)===null;
-      result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&!!a.wake_capable}});
-     }
+     // Codex discovery never grants a Claude attachment route.
+     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>row.harness==='claude');
+     const up=new Map(rows.map(row=>[row.id,offlineReason(c,row,attachments.get(row.id),scope)===null]));
+     // A session without a live lease is not offline: only an end event or a vanished host process says that.
+     const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});
+     result=listed.map(row=>({...row,attachment:up.get(row.id)?'attached':row.lifecycle==='ended'?'ended':'not-attached',
+      ...(!up.get(row.id)&&row.lifecycle!=='ended'?{attachmentHint:ATTACH_HINT}:{}),
+      capabilities:{visible:true,reachable:up.get(row.id),wakeCapable:up.get(row.id)&&!!attachments.get(row.id).wake_capable}}));
     }
     healthy();}catch(error){degraded(error);}return result;},
   async recipientIds(reader){return (await this.listFor(reader)).filter(r=>r.capabilities.reachable).map(r=>r.id);},

@@ -32,7 +32,7 @@ export function loadLocalMessagingConfig(configPath) {
  }
  if(config.discovery!==undefined){
   const d=config.discovery;
-  if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['enabled','integrationPath','workspace'].includes(k))||typeof d.enabled!=='boolean'||
+  if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['enabled','integrationPath','workspace','titles'].includes(k))||typeof d.enabled!=='boolean'||(d.titles!==undefined&&typeof d.titles!=='boolean')||
     (d.enabled&&(typeof d.integrationPath!=='string'||!d.integrationPath.startsWith('/')||d.integrationPath.includes('\0'))))throw coded('invalid_local_config','Invalid discovery configuration');
  }
  if(config.wake!==undefined){
@@ -138,7 +138,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     });
     interactiveRecipients.add(interactiveBroker.senderId);
    }
-   journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger});
+   journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger,titles:config.discovery?.titles!==false});
    if(interactiveIntegration){
     await journal.initInteractiveWakeBinding({
      senderId:interactiveIntegration.senderId,

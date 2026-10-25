@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {execFile} from 'node:child_process';
 import {randomUUID,timingSafeEqual,createHash} from 'node:crypto';
 import {validatePrivateDirectory} from './local-messaging-address.mjs';
 import {coded} from './local-messaging-errors.mjs';
@@ -55,9 +56,83 @@ export function createDesktopCredentialBroker({bindingPath,integrationPath,recip
  });
 }
 
+// A conversation title is untrusted display text from a harness: bounded, one line, free of control and bidi
+// characters, with long token-like runs (a pasted key or id) masked so a secret never becomes a directory label.
+const TOKEN_RUN=/(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{28,}/g;
+// C0/C1 controls, soft hyphen, Arabic letter mark, Mongolian vowel separator, zero-width and directional marks,
+// line/paragraph separators and embeddings, word joiners and the byte-order mark.
+const UNSAFE_TITLE_CHARS=new RegExp('['+[[0,0x1f],[0x7f,0x9f],[0xad],[0x61c],[0x180e],[0x200b,0x200f],[0x2028,0x202e],[0x2060,0x206f],[0xfeff]]
+ .map(([from,to=from])=>`\\u{${from.toString(16)}}-\\u{${to.toString(16)}}`).join('')+']','gu');
+export function sanitizeSessionTitle(value){
+ if(typeof value!=='string')return null;
+ const cleaned=value.normalize('NFC').replace(UNSAFE_TITLE_CHARS,' ').replace(TOKEN_RUN,'…').replace(/\s+/g,' ').trim();
+ if(!cleaned||cleaned==='…')return null;
+ const chars=[...cleaned];
+ return chars.length>80?chars.slice(0,79).join('').trimEnd()+'…':cleaned;
+}
+
+// A session's host process, recorded by its own lifecycle hook and compared by pid *and* exact start time, so a
+// reused pid is never mistaken for it. `session`: one process per conversation. `shared`: an app server hosting
+// many conversations, whose liveness says the app is up, not that this conversation is open.
+const START_FORMAT=/^[A-Za-z]{3} [A-Za-z]{3} \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
+const normalizedStart=value=>String(value).replace(/\s+/g,' ').trim();
+export function validSessionHost(host){
+ return !!host&&typeof host==='object'&&!Array.isArray(host)&&Object.keys(host).sort().join(',')==='pid,scope,start'&&
+  Number.isSafeInteger(host.pid)&&host.pid>1&&host.pid<=4194304&&['session','shared'].includes(host.scope)&&
+  typeof host.start==='string'&&START_FORMAT.test(normalizedStart(host.start));
+}
+function defaultPs(args){
+ return new Promise(resolve=>execFile('/bin/ps',args,{encoding:'utf8',timeout:1500,maxBuffer:1<<20,env:{PATH:'/usr/bin:/bin',LC_ALL:'C',TZ:'UTC'}},
+  (error,stdout)=>resolve(error&&!(error.code===1&&typeof stdout==='string')?null:stdout)));
+}
+// One `ps` call per refresh however many sessions are listed; results are cached briefly. Anything it cannot
+// establish is `unknown`, never `gone`.
+export function createHostProcessProbe({ps=defaultPs,ttlMs=5000,clock=()=>Date.now()}={}){
+ const cache=new Map();
+ return async function probe(hosts){
+  const now=clock(),result=new Map(),need=new Map();
+  for(const {pid,start} of hosts){
+   const key=`${pid}:${normalizedStart(start)}`,hit=cache.get(key);
+   if(hit&&now-hit.at<ttlMs)result.set(key,hit.state);else need.set(key,{pid,start:normalizedStart(start)});
+  }
+  if(need.size){
+   // The whole table, not `-p <pids>`: macOS ps prints nothing at all when any listed pid is gone, which would
+   // make every live session look dead. An empty table is a failed read, not "everything is gone".
+   const out=await ps(['-axo','pid=,lstart=']),seen=new Map();
+   if(typeof out==='string')for(const line of out.split('\n')){const m=/^\s*(\d+)\s+(.+?)\s*$/.exec(line);if(m)seen.set(Number(m[1]),normalizedStart(m[2]));}
+   for(const [key,h] of need){
+    const state=seen.size===0?'unknown':seen.get(h.pid)===h.start?'alive':'gone';
+    result.set(key,state);if(state!=='unknown')cache.set(key,{state,at:now});
+   }
+   if(cache.size>1024)for(const [key,hit] of cache)if(now-hit.at>=ttlMs)cache.delete(key);
+  }
+  return result;
+ };
+}
+const sharedHostProbe=createHostProcessProbe();
+
+// Presence is what the evidence supports and says which evidence it is; it is never inferred from a label, and
+// it is not reachability. `lease` is the renewal time of a live attachment lease, or null when there is none.
+export function sessionPresence(row,{lease=null,host='unknown',hostScope=null,now=Date.now()}={}){
+ if(row.lifecycle==='ended')return {presence:'offline',presenceEvidence:{kind:'end-event',observedAt:row.lastSeenAt}};
+ if(lease!==null)return {presence:'online',presenceEvidence:{kind:'mcp-lease',observedAt:lease}};
+ if(host==='gone')return {presence:'offline',presenceEvidence:{kind:'host-process-gone',observedAt:now}};
+ if(host==='alive')return {presence:hostScope==='session'?'online':'unknown',presenceEvidence:{kind:'host-process',scope:hostScope,observedAt:now}};
+ return {presence:'unknown',presenceEvidence:{kind:'none'}};
+}
+// Adds presence to journal rows and drops the internal host fields. `leaseOf(row)` returns a lease renewal time or null.
+export async function withSessionPresence(rows,{probe=sharedHostProbe,leaseOf=null,now=Date.now()}={}){
+ const hosts=rows.filter(r=>r.lifecycle!=='ended'&&r._host).map(r=>r._host);
+ const states=hosts.length?await probe(hosts).catch(()=>new Map()):new Map();
+ return rows.map(({_host,...row})=>{
+  const host=_host?states.get(`${_host.pid}:${normalizedStart(_host.start)}`)??'unknown':'unknown';
+  return {...row,...sessionPresence(row,{lease:leaseOf?leaseOf(row):null,host,hostScope:_host?.scope??null,now})};
+ });
+}
+
 // Discovery credentials admit lifecycle metadata only. They never issue a turn
 // credential or alter a messaging ACL. Same-account shell isolation is not claimed.
-export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>Date.now(),logger={}}) {
+export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>Date.now(),logger={},processProbe=sharedHostProbe}) {
  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  const hex=/^[a-f0-9]{64}$/;
  const pending=new Map();
@@ -79,13 +154,19 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
   return c;
  }
  function normalize(event,c){
-  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).filter(k=>!['harness','origin'].includes(k)).sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
+  // Optional descriptive metadata: origin (Codex only), a conversation title and the session's host process.
+  // None of it identifies or authorizes anything; all of it is bounded here whatever the reporter sent.
+  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).filter(k=>!['harness','origin','title','host'].includes(k)).sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
     (event.harness!==undefined&&!['claude','codex'].includes(event.harness))||
     (event.origin!==undefined&&(event.harness!=='codex'||!['unknown','cli','vscode','exec','app-server','appServer','subagent'].includes(event.origin)))||
+    (event.title!==undefined&&(typeof event.title!=='string'||event.title.length>400))||
+    (event.host!==undefined&&!validSessionHost(event.host))||
     !(c.harnesses||['claude']).includes(event.harness||'claude')||
     !uuid.test(event.eventId)||!uuid.test(event.sessionId)||!['start','activity','end'].includes(event.kind)||
     event.workspace!==c.workspace||!Number.isSafeInteger(event.observedAt)||event.observedAt>clock()+1000||event.observedAt<clock()-30000)throw coded('invalid_discovery_event','Invalid or stale lifecycle metadata');
-  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt,...(event.harness==='codex'?{harness:'codex',...(event.origin!==undefined?{origin:event.origin}:{})}:{})};
+  const title=event.title===undefined?null:sanitizeSessionTitle(event.title);
+  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt,...(event.harness==='codex'?{harness:'codex',...(event.origin!==undefined?{origin:event.origin}:{})}:{}),
+   ...(title?{title}:{}),...(event.host?{host:{pid:event.host.pid,start:normalizedStart(event.host.start),scope:event.host.scope}}:{})};
  }
  const digest=(event,installationId)=>createHash('sha256').update(installationId+'\0'+JSON.stringify(event)).digest('hex');
  return {
@@ -110,8 +191,9 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
    try{
     const c=current();
     if(!c.enabled||!c.readerIds.includes(readerId))return [];
-    const rows=await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
-    warned=false;return rows.filter(r=>(c.harnesses||['claude']).includes(r.harness));
+    const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(r=>(c.harnesses||['claude']).includes(r.harness));
+    const listed=await withSessionPresence(rows,{probe:processProbe,now:clock()});
+    warned=false;return listed;
    }catch{
     if(!warned){warned=true;try{logger?.warn?.('Session discovery unavailable; configured recipients remain available');}catch{}}
     return [];
