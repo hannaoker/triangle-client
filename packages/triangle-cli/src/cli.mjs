@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // triangle — join a MESH, manage this device's agents and their permissions.
 import { realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
 import { approveDevice, listDevices, renderDevices, revokeDevice } from "./devices.mjs";
+import { identityInventory, renderIdentityInventory } from "./identity-inventory.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
 import { defaultHome } from "./custody.mjs";
@@ -39,6 +41,8 @@ export const USAGE = `Usage: triangle <command> [options]
   device list
   device approve <fingerprint>
   device revoke <fingerprint> [--yes]
+  identity inventory --client-root DIR
+                              Read-only projection of local identity bindings observed on disk.
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
@@ -125,7 +129,7 @@ async function keepIfUnwritten(written) {
 
 const PROCESS_IO = { stdout: (s) => writeLine(process.stdout, s), stderr: (s) => { process.stderr.write(`${s}\n`); } };
 
-export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch, setupDependencies = {}, serviceDependencies = {} } = {}) {
+export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl = globalThis.fetch, setupDependencies = {}, serviceDependencies = {}, identityDependencies = {} } = {}) {
   if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
     io.stdout(USAGE);
     return 0;
@@ -298,6 +302,17 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           return 0;
         }
         throw new UsageError(`unknown device command ${sub ?? ""}`);
+      }
+      case "identity": {
+        if (sub !== "inventory") throw new UsageError(`unknown identity command ${sub ?? ""}`);
+        if (rest.length) throw new UsageError("identity inventory takes no positional arguments");
+        allowOnly(flags, ["client-root"]);
+        const clientRoot = flags["client-root"];
+        if (!clientRoot) throw new UsageError("identity inventory requires --client-root ABSOLUTE_PATH");
+        if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+        const report = await identityInventory({ clientRoot, ...identityDependencies });
+        await print(io, flags, report, renderIdentityInventory);
+        return 0;
       }
       case "status":
       case "doctor": {
