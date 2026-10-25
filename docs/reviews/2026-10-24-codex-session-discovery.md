@@ -99,3 +99,18 @@ Pinned hook schema inspected: https://github.com/openai/codex/blob/rust-v0.164.0
 After the owner restarted Codex, both original scratch chats made fresh metadata calls (new MCP PIDs 76549 and 77167, hashes still 4d86b7c5 and a21c63c3). Their resume hooks were logged at 1792903283469 and 1792903286648. However, restarting the app had also terminated the tool-owned disposable host. It was restarted only after those resume events. The directory still showed older ended rows, with last-seen times 1792888099917 and 1792888702903; they are not fresh registration evidence. Subsequent delegated metadata turns did not produce fresh registrations. No positive acceptance claim follows from this attempt.
 
 The fixture is now independently hosted by temporary per-user LaunchAgent `dev.thetriangle.discovery-proof-d3`, bootstrapped from `/private/tmp/triangle-codex-discovery-d3-20261024/discovery-proof.plist`. `launchctl print` reports running and its own socket status succeeds. This temporary service uses only the disposable journal and has no executable worker implementation; production `dev.thetriangle.client` is unchanged. Baseline directory evidence was saved privately as `pre-restart-directory.json` under the test root. A further user-controlled app restart is needed to repeat the resume case with the host already available. After acceptance, remove only this temporary job using `launchctl bootout gui/501/dev.thetriangle.discovery-proof-d3` and disable the disposable hooks as before.
+
+## Corrected two-desktop restart acceptance — passed
+
+The owner restarted Codex again with the temporary launchd-owned test host already running. Its socket status and launchd running state were verified before either scratch chat was prompted. Both chats then automatically registered through their own SessionStart/resume hooks; no operator lifecycle report or registration was injected.
+
+| Original scratch session hash prefix | New MCP PID | MCP launch ms | Resume hook ms | Journal last-seen ms | Launch to registration | Generation |
+|---|---:|---:|---:|---:|---:|---:|
+| `4d86b7c5` | 81807 | 1792903507636 | 1792903509033 | 1792903509052 | 1416 ms | 2 |
+| `a21c63c3` | 82404 | 1792903509648 | 1792903510837 | 1792903510854 | 1206 ms | 2 |
+
+Their exact handles remained `session-1c831761170ccb9a9e88932a0dfb1ef870e858bf032c8945883412090dfbc129` and `session-607cb44d58587f9043903e9b89ae2c835926e0beb9b8fb3e294bdc06da0d74d3`. Each was `observed`, presence `unknown`, with receive and wake capabilities false. Fresh metadata-only tool calls in PIDs 81807/82404 independently recorded matching session/thread hashes at 1792903510583/1792903513059. The raw metadata log is the authority for those hashes; app-rendered final strings still omit some JSON values.
+
+This closes the two-existing-desktop-conversations-after-app-restart case for the tested source guard and runtime. It does not establish no-reload attachment, five future-session trials, fork/compaction, hardware sleep/wake, or current execution-owner classification. Launch-to-registration is measured in two trials only; hook-log-to-journal differences were 19 and 17 ms. A retained old `5e76fdf2` row predates the source guard and is not evidence of a newly admitted exec-origin session. Private snapshots before/after are saved as `pre-restart-directory.json` and `post-restart-directory.json` under the test root.
+
+The disposable hooks are disabled and the temporary launchd host removed after this bounded acceptance run. Existing probe hooks and production Triangle configuration remain unchanged. PR #118 remains draft pending the remaining gates and review.
