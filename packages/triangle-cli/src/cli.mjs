@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 // triangle — join a MESH, manage this device's agents and their permissions.
 import { realpathSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
 import { approveDevice, listDevices, renderDevices, revokeDevice } from "./devices.mjs";
 import { identityInventory, renderIdentityInventory } from "./identity-inventory.mjs";
+import {
+  identityMigrate,
+  renderIdentityMigrateApply,
+  renderIdentityMigratePartial,
+  renderIdentityMigratePlan,
+} from "./identity-migrate.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
 import { defaultHome } from "./custody.mjs";
@@ -43,6 +49,8 @@ export const USAGE = `Usage: triangle <command> [options]
   device revoke <fingerprint> [--yes]
   identity inventory --client-root DIR
                               Read-only projection of local identity bindings observed on disk.
+  identity migrate --client-root DIR --registry-root DIR [--confirm PLAN_ID]
+                              Propose or apply owner-confirmed identity mapping records.
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
@@ -304,15 +312,100 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
         throw new UsageError(`unknown device command ${sub ?? ""}`);
       }
       case "identity": {
-        if (sub !== "inventory") throw new UsageError(`unknown identity command ${sub ?? ""}`);
-        if (rest.length) throw new UsageError("identity inventory takes no positional arguments");
-        allowOnly(flags, ["client-root"]);
-        const clientRoot = flags["client-root"];
-        if (!clientRoot) throw new UsageError("identity inventory requires --client-root ABSOLUTE_PATH");
-        if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
-        const report = await identityInventory({ clientRoot, ...identityDependencies });
-        await print(io, flags, report, renderIdentityInventory);
-        return 0;
+        if (sub === "inventory") {
+          if (rest.length) throw new UsageError("identity inventory takes no positional arguments");
+          allowOnly(flags, ["client-root"]);
+          const clientRoot = flags["client-root"];
+          if (!clientRoot) throw new UsageError("identity inventory requires --client-root ABSOLUTE_PATH");
+          if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          const report = await identityInventory({ clientRoot, ...identityDependencies });
+          await print(io, flags, report, renderIdentityInventory);
+          return 0;
+        }
+        if (sub === "migrate") {
+          if (rest.length) throw new UsageError("identity migrate takes no positional arguments");
+          allowOnly(flags, ["client-root", "registry-root", "confirm"]);
+          const clientRoot = flags["client-root"];
+          const registryRoot = flags["registry-root"];
+          if (!clientRoot) throw new UsageError("identity migrate requires --client-root ABSOLUTE_PATH");
+          if (!registryRoot) throw new UsageError("identity migrate requires --registry-root ABSOLUTE_PATH");
+          if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          if (typeof registryRoot !== "string" || !isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
+
+          const normClient = resolve(clientRoot);
+          const normRegistry = resolve(registryRoot);
+          if (normRegistry === normClient) {
+            throw new UsageError("registry root must not equal client root");
+          }
+          if (normClient.startsWith(normRegistry + sep)) {
+            throw new UsageError("registry root must not contain client root");
+          }
+          if (normRegistry.startsWith(normClient + sep)) {
+            throw new UsageError("registry root must not be inside client root");
+          }
+
+          if (flags.confirm !== undefined) {
+            const confirm = flags.confirm;
+            if (typeof confirm !== "string" || !/^[a-f0-9]{64}$/.test(confirm)) {
+              throw new UsageError("--confirm must be 64 lowercase hex characters");
+            }
+
+            const isTerm =
+              identityDependencies.isTerminal !== undefined
+                ? (typeof identityDependencies.isTerminal === "function"
+                    ? identityDependencies.isTerminal()
+                    : Boolean(identityDependencies.isTerminal))
+                : Boolean(
+                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
+                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
+                  );
+
+            if (!isTerm) {
+              io.stderr("identity migrate --confirm requires standard input and output to be a terminal");
+              return 2;
+            }
+
+            try {
+              const result = await identityMigrate({
+                clientRoot,
+                registryRoot,
+                confirm,
+                ...identityDependencies,
+              });
+              await print(io, flags, result, renderIdentityMigrateApply);
+              return 0;
+            } catch (err) {
+              if (err.code === "plan_stale" || err.code === "confirmation_mismatch") {
+                io.stderr(`identity migrate failed: ${err.message ?? err.code}`);
+                return 2;
+              }
+              if (err.applied !== undefined) {
+                await print(
+                  io,
+                  flags,
+                  {
+                    applied: err.applied,
+                    failed: err.failed,
+                    remaining: err.remaining,
+                  },
+                  renderIdentityMigratePartial
+                );
+                return 1;
+              }
+              throw err;
+            }
+          }
+
+          const plan = await identityMigrate({
+            clientRoot,
+            registryRoot,
+            confirm: null,
+            ...identityDependencies,
+          });
+          await print(io, flags, plan, (p) => renderIdentityMigratePlan(p, { clientRoot, registryRoot }));
+          return 0;
+        }
+        throw new UsageError(`unknown identity command ${sub ?? ""}`);
       }
       case "status":
       case "doctor": {

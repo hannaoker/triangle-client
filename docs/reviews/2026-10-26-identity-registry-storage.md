@@ -171,7 +171,7 @@ Executed from `/Users/zhenyuhou/Projects/The Triangle/worktrees/identity-registr
 2. **No host installation key**: No host installation signing key or hardware-backed sealing exists yet.
 3. **No audit log rotation**: `registry-audit.jsonl` is capped at 8 MiB (`registry_audit_full`); log rotation and compaction are out of scope for this slice.
 4. **Undecided default registry location**: `root` is always an explicit caller-supplied absolute path; default path resolution (`<TRIANGLE_HOME>/identity` vs. supervisor state root, Assumption A4) is undecided and omitted here.
-5. **Library-only**: No production code or CLI imports `identity-registry.mjs` yet, so this change does not alter the running supervisor or packaged runtime manifests.
+5. **Library-only**: Only the identity mapping modules import `identity-registry.mjs` (the library `identity-mapping.mjs` and the CLI bridge `identity-migrate.mjs`, added by the identity mapping change; the source-level isolation test names them). The supervisor and the runtime do not, so the running supervisor and the packaged runtime manifests are unaffected.
 
 ---
 
