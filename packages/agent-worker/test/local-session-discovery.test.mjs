@@ -58,7 +58,7 @@ test('nonce binds event; duplicate retry is durable; invalid secret, scope and d
  }finally{await f.close();}
 });
 
-import {setupLocalMessaging,setupSessionDiscovery,disableSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
+import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
 import {spawn} from 'node:child_process';
@@ -229,4 +229,181 @@ test('R2: full directory evicts oldest ended row, retaining its end fence across
   await assert.rejects(report(randomUUID(),'start',now),{code:'directory_full'});
   const status=await f.broker().status();assert.equal(status.used,128);assert.equal(status.capacity,128);
  }finally{await f.close();}
+});
+
+test('Codex opt-in is explicit, namespaces equal UUIDs and binds harness into the challenge',async()=>{
+ const f=fixture();try{
+  const b=f.broker(),sid=randomUUID(),e={...f.event(sid,'start'),harness:'codex'};
+  assert.throws(()=>b.challenge({installationId:f.integration.installationId,secret:f.integration.secret,event:e}),{code:'invalid_discovery_event'});
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['claude','codex']});
+  const auth={installationId:f.integration.installationId,secret:f.integration.secret};
+  const challenge=b.challenge({...auth,event:e});
+  await assert.rejects(b.report({...auth,nonce:challenge.nonce,event:{...e,harness:'claude'}}),{code:'unauthorized'});
+  const codex=await f.report(b,e),claude=await f.report(b,f.event(sid,'start'));
+  assert.notEqual(codex.id,claude.id);
+  let rows=await b.listFor(f.reader);assert.deepEqual(new Set(rows.map(r=>r.harness)),new Set(['claude','codex']));
+  assert.ok(rows.find(r=>r.id===codex.id).label.startsWith('Codex · '));
+  assert.ok(rows.every(r=>!r.capabilities.reachable&&!r.capabilities.wakeCapable));
+  await f.report(b,{...f.event(sid,'end'),harness:'codex'});
+  rows=await b.listFor(f.reader);assert.equal(rows.find(r=>r.id===claude.id).presence,'unknown');
+  await f.reopen();rows=await f.broker().listFor(f.reader);assert.equal(rows.find(r=>r.id===codex.id).presence,'offline');
+  writePrivateJson(f.integrationPath,f.integration);rows=await f.broker().listFor(f.reader);
+  assert.deepEqual(rows.map(r=>r.harness),['claude'],'removing opt-in hides retained Codex metadata');
+ }finally{await f.close();}
+});
+
+test('Codex and Claude hook setup coexist, preserve unrelated settings, and disable together',()=>{
+ const f=ownerFixture();try{
+  const codexDir=path.join(f.workspace,'.codex');fs.mkdirSync(codexDir,{mode:0o700});
+  const codexFile=path.join(codexDir,'hooks.json');
+  const prior={description:'owner hooks',hooks:{SessionStart:[{hooks:[{type:'command',command:'echo owner'}]}]}};
+  fs.writeFileSync(codexFile,JSON.stringify(prior),{mode:0o600});
+  const args={config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local'),harness:'codex'};
+  setupSessionDiscovery(args);setupSessionDiscovery(args);
+  const after=JSON.parse(fs.readFileSync(codexFile));
+  assert.deepEqual(after.hooks.SessionStart[0],prior.hooks.SessionStart[0]);
+  assert.equal(after.hooks.SessionStart.length,2);assert.equal(after.hooks.SessionEnd[0].hooks[0].timeout,3);
+  assert.ok(after.hooks.SessionStart[1].hooks[0].command.endsWith('--harness codex'));
+  assert.deepEqual(new Set(JSON.parse(fs.readFileSync(f.integrationPath)).harnesses),new Set(['claude','codex']));
+  assert.throws(()=>setupSessionDiscovery({...args,harness:'unknown'}),{code:'invalid_arguments'});
+  const result=disableSessionDiscovery({config:f.configPath});assert.equal(result.hooksCleanupRequired,false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(codexFile)),prior);
+  assert.ok(!JSON.parse(fs.readFileSync(f.settingsPath)).hooks);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('Codex hook reaches real isolated host with payload identity, not inherited process identity',async()=>{
+ const f=ownerFixture();let host;
+ try{
+  setupSessionDiscovery({config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local'),harness:'codex'});
+  const config=JSON.parse(fs.readFileSync(f.configPath));
+  let executions=0;
+  host=createInstalledLocalMessagingHost({configPath:f.configPath,runners:new Map([[config.recipients[0].instanceId,{run:async()=>{executions++;return {status:'completed',text:'unexpected'};}}]]),gate:createProfiledReasonerGate()});
+  await host.start();
+  const ids=[randomUUID(),randomUUID(),randomUUID()];
+  const codexHome=path.join(f.root,'codex-home');fs.mkdirSync(codexHome,{mode:0o700});
+  const metadata=new DatabaseSync(path.join(codexHome,'state_5.sqlite'));
+  metadata.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,source TEXT)');
+  for(const [i,sid] of ids.entries())if(i<2)metadata.prepare('INSERT INTO threads VALUES(?,?)').run(sid,i?'exec':'cli');
+  metadata.close();fs.chmodSync(path.join(codexHome,'state_5.sqlite'),0o600);
+  const invoke=async(sid,eventName)=>{
+   const result=await new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[cli,'discovery-hook','--config',f.configPath,'--harness','codex'],{env:{...process.env,CODEX_HOME:codexHome,CODEX_THREAD_ID:randomUUID()}});
+    let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
+    child.once('error',reject);child.once('exit',code=>resolve({code,stdout,stderr}));
+    child.stdin.end(JSON.stringify({session_id:sid,cwd:f.workspace,hook_event_name:eventName,source:'startup',prompt:'DO_NOT_RETAIN',transcript_path:'DO_NOT_READ'}));
+   });assert.equal(result.code,0);assert.equal(result.stdout,'');
+   assert.equal(result.stderr.replace(/\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/g,''),'');
+  };
+  for(const sid of ids)await invoke(sid,'SessionStart');
+  let output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
+  const sessions=JSON.parse(output).sessions.filter(r=>r.harness==='codex');assert.equal(sessions.length,3);
+  assert.deepEqual(new Set(sessions.map(r=>r.origin)),new Set(['cli','exec','unknown']));
+  assert.ok(sessions.every(r=>ids.some(id=>r.label.endsWith(createHash('sha256').update(id).digest('hex').slice(0,8)))));
+  for(const row of sessions){
+   await assert.rejects(runLocalMessagingCLI(['send','--config',f.configPath,'--to',row.id,'--text','must not run'],{output:{write(){}}}),/recipient|authorized|allowed/i);
+  }
+  const bytes=fs.readFileSync(path.join(config.stateRoot,'local-messaging.sqlite'));
+  for(const sid of ids)assert.equal(bytes.includes(Buffer.from(sid)),false);
+  assert.equal(bytes.includes(Buffer.from('DO_NOT_RETAIN')),false);assert.equal(executions,0);
+  fs.unlinkSync(path.join(codexHome,'state_5.sqlite'));
+  for(const sid of ids)await invoke(sid,'SessionEnd');
+  output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
+  const ended=JSON.parse(output).sessions.filter(r=>r.harness==='codex');
+  assert.ok(ended.every(r=>r.presence==='offline'),'missing optional metadata must not suppress end hooks');
+  assert.deepEqual(new Set(ended.map(r=>r.origin)),new Set(['cli','exec','unknown']),'unknown end metadata preserves known origin');
+ }finally{await host?.stop();fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+import {DatabaseSync} from 'node:sqlite';
+test('pre-Codex journal migration keeps Claude handles and lifecycle across reopen',async()=>{
+ const f=fixture();try{
+  const sid=randomUUID(),b=f.broker();const original=await f.report(b,f.event(sid,'start'));
+  await f.journal.close();
+  const db=new DatabaseSync(path.join(f.root,'journal/local-messaging.sqlite'));
+  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN harness; ALTER TABLE local_discovered_sessions DROP COLUMN origin');db.close();
+  await f.reopen();
+  const rows=await f.broker().listFor(f.reader);
+  assert.equal(rows.length,1);assert.equal(rows[0].id,original.id);assert.equal(rows[0].harness,'claude');assert.equal(rows[0].generation,1);
+ }finally{await f.close();}
+});
+
+test('twenty mixed sessions retain distinct handles across end/resume and journal restart',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['claude','codex']});
+  const sessions=Array.from({length:20},(_,i)=>({sid:randomUUID(),harness:i%2?'codex':'claude'}));
+  const now=Date.now();const event=(s,kind,offset)=>({...f.event(s.sid,kind,now+offset),harness:s.harness});
+  let b=f.broker();
+  for(const s of sessions)await f.report(b,event(s,'start',-30));
+  const before=await b.listFor(f.reader);assert.equal(new Set(before.map(r=>r.id)).size,20);
+  for(const s of sessions)await f.report(b,event(s,'end',-20));
+  assert.ok((await b.listFor(f.reader)).every(r=>r.presence==='offline'));
+  await f.reopen();b=f.broker();
+  for(const s of sessions)await f.report(b,event(s,'start',-10));
+  const after=await b.listFor(f.reader);assert.deepEqual(after.map(r=>r.id),before.map(r=>r.id));
+  assert.ok(after.every(r=>r.generation===2&&!r.capabilities.reachable&&!r.capabilities.wakeCapable));
+  assert.equal(after.filter(r=>r.harness==='codex').length,10);
+ }finally{await f.close();}
+});
+
+import {readCodexSessionOrigin} from '../src/local-messaging-cli.mjs';
+test('Codex origin is optional metadata, including unattended sources, and never creates or edits a database',()=>{
+ const root=fs.mkdtempSync('/private/tmp/triangle-codex-source-');
+ try{
+  const file=path.join(root,'state_5.sqlite'),env={CODEX_HOME:root};
+  assert.deepEqual(readCodexSessionOrigin(randomUUID(),env),'unknown');
+  assert.equal(fs.existsSync(file),false,'optional reader never creates a missing database');
+  const db=new DatabaseSync(file);db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY, source TEXT)');
+  const ids={};for(const source of ['cli','vscode','exec','app-server','subagent','future-source']){
+   ids[source]=randomUUID();db.prepare('INSERT INTO threads VALUES(?,?)').run(ids[source],source);
+  }
+  db.close();fs.chmodSync(file,0o600);const before=fs.readFileSync(file);
+  for(const source of ['cli','vscode','exec','app-server','subagent'])assert.equal(readCodexSessionOrigin(ids[source],env),source);
+  assert.equal(readCodexSessionOrigin(ids['future-source'],env),'unknown');
+  assert.equal(readCodexSessionOrigin(randomUUID(),env),'unknown');
+  assert.equal(readCodexSessionOrigin('bad',env),'unknown');
+  assert.deepEqual(fs.readFileSync(file),before,'origin queries do not change source database');
+  fs.chmodSync(file,0o666);assert.equal(readCodexSessionOrigin(ids.cli,env),'unknown');
+  fs.chmodSync(file,0o600);fs.renameSync(file,file+'.saved');fs.symlinkSync(file+'.saved',file);
+  assert.equal(readCodexSessionOrigin(ids.cli,env),'unknown');
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('origin is bounded descriptive metadata and is covered by the event challenge',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['codex']});
+  const b=f.broker(),auth={installationId:f.integration.installationId,secret:f.integration.secret};
+  const e={...f.event(randomUUID(),'start'),harness:'codex',origin:'exec'};
+  const challenge=b.challenge({...auth,event:e});
+  await assert.rejects(b.report({...auth,nonce:challenge.nonce,event:{...e,origin:'cli'}}),{code:'unauthorized'});
+  assert.throws(()=>b.challenge({...auth,event:{...e,origin:'UNBOUNDED_OR_INJECTED'}}),{code:'invalid_discovery_event'});
+  await f.report(b,e);const [row]=await b.listFor(f.reader);
+  assert.equal(row.origin,'exec');assert.equal(row.capabilities.reachable,false);assert.equal(row.capabilities.wakeCapable,false);
+ }finally{await f.close();}
+});
+
+test('pre-origin Codex journal keeps its namespaced handle and defaults descriptive origin to unknown',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['codex']});
+  const sid=randomUUID(),e={...f.event(sid,'start'),harness:'codex',origin:'exec'};
+  const original=await f.report(f.broker(),e);
+  await f.journal.close();
+  const db=new DatabaseSync(path.join(f.root,'journal/local-messaging.sqlite'));
+  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN origin');db.close();
+  await f.reopen();const [row]=await f.broker().listFor(f.reader);
+  assert.equal(row.id,original.id);assert.equal(row.harness,'codex');assert.equal(row.origin,'unknown');
+  assert.equal(row.capabilities.reachable,false);assert.equal(row.capabilities.wakeCapable,false);
+ }finally{await f.close();}
+});
+
+test('Codex-only discovery rejects Claude messaging setup before changing owner files',()=>{
+ const f=ownerFixture();try{
+  const integration=JSON.parse(fs.readFileSync(f.integrationPath));
+  writePrivateJson(f.integrationPath,{...integration,harnesses:['codex']});
+  const beforeConfig=fs.readFileSync(f.configPath),beforeIntegration=fs.readFileSync(f.integrationPath);
+  const stateRoot=JSON.parse(beforeConfig).stateRoot,priorFiles=fs.readdirSync(stateRoot).sort();
+  assert.throws(()=>setupWorkspaceMessaging({config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local')}),{code:'claude_discovery_required'});
+  assert.deepEqual(fs.readFileSync(f.configPath),beforeConfig);assert.deepEqual(fs.readFileSync(f.integrationPath),beforeIntegration);
+  assert.deepEqual(fs.readdirSync(stateRoot).sort(),priorFiles);assert.equal(fs.existsSync(path.join(f.workspace,'.mcp.json')),false);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });

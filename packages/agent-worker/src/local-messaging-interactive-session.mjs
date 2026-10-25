@@ -225,7 +225,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId,...additionalPrincipals]);
  const liveRecipients=configuredRecipients===null?null:new Set([...configuredRecipients,...additionalPrincipals]);
  function policy(){const c=readSessionMessagingPolicy(policyPath),d=readPrivateJson(discoveryPath);
-  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
+  if(!c.enabled||!d.enabled||!(d.harnesses||['claude']).includes('claude')||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
   return {...c,
    allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
    allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
@@ -271,6 +271,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
     if(c.allowedSenders.includes(reader)){ // a reader outside the policy is simply shown nothing
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
      for(const row of await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})){
+      if(row.harness!=='claude')continue; // Codex discovery never grants a Claude attachment route.
       const a=attachments.get(row.id),online=offlineReason(c,row,a,scope)===null;
       result.push({...row,presence:online?'online':'offline',capabilities:{visible:true,reachable:online,wakeCapable:online&&!!a.wake_capable}});
      }
