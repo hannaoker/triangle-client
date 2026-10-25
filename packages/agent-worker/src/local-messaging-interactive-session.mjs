@@ -220,7 +220,7 @@ export const ATTACH_HINT='No Triangle MCP child is attached to this chat. Chats 
 export const CODEX_ATTACH_HINT='This Codex chat has not called a Triangle tool yet, or its Triangle MCP server is not loaded. It becomes reachable on its first Triangle tool call (for example triangle_get_status). Codex loads MCP servers when a chat starts: restart the Codex app or start a new chat after setup.';
 // Codex addresses live in their own namespace, exactly as lifecycle discovery derives them (see recordDiscoveryEvent).
 export const sessionAddressKey=(harness,sessionId)=>harness==='codex'?'codex:'+sessionId:sessionId;
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,logger=null,processProbe=undefined}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,boundIntegrationPath=null,logger=null,processProbe=undefined}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -245,12 +245,14 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   const harnesses=d.harnesses||['claude'],claudeOn=harnesses.includes('claude'),codexOn=c.codex?.enabled===true&&harnesses.includes('codex');
   if(!c.enabled||!d.enabled||(!claudeOn&&!codexOn)||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
   const codexSenders=c.codex?.allowedSenders??[];
-  return {...c,claudeOn,codexOn,
+  const boundThread=boundIntegrationPath?readPrivateJson(boundIntegrationPath).threadId:null;
+  return {...c,claudeOn,codexOn,boundSessionId:boundThread?sessionAddress(c.installationId,c.workspace,sessionAddressKey('codex',boundThread)):null,
    allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
    codexSenders:liveCodexSenders?codexSenders.filter(id=>id.startsWith('session-')||liveCodexSenders.has(id)):codexSenders,
    allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
  // Why a session cannot be reached right now, judged from data already loaded (no I/O); null when it can be.
  const offlineReason=(c,r,a,scope=policyScope(c))=>!r||r.lifecycle==='ended'?'Session has ended or is not discovered'
+  :r.id===c.boundSessionId?'This is the bound Codex conversation; use its existing identity and inbox'
   :(r.harness==='codex'?!c.codexOn:!c.claudeOn)?'Messaging is disabled for this harness'
   :!a||a.installation_id!==scope||a.generation!==r.generation||a.expires_at<=clock()?'Session MCP child is offline':null;
  // One policy read, then primary-key lookups: no scan of the directory for a single session.
@@ -288,6 +290,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    const harness=harnessOf(request),c=verify(request,harness),key=sessionAddressKey(harness,request.sessionId),identity=attachedSessionIdentity(key);
    if(!(harness==='codex'?c.codexOn:c.claudeOn))throw coded('session_disabled','Messaging is not enabled for this harness');
    const id=sessionAddress(c.installationId,c.workspace,key);
+   if(id===c.boundSessionId)throw coded('bound_codex_context','This chat already owns the bound Codex identity; use its existing Triangle inbox instead of session attachment');
    const r=await journal.getDiscoveredSession({id,installationId:c.installationId,workspace:c.workspace});
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
@@ -312,7 +315,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
      // A session without a live lease is not offline: only an end event or a vanished host process says that.
      const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});
      result=listed.map(row=>({...row,attachment:up.get(row.id)?'attached':row.lifecycle==='ended'?'ended':'not-attached',
-      ...(!up.get(row.id)&&row.lifecycle!=='ended'?{attachmentHint:row.harness==='codex'?CODEX_ATTACH_HINT:ATTACH_HINT}:{}),
+      ...(!up.get(row.id)&&row.lifecycle!=='ended'?{attachmentHint:row.id===c.boundSessionId?'This is the bound Codex conversation; use its existing Triangle identity and inbox':row.harness==='codex'?CODEX_ATTACH_HINT:ATTACH_HINT}:{}),
       capabilities:{visible:true,reachable:up.get(row.id),wakeCapable:up.get(row.id)&&!!attachments.get(row.id).wake_capable}}));
     }
     healthy();}catch(error){degraded(error);}return result;},

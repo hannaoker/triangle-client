@@ -9,8 +9,8 @@ Written when Claude's weekly quota reached 10% (quota hook notice; resets 09:00 
 3. Improve existing-session attachment: remove or clearly document the reload requirement. **Done in source and docs** (documented, not removable: it is a harness property).
 4. Complete Codex messaging attachment (arbitrary discovered chats get receive/wake). **Done and INSTALLED 2026-10-25** (commits 790e420, 2ae8696, 408cc91; supervisor bundle `502630cf…`; enabled for the bound Codex identity only); real Codex 0.164.0 `exec` end-to-end passed on an isolated host; Codex Desktop waking an idle chat is unproven (needs the owner's chat). See `docs/reviews/2026-10-25-codex-chat-attachment.md`.
 5. Directory usability: actual conversation titles and evidence-backed presence. **Source and tests done.**
-6. Unify the agent-facing messaging interface across local, Iroh and MESH. Not started.
-7. Reconcile identities across local sessions, Iroh endpoints and MESH accounts. Not started (contract in `docs/plans/2026-10-23-unified-agent-messaging-follow-up.md`; resolve before remote routing).
+6. Unify the agent-facing messaging interface across local, Iroh and MESH. **Design written** (`2026-10-25-unified-messaging-interface-design.md`); implementation pending.
+7. Reconcile identities across local sessions, Iroh endpoints and MESH accounts. **Design written** (`2026-10-25-identity-reconciliation-design.md`); implementation pending (contract in `docs/plans/2026-10-23-unified-agent-messaging-follow-up.md`; resolve before remote routing).
 
 ## Where the work is
 

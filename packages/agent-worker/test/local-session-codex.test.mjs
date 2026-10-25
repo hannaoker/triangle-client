@@ -25,7 +25,7 @@ function ownerFiles({senders=null,wake=true,claude=false,codexMessaging=true}={}
  const root=fs.mkdtempSync('/private/tmp/tri-codex-'),workspace=path.join(root,'workspace');fs.mkdirSync(workspace,{mode:0o700});
  const wrapper=path.join(root,'triangle-local');fs.writeFileSync(wrapper,'#!/bin/sh\nexit 0\n',{mode:0o700});
  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');writePrivateJson(bindingPath,{instanceId:'a'.repeat(64)});
- setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'codex-attachment-test-thread',recipients:['gravity2']});
+ setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'11111111-2222-4333-8444-555555555555',recipients:['gravity2']});
  if(claude)setupSessionDiscovery({config:configPath,workspace,'local-cli':wrapper});
  setupSessionDiscovery({config:configPath,workspace,'local-cli':wrapper,harness:'codex'});
  const config=readPrivateJson(configPath),desktop=readPrivateJson(config.integrationPath);
@@ -38,9 +38,9 @@ function ownerFiles({senders=null,wake=true,claude=false,codexMessaging=true}={}
 async function fixture(options={}){
  const files=ownerFiles(options),{root,workspace,configPath}=files;
  const config=readPrivateJson(configPath),desktop=readPrivateJson(config.integrationPath),clients=[],children=[],runs=[];
- const host=createInstalledLocalMessagingHost({configPath,runners:new Map(config.recipients.map(r=>[r.instanceId,{run:async request=>{runs.push(request);return {status:'completed',text:'worker result'};}}])),
+ const makeHost=()=>createInstalledLocalMessagingHost({configPath,runners:new Map(config.recipients.map(r=>[r.instanceId,{run:async request=>{runs.push(request);return {status:'completed',text:'worker result'};}}])),
   gate:createProfiledReasonerGate(),wakeAdapter:{notify:async()=>({state:'accepted',receipt:{queuedId:uuid(),threadId:uuid()}})},logger:{info(){},error(){},warn(){}}});
- await host.start();
+ let host=makeHost();await host.start();
  const client=senderId=>{const c=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId});clients.push(c);return c;};
  const owner=client(desktop.senderId);
  const grant=async()=>(await owner.exchangeTurnBinding({bindingId:desktop.bindingId,threadId:desktop.threadId,secret:desktop.secret})).credential;
@@ -55,6 +55,7 @@ async function fixture(options={}){
  const address=thread=>sessionAddress(policy.installationId,policy.workspace,'codex:'+thread);
  const listed=async()=>(await owner.listSessions({credential:await grant()})).filter(row=>row.harness==='codex');
  return {...files,config,desktop,runs,notifications,client,owner,grant,lifecycle,codexChild,policy,address,listed,
+  async restart(){await host.stop();host=makeHost();await host.start();},
   async close(){for(const c of children)await c.close();for(const c of clients)await c.close();await host.stop();fs.rmSync(root,{recursive:true,force:true});}};
 }
 // A tool call as Codex 0.164 makes it: the chat's identity is in the call's own _meta.
@@ -358,3 +359,31 @@ test('setup and disable work when the CLI file is run as the program, as the ins
   assert.equal(refused.code,1);assert.equal(JSON.parse(refused.stderr).error,'invalid_arguments');
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+ test('the bound Codex thread cannot attach a second inbox through either child or broker, including after rebind and restart',async()=>{
+ const f=await fixture();try{
+  const bound=f.desktop.threadId,other=uuid();
+  await f.lifecycle(bound,'SessionStart');await f.lifecycle(other,'SessionStart');
+  const child=f.codexChild();
+  await assert.rejects(call(child,bound,'triangle_get_status'),/bound_codex_context/);
+  const direct=f.client(f.address(bound));
+  const attach=()=>direct.attachSession({installationId:f.policy.installationId,secret:f.policy.secret,sessionId:bound,childId:uuid(),harness:'codex',wakeCapable:true});
+  await assert.rejects(attach(),{code:'bound_codex_context'});
+  const before=(await f.listed()).find(r=>r.id===f.address(bound));
+  assert.equal(before.capabilities.reachable,false);assert.equal(before.capabilities.wakeCapable,false);
+  assert.equal((await call(child,other,'triangle_get_status')).senderId,f.address(other));
+  // The live integration is authoritative even for a child/broker started before a rebind.
+  const credential=await f.grant();
+  writePrivateJson(f.config.integrationPath,{...f.desktop,threadId:other});
+  await assert.rejects(call(child,other,'triangle_get_status'),/bound_codex_context/);
+  const receiver=f.client(f.address(other));
+  await assert.rejects(receiver.attachSession({installationId:f.policy.installationId,secret:f.policy.secret,sessionId:other,childId:uuid(),harness:'codex'}),{code:'bound_codex_context'});
+  const after=(await f.owner.listSessions({credential})).find(r=>r.id===f.address(other));assert.equal(after.capabilities.reachable,false);assert.equal(after.capabilities.wakeCapable,false);
+  const restarted=f.codexChild();await assert.rejects(call(restarted,other,'triangle_get_status'),/bound_codex_context/);
+  writePrivateJson(f.config.integrationPath,f.desktop);
+  await f.restart();
+  await assert.rejects(call(f.codexChild(),bound,'triangle_get_status'),/bound_codex_context/);
+  await assert.rejects(attach(),{code:'bound_codex_context'});
+  assert.equal(f.notifications.length,0);
+ }finally{await f.close();}
+ });

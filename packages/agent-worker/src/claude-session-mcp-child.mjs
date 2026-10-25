@@ -731,6 +731,10 @@ export function createCodexSessionMcpChild({
   // grant from an earlier attach, which a supervisor restart may have outdated.
   async function credentialFor(state, { renew = false, onReuse = null } = {}) {
     if (closed) throw coded("client_closed", "MCP child is closed");
+    const bound = readPrivateJson(config.integrationPath);
+    if (typeof bound.threadId === "string" && bound.threadId.toLowerCase() === state.threadId) {
+      throw coded("bound_codex_context", "This chat already owns the bound Codex identity; use its existing Triangle inbox instead of session attachment");
+    }
     const current = readSessionMessagingPolicy(policyPath);
     if (!current.enabled || current.codex?.enabled !== true || current.secret !== pinned.secret) {
       throw coded("session_revoked", "Workspace participation was disabled or rotated");
