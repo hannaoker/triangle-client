@@ -651,9 +651,6 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   output.write(JSON.stringify(result)+'\n');return 0;
  } finally {await client.close();}
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
-}
 
 
 // Codex reads project-scoped MCP servers from <workspace>/.codex/config.toml (trusted projects only). The Triangle
@@ -825,4 +822,10 @@ export function disableDesktopInbox(options,env=process.env){
  let policyCleanupRequired=false;
  if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});}catch{policyCleanupRequired=true;}}
  return {inboxEnabled:false,policyCleanupRequired,requiresServiceRestart:true};
+}
+
+// The entry point runs last: everything above, including the module-level constants the setup commands use, must be
+// initialized before the CLI starts when this file is the program (importing it, as the tests do, hides the order).
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+ try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
 }

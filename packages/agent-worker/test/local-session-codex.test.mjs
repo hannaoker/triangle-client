@@ -331,3 +331,30 @@ test('the installed codex-session-mcp entry speaks MCP over stdio, attaches on t
   assert.deepEqual((await f.listed()).map(row=>row.attachment),['not-attached'],'closing the input detaches the chat');
  }finally{await f.close();}
 });
+
+// The CLI is also a program. These run setup and disable as the program, the way the installed wrapper does:
+// the module-level constants must be initialized before the entry point runs (importing the module hid this).
+function runProgram(args,options={}){
+ return new Promise((resolve,reject)=>{
+  const child=spawn(process.execPath,[cli,...args],{stdio:['ignore','pipe','pipe'],...options});
+  let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
+  child.once('error',reject);child.once('exit',code=>resolve({code,stdout,stderr:stderr.replace(/\(node:\d+\) ExperimentalWarning[^\n]*\n(\(Use `node --trace-warnings[^\n]*\n)?/g,'')}));
+ });
+}
+test('setup and disable work when the CLI file is run as the program, as the installed wrapper runs it',async()=>{
+ const f=ownerFiles({codexMessaging:false});try{
+  const file=path.join(f.workspace,'.codex','config.toml');
+  const setup=await runProgram(['setup-session-messaging','--config',f.configPath,'--harness','codex','--workspace',f.workspace,'--local-cli',f.wrapper,'--sender',f.desktopSender]);
+  assert.equal(setup.stderr,'');assert.equal(setup.code,0);
+  const result=JSON.parse(setup.stdout);assert.equal(result.harness,'codex');assert.deepEqual(result.allowedSenders,[f.desktopSender]);
+  assert.ok(fs.readFileSync(file,'utf8').includes(CODEX_TOML_BEGIN));
+  const rerun=await runProgram(['setup-session-messaging','--config',f.configPath,'--harness','codex','--workspace',f.workspace,'--local-cli',f.wrapper,'--sender',f.desktopSender]);
+  assert.equal(rerun.code,0,'rerunning is fine');
+  const disable=await runProgram(['disable-session-messaging','--config',f.configPath,'--workspace',f.workspace]);
+  assert.equal(disable.stderr,'');assert.equal(disable.code,0);assert.equal(JSON.parse(disable.stdout).mcpCleanupRequired,false);
+  assert.equal(fs.existsSync(file),false,'the block was removed (and the file, which held nothing else)');
+  // The refusals are reported by code, not swallowed.
+  const refused=await runProgram(['setup-session-messaging','--config',f.configPath,'--harness','codex','--workspace',f.workspace,'--local-cli',f.wrapper]);
+  assert.equal(refused.code,1);assert.equal(JSON.parse(refused.stderr).error,'invalid_arguments');
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
