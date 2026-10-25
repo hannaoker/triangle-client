@@ -13,11 +13,13 @@ import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messagi
 import {validateInteractiveIntegration,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
 import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
+import {setupGrok,disableGrok,runGrokCommand} from './grok-local-session.mjs';
 
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
- const flags=new Set(['config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness']);
+if(command==='grok')options.operation=args.shift();
+ const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness']);
  while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -55,7 +57,7 @@ export function setupLocalMessaging(options,env=process.env){
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
- const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging','inbox'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging','inbox','grok'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
  if(optional.inbox&&bindingChanged)optional.inbox={...optional.inbox,enabled:false,bindingId:randomUUID()};
@@ -403,7 +405,10 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
- if(command==='help'||command==='--help'){output.write('triangle-local: setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
+ if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
+ if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -505,6 +510,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
     const sessions=await client.listSessions(rpcOptions);
     if(sessions.some(row=>row.id===options.to&&row.capabilities?.reachable===true))to=options.to;
    }
+   if(!to&&config.grok?.enabled){const sessions=await client.listSessions(rpcOptions);if(sessions.some(row=>row.id===options.to&&row.harness==='grok'&&row.capabilities?.queueable))to=options.to;}
    if(!to)throw coded('recipient_not_allowed','Choose an explicitly authorized reachable recipient');
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;

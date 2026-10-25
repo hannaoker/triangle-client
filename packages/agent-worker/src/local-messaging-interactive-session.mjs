@@ -60,6 +60,7 @@ export function createInteractiveSessionBroker({
   integrationPath,
   recipients = [],
   issue,
+  readIntegration = validateInteractiveIntegration,
 }) {
   if (typeof integrationPath !== "string" || !path.isAbsolute(integrationPath)) {
     throw coded("invalid_broker_options", "integrationPath must be an absolute path");
@@ -71,12 +72,12 @@ export function createInteractiveSessionBroker({
     throw coded("invalid_broker_options", "issue function is required");
   }
 
-  const integration = validateInteractiveIntegration(integrationPath);
+  const integration = readIntegration(integrationPath);
   const failureLimiter = createPerSenderRateLimiter({ maxRequestsPerWindow: 30, windowMs: 60000 });
   const successLimiter = createPerSenderRateLimiter({ maxRequestsPerWindow: 120, windowMs: 60000 });
 
   function getCurrent() {
-    return validateInteractiveIntegration(integrationPath);
+    return readIntegration(integrationPath);
   }
 
   function verifyTuple(request) {
@@ -206,7 +207,7 @@ export function attachedSessionIdentity(sessionId){
  const sessionHash=createHash('sha256').update(sessionId.toLowerCase()).digest('hex');
  return {pseudoSessionId:`${sessionHash.slice(0,8)}-${sessionHash.slice(8,12)}-4${sessionHash.slice(13,16)}-8${sessionHash.slice(17,20)}-${sessionHash.slice(20,32)}`};
 }
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,logger=null}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],logger=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -221,8 +222,8 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  const healthy=()=>{degradedCode=null;};
  // The policy file is the ceiling the owner granted at setup; it never widens what the live owner
  // configuration allows. A replaced Codex sender or a removed worker loses session access immediately.
- const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId]);
- const liveRecipients=configuredRecipients===null?null:new Set(configuredRecipients);
+ const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId,...additionalPrincipals]);
+ const liveRecipients=configuredRecipients===null?null:new Set([...configuredRecipients,...additionalPrincipals]);
  function policy(){const c=readSessionMessagingPolicy(policyPath),d=readPrivateJson(discoveryPath);
   if(!c.enabled||!d.enabled||!(d.harnesses||['claude']).includes('claude')||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
   return {...c,
