@@ -1007,7 +1007,8 @@ export function createLocalMessagingJournal({
         bindingId: binding.binding_id,
         snapshot: {
           wakeId: reservationId,
-          replyCount: obligations.unreadReplies.length + obligations.queuedMessages.length,
+          replyCount: obligations.unreadReplies.length,
+          inboxCount: obligations.queuedMessages.length,
           heldCount: obligations.heldMessages.length,
           lateResult: obligations.hasLateResult,
         },

@@ -89,7 +89,7 @@ test('a Codex chat attaches on its first tool call, receives from an allowed sen
   const {binding,snapshot}=f.notifications[0];
   assert.equal(binding.threadId,thread,'the wake targets the chat that is calling, from its own context');
   assert.equal(binding.codexPath,path.join(f.root,'fake-codex'));assert.equal(binding.codexHome,path.join(f.root,'codex-home'));
-  assert.equal(binding.generation,1);assert.equal(binding.enabled,true);assert.equal(snapshot.replyCount,1);assert.match(snapshot.wakeId,/^[0-9a-f-]{36}$/);
+  assert.equal(binding.generation,1);assert.equal(binding.enabled,true);assert.equal(snapshot.replyCount,0);assert.equal(snapshot.inboxCount,1);assert.match(snapshot.wakeId,/^[0-9a-f-]{36}$/);
 
   const inbox=await call(child,thread,'triangle_list_inbox');
   assert.equal(inbox.items.length,1);assert.equal(inbox.items[0].messageId,'codex-task');
