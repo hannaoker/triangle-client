@@ -1,4 +1,5 @@
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -345,6 +346,48 @@ test("identity migrate CLI: network trap (globalThis.fetch) is never called", as
     );
     assert.equal(codeApply, 0);
     assert.equal(fetchCalled, false, "fetch must not be called during apply");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("identity migrate CLI: a registry root inside the client root is a usage error", async () => {
+  const f = createRealInventoryFixture();
+  try {
+    const inside = path.join(f.client, "registry");
+    const err = [];
+    const code = await main(
+      ["identity", "migrate", "--client-root", f.client, "--registry-root", inside],
+      { io: { stdout: () => {}, stderr: (s) => err.push(s) } },
+    );
+    assert.equal(code, 2);
+    assert.match(err.join("\n"), /registry root must not be inside client root/);
+    assert.equal(existsSync(inside), false);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("identity migrate CLI: the printed confirm command survives shell parsing when paths contain spaces and quotes", async () => {
+  const f = createRealInventoryFixture();
+  try {
+    // The fixture client root already contains a space; the registry root adds a single quote.
+    const regRoot = path.join(f.root, "registry it's here");
+    const out = [];
+    const code = await main(
+      ["identity", "migrate", "--client-root", f.client, "--registry-root", regRoot],
+      { io: { stdout: (s) => out.push(s), stderr: () => {} } },
+    );
+    assert.equal(code, 0);
+    const text = out.join("\n");
+    const planId = /Plan ID: ([a-f0-9]{64})/.exec(text)[1];
+    const line = text.split("\n").find((l) => l.trim().startsWith("triangle identity migrate"));
+    assert.ok(line, "the confirm command line is printed");
+    const rest = line.trim().slice("triangle identity migrate".length);
+    const argv = execFileSync("/bin/sh", ["-c", `printf '%s\\n' ${rest}`], { encoding: "utf8" })
+      .split("\n")
+      .slice(0, -1);
+    assert.deepEqual(argv, ["--client-root", f.client, "--registry-root", regRoot, "--confirm", planId]);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

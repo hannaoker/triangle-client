@@ -1638,9 +1638,15 @@ test("Item 4: boundaries (no network, no process spawn, nothing outside root, le
     rmSync(base, { recursive: true, force: true });
   }
 });
-test("Item 4: source-level isolation — no file under packages/*/src other than identity-registry.mjs imports it", () => {
+test("Item 4: source-level isolation — only the identity mapping modules import identity-registry.mjs", () => {
   const packagesDir = path.join(REPO_ROOT, "packages");
   const selfFile = path.join(REPO_ROOT, "packages/agent-worker/src/identity-registry.mjs");
+  // The mapping library and its CLI bridge are the deliberate importers; nothing in the
+  // supervisor or the runtime reaches the registry.
+  const allowedImporters = new Set([
+    path.join(REPO_ROOT, "packages/agent-worker/src/identity-mapping.mjs"),
+    path.join(REPO_ROOT, "packages/triangle-cli/src/identity-migrate.mjs"),
+  ]);
   const offending = [];
 
   function walkSrc(dir) {
@@ -1650,7 +1656,7 @@ test("Item 4: source-level isolation — no file under packages/*/src other than
       if (entry.isDirectory()) {
         walkSrc(full);
       } else if (entry.isFile() && /\.(mjs|cjs|js|ts)$/.test(entry.name)) {
-        if (full === selfFile) continue;
+        if (full === selfFile || allowedImporters.has(full)) continue;
         const content = readFileSync(full, "utf8");
         if (content.includes("identity-registry")) {
           offending.push(path.relative(REPO_ROOT, full));
@@ -1668,7 +1674,7 @@ test("Item 4: source-level isolation — no file under packages/*/src other than
   assert.deepEqual(
     offending,
     [],
-    `No production source file may import identity-registry.mjs in this slice, found: ${offending.join(", ")}`,
+    `Only the identity mapping modules may import identity-registry.mjs, found: ${offending.join(", ")}`,
   );
 });
 

@@ -340,6 +340,9 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           if (normClient.startsWith(normRegistry + sep)) {
             throw new UsageError("registry root must not contain client root");
           }
+          if (normRegistry.startsWith(normClient + sep)) {
+            throw new UsageError("registry root must not be inside client root");
+          }
 
           if (flags.confirm !== undefined) {
             const confirm = flags.confirm;

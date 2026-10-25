@@ -58,8 +58,7 @@ export async function identityMigrate({
     try {
       workerInstallation = await import("../../agent-worker/src/installation-inventory.mjs");
       workerIdentity = await import("../../agent-worker/src/identity-inventory.mjs");
-      const regUrl = new URL("../../agent-worker/src/identity-" + "registry.mjs", import.meta.url).href;
-      workerRegistry = await import(regUrl);
+      workerRegistry = await import("../../agent-worker/src/identity-registry.mjs");
       workerMapping = await import("../../agent-worker/src/identity-mapping.mjs");
     } catch (error) {
       const err = new Error(
@@ -100,6 +99,12 @@ export async function identityMigrate({
     now,
     faultHook,
   });
+}
+
+/** Quotes a path for a POSIX shell so the printed command can be pasted as it is. */
+function shellQuote(value) {
+  const text = String(value);
+  return /^[A-Za-z0-9_\/.:@%+=,-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
 /**
@@ -155,7 +160,7 @@ export function renderIdentityMigratePlan(plan, { clientRoot, registryRoot } = {
   if (clientRoot && registryRoot) {
     lines.push("");
     lines.push("To confirm and apply this plan, run:");
-    lines.push(`  triangle identity migrate --client-root ${clientRoot} --registry-root ${registryRoot} --confirm ${plan.planId}`);
+    lines.push(`  triangle identity migrate --client-root ${shellQuote(clientRoot)} --registry-root ${shellQuote(registryRoot)} --confirm ${plan.planId}`);
   }
   return lines.join("\n");
 }

@@ -18,13 +18,11 @@ import {
   INSTANCE_ID_PATTERN,
   isValidBareHttpsOrigin,
 } from "./identity-inventory.mjs";
-
-const REG_MODULE_URL = new URL("./identity-" + "registry.mjs", import.meta.url).href;
-const {
+import {
   canonicalJson,
   readIdentityRegistry,
   updateIdentityRegistry,
-} = await import(REG_MODULE_URL);
+} from "./identity-registry.mjs";
 
 export const IDENTITY_MAPPING_PLAN_SCHEMA = "identity_mapping_plan_v1";
 
@@ -70,6 +68,26 @@ function compareStrings(a, b) {
   return sa < sb ? -1 : sa > sb ? 1 : 0;
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Accepts null/undefined (no registry), a `readIdentityRegistry` result, or a raw
+ * registry object. Anything else fails closed instead of being read as an empty registry.
+ */
+function registryView(registry) {
+  if (registry === null || registry === undefined) return { sequence: 0, bindings: {} };
+  if (isPlainObject(registry)) {
+    if (registry.state === "absent") return { sequence: 0, bindings: {} };
+    const body = registry.state === "ok" ? registry.registry : registry.state === undefined ? registry : null;
+    if (isPlainObject(body) && Number.isSafeInteger(body.sequence) && body.sequence >= 0 && isPlainObject(body.bindings)) {
+      return { sequence: body.sequence, bindings: body.bindings };
+    }
+  }
+  throw codedError("invalid_registry", "unrecognized_registry_shape");
+}
+
 /**
  * Pure planning step for identity mapping.
  *
@@ -83,21 +101,7 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
     throw codedError("invalid_inventory", "inventory_must_be_object");
   }
 
-  let registrySequence = 0;
-  let existingBindings = {};
-
-  if (registry !== null && typeof registry === "object") {
-    if (registry.state === "ok" && registry.registry && typeof registry.registry === "object") {
-      registrySequence = registry.registry.sequence ?? 0;
-      existingBindings = registry.registry.bindings ?? {};
-    } else if (registry.state === "absent") {
-      registrySequence = 0;
-      existingBindings = {};
-    } else if (typeof registry.sequence === "number" && registry.bindings && typeof registry.bindings === "object") {
-      registrySequence = registry.sequence;
-      existingBindings = registry.bindings;
-    }
-  }
+  const { sequence: registrySequence, bindings: existingBindings } = registryView(registry);
 
   const rawBlocked = [];
   const rawLocalOnly = [];
@@ -175,6 +179,8 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
           });
         }
       }
+      // Other faults (for example lane health such as binding_missing) say nothing about the
+      // identity evidence and do not block a mapping; `identity inventory` lists them.
     }
   }
 
@@ -476,15 +482,17 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
 }
 
 function resolveNowIso(nowInput) {
-  let value = typeof nowInput === "function" ? nowInput() : nowInput;
+  const value = typeof nowInput === "function" ? nowInput() : nowInput;
   if (value === undefined) return new Date().toISOString();
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === "number") return new Date(value).toISOString();
-  if (typeof value === "string") {
-    const ms = Date.parse(value);
-    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  let ms = Number.NaN;
+  if (value instanceof Date) ms = value.getTime();
+  else if (typeof value === "number") ms = value;
+  else if (typeof value === "string") ms = Date.parse(value);
+  const date = new Date(ms);
+  if (!Number.isFinite(ms) || Number.isNaN(date.getTime())) {
+    throw codedError("invalid_now", "now_must_be_a_valid_time");
   }
-  return new Date().toISOString();
+  return date.toISOString();
 }
 
 /**
@@ -520,6 +528,9 @@ export function applyIdentityMapping({
   if (typeof readInventory !== "function") {
     throw codedError("invalid_inventory_reader", "read_inventory_must_be_function");
   }
+
+  // Reject an unusable clock before anything is read or written
+  resolveNowIso(now);
 
   // Re-read inventory and registry
   const freshInventory = readInventory();

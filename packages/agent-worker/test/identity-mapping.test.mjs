@@ -677,18 +677,20 @@ test("Item 2: confirmed apply — partial failure with applied, failed, and rema
 
     let errCaught = null;
     try {
-      // We pass a now that throws on second call!
-      let nowCalls = 0;
+      // Fail the second step inside the registry commit, before its audit line is written
+      let auditAppends = 0;
       applyIdentityMapping({
         root,
         confirmation: plan.planId,
         readInventory,
-        now: () => {
-          nowCalls++;
-          if (nowCalls === 2) {
-            throw new Error("injected_fault_at_step_2");
+        now: "2026-10-25T14:00:00.000Z",
+        faultHook: (name) => {
+          if (name === "before_audit_append" && ++auditAppends === 2) {
+            throw Object.assign(new Error("injected_fault_at_step_2"), {
+              code: "fault_injected",
+              reason: "injected_fault_at_step_2",
+            });
           }
-          return "2026-10-25T14:00:00.000Z";
         },
       });
     } catch (err) {
@@ -696,6 +698,7 @@ test("Item 2: confirmed apply — partial failure with applied, failed, and rema
     }
 
     assert.ok(errCaught, "should have thrown partial failure error");
+    assert.equal(errCaught.code, "fault_injected");
     assert.equal(errCaught.applied.length, 1);
     assert.equal(errCaught.applied[0].profile_instance_id, inst1);
     assert.ok(errCaught.failed);
@@ -927,6 +930,102 @@ test("Item 4: boundaries — nothing in identity-mapping reads process.env", () 
     } finally {
       process.env = originalEnv;
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function meshInventory(entries, extra = {}) {
+  return {
+    schema: "identity_inventory_v1",
+    identities: entries.map(({ profile, principalId, authorityOrigin = "https://mesh.example.com" }) => ({
+      principalId,
+      kind: "mesh-managed",
+      authorityOrigin,
+      profiles: [{ profile, instanceId: deriveClientInstanceId(profile), bindingState: "bound" }],
+      diagnostics: [],
+    })),
+    unmappedProfiles: [],
+    diagnostics: [],
+    ...extra,
+  };
+}
+
+test("Review: lane-health faults on a profile do not block its mapping, identity faults still do", () => {
+  const inventory = meshInventory(
+    [
+      { profile: "alpha-worker", principalId: `agent_${"a".repeat(32)}` },
+      { profile: "bravo-worker", principalId: `agent_${"b".repeat(32)}` },
+    ],
+    {
+      diagnostics: [
+        // Installation lane health says nothing about the identity evidence
+        { code: "binding_missing", severity: "fault", profile: "alpha-worker", message: "fixed text" },
+        { code: "custody_fault", severity: "fault", profile: "bravo-worker", message: "fixed text" },
+      ],
+    },
+  );
+  const plan = planIdentityMapping({ inventory });
+  assert.deepEqual(plan.proposals.map((p) => p.profile_name), ["alpha-worker"]);
+  assert.deepEqual(
+    plan.blocked.map((b) => [b.profile, b.reason]),
+    [["bravo-worker", BLOCKED_REASONS.CUSTODY_FAULT]],
+  );
+});
+
+test("Review: unrecognised registry shapes are rejected instead of being read as an empty registry", () => {
+  const inventory = meshInventory([{ profile: "alpha-worker", principalId: `agent_${"a".repeat(32)}` }]);
+  const badShapes = [
+    {},
+    "x",
+    5,
+    [],
+    { state: "ok" },
+    { state: "weird" },
+    { state: "ok", registry: { sequence: -1, bindings: {} } },
+    { state: "ok", registry: { sequence: 1 } },
+  ];
+  for (const bad of badShapes) {
+    assert.throws(
+      () => planIdentityMapping({ inventory, registry: bad }),
+      (err) => err.code === "invalid_registry" && err.reason === "unrecognized_registry_shape",
+      JSON.stringify(bad),
+    );
+  }
+  const reference = planIdentityMapping({ inventory });
+  for (const absent of [null, undefined, { state: "absent" }, { sequence: 0, bindings: {} }, { state: "ok", registry: { sequence: 0, bindings: {} } }]) {
+    assert.equal(planIdentityMapping({ inventory, registry: absent }).planId, reference.planId);
+  }
+});
+
+test("Review: an invalid explicit now is rejected before anything is read or written", () => {
+  const root = makeTmpDir("triangle-mapping-now-");
+  try {
+    const registryRoot = path.join(root, "registry");
+    const inventory = meshInventory([{ profile: "alpha-worker", principalId: `agent_${"a".repeat(32)}` }]);
+    const plan = planIdentityMapping({ inventory });
+    let reads = 0;
+    const readInventory = () => {
+      reads += 1;
+      return inventory;
+    };
+    for (const badNow of ["garbage", Number.NaN, new Date(Number.NaN), () => "garbage", {}]) {
+      assert.throws(
+        () => applyIdentityMapping({ root: registryRoot, confirmation: plan.planId, readInventory, now: badNow }),
+        (err) => err.code === "invalid_now",
+      );
+    }
+    assert.equal(reads, 0);
+    assert.equal(existsSync(registryRoot), false);
+
+    const ok = applyIdentityMapping({
+      root: registryRoot,
+      confirmation: plan.planId,
+      readInventory,
+      now: new Date("2026-10-25T15:00:00.000Z"),
+    });
+    assert.equal(ok.applied.length, 1);
+    assert.equal(ok.applied[0].issued_at, "2026-10-25T15:00:00.000Z");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
