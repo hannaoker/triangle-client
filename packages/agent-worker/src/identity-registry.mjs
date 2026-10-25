@@ -1124,6 +1124,75 @@ function appendAuditEntrySync(root, auditPath, committedByteLength, uncommittedT
   }
 }
 
+function assertMutationMatchesAction(current, oldBindings, nextBindings, action, subject) {
+  if (action === "init") {
+    if (current.state !== "absent" || Object.keys(nextBindings).length !== 0) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+    return null;
+  }
+
+  // Every binding other than `subject` must be identical to oldBindings (and no extra bindings added)
+  for (const [instId, oldB] of Object.entries(oldBindings)) {
+    if (instId === subject) continue;
+    if (!Object.hasOwn(nextBindings, instId)) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+    if (canonicalJson(nextBindings[instId]) !== canonicalJson(oldB)) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+  }
+  for (const instId of Object.keys(nextBindings)) {
+    if (instId === subject) continue;
+    if (!Object.hasOwn(oldBindings, instId)) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+  }
+
+  const nextB = nextBindings[subject];
+  if (!nextB) {
+    throw codedError("invalid_registry", "mutation_does_not_match_action");
+  }
+  const oldB = Object.hasOwn(oldBindings, subject) ? oldBindings[subject] : null;
+
+  if (action === "bind") {
+    if (oldB === null) {
+      // Subject absent before: new binding must have binding_generation === 1 and revoked_at === null
+      if (nextB.binding_generation !== 1 || nextB.revoked_at !== null) {
+        throw codedError("invalid_registry", "mutation_does_not_match_action");
+      }
+    } else {
+      // Subject present before: rebind
+      if (
+        nextB.binding_generation !== oldB.binding_generation + 1 ||
+        nextB.revoked_at !== null ||
+        nextB.binding_id === oldB.binding_id ||
+        nextB.profile_name !== oldB.profile_name ||
+        nextB.profile_instance_id !== oldB.profile_instance_id
+      ) {
+        throw codedError("invalid_registry", "mutation_does_not_match_action");
+      }
+    }
+    return nextB.binding_id;
+  }
+
+  if (action === "revoke") {
+    if (oldB === null || oldB.revoked_at !== null || nextB.revoked_at === null) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+    const expectedRevoked = {
+      ...oldB,
+      revoked_at: nextB.revoked_at,
+    };
+    if (canonicalJson(nextB) !== canonicalJson(expectedRevoked)) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+    return nextB.binding_id;
+  }
+
+  throw codedError("invalid_registry", "mutation_does_not_match_action");
+}
+
 function writeAtomicRegistrySync(root, registryPath, contentBuffer, faultHook) {
   const tempPath = `${registryPath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   const fd = openSync(tempPath, "wx", 0o600);
@@ -1207,7 +1276,7 @@ export function updateIdentityRegistry({
     }
 
     if (current.state === "absent" && action !== "init" && action !== "bind") {
-      throw codedError("invalid_registry", "cannot_revoke_when_absent");
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
     }
 
     const baseRegistry =
@@ -1252,47 +1321,24 @@ export function updateIdentityRegistry({
     const prevHash =
       current.state === "absent" ? ZERO_HASH_64 : current.registry.auditHead.hash;
 
-    // Validate candidate bindings and registry structure before determining bindingId
-    if (!isPlainObject(mutated.bindings)) {
-      throw codedError("invalid_registry", "bindings_not_object");
-    }
+    // Validate candidate registry structure (closed schema, valid bindings) before diffing
+    const placeholderRegistry = validateIdentityRegistry({
+      ...mutated,
+      sequence: nextSeq,
+      updatedAt: nowIso,
+      auditHead: {
+        sequence: nextSeq,
+        hash: "a".repeat(64),
+      },
+    });
 
-    // Enforce monotonic binding_generation and no-delete rule
-    for (const [instId, oldB] of Object.entries(oldBindings)) {
-      if (!Object.hasOwn(mutated.bindings, instId)) {
-        throw codedError("invalid_registry", "binding_deleted");
-      }
-      const nextB = mutated.bindings[instId];
-      if (!isPlainObject(nextB)) {
-        throw codedError("invalid_registry", "binding_not_object");
-      }
-      if (
-        typeof nextB.binding_generation !== "number" ||
-        !Number.isSafeInteger(nextB.binding_generation) ||
-        nextB.binding_generation < oldB.binding_generation
-      ) {
-        throw codedError("invalid_registry", "binding_generation_decreased");
-      }
-    }
-
-    let bindingId = null;
-    if (action === "bind" || action === "revoke") {
-      const targetBinding = mutated.bindings[subject];
-      if (!isPlainObject(targetBinding)) {
-        throw codedError("invalid_registry", "subject_binding_missing");
-      }
-      if (action === "revoke" && targetBinding.revoked_at === null) {
-        throw codedError("invalid_registry", "revoke_action_requires_revoked_at");
-      }
-      if (typeof targetBinding.binding_id !== "string" || !BINDING_ID_PATTERN.test(targetBinding.binding_id)) {
-        throw codedError("invalid_registry", "invalid_binding_id");
-      }
-      bindingId = targetBinding.binding_id;
-    } else if (action === "init") {
-      if (Object.keys(mutated.bindings).length > 0) {
-        throw codedError("invalid_registry", "init_must_not_contain_bindings");
-      }
-    }
+    const bindingId = assertMutationMatchesAction(
+      current,
+      oldBindings,
+      placeholderRegistry.bindings,
+      action,
+      subject,
+    );
 
     const auditEntry = buildAuditEntry({
       sequence: nextSeq,
@@ -1304,17 +1350,13 @@ export function updateIdentityRegistry({
     });
     validateAuditEntryObject(auditEntry);
 
-    const candidateRegistry = {
-      ...mutated,
-      sequence: nextSeq,
-      updatedAt: nowIso,
+    const validatedRegistry = validateIdentityRegistry({
+      ...placeholderRegistry,
       auditHead: {
         sequence: nextSeq,
         hash: auditEntry.hash,
       },
-    };
-
-    const validatedRegistry = validateIdentityRegistry(candidateRegistry);
+    });
     const registryBuffer = Buffer.from(`${canonicalJson(validatedRegistry)}\n`, "utf8");
     const auditLineBuffer = Buffer.from(`${canonicalJson(auditEntry)}\n`, "utf8");
 

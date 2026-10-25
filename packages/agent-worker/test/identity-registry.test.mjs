@@ -678,7 +678,13 @@ test("Item 2: absent root read, init write, bind, revoke, sequence conflict, and
       (err) => err.code === "invalid_registry",
     );
 
-    // Bump generation to 2, then try decreasing to 1
+    // Bump generation to 2 (rebind requires a new binding_id), then try decreasing to 1
+    const bobRebound = {
+      ...bobBinding,
+      binding_id: `bind_${hex32("bind:bob:gen2")}`,
+      binding_generation: 2,
+      issued_at: "2026-10-25T12:08:00.000Z",
+    };
     const u3 = updateIdentityRegistry({
       root,
       expectedSequence: 2,
@@ -686,7 +692,7 @@ test("Item 2: absent root read, init write, bind, revoke, sequence conflict, and
       action: "bind",
       subject: bobBinding.profile_instance_id,
       mutate: (reg) => {
-        reg.bindings[bobBinding.profile_instance_id].binding_generation = 2;
+        reg.bindings[bobBinding.profile_instance_id] = bobRebound;
         return reg;
       },
     });
@@ -747,7 +753,7 @@ test("Item 2: absent root read, init write, bind, revoke, sequence conflict, and
     assert.equal(u4.registry.bindings[bobBinding.profile_instance_id].revoked_at, t4);
     assert.equal(u4.auditEntry.action, "revoke");
     assert.equal(u4.auditEntry.subject, bobBinding.profile_instance_id);
-    assert.equal(u4.auditEntry.bindingId, bobBinding.binding_id);
+    assert.equal(u4.auditEntry.bindingId, bobRebound.binding_id);
 
     const r4 = readIdentityRegistry({ root });
     assert.equal(r4.state, "ok");
@@ -1670,3 +1676,340 @@ test("Item 4: source-level isolation — no file under packages/*/src other than
     `No production source file may import identity-registry.mjs in this slice, found: ${offending.join(", ")}`,
   );
 });
+
+test("Review Item 1: audit entry must describe the exact mutation (mutation_does_not_match_action)", () => {
+  const base = makeTmpRoot("id-reg-mutation-match-");
+  try {
+    const root = path.join(base, "identity");
+    const t0 = "2026-10-25T16:00:00.000Z";
+    const t1 = "2026-10-25T16:01:00.000Z";
+    const bAlpha = makeValidBinding("alpha", { issued_at: t1 });
+    const bBeta = makeValidBinding("beta", { issued_at: t1 });
+
+    // 1. Positive init when absent
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: t0,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+
+    // init when registry is already present must be refused with mutation_does_not_match_action
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 1,
+          now: t1,
+          action: "init",
+          subject: null,
+          mutate: (r) => r,
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // 2. New bind requires binding_generation === 1 and revoked_at === null
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 1,
+          now: t1,
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id] = { ...bAlpha, binding_generation: 2 };
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 1,
+          now: t1,
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id] = { ...bAlpha, revoked_at: t1 };
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Reproduction (b): one bind for subject A also adds an unrelated binding B -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 1,
+          now: t1,
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id] = bAlpha;
+            r.bindings[bBeta.profile_instance_id] = bBeta;
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Positive new bind for alpha
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 1,
+      now: t1,
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlpha;
+        return r;
+      },
+    });
+    // Positive new bind for beta
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 2,
+      now: t1,
+      action: "bind",
+      subject: bBeta.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bBeta.profile_instance_id] = bBeta;
+        return r;
+      },
+    });
+
+    const regPath = path.join(root, REGISTRY_FILE_NAME);
+    const auditPath = path.join(root, AUDIT_FILE_NAME);
+    const snapReg = () => readFileSync(regPath);
+    const snapAudit = () => readFileSync(auditPath);
+
+    let regBefore = snapReg();
+    let auditBefore = snapAudit();
+
+    // Reproduction (a): with action: "bind" and an existing binding, mutate replaces principal_id at same generation -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].principal_id = `agent_${hex32("other-agent")}`;
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Rebind keeping the old binding_id or skipping generation + 2 or modifying another binding -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].binding_generation = 2; // same binding_id!
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id] = {
+              ...bAlpha,
+              binding_id: `bind_${hex32("alpha-gen3")}`,
+              binding_generation: 3, // skipped gen 2!
+            };
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id] = {
+              ...bAlpha,
+              binding_id: `bind_${hex32("alpha-gen2")}`,
+              binding_generation: 2,
+            };
+            r.bindings[bBeta.profile_instance_id].authority_origin = "https://other.example.test";
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Reproduction (c): a revoke also changes authority_origin (or generation, or another binding) -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "revoke",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].revoked_at = "2026-10-25T16:02:00.000Z";
+            r.bindings[bAlpha.profile_instance_id].authority_origin = "https://evil.example.test";
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 3,
+          now: "2026-10-25T16:02:00.000Z",
+          action: "revoke",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].revoked_at = "2026-10-25T16:02:00.000Z";
+            r.bindings[bBeta.profile_instance_id].revoked_at = "2026-10-25T16:02:00.000Z";
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Verify all refused updates left both files byte-identical
+    assert.deepEqual(snapReg(), regBefore);
+    assert.deepEqual(snapAudit(), auditBefore);
+
+    // Positive rebind: generation = old + 1, new binding_id, revoked_at = null, issued_at updated
+    const bAlphaGen2 = {
+      ...bAlpha,
+      binding_id: `bind_${hex32("alpha-gen2")}`,
+      principal_id: `agent_${hex32("alpha-new-agent")}`,
+      authority_origin: "https://mesh2.example.test",
+      binding_generation: 2,
+      issued_at: "2026-10-25T16:03:00.000Z",
+      revoked_at: null,
+    };
+    const uRebind = updateIdentityRegistry({
+      root,
+      expectedSequence: 3,
+      now: "2026-10-25T16:03:00.000Z",
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlphaGen2;
+        return r;
+      },
+    });
+    assert.equal(uRebind.registry.sequence, 4);
+    assert.equal(uRebind.auditEntry.bindingId, bAlphaGen2.binding_id);
+
+    // Positive revoke on alpha
+    const tRevoke = "2026-10-25T16:04:00.000Z";
+    const uRevoke = updateIdentityRegistry({
+      root,
+      expectedSequence: 4,
+      now: tRevoke,
+      action: "revoke",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id].revoked_at = tRevoke;
+        return r;
+      },
+    });
+    assert.equal(uRevoke.registry.sequence, 5);
+    assert.equal(uRevoke.registry.bindings[bAlpha.profile_instance_id].revoked_at, tRevoke);
+
+    regBefore = snapReg();
+    auditBefore = snapAudit();
+
+    // Double revoke (when old binding already has revoked_at !== null) -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 5,
+          now: "2026-10-25T16:05:00.000Z",
+          action: "revoke",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].revoked_at = "2026-10-25T16:05:00.000Z";
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    // Reproduction (d): after a revoke, a bind sets revoked_at back to null at the same generation -> refused
+    assert.throws(
+      () =>
+        updateIdentityRegistry({
+          root,
+          expectedSequence: 5,
+          now: "2026-10-25T16:05:00.000Z",
+          action: "bind",
+          subject: bAlpha.profile_instance_id,
+          mutate: (r) => {
+            r.bindings[bAlpha.profile_instance_id].revoked_at = null;
+            return r;
+          },
+        }),
+      (err) => err.code === "invalid_registry" && err.reason === "mutation_does_not_match_action",
+    );
+
+    assert.deepEqual(snapReg(), regBefore);
+    assert.deepEqual(snapAudit(), auditBefore);
+
+    // Rebinding a revoked binding with generation + 1 (3) and a new binding_id succeeds
+    const bAlphaGen3 = {
+      ...bAlphaGen2,
+      binding_id: `bind_${hex32("alpha-gen3-rebind")}`,
+      binding_generation: 3,
+      issued_at: "2026-10-25T16:06:00.000Z",
+      revoked_at: null,
+    };
+    const uRebindAfterRevoke = updateIdentityRegistry({
+      root,
+      expectedSequence: 5,
+      now: "2026-10-25T16:06:00.000Z",
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlphaGen3;
+        return r;
+      },
+    });
+    assert.equal(uRebindAfterRevoke.registry.sequence, 6);
+    assert.equal(
+      uRebindAfterRevoke.registry.bindings[bAlpha.profile_instance_id].revoked_at,
+      null,
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
