@@ -1,6 +1,6 @@
 # Codex chat attachment — 2026-10-25
 
-Status: source and tests on `codex/discovery-usability` (on top of `cb733f3`), not installed. Owner request: todo 4, make arbitrary discovered Codex chats able to receive and be woken, as the bound conversation already can. Operator documentation: `docs/triangle-client/installed-local-messaging.md` ("Codex chat attachment").
+Status: committed locally on `codex/discovery-usability` (`790e420`, `2ae8696`, `408cc91`; not pushed) and installed on the Mini on 2026-10-25 (supervisor bundle `502630cf…`), enabled in the real workspace for the bound Codex identity only. Codex Desktop waking an idle attached chat is not yet shown. Owner request: todo 4, make arbitrary discovered Codex chats able to receive and be woken, as the bound conversation already can. Operator documentation: `docs/triangle-client/installed-local-messaging.md` ("Codex chat attachment").
 
 ## What Codex tells an MCP server (Codex 0.164.0, `exec`, metadata-only probe)
 
@@ -40,3 +40,18 @@ Consequence: a Codex chat can attach only at its first Triangle tool call, and t
 3. In a Codex Desktop chat in that workspace: "Call triangle_get_status and tell me the address."
 4. From another session send that address a message, leave the chat idle, and watch for a turn started by the hint. Evidence: the journal's wake state (accepted, then acknowledged), the thread's rollout, and the directory (`attached`, `online`).
 5. Repeat after a Codex restart and after closing and reopening the chat.
+
+## Installation (2026-10-25, owner go-ahead: supervisor runtime only, bound Codex identity only)
+
+Installed from `408cc91`, a local commit that is not on `origin`. Bundle `490374ac…` (`cb733f3`) became `502630cfb87128b9219c1d9e5d6e93331df5fa2985074cf69f6508ced3d5b4db`; manifest v12, 81 artifacts, same Node; the codex, hermes and antigravity manifests were not restaged.
+
+What the live attempt found, in order:
+
+1. The preflight (snapshot tests under `umask 077`) failed a setup test: `replaceTextFile` created its temporary file with the owner's mode but creation honors the umask, so a 0640 `config.toml` became 0600. Fixed with an explicit `fchmod` (`2ae8696`); my first "fix" was committed after a verification step whose pipeline hid the failing test, and was amended once the test truly passed under both umasks.
+2. The first install of the item 4 revision (bundle `f4320780…`) succeeded, but enabling Codex attachment through the installed `triangle-local` failed with `local_command_failed`. The automatic revert restored the baseline (configuration, policy and hook files byte-identical to their pre-change copies; `.codex/config.toml` absent). A patched copy of the CLI printed the real error: a temporal dead zone, because the entry-point block sat in the middle of `local-messaging-cli.mjs` and ran before the Codex setup constants below it were initialized. The tests import the module, which finishes evaluating first, so none could see it. Fixed by running the entry point last (`408cc91`), with a test that runs setup, a rerun and disable as the program; that test fails against the previous file and passes now.
+3. Preflight on `408cc91`: snapshot 329/329, the live bundle equals the `2ae8696` source, exactly one artifact (the CLI) changes, route quiet. Install, restart and verification passed: one supervisor from the new bundle, journal unchanged (36 completed, 2 held, 14 pending replies), Codex directory rows carry `attachment` fields.
+4. Through the installed wrapper: setup (an idempotent rerun that keeps the capability secret), policy `codex` section exactly `{enabled: true, allowedSenders: [the bound identity]}` with the Claude receiver list empty (mode 0600), the managed block in `/Users/zhenyuhou/Projects/The Triangle/.codex/config.toml` (mode 0600), the MCP entry started as Codex starts it from the workspace (`initialize` and `tools/list`: 10 tools, exit 0, no stderr), and no broker warnings in the logs. The real workspace is already trusted in Codex (`trust_level = "trusted"`).
+
+Records: pre-change copies in `~/Library/Application Support/The Triangle/archive/codex-attachment-20261025/` (checksums verified) and `releases/codex-attachment-install-verification.json`. Manual rollback: `triangle-local disable-session-messaging --workspace <workspace>`; restore `supervisor.manifest.cb733f3.json` from the archive to `worker-runtime/supervisor.manifest.json` (mode 0600, atomic) for the previous bundle; `scripts/triangle-client-service.sh start` with `TRIANGLE_READY_TIMEOUT_MS=60000` behind a quiet gate. The earlier policy file (a disabled one from the disposable-workspace tests) was replaced by the current policy; its pre-change copy is in the archive.
+
+Still open: the Desktop proof in the section above, which needs a Codex chat started after the config change (a chat that was already loaded does not gain the server).
