@@ -1,7 +1,10 @@
 # Grok Bot pull-only local messaging prototype
 
 2026-10-24. Draft prototype with passed live two-Grok source-host acceptance.
-The production/installed supervisor has not been upgraded or activated for Grok.
+The reviewed candidate is now installed on the Mini's existing supervisor for
+bounded acceptance; Grok-to-Codex automatic receiver wake has passed. Full installed
+results and remaining boundaries are tracked in
+`docs/reviews/2026-10-24-pr117-installed-acceptance.md`.
 Base: client main `5b6c5c896eeb3e95a82cd2c3f32360e3710e52a4` (#116).
 
 ## Motivation and boundary

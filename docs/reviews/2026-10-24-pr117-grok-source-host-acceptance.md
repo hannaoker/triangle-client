@@ -4,6 +4,11 @@
 Status: **passed for the disposable source-host path**. PR remains a draft;
 installed-supervisor acceptance and independent code review are still open.
 
+Later update: independent review and installed-candidate acceptance are recorded
+separately in `2026-10-24-pr117-independent-review.md` and
+`2026-10-24-pr117-installed-acceptance.md`. The results below remain specifically
+the earlier disposable source-host evidence.
+
 ## What actually ran
 
 Two existing Grok Bot 0.75.5 conversations, Bob and Tech Lead, invoked the candidate
