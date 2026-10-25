@@ -96,13 +96,28 @@ No other files in the repository were created or modified.
 
 1. **Installed CLI Bundle vs. Source CLI**:
    - `packages/triangle-cli/src/identity-inventory.mjs` dynamically imports `installation-inventory.mjs` and `identity-inventory.mjs` from `@the-triangle/agent-worker`.
-   - The CLI statically imports the new thin bridge; only the identity command dynamically loads the agent-worker inventory modules. The source CLI regression suite passes. Installed CLI operation has not been exercised in this step.
+   - The CLI statically imports the new thin bridge; only the identity command dynamically loads the agent-worker inventory modules. The source CLI regression suite passes. Operation from a built client package was exercised afterwards; see "Built-package verification" below.
    - The package archive builder (`scripts/release/build-client-package.mjs`) includes tracked source files matching `packages/(triangle-cli|agent-worker)/src/.*\.mjs`.
 
 2. **Unresolved Release Gate (Manifest v12 vs v13)**:
    - `scripts/triangle-worker-install.py` defines `CURRENT_MANIFEST_VERSION = 12`. Its artifact lists (`SUPERVISOR_ARTIFACTS`, `WORKLOAD_CORE_ARTIFACTS`, etc.) currently omit `installation-inventory.mjs` and `identity-inventory.mjs`.
    - Per prompt constraints and Owner Decision 4 (Unified Messaging Interface design), neither `scripts/triangle-worker-install.py`, package manifests, nor Swift release scripts were modified. Manifest bump is deferred to a single release train (v13) for R1–R5.
-   - This step represents **source CLI exposure only**. The archive builder and supervisor runtime manifest are separate packaging surfaces: omission from the supervisor manifest alone does not prove the packaged admin CLI is broken. Installed-package closure and execution remain untested; the later release train must verify each surface it activates.
+   - This step represents **source CLI exposure only**. The archive builder and supervisor runtime manifest are separate packaging surfaces: omission from the supervisor manifest alone does not prove the packaged admin CLI is broken. Client-package closure and execution were verified from a built package (below). The supervisor runtime manifest surface stays untouched and unexercised because no supervisor entry point imports these modules; the later release train must verify each surface it activates.
+
+### Built-package verification (reviewer: Claude, 2026-10-25)
+
+- **Build.** Two client packages were built with `scripts/release/build-client-package.mjs`, using the installed public ad-hoc helper and client binaries and the bundled Node 22.22.3 of the installed 0.2.0-onboarding.4 release as prebuilt inputs, in a scratch directory. Nothing was installed. One package came from this branch head (`1bfd003`), one from `origin/main` (`db5e28a`). Manifest difference: 137 versus 135 files; added `packages/agent-worker/src/identity-inventory.mjs` and `packages/triangle-cli/src/identity-inventory.mjs`; changed `packages/triangle-cli/src/cli.mjs`; `worker-artifacts.json` byte-identical.
+- **Execution.** The packaged CLI ran with the bundled Node under a macOS sandbox profile that denies all network access and all file writes: `identity inventory --client-root <real client directory> --json` exited 0 with a 3,997-byte report (3 identities, 0 unmapped profiles, 0 faults, 5 warnings). The same command from the source checkout produced byte-identical output. A fingerprint of every file's path, mtime, size and mode under the real client directory and `profiles-v1` was identical before and after. The human-readable form rendered (21 lines). No secret-shaped strings appeared in either output.
+- **Edge cases from the package.** The parent directory as `--client-root` returns a graceful `registry_absent` fault report (exit 0). A missing, relative or extra argument and an unknown subcommand exit 2. The usage text lists the command.
+- **Closure.** Deleting `packages/agent-worker/src/identity-inventory.mjs` from a copy of the package makes the command fail with "Installation inventory foundation (@the-triangle/agent-worker) is not available in this installation." (exit 1).
+- **Suites.** New tests 21/21; `packages/triangle-cli` 93/93; installation inventory and doctor 36/36; bundle closure and supervisor bundle 25/25; packaged-installer tests 9/9 with the system Node; `scripts/run-all-tests.mjs` 11 of 15 suites pass. The four failures are identical on `origin/main` in this environment: `triangle-client-service` (26 of 27; "install prepares a runtime manifest and creates a private fixed plist") and `a2a-gateway`, `agents/codex`, `agents/hermes` (`ERR_MODULE_NOT_FOUND` for `@the-triangle/a2a-gateway` in a fresh worktree without installed workspace links). `tests/client-package.test.mjs` fails 6 of 9 when run with the bundled Node of an installed release (no sibling LICENSE file), on main as well; run it with the system Node.
+
+### Review findings (non-blocking; for the status/doctor integration slice)
+
+1. **False-positive lane-health warnings.** The CLI fixes the lock probes at "unknown", and the underlying installation inventory then raises `claimer_not_held` for the codex-headless and cursor-acp lanes even when the claimer is held. On the real client directory both claimer processes were alive (pid in the lock file). `claimer_not_held` and `progress_evidence_unavailable` are installation-health diagnostics, not identity facts: keep them out of the identity report or report them as unknown.
+2. **Untyped error.** When the agent-worker modules are absent, a plain `Error` escapes as an uncaught exception with a stack trace and absolute paths. A typed CLI error would print one line and exit 1.
+3. **Exit status.** The command exits 0 even when the report contains faults (a wrong root yields `registry_absent`), so scripts must read `summary.faultCount`. Decide whether faults change the exit status when the command joins `status` and `doctor`.
+4. **Sort order.** Sorting uses `localeCompare`, which depends on the host's locale and ICU build; a code-unit comparison would make the output identical across hosts.
 
 ---
 
