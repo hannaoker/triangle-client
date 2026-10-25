@@ -447,8 +447,9 @@ Codex's normal hook UI; setup does not trust them for you. Existing MCP configur
 still require an app restart.
 
 The hooks call the chat's own MCP child directly, using Codex-supplied identity metadata.
-The model does not have to call status first. The first-prompt hook covers startup races
-where MCP or discovery is not ready at SessionStart. No additional reasoning turn is
+The model does not have to call status first. The first-prompt hook covers MCP readiness at SessionStart; the attachment tool also
+waits up to two seconds for a concurrent discovery command, retrying only explicit offline
+refusals. Timeouts and other errors keep their existing failure semantics. No additional reasoning turn is
 queued merely to attach. The fixed bound chat remains on its existing identity and inbox.
 This adds no sender, receiver grant, global session scan or alternate App Server.
 

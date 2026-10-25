@@ -32,7 +32,7 @@ Scratch scripts/logs: `/private/tmp/triangle-auto-attach-spike-20261025/`. Origi
 
 ## Acceptance and release gates
 
-Affected messaging/discovery/Claude/Grok/inbox/wake/supervisor/closure suite: **317/317 passed**, zero failures or skips. `git diff --check` passed. Source regression coverage:
+Affected messaging/discovery/Claude/Grok/inbox/wake/supervisor/closure suite: **318/318 passed after the startup-race regression fix**, zero failures or skips. `git diff --check` passed. Source regression coverage:
 
 - Automatic hook context (threadId only) attaches without a model tool call; repeated calls are idempotent.
 - Missing/ambiguous context and supplied identity arguments fail closed; revoked policy is enforced.
@@ -51,3 +51,12 @@ Required live gate before claiming Desktop usability:
 6. Record actual startup races and fallback behavior. If neither hook can reach MCP, retain manual status attachment and show a truthful hint; do not scan private stores or start another owner.
 
 Unloaded-chat auto-wake, cross-machine routing and universal agent parity remain outside this change.
+
+
+## Desktop startup race found during approved acceptance
+
+The owner approved candidate installation, two real-workspace hooks and merge conditional on passing Desktop tests. Candidate `c24f269` installed with unchanged receiver policy. The first Desktop no-tools turn did not attach. Restarting the app did not fix it. The bundled Desktop binary is `0.164.0-alpha.11.1`; an isolated probe with that exact binary also supported MCP hooks, disproving a simple version-incompatibility explanation.
+
+Temporary metadata-only tracing of the candidate MCP child confirmed a real Desktop `triangle_attach_session` invocation with `_meta.threadId`, followed by explicit `session_offline`: the hook ran concurrently with the command that registers discovery. No message content or credentials were traced. Tracing is not part of the source change and must be removed before final acceptance.
+
+The fix waits at most two seconds for explicit `session_offline` refusals inside the hook, bounded by the remaining RPC budget. Timeouts and other errors are not blindly retried. Each hook forces a fresh grant so same-child resume cannot return a cached old-generation credential; existing generation-fencing recovery still applies. Regression deliberately starts attachment before discovery, verifies success only after a real lifecycle report, checks resume at generation 2, and checks failure when no lifecycle ever arrives.

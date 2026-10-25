@@ -733,7 +733,7 @@ export function createCodexSessionMcpChild({
 
   // `renew` forces a fresh attach (the heartbeat, which keeps the lease alive); `onReuse` tells the caller it got a
   // grant from an earlier attach, which a supervisor restart may have outdated.
-  async function credentialFor(state, { renew = false, onReuse = null } = {}) {
+  async function credentialFor(state, { renew = false, onReuse = null, timeout = null } = {}) {
     if (closed) throw coded("client_closed", "MCP child is closed");
     const bound = readPrivateJson(config.integrationPath);
     if (typeof bound.threadId === "string" && bound.threadId.toLowerCase() === state.threadId) {
@@ -756,7 +756,7 @@ export function createCodexSessionMcpChild({
       harness: "codex",
       wakeCapable: wake !== null,
       ...(state.generation === null ? {} : { generation: state.generation }),
-    });
+    }, timeout === null ? {} : { timeout });
     if (state.generation === null) state.generation = grant.generation;
     if (grant.senderId !== state.address || grant.sessionId !== state.identity.pseudoSessionId
       || grant.bindingId !== state.childId || grant.generation !== state.generation) {
@@ -766,6 +766,24 @@ export function createCodexSessionMcpChild({
     state.grantAt = now;
     state.attached = true;
     return grant.credential;
+  }
+
+  // Desktop can run MCP hooks alongside the discovery command. Wait briefly for that command to register
+  // this lifecycle, without asking the model to poll or starting another turn. Only an explicit offline
+  // refusal is retryable; timeouts have unknown outcomes and other errors must retain their semantics.
+  async function attachFromHook(state, options) {
+    const deadline = performance.now() + 2000;
+    let lastOfflineError = null;
+    while (true) {
+      if (lastOfflineError && deadline - performance.now() <= 50) throw lastOfflineError;
+      try {
+        return await credentialFor(state, { ...options, renew: true, timeout: Math.max(1, Math.ceil(deadline - performance.now())) });
+      } catch (error) {
+        if (error?.code !== "session_offline" || performance.now() >= deadline) throw error;
+        lastOfflineError = error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - performance.now()))));
+      }
+    }
   }
 
   // One wake attempt for one chat: reserve (the supervisor decides whether anything is owed), queue the hint to the
@@ -847,7 +865,7 @@ export function createCodexSessionMcpChild({
             throw coded("invalid_arguments", "Automatic attachment accepts no identity or other arguments");
           }
           state = chatState(codexCallIdentity(params._meta));
-          const credential = await credentialFor(state, { renew: fresh, onReuse: () => { reusedGrant = true; } });
+          const credential = await (name === "triangle_attach_session" ? attachFromHook : credentialFor)(state, { renew: fresh, onReuse: () => { reusedGrant = true; } });
           const resultData = name === "triangle_attach_session" ? {} : await runSessionTool({ client: state.client, credential, name, args, generation: state.generation });
           return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(resultData) }], isError: false } };
         }

@@ -461,3 +461,21 @@ test('the installed CLI program accepts explicit automatic-attachment opt-in and
   const duplicate=await runProgram([...args,'--auto-attach','--no-auto-attach']);assert.notEqual(duplicate.code,0);assert.match(duplicate.stderr,/invalid_arguments/);
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+
+test('automatic attachment waits for a concurrent discovery hook, but never invents a lifecycle',async()=>{
+ const f=await fixture();try{
+  const thread=uuid(),child=f.codexChild();
+  // The real Desktop trace showed the MCP hook arriving before the discovery command finished.
+  const attaching=call(child,thread,'triangle_attach_session');
+  await new Promise(resolve=>setTimeout(resolve,100));
+  assert.equal((await f.listed()).some(r=>r.id===f.address(thread)),false);
+  await f.lifecycle(thread,'SessionStart');
+  assert.deepEqual(await attaching,{});
+  assert.equal((await f.listed()).find(r=>r.id===f.address(thread)).capabilities.reachable,true);
+  await f.lifecycle(thread,'SessionEnd');await f.lifecycle(thread,'SessionStart');
+  assert.deepEqual(await call(child,thread,'triangle_attach_session'),{});
+  const resumed=(await f.listed()).find(r=>r.id===f.address(thread));assert.equal(resumed.generation,2);assert.equal(resumed.capabilities.reachable,true,'hook refresh cannot reuse an old generation grant');
+  await assert.rejects(call(child,uuid(),'triangle_attach_session'),/session_offline/,'no lifecycle report still fails closed after the bounded wait');
+ }finally{await f.close();}
+});
