@@ -1018,15 +1018,15 @@ test("binding origin overrides are checked on the raw path, before URL normaliza
 });
 
 
-test("doctor accepts supported worker manifests through v11 but rejects future versions", () => {
+test("doctor accepts supported worker manifests through v12 but rejects future versions", () => {
  const f=mixedFixture();try {
   const file=path.join(f.client,'../worker-runtime/antigravity.manifest.json');
   const base=JSON.parse(readFileSync(file,'utf8'));
-  for(const version of [9,10,11,12]){
+  for(const version of [9,10,11,12,13]){
    writeJson(file,{...base,version});
    const inv=readInstallationInventory({clientRoot:f.client,now:NOW,pidAlive:()=>true,advisoryHeldAt:()=>true});
    const row=inv.profiles.find(p=>p.profile==='gravity2');
-   assert.equal(row.binding.status,version===12?'invalid':'bound');
+   assert.equal(row.binding.status,version===13?'invalid':'bound');
   }
  }finally{rmSync(f.root,{recursive:true,force:true});}
 });

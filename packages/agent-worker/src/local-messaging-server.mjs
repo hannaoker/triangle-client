@@ -97,7 +97,7 @@ export function createLocalControlServer({
         !["worker", "conversation"].includes(entry.kind)) {
       throw coded("invalid_options", "Invalid recipient directory entry");
     }
-    directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown" });
+    directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown", ...(entry.harness === "grok" ? {harness:"grok",capabilities:{queueable:true,wakeCapable:false,pullInbox:true}} : {}) });
   }
 
   let server = null;
@@ -257,7 +257,7 @@ export function createLocalControlServer({
             const known=new Set(sessions.map(entry=>entry.id));
             sessions.push(...discovered.filter(entry=>!known.has(entry.id)));
           }
-          socket.write(encodeFrame(createSuccessResponse(id, { sessions }, PROTOCOL_VERSION)));
+          socket.write(encodeFrame(createSuccessResponse(id, { sessions: interactiveBroker?.filterDirectory?interactiveBroker.filterDirectory(senderId,sessions):sessions }, PROTOCOL_VERSION)));
           break;
         }
         case "discover_recipients": {

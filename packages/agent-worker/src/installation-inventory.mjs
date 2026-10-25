@@ -55,7 +55,7 @@ const PROFILE_BINDING_MAX_BYTES = 4096;
 const AGENT_RECORD_MAX_BYTES = 64 * 1024;
 const INSTALLATION_IDENTITY_MAX_BYTES = 512;
 const WORKER_MANIFEST_KEYS = ["version", "nodeSHA256", "projectRoot", "environment", "artifacts"];
-const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8, 9, 10, 11]);
+const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 

@@ -283,7 +283,7 @@ public enum WorkerLauncherContractCases {
 
     public static func standaloneSupervisorResolvesCursorAndRejectsCorruption() throws {
         let cursor = try ClientInstance(profile: ProfileName("cursor-only"), runtimeAdapter: .cursorAcp)
-        for version in [8, 9, 10, 11] {
+        for version in [8, 9, 10, 11, 12] {
         let fixture = try ResolverFixture(manifestVersion: version, supervisor: true); defer { fixture.cleanup() }
         let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
         let coordinator = try resolver.resolveCoordinator(for: [cursor])
@@ -545,7 +545,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -561,7 +561,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -596,12 +596,12 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 {
+        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 {
+        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",
@@ -644,6 +644,9 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/claude-session-delivery.mjs",
                 "packages/agent-worker/src/claude-session-mcp-child.mjs",
             ]
+        }
+        if manifestVersion >= 12 {
+            artifactNames += ["packages/agent-worker/src/grok-local-session.mjs"]
         }
         if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]
