@@ -58,7 +58,7 @@ test('nonce binds event; duplicate retry is durable; invalid secret, scope and d
  }finally{await f.close();}
 });
 
-import {setupLocalMessaging,setupSessionDiscovery,disableSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
+import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,disableSessionDiscovery,runLocalMessagingCLI} from '../src/local-messaging-cli.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
 import {spawn} from 'node:child_process';
@@ -394,4 +394,16 @@ test('pre-origin Codex journal keeps its namespaced handle and defaults descript
   assert.equal(row.id,original.id);assert.equal(row.harness,'codex');assert.equal(row.origin,'unknown');
   assert.equal(row.capabilities.reachable,false);assert.equal(row.capabilities.wakeCapable,false);
  }finally{await f.close();}
+});
+
+test('Codex-only discovery rejects Claude messaging setup before changing owner files',()=>{
+ const f=ownerFixture();try{
+  const integration=JSON.parse(fs.readFileSync(f.integrationPath));
+  writePrivateJson(f.integrationPath,{...integration,harnesses:['codex']});
+  const beforeConfig=fs.readFileSync(f.configPath),beforeIntegration=fs.readFileSync(f.integrationPath);
+  const stateRoot=JSON.parse(beforeConfig).stateRoot,priorFiles=fs.readdirSync(stateRoot).sort();
+  assert.throws(()=>setupWorkspaceMessaging({config:f.configPath,workspace:f.workspace,'local-cli':path.join(f.root,'triangle-local')}),{code:'claude_discovery_required'});
+  assert.deepEqual(fs.readFileSync(f.configPath),beforeConfig);assert.deepEqual(fs.readFileSync(f.integrationPath),beforeIntegration);
+  assert.deepEqual(fs.readdirSync(stateRoot).sort(),priorFiles);assert.equal(fs.existsSync(path.join(f.workspace,'.mcp.json')),false);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });

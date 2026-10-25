@@ -551,6 +551,7 @@ export function setupWorkspaceMessaging(options,env=process.env){
  if(!config.discovery?.enabled)throw coded('discovery_required','Enable lifecycle discovery in this disposable workspace first');
  const d=readPrivateJson(config.discovery.integrationPath);
  if(!d.enabled||!options.workspace||fs.realpathSync(options.workspace)!==d.workspace)throw coded('workspace_mismatch','Explicit opted-in discovery workspace required');
+ if(!(d.harnesses||['claude']).includes('claude'))throw coded('claude_discovery_required','Enable Claude discovery with setup-discovery --harness claude before attaching Claude messaging');
  const wrapper=options['local-cli']||path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/bin/triangle-local');
  const st=fs.lstatSync(wrapper);
  if(fs.realpathSync(wrapper)!==wrapper||!st.isFile()||st.uid!==process.getuid()||(st.mode&0o022)||!(st.mode&0o100))throw coded('unsafe_path','Owner installed wrapper required');
