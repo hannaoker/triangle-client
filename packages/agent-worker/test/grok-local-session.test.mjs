@@ -8,13 +8,13 @@ import {execFile} from 'node:child_process';
 import {Readable} from 'node:stream';
 import {fileURLToPath} from 'node:url';
 import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,setupDesktopInbox,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
-import {setupGrok,readGrokBinding,disableGrok} from '../src/grok-local-session.mjs';
+import {setupGrok,readGrokBinding,disableGrok,runGrokCommand} from '../src/grok-local-session.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
 import {createLocalControlClient} from '../src/local-messaging-client.mjs';
 import {resolveLocalSocketAddress} from '../src/local-messaging-address.mjs';
-import {sessionAddress} from '../src/local-messaging-interactive-session.mjs';
+import {sessionAddress,readSessionMessagingPolicy} from '../src/local-messaging-interactive-session.mjs';
 const exec=promisify(execFile),cli=fileURLToPath(new URL('../src/local-messaging-cli.mjs',import.meta.url));
 const ownerId='a'.repeat(64),ctxA='11111111-1111-4111-8111-111111111111',ctxB='22222222-2222-4222-8222-222222222222';
 const hash=s=>createHash('sha256').update(s).digest('hex');
@@ -178,5 +178,47 @@ test('owner pairs a probed context hash while runtime still requires the actual 
   await errorCode(f.run(undefined,['grok','status','--context-hash',hash(ctxA)]),'grok_context_mismatch');
   await errorCode(f.run(undefined,['setup-grok','--alias','ambiguous','--context-hash',hash(ctxA),'--conversation-id',ctxB]),'invalid_grok_context');
   await errorCode(f.run(undefined,['setup-grok','--alias','invalid','--context-hash','not-a-hash']),'invalid_grok_context');
+ }finally{await f.close();}
+});
+
+
+test('send and reply preserve UTF-8 split across single-byte stdin reads',async()=>{
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[]);await f.start();
+  const invoke=async(context,operation,options,text)=>{
+   const bytes=Buffer.from(text);let out='';
+   const code=await runGrokCommand(operation,options,{configPath:f.configPath,env:{CURSOR_CONVERSATION_ID:context},input:Readable.from([...bytes].map(byte=>Buffer.from([byte]))),output:{write:part=>out+=part}});
+   assert.equal(code,0);return JSON.parse(out);
+  };
+  const text='你好🌍';
+  await invoke(ctxA,'send',{to:b.senderId,'message-id':'utf8-request','request-id':'utf8-request'},text);
+  assert.equal((await f.run(ctxB,['grok','inbox'])).items[0].text,text);
+  const claim=path.join(f.root,'utf8-claim.json');await f.run(ctxB,['grok','claim','--message-id','utf8-request','--claim-id','utf8-claim','--claim-file',claim]);
+  await invoke(ctxB,'reply',{'message-id':'utf8-request','reply-id':'utf8-reply','claim-file':claim},text);
+  assert.equal((await f.run(ctxA,['grok','replies','--request-id','utf8-request'])).replies[0].text,text);
+ }finally{await f.close();}
+});
+
+test('pairing at the workspace permission ceiling fails before changing any owner state',async()=>{
+ const f=fixture();try{
+  setupLocalMessaging({config:f.configPath,'desktop-binding':path.join(f.root,'desktop.json'),'thread-id':'grok-test-desktop',recipients:Array.from({length:32},(_,i)=>'worker-'+i)});
+  setupDesktopInbox({config:f.configPath,senders:['f'.repeat(64)]});
+  const workspace=path.join(f.root,'workspace');fs.mkdirSync(workspace,{mode:0o700});const wrapper=path.join(f.root,'wrapper');fs.writeFileSync(wrapper,'#!/bin/sh\nexit 0\n',{mode:0o700});
+  setupSessionDiscovery({config:f.configPath,workspace,'local-cli':wrapper});setupWorkspaceMessaging({config:f.configPath,workspace,'local-cli':wrapper});
+  const peer='session-'+'b'.repeat(64);
+  for(let i=0;i<31;i++)f.pair('participant-'+i,randomUUID(),[peer],[]);
+  const config=readPrivateJson(f.configPath),policyFile=config.sessionMessaging.integrationPath;
+  assert.equal(readSessionMessagingPolicy(policyFile).allowedRecipients.length,64);
+  const priorConfig=fs.readFileSync(f.configPath),priorPolicy=fs.readFileSync(policyFile);
+  assert.throws(()=>f.pair('overflow',randomUUID(),[peer],[]),{code:'grok_policy_capacity'});
+  assert.deepEqual(fs.readFileSync(f.configPath),priorConfig);assert.deepEqual(fs.readFileSync(policyFile),priorPolicy);
+  assert.equal(fs.existsSync(path.join(config.stateRoot,'grok-overflow.json')),false);
+  assert.equal(readSessionMessagingPolicy(policyFile).allowedRecipients.length,64);
+  // The independent outgoing ceiling has the same non-mutating failure contract.
+  const policy=readSessionMessagingPolicy(policyFile);
+  writePrivateJson(policyFile,{...policy,allowedSenders:Array.from({length:64},(_,i)=>createHash('sha256').update('sender-'+i).digest('hex'))});
+  const fullSenders=fs.readFileSync(policyFile);
+  assert.throws(()=>f.pair('outgoing-overflow',randomUUID(),[],[peer]),{code:'grok_policy_capacity'});
+  assert.deepEqual(fs.readFileSync(policyFile),fullSenders);assert.deepEqual(fs.readFileSync(f.configPath),priorConfig);
  }finally{await f.close();}
 });

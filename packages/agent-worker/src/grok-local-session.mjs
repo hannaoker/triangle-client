@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash, randomBytes, randomUUID} from 'node:crypto';
 import {readPrivateJson, writePrivateJson} from './local-messaging-auth-broker.mjs';
-import {createInteractiveSessionBroker, HEX64_PATTERN, UUID_PATTERN} from './local-messaging-interactive-session.mjs';
+import {createInteractiveSessionBroker, readSessionMessagingPolicy, HEX64_PATTERN, UUID_PATTERN} from './local-messaging-interactive-session.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
 import {coded} from './local-messaging-errors.mjs';
@@ -70,11 +70,15 @@ export function setupGrok(options, configPath, env = process.env) {
   // workspace policy ceiling; the per-Grok checks still restrict individual peers.
   if ([...allowedSenders,...allowedRecipients].some(id=>id.startsWith('session-'))) {
     if (!config.sessionMessaging?.enabled) throw coded('session_messaging_required','Enable workspace session messaging first');
-    const policy = readPrivateJson(config.sessionMessaging.integrationPath);
-    writePrivateJson(config.sessionMessaging.integrationPath,{...policy,
+    const policy = readSessionMessagingPolicy(config.sessionMessaging.integrationPath);
+    const nextPolicy={...policy,
       allowedSenders:[...new Set([...policy.allowedSenders,...(allowedRecipients.some(id=>id.startsWith('session-'))?[senderId]:[])])],
       allowedRecipients:[...new Set([...policy.allowedRecipients,...(allowedSenders.some(id=>id.startsWith('session-'))?[senderId]:[])])],
-    });
+    };
+    // Match the shared policy reader before writing ANY pairing/policy/config.
+    // Overfilling one list would otherwise disable unrelated Claude sessions.
+    if(nextPolicy.allowedSenders.length>64||nextPolicy.allowedRecipients.length>64)throw coded('grok_policy_capacity','Workspace policy cannot admit another Grok principal');
+    writePrivateJson(config.sessionMessaging.integrationPath,nextPolicy);
   }
   writePrivateJson(file,binding);
   writePrivateJson(configPath,{...config,grok:{enabled:true,bindings:[...entries.map(b=>b.file),file]}});
@@ -139,7 +143,16 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
         if (!st.isFile() || st.size > 128*1024) throw coded('invalid_message','Bounded message file required');
         text = fs.readFileSync(fd,'utf8');
       } finally {fs.closeSync(fd);}
-    } else for await (const chunk of input) {text += chunk;if (Buffer.byteLength(text)>128*1024) throw coded('invalid_message','Message too large');}
+    } else {
+      const chunks=[];let bytes=0;
+      for await (const chunk of input) {
+        const bytesChunk=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);
+        bytes+=bytesChunk.length;if(bytes>128*1024)throw coded('invalid_message','Message too large');
+        chunks.push(bytesChunk);
+      }
+      // Decode once: a pipe can split a UTF-8 character between arbitrary reads.
+      text=Buffer.concat(chunks,bytes).toString('utf8');
+    }
     if (!text.trim() || Buffer.byteLength(text)>128*1024) throw coded('invalid_message','Bounded nonempty text required');
     return text;
   };
