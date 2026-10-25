@@ -96,13 +96,13 @@ No other files in the repository were created or modified.
 
 1. **Installed CLI Bundle vs. Source CLI**:
    - `packages/triangle-cli/src/identity-inventory.mjs` dynamically imports `installation-inventory.mjs` and `identity-inventory.mjs` from `@the-triangle/agent-worker`.
-   - The default CLI commands (`triangle --help`, `setup`, `join`, `agent`, `permissions`, `device`, `status`, `doctor`, `resume`, `service`) do not import or evaluate the new inventory modules, keeping the default installed CLI fully operational.
+   - The CLI statically imports the new thin bridge; only the identity command dynamically loads the agent-worker inventory modules. The source CLI regression suite passes. Installed CLI operation has not been exercised in this step.
    - The package archive builder (`scripts/release/build-client-package.mjs`) includes tracked source files matching `packages/(triangle-cli|agent-worker)/src/.*\.mjs`.
 
 2. **Unresolved Release Gate (Manifest v12 vs v13)**:
    - `scripts/triangle-worker-install.py` defines `CURRENT_MANIFEST_VERSION = 12`. Its artifact lists (`SUPERVISOR_ARTIFACTS`, `WORKLOAD_CORE_ARTIFACTS`, etc.) currently omit `installation-inventory.mjs` and `identity-inventory.mjs`.
    - Per prompt constraints and Owner Decision 4 (Unified Messaging Interface design), neither `scripts/triangle-worker-install.py`, package manifests, nor Swift release scripts were modified. Manifest bump is deferred to a single release train (v13) for R1–R5.
-   - Consequently, this step represents **source CLI exposure only**; installed CLI support is not claimed until manifest v13 is enacted in that release train.
+   - This step represents **source CLI exposure only**. The archive builder and supervisor runtime manifest are separate packaging surfaces: omission from the supervisor manifest alone does not prove the packaged admin CLI is broken. Installed-package closure and execution remain untested; the later release train must verify each surface it activates.
 
 ---
 
