@@ -638,12 +638,16 @@ export async function createAttachedClaudeSessionMcpChild(options){
 // may serve several chats, and a chat attaches on its first Triangle tool call. Wake runs `codex queue` against the
 // chat's own thread from inside this child, with the executable and CODEX_HOME the owner pinned for wake, so the
 // supervisor never needs to store a raw thread id.
-export const CODEX_MCP_TOOLS = CLAUDE_MCP_TOOLS.map((tool) => (tool.name === "triangle_get_status"
+export const CODEX_MCP_TOOLS = [{
+  name: "triangle_attach_session",
+  description: "Lifecycle hook: attach only this calling Codex chat without reading its inbox or sending a message. No arguments or peer identity accepted.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+}, ...CLAUDE_MCP_TOOLS.map((tool) => (tool.name === "triangle_get_status"
   ? {
     ...tool,
-    description: "Show this chat's Triangle address and inbox counts, or the status of a sent message. Call it once at the start of a conversation: the first Triangle tool call is what makes this chat reachable by other agents.",
+    description: "Show this chat's Triangle address and inbox counts, or the status of a sent message. When automatic lifecycle attachment is enabled, this chat attaches without a model tool call. Otherwise call this once to make the chat reachable by other agents.",
   }
-  : tool));
+  : tool))];
 const MAX_CODEX_CHATS_PER_PROCESS = 16;
 
 export function codexCallIdentity(meta) {
@@ -839,15 +843,23 @@ export function createCodexSessionMcpChild({
         case "tools/call": {
           const { name, arguments: args = {} } = params;
           if (!args || typeof args !== "object") throw new Error("Invalid tool arguments: expected object");
+          if (name === "triangle_attach_session" && (Array.isArray(args) || Object.keys(args).length !== 0)) {
+            throw coded("invalid_arguments", "Automatic attachment accepts no identity or other arguments");
+          }
           state = chatState(codexCallIdentity(params._meta));
           const credential = await credentialFor(state, { renew: fresh, onReuse: () => { reusedGrant = true; } });
-          const resultData = await runSessionTool({ client: state.client, credential, name, args, generation: state.generation });
+          const resultData = name === "triangle_attach_session" ? {} : await runSessionTool({ client: state.client, credential, name, args, generation: state.generation });
           return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(resultData) }], isError: false } };
         }
         default:
           return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
       }
     } catch (err) {
+      // The fixed conversation already has its own owner/inbox. A lifecycle hook is a harmless no-op there;
+      // ordinary tools still explain that it must use the existing identity. Never attach a second inbox.
+      if (method === "tools/call" && params.name === "triangle_attach_session" && err?.code === "bound_codex_context") {
+        return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "{}" }], isError: false } };
+      }
       // A reused grant can predate a supervisor restart, and a resumed chat has a new lifecycle generation (its old
       // attachment then reads as offline). Both are refused before anything is processed, so one fresh attach and a
       // single retry of the whole call is safe. A chat that really ended fails the fresh attach and says so.

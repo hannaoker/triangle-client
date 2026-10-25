@@ -387,3 +387,77 @@ test('setup and disable work when the CLI file is run as the program, as the ins
   assert.equal(f.notifications.length,0);
  }finally{await f.close();}
  });
+
+
+test('automatic lifecycle attachment uses runtime identity without a model tool call and is a no-op for the bound thread',async()=>{
+ const f=await fixture();try{
+  const thread=uuid();await f.lifecycle(thread,'SessionStart');await f.lifecycle(f.desktop.threadId,'SessionStart');
+  const child=f.codexChild();
+  // Real Codex MCP hook metadata carries threadId without sessionId (probe 0.164.0).
+  const hook=async(id,args={})=>child.handleRequest({jsonrpc:'2.0',id:uuid(),method:'tools/call',params:{name:'triangle_attach_session',arguments:args,_meta:{threadId:id}}});
+  assert.equal((await f.listed()).find(r=>r.id===f.address(thread)).capabilities.reachable,false);
+  let result=await hook(thread);assert.equal(result.result.isError,false);assert.equal(result.result.content[0].text,'{}');
+  assert.equal((await f.listed()).find(r=>r.id===f.address(thread)).capabilities.reachable,true);
+  assert.equal((await hook(thread)).result.isError,false,'repeated hooks renew the existing attachment');
+  assert.equal((await hook(thread,{threadId:uuid()})).result.isError,true,'caller-supplied identity is never accepted');
+  assert.equal((await hook(f.desktop.threadId)).result.isError,false,'fixed owner needs no second attachment');
+  const bound=(await f.listed()).find(r=>r.id===f.address(f.desktop.threadId));assert.equal(bound.capabilities.reachable,false);assert.equal(bound.capabilities.wakeCapable,false);
+  await assert.rejects(call(child,f.desktop.threadId,'triangle_get_status'),/bound_codex_context/);
+  const bare=await child.handleRequest({jsonrpc:'2.0',id:uuid(),method:'tools/call',params:{name:'triangle_attach_session',arguments:{}}});
+  assert.equal(bare.result.isError,true);assert.match(bare.result.content[0].text,/missing_codex_context/);
+  await assert.rejects(call(child,thread,'triangle_attach_session',{},{sessionId:uuid()}),/ambiguous_codex_context/);
+  assert.equal(f.notifications.length,0,'attachment itself never queues a wake or reads an inbox');
+  assert.equal(f.runs.length,0);
+  writePrivateJson(f.config.sessionMessaging.integrationPath,{...f.policy,codex:{...f.policy.codex,enabled:false}});
+  assert.equal((await hook(thread)).result.isError,true,'revocation is enforced on every hook');
+ }finally{await f.close();}
+});
+
+test('automatic attachment setup is explicit, preserves unrelated hooks and mode, and cleans up on opt-out or disable',()=>{
+ const f=ownerFiles({codexMessaging:false});try{
+  const hooksFile=path.join(f.workspace,'.codex','hooks.json');
+  const settings=JSON.parse(fs.readFileSync(hooksFile));
+  settings.hooks.UserPromptSubmit.push({matcher:'anything',hooks:[{type:'command',command:'/bin/true',timeout:7}]});
+  fs.writeFileSync(hooksFile,JSON.stringify(settings));fs.chmodSync(hooksFile,0o640);
+  const original=fs.readFileSync(hooksFile,'utf8');
+  assert.equal(setupWorkspaceMessaging(f.codexOptions).autoAttach,false);
+  assert.equal(fs.readFileSync(hooksFile,'utf8'),original,'default setup cannot opt chats in or rewrite their hook file');
+  const enabled=setupWorkspaceMessaging({...f.codexOptions,autoAttach:true});assert.equal(enabled.autoAttach,true);assert.equal(enabled.requiresHarnessHookApproval,true);
+  const installed=fs.readFileSync(hooksFile,'utf8'),next=JSON.parse(installed);
+  for(const event of ['SessionStart','UserPromptSubmit']){
+   assert.deepEqual(next.hooks[event].slice(0,-1),settings.hooks[event]);
+   const hook=next.hooks[event].at(-1).hooks[0];assert.equal(hook.type,'mcp_tool');assert.equal(hook.server,'triangle-session');assert.equal(hook.tool,'triangle_attach_session');assert.deepEqual(hook.input,{});
+  }
+  assert.equal(fs.statSync(hooksFile).mode&0o777,0o640);
+  assert.equal(setupWorkspaceMessaging({...f.codexOptions,autoAttach:true}).requiresHarnessHookApproval,false);
+  assert.equal(fs.readFileSync(hooksFile,'utf8'),installed,'rerun is idempotent');
+  assert.equal(setupWorkspaceMessaging(f.codexOptions).autoAttach,true,'omitting the option preserves prior opt-in');
+  setupWorkspaceMessaging({...f.codexOptions,autoAttach:false});assert.deepEqual(JSON.parse(fs.readFileSync(hooksFile)),settings);
+  setupWorkspaceMessaging({...f.codexOptions,autoAttach:true});
+  assert.equal(disableWorkspaceMessaging({config:f.configPath,workspace:f.workspace}).mcpCleanupRequired,false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(hooksFile)),settings);
+  assert.equal(fs.statSync(hooksFile).mode&0o777,0o640);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('automatic attachment preflight rejects unsafe or foreign hooks without changing policy or MCP settings',()=>{
+ const f=ownerFiles();try{
+  const config=readPrivateJson(f.configPath),hooksFile=path.join(f.workspace,'.codex','hooks.json'),mcpFile=path.join(f.workspace,'.codex','config.toml');
+  const before=[fs.readFileSync(f.configPath,'utf8'),fs.readFileSync(config.sessionMessaging.integrationPath,'utf8'),fs.readFileSync(mcpFile,'utf8')];
+  const other=path.join(f.root,'foreign-hooks.json');fs.writeFileSync(other,'{}');fs.unlinkSync(hooksFile);fs.symlinkSync(other,hooksFile);
+  assert.throws(()=>setupWorkspaceMessaging({...f.codexOptions,autoAttach:true}),{code:'unsafe_path'});
+  fs.unlinkSync(hooksFile);fs.writeFileSync(hooksFile,JSON.stringify({hooks:{SessionStart:[{hooks:[{type:'mcp_tool',server:'triangle-session',tool:'triangle_attach_session',input:{arbitrary:'keep'}}]}]}}));
+  assert.throws(()=>setupWorkspaceMessaging({...f.codexOptions,autoAttach:true}),{code:'integration_exists'});
+  assert.deepEqual([fs.readFileSync(f.configPath,'utf8'),fs.readFileSync(config.sessionMessaging.integrationPath,'utf8'),fs.readFileSync(mcpFile,'utf8')],before);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+
+test('the installed CLI program accepts explicit automatic-attachment opt-in and opt-out',async()=>{
+ const f=ownerFiles({codexMessaging:false});try{
+  const args=['setup-session-messaging','--config',f.configPath,'--harness','codex','--workspace',f.workspace,'--local-cli',f.wrapper,'--sender',f.desktopSender];
+  const enable=await runProgram([...args,'--auto-attach']);assert.equal(enable.code,0,enable.stderr);assert.equal(JSON.parse(enable.stdout).autoAttach,true);
+  const disable=await runProgram([...args,'--no-auto-attach']);assert.equal(disable.code,0,disable.stderr);assert.equal(JSON.parse(disable.stdout).autoAttach,false);
+  const duplicate=await runProgram([...args,'--auto-attach','--no-auto-attach']);assert.notEqual(duplicate.code,0);assert.match(duplicate.stderr,/invalid_arguments/);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
