@@ -125,7 +125,7 @@ Rules:
 - Admission rows and adapter rows are reconciled at startup. A mismatch is shown in `status` as `inconsistent` and is never resolved by re-sending content automatically.
 - The local and Iroh adapters queue, because their journals already do. The MESH adapter fails fast with `route_unavailable` when MESH is unreachable in its first cut; whether to add an outbound queue is a later choice, since a hidden queue is the stale-instruction risk below.
 - `deliverBy` (proposed, stored as `deliver_by`) bounds how long a message may wait to be delivered. Defaults (owner decision 6): Iroh 24 hours, which survives a night with a sleeping Mac; local none, so the proved same-host behavior does not change unless the owner sets a limit; MESH not applicable. The owner can set or shorten a route's default, and a send can only shorten it further. Expiry applies only to messages not yet delivered: work that is `executing` or `held` is never expired by time. After it passes, the record becomes `expired` and is never delivered. This prevents a stale instruction arriving hours later after a reconnect. The Iroh drain has no delivery deadline of its own beyond its 8-day record retention (checked); whether that retention removes an unacknowledged outbound request at day 8 was not checked.
-- Retention follows section 4.11; after it, `status` answers `expired`, not `unknown`.
+- Retention follows section 4.11. Missing history is not delivery expiry: without an explicit retained expiry record, preserve native `not_found` / history unavailable. Never fabricate `expired` from compaction.
 
 ### 4.4 State model
 
@@ -135,13 +135,13 @@ The caller sees one `state` plus an `evidence` list; every step records when it 
 | :--- | :--- | :--- | :--- | :--- |
 | `admitted` | Persisted by the router; nothing handed off yet | journal row, before dispatch | router record only | router record only |
 | `handed_off` | The adapter holds it | `queued_local` | `outbound` row written | `mesh.messages.send` accepted |
-| `received` | The remote side has it durably | recipient journal row (same host, so equal to `handed_off`) | engine receipt `received_peer` | event recorded in the room (server-recorded) |
-| `delivered` | A destination has it: session inbox, wake accepted, or runner queue | claimed or woken session | peer drain `admitted` | delivery claimed; the sender may be unable to see this |
-| `executing` | Work started | `executing` | `executing` | not reportable |
+| `received` | Destination-side durable custody, with component evidence | same-host journal row; no recipient action implied | engine receipt `received_peer` | not proved by a server-recorded room event alone |
+| `delivered` | Recipient retrieval or claim explicitly reported | interactive claim if exposed; a wake or queued inbox alone is insufficient | drain admission alone is insufficient | explicit recipient claim if exposed to sender |
+| `executing` | Native execution claim reported; not independent proof the model started | `executing` | `executing` | not reportable |
 | `held` | Uncertain execution or a destination problem; owner action needed; never replayed | `held` | `held` | not reportable |
 | `completed` | Work finished; a reply may exist | `completed` | `result` | not reportable |
 | `replied` | A correlated reply is available | `list_replies` non-empty | `reply_received` | reply event present |
-| `failed`, `expired` | Terminal, with a bounded reason code | execution failure; `deliver_by` | `rejected`, `reply_failed`, `discarded` | permission or quota denial |
+| `failed`, `expired` | Explicit terminal rejection or delivery-deadline expiry | runtime failure remains `held`; expiry requires a future explicit deadline record | preserve recoverable `reply_failed`; do not flatten it into terminal failure | permission or quota denial |
 
 A state that a route cannot report is shown as `unknown` with the reason, and the router never infers it from a later state on another axis. The first state is always `admitted`, so the contract's distinction between admission, delivery, execution and reply is explicit. Existing `status` and `phase` fields stay in the response for compatibility.
 
@@ -222,7 +222,7 @@ Evaluation order for every send, on every route, failing closed at the first ref
 
 The router also helps loaded sessions without any schema change: error text for `route_ambiguous` and `sender_unbound` tells the model exactly which argument to add or what to ask the owner, and that text arrives in the result.
 
-Retention, stated once for the unified interface: the admission record follows the local journal's 8-day compaction of finished records; the Iroh route adds 7 days of engine tombstones; the MESH route follows MESH's 1-year events and 30-day processed delivery rows. The router's `expired` answer applies after the shortest of them for the route in use.
+Retention, stated once for the unified interface: the admission record follows the local journal's 8-day compaction of finished records; the Iroh route adds 7 days of engine tombstones; the MESH route follows MESH's 1-year events and 30-day processed delivery rows. Retention removes evidence; it does not establish delivery-deadline expiry. Until a tombstone contract exists, a missing record remains native `not_found` / history unavailable. Pending local requests, held work and unconsumed replies are not compacted by the finished-record policy.
 
 ## 5. Security notes
 
@@ -311,3 +311,13 @@ Release mechanics (project experience): the router and adapters are new modules 
 | MESH authority composable; no content bridge, fallback, enrollment or weaker authentication | 2, 4.2, 5 |
 | Installed supervisor and supported entries end to end | 4.1, 6, 7 |
 | Acceptance 1 to 6 | 6 |
+
+### R0 implementation checkpoint (2026-10-25)
+
+`transport-adapter-contract.mjs` and `local-adapter.mjs` are library-only modules, not imported by production entrypoints or added to the installed runtime manifest. The adapter wraps the existing authenticated local control client; it creates no identities, grants, admissions table, router, background loop or wake path. The caller owns the client and supplies a current credential for each operation.
+
+R0 requires caller-owned stable message and request IDs before sending. Native errors and retry IDs remain with the caller; no automatic send retry or fallback occurs. Remote `via`, delivery deadlines and nonzero waits fail explicitly before authentication or IPC. Discovery keeps visibility metadata separate from current send eligibility. `poll` and `replies` are non-consuming, and `consume` remains explicit. Claims and replies continue through the existing native interface; this is not yet the unified agent-facing tool.
+
+State projection preserves native status and phase. `queued_local` means same-host durable `received`, not recipient delivery; `executing` reports a native claim; `completed` does not establish a correlated reply. Wake acceptance never establishes delivery. Full router timestamps and evidence histories remain later-slice work.
+
+Verification uses the production SQLite journal, real local control server/client and real dispatcher with a controlled test runner. These are isolated conformance tests, not installed-runtime or live-model acceptance. R1 remains dependent on the identity design and its own rollout gates.
