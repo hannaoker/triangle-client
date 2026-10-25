@@ -11,6 +11,9 @@ export function createLocalAdapter({ client, getCredential } = {}) {
     throw coded("invalid_transport_adapter", "Local client and credential provider are required");
   }
   function check(options = {}) {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      throw coded("invalid_arguments", "Local adapter options must be an object");
+    }
     if (options.via !== undefined && options.via !== "local") {
       throw coded("route_unavailable", "R0 supports only the local route");
     }

@@ -116,6 +116,12 @@ test("unsupported routes and policies fail before authentication; unknown send o
   client.sendMessage = async () => { sends++; throw Object.assign(new Error("unknown outcome"), { code: "timeout" }); };
   const adapter = createLocalAdapter({ client, getCredential: () => { credentials++; return "credential"; } });
   const input = { to: "worker", text: "x", messageId: "stable", requestId: "stable" };
+  for (const method of ["send", "status", "poll", "replies", "consume", "discover"]) {
+    for (const invalid of [null, [], "invalid"]) {
+      await assert.rejects(adapter[method](invalid), { code: "invalid_arguments" });
+    }
+  }
+  await assert.rejects(adapter.reach("worker", null), { code: "invalid_arguments" });
   for (const options of [{ via: "iroh" }, { via: "mesh" }, { deliverBy: 123 }, { waitMs: 1 }]) {
     await assert.rejects(adapter.send({ ...input, ...options }));
   }
