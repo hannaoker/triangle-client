@@ -642,3 +642,23 @@ test('evicting an ended session from a full directory takes its custody and wake
   assert.equal(await j.getSessionAttachment(addresses[0]),null);assert.ok(await j.getSessionAttachment(addresses[1]));
  }finally{inspect?.close();await j?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('a visible chat without an MCP child says why it cannot be reached; presence follows evidence, not the lease alone',async()=>{
+ const f=await fixture();try{
+  const sid=randomUUID();await f.lifecycle(sid,'SessionStart');
+  const listed=async()=>(await f.owner.listSessions({credential:await f.grant()})).find(r=>r.id.startsWith('session-'));
+  let row=await listed();
+  assert.equal(row.attachment,'not-attached');assert.match(row.attachmentHint,/reload or restart this chat/i);
+  assert.equal(row.capabilities.reachable,false);assert.equal(row.presence,'unknown','no lease is not the same as offline');assert.equal(row.presenceEvidence.kind,'none');
+  const child=await f.child(sid);await tool(child,'triangle_get_status');
+  row=await listed();
+  assert.equal(row.attachment,'attached');assert.equal(row.attachmentHint,undefined);assert.ok(row.capabilities.reachable);
+  assert.equal(row.presence,'online');assert.equal(row.presenceEvidence.kind,'mcp-lease');assert.ok(Date.now()-row.presenceEvidence.observedAt<30000);
+  await child.close();
+  row=await listed();
+  assert.equal(row.attachment,'not-attached','a closed child leaves the chat visible but unattached');assert.equal(row.capabilities.reachable,false);assert.equal(row.presence,'unknown');
+  await f.lifecycle(sid,'SessionEnd');
+  row=await listed();
+  assert.equal(row.attachment,'ended');assert.equal(row.attachmentHint,undefined);assert.equal(row.presence,'offline');assert.equal(row.presenceEvidence.kind,'end-event');
+ }finally{await f.close();}
+});

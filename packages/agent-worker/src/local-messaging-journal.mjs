@@ -6,6 +6,7 @@ import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal
 import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
 import { sessionAddress } from "./local-messaging-interactive-session.mjs";
+import { sanitizeSessionTitle } from "./local-messaging-auth-broker.mjs";
 
 const DB_NAME = "local-messaging.sqlite";
 const OWNER_DB_NAME = "local-messaging-owner.sqlite";
@@ -170,6 +171,9 @@ export function createLocalMessagingJournal({
   logger = {},
   maxPairRequests = DEFAULT_MAX_PAIR_EXCHANGES,
   pairWindowMs = DEFAULT_PAIR_WINDOW_MS,
+  // Owner choice (`discovery.titles`): when false, conversation titles are neither stored nor shown, including
+  // ones stored earlier, which stay in the file only until their entry ages out.
+  titles = true,
 } = {}) {
   adoptLegacyJournalFiles(stateRoot, logger);
   const deliveryJournal = openDeliveryJournal({
@@ -291,6 +295,10 @@ export function createLocalMessagingJournal({
   }
   if (!discoveryColumns.includes('origin')) {
     db.exec("ALTER TABLE local_discovered_sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'");
+  }
+  // Descriptive title and the session's host process (pid, exact start time, scope), all nullable and optional.
+  for (const [column, type] of [['title', 'TEXT'], ['host_pid', 'INTEGER'], ['host_start', 'TEXT'], ['host_scope', 'TEXT']]) {
+    if (!discoveryColumns.includes(column)) db.exec(`ALTER TABLE local_discovered_sessions ADD COLUMN ${column} ${type}`);
   }
   const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
   if (!messageColumns.includes("late_result_text")) {
@@ -1639,11 +1647,20 @@ export function createLocalMessagingJournal({
       }
       const generation=old ? old.generation+(old.lifecycle==='ended'&&event.kind==='start'&&!stale?1:0) : 1;
       if(!stale){
-        db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at,harness,origin)
-          VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
+        // A title that cannot be read now keeps the last known one. A start is a new run of the session, so its
+        // host process replaces the old one even when it could not be read; other events only refine it.
+        const host=event.host??null;
+        db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at,harness,origin,title,host_pid,host_start,host_scope)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
           generation=excluded.generation,session_id=excluded.session_id,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at,
-          origin=CASE WHEN excluded.origin='unknown' THEN local_discovered_sessions.origin ELSE excluded.origin END`)
-          .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt,harness,event.origin||'unknown');
+          origin=CASE WHEN excluded.origin='unknown' THEN local_discovered_sessions.origin ELSE excluded.origin END,
+          title=COALESCE(excluded.title,local_discovered_sessions.title),
+          host_pid=CASE WHEN excluded.host_pid IS NULL AND ? THEN local_discovered_sessions.host_pid ELSE excluded.host_pid END,
+          host_start=CASE WHEN excluded.host_pid IS NULL AND ? THEN local_discovered_sessions.host_start ELSE excluded.host_start END,
+          host_scope=CASE WHEN excluded.host_pid IS NULL AND ? THEN local_discovered_sessions.host_scope ELSE excluded.host_scope END`)
+          .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt,harness,event.origin||'unknown',
+            titles?event.title??null:null,host?host.pid:null,host?host.start:null,host?host.scope:null,
+            ...(event.kind==='start'?[0,0,0]:[1,1,1]));
       }
       if(!stale){
         if(event.kind==='end')db.prepare(`INSERT INTO local_discovery_ended(id,event_at,generation,last_seen_at) VALUES(?,?,?,?)
@@ -1657,12 +1674,18 @@ export function createLocalMessagingJournal({
     }catch(error){db.exec('ROLLBACK');throw error;}
   }
 
-  const discoveredSessionView=(row,workspace)=>({
-      id:row.id,label:`${row.harness==='codex'?'Codex':'Claude'} · ${path.basename(workspace).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,48)} · ${row.session_id.slice(0,8)}`,
-      kind:'conversation',harness:row.harness,...(row.harness==='codex'?{origin:row.origin}:{ }),workspace,generation:row.generation,
+  // `_host` is internal: brokers turn it into presence evidence and never hand a pid to a reader. The title is
+  // sanitized again here because it is untrusted text that ends up in a label other agents read.
+  const discoveredSessionView=(row,workspace)=>{
+    const title=titles?sanitizeSessionTitle(row.title):null;
+    return {
+      id:row.id,label:`${row.harness==='codex'?'Codex':'Claude'} · ${title?title+' · ':''}${path.basename(workspace).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,48)} · ${row.session_id.slice(0,8)}`,
+      ...(title?{title}:{}),kind:'conversation',harness:row.harness,...(row.harness==='codex'?{origin:row.origin}:{ }),workspace,generation:row.generation,
       presence:row.lifecycle==='ended'?'offline':'unknown',lifecycle:row.lifecycle,lastSeenAt:row.last_seen_at,
       capabilities:{visible:true,reachable:false,wakeCapable:false},
-    });
+      ...(row.host_pid?{_host:{pid:row.host_pid,start:row.host_start,scope:row.host_scope}}:{}),
+    };
+  };
   async function listDiscoveredSessions({installationId,workspace}) {
     assertNotClosed();
     return db.prepare('SELECT * FROM local_discovered_sessions WHERE installation_id=? AND workspace=? ORDER BY id').all(installationId,workspace).map(row=>discoveredSessionView(row,workspace));
