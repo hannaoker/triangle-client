@@ -280,23 +280,25 @@ test('Codex hook reaches real isolated host with payload identity, not inherited
   let executions=0;
   host=createInstalledLocalMessagingHost({configPath:f.configPath,runners:new Map([[config.recipients[0].instanceId,{run:async()=>{executions++;return {status:'completed',text:'unexpected'};}}]]),gate:createProfiledReasonerGate()});
   await host.start();
-  const ids=[randomUUID(),randomUUID()];
+  const ids=[randomUUID(),randomUUID(),randomUUID()];
   const codexHome=path.join(f.root,'codex-home');fs.mkdirSync(codexHome,{mode:0o700});
   const metadata=new DatabaseSync(path.join(codexHome,'state_5.sqlite'));
   metadata.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,source TEXT)');
-  for(const sid of ids)metadata.prepare('INSERT INTO threads VALUES(?,?)').run(sid,'cli');
+  for(const [i,sid] of ids.entries())if(i<2)metadata.prepare('INSERT INTO threads VALUES(?,?)').run(sid,i?'exec':'cli');
   metadata.close();fs.chmodSync(path.join(codexHome,'state_5.sqlite'),0o600);
-  for(const sid of ids){
+  const invoke=async(sid,eventName)=>{
    const result=await new Promise((resolve,reject)=>{
     const child=spawn(process.execPath,[cli,'discovery-hook','--config',f.configPath,'--harness','codex'],{env:{...process.env,CODEX_HOME:codexHome,CODEX_THREAD_ID:randomUUID()}});
     let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);
     child.once('error',reject);child.once('exit',code=>resolve({code,stdout,stderr}));
-    child.stdin.end(JSON.stringify({session_id:sid,cwd:f.workspace,hook_event_name:'SessionStart',source:'startup',prompt:'DO_NOT_RETAIN',transcript_path:'DO_NOT_READ'}));
+    child.stdin.end(JSON.stringify({session_id:sid,cwd:f.workspace,hook_event_name:eventName,source:'startup',prompt:'DO_NOT_RETAIN',transcript_path:'DO_NOT_READ'}));
    });assert.equal(result.code,0);assert.equal(result.stdout,'');
    assert.equal(result.stderr.replace(/\(node:\d+\) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)\n/g,''),'');
-  }
+  };
+  for(const sid of ids)await invoke(sid,'SessionStart');
   let output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
-  const sessions=JSON.parse(output).sessions.filter(r=>r.harness==='codex');assert.equal(sessions.length,2);
+  const sessions=JSON.parse(output).sessions.filter(r=>r.harness==='codex');assert.equal(sessions.length,3);
+  assert.deepEqual(new Set(sessions.map(r=>r.origin)),new Set(['cli','exec','unknown']));
   assert.ok(sessions.every(r=>ids.some(id=>r.label.endsWith(createHash('sha256').update(id).digest('hex').slice(0,8)))));
   for(const row of sessions){
    await assert.rejects(runLocalMessagingCLI(['send','--config',f.configPath,'--to',row.id,'--text','must not run'],{output:{write(){}}}),/recipient|authorized|allowed/i);
@@ -304,6 +306,12 @@ test('Codex hook reaches real isolated host with payload identity, not inherited
   const bytes=fs.readFileSync(path.join(config.stateRoot,'local-messaging.sqlite'));
   for(const sid of ids)assert.equal(bytes.includes(Buffer.from(sid)),false);
   assert.equal(bytes.includes(Buffer.from('DO_NOT_RETAIN')),false);assert.equal(executions,0);
+  fs.unlinkSync(path.join(codexHome,'state_5.sqlite'));
+  for(const sid of ids)await invoke(sid,'SessionEnd');
+  output='';await runLocalMessagingCLI(['sessions','--config',f.configPath],{output:{write:x=>output+=x}});
+  const ended=JSON.parse(output).sessions.filter(r=>r.harness==='codex');
+  assert.ok(ended.every(r=>r.presence==='offline'),'missing optional metadata must not suppress end hooks');
+  assert.deepEqual(new Set(ended.map(r=>r.origin)),new Set(['cli','exec','unknown']),'unknown end metadata preserves known origin');
  }finally{await host?.stop();fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
@@ -313,7 +321,7 @@ test('pre-Codex journal migration keeps Claude handles and lifecycle across reop
   const sid=randomUUID(),b=f.broker();const original=await f.report(b,f.event(sid,'start'));
   await f.journal.close();
   const db=new DatabaseSync(path.join(f.root,'journal/local-messaging.sqlite'));
-  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN harness');db.close();
+  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN harness; ALTER TABLE local_discovered_sessions DROP COLUMN origin');db.close();
   await f.reopen();
   const rows=await f.broker().listFor(f.reader);
   assert.equal(rows.length,1);assert.equal(rows[0].id,original.id);assert.equal(rows[0].harness,'claude');assert.equal(rows[0].generation,1);
@@ -338,25 +346,52 @@ test('twenty mixed sessions retain distinct handles across end/resume and journa
  }finally{await f.close();}
 });
 
-import {codexDiscoveryEligibility} from '../src/local-messaging-cli.mjs';
-test('Codex own-session metadata gate excludes exec, app-server, subagents, missing and unknown sources',()=>{
+import {readCodexSessionOrigin} from '../src/local-messaging-cli.mjs';
+test('Codex origin is optional metadata, including unattended sources, and never creates or edits a database',()=>{
  const root=fs.mkdtempSync('/private/tmp/triangle-codex-source-');
  try{
   const file=path.join(root,'state_5.sqlite'),env={CODEX_HOME:root};
-  assert.deepEqual(codexDiscoveryEligibility(randomUUID(),env),{eligible:false,reason:'metadata_unavailable'});
-  assert.equal(fs.existsSync(file),false,'read-only gate never creates a missing database');
+  assert.deepEqual(readCodexSessionOrigin(randomUUID(),env),'unknown');
+  assert.equal(fs.existsSync(file),false,'optional reader never creates a missing database');
   const db=new DatabaseSync(file);db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY, source TEXT)');
   const ids={};for(const source of ['cli','vscode','exec','app-server','subagent','future-source']){
    ids[source]=randomUUID();db.prepare('INSERT INTO threads VALUES(?,?)').run(ids[source],source);
   }
   db.close();fs.chmodSync(file,0o600);const before=fs.readFileSync(file);
-  for(const source of ['cli','vscode'])assert.deepEqual(codexDiscoveryEligibility(ids[source],env),{eligible:true});
-  for(const source of ['exec','app-server','subagent','future-source'])assert.deepEqual(codexDiscoveryEligibility(ids[source],env),{eligible:false,reason:'unsupported_session_source'});
-  assert.equal(codexDiscoveryEligibility(randomUUID(),env).eligible,false);
-  assert.equal(codexDiscoveryEligibility('bad',env).eligible,false);
-  assert.deepEqual(fs.readFileSync(file),before,'eligibility queries do not change source database');
-  fs.chmodSync(file,0o666);assert.equal(codexDiscoveryEligibility(ids.cli,env).eligible,false);
+  for(const source of ['cli','vscode','exec','app-server','subagent'])assert.equal(readCodexSessionOrigin(ids[source],env),source);
+  assert.equal(readCodexSessionOrigin(ids['future-source'],env),'unknown');
+  assert.equal(readCodexSessionOrigin(randomUUID(),env),'unknown');
+  assert.equal(readCodexSessionOrigin('bad',env),'unknown');
+  assert.deepEqual(fs.readFileSync(file),before,'origin queries do not change source database');
+  fs.chmodSync(file,0o666);assert.equal(readCodexSessionOrigin(ids.cli,env),'unknown');
   fs.chmodSync(file,0o600);fs.renameSync(file,file+'.saved');fs.symlinkSync(file+'.saved',file);
-  assert.equal(codexDiscoveryEligibility(ids.cli,env).eligible,false);
+  assert.equal(readCodexSessionOrigin(ids.cli,env),'unknown');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('origin is bounded descriptive metadata and is covered by the event challenge',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['codex']});
+  const b=f.broker(),auth={installationId:f.integration.installationId,secret:f.integration.secret};
+  const e={...f.event(randomUUID(),'start'),harness:'codex',origin:'exec'};
+  const challenge=b.challenge({...auth,event:e});
+  await assert.rejects(b.report({...auth,nonce:challenge.nonce,event:{...e,origin:'cli'}}),{code:'unauthorized'});
+  assert.throws(()=>b.challenge({...auth,event:{...e,origin:'UNBOUNDED_OR_INJECTED'}}),{code:'invalid_discovery_event'});
+  await f.report(b,e);const [row]=await b.listFor(f.reader);
+  assert.equal(row.origin,'exec');assert.equal(row.capabilities.reachable,false);assert.equal(row.capabilities.wakeCapable,false);
+ }finally{await f.close();}
+});
+
+test('pre-origin Codex journal keeps its namespaced handle and defaults descriptive origin to unknown',async()=>{
+ const f=fixture();try{
+  writePrivateJson(f.integrationPath,{...f.integration,harnesses:['codex']});
+  const sid=randomUUID(),e={...f.event(sid,'start'),harness:'codex',origin:'exec'};
+  const original=await f.report(f.broker(),e);
+  await f.journal.close();
+  const db=new DatabaseSync(path.join(f.root,'journal/local-messaging.sqlite'));
+  db.exec('ALTER TABLE local_discovered_sessions DROP COLUMN origin');db.close();
+  await f.reopen();const [row]=await f.broker().listFor(f.reader);
+  assert.equal(row.id,original.id);assert.equal(row.harness,'codex');assert.equal(row.origin,'unknown');
+  assert.equal(row.capabilities.reachable,false);assert.equal(row.capabilities.wakeCapable,false);
+ }finally{await f.close();}
 });

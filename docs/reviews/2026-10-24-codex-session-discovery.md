@@ -1,5 +1,7 @@
 # Codex automatic discovery: visibility-only candidate
 
+Current owner decision (2026-10-24): **list all participating sessions; keep delivery permissions separate**. This supersedes the earlier interactive-only source guard and current-owner hiding gate below. Origin is optional descriptive metadata; unknown origin does not prevent registration or lifecycle cleanup. Listing does not grant a receive route, wake capability, or messaging credential. “All” means eligible hook reports in the explicitly opted-in workspace, not a global scan of every chat on the machine.
+
 Status: implementation candidate; not installed in the production supervisor. This is a bounded part of discovery milestone D3, not completion of D3 or Reason parity.
 
 ## Fresh desktop evidence
@@ -114,3 +116,22 @@ Their exact handles remained `session-1c831761170ccb9a9e88932a0dfb1ef870e858bf03
 This closes the two-existing-desktop-conversations-after-app-restart case for the tested source guard and runtime. It does not establish no-reload attachment, five future-session trials, fork/compaction, hardware sleep/wake, or current execution-owner classification. Launch-to-registration is measured in two trials only; hook-log-to-journal differences were 19 and 17 ms. A retained old `5e76fdf2` row predates the source guard and is not evidence of a newly admitted exec-origin session. Private snapshots before/after are saved as `pre-restart-directory.json` and `post-restart-directory.json` under the test root.
 
 The disposable hooks are disabled and the temporary launchd host removed after this bounded acceptance run. Existing probe hooks and production Triangle configuration remain unchanged. PR #118 remains draft pending the remaining gates and review.
+
+
+## Owner-approved list-all revision
+
+The owner selected “List all sessions; keep delivery permissions separate.” Removed SQLite-based admission. The optional own-session point lookup now reports a bounded descriptive `origin` (`cli`, `vscode`, `exec`, app-server variants, subagent, or `unknown`); it does not classify the current owner or infer a worker kind. Metadata loss or schema drift produces unknown origin and never suppresses start/activity/end reports. Known origin is retained when a later end hook cannot read metadata.
+
+The journal adds `origin` with default `unknown`. Older Claude records and pre-origin Codex records retain their handles. Origin is enum-validated, permitted only for Codex, and included in the challenge digest. It cannot confer identity or authority. The directory retains `kind: conversation` for Codex conversation records regardless of who is running them; no worker classification is inferred from origin. Existing separately configured workers retain their established worker kind.
+
+Independent read-only review found no blocker in this separation, normalization or additive migration. Added coverage includes known-origin start followed by metadata-unavailable end, origin tampering between challenge/report, and both pre-harness and pre-origin migrations. Final regression: **253 tests passed, zero failures or skips** across local messaging/discovery/attachments, Claude session adapters and worker bundle closure. Independent review originally ran 17 focused tests before the final new cases; the final aggregate run was performed by the implementing agent.
+
+Earlier source-gate observations in this file are historical. Current-owner classification is no longer an admission requirement. Delivery attachment/wake and privacy/reader policy still require their existing separate approvals and proofs. No production activation follows from this scope revision alone.
+
+## List-all live acceptance — passed for Codex CLI 0.164
+
+Five fresh, unattended, no-tools `codex exec` canaries ran through the ordinarily trusted hooks and isolated host. All five returned the exact requested tokens, automatically appeared with `origin: exec`, then ended offline at generation 1. No operator registration was injected. Hook-log-to-first-journal-registration times were **22, 20, 40, 19 and 9 ms**. Process-launch-to-registration times were **2531, 1875, 1945, 5581 and 2076 ms**. Thus all five were prompt after their lifecycle hook, but this is not five launches under five seconds; one launch took 5.581 seconds. These are CLI trials, not five new desktop conversations or a measurement of MCP attachment time. Private per-trial metadata and output are under `all-origins-results.json` and `all-origins-*.jsonl` in the test root.
+
+A real `codex exec fork` from the first completed test session then produced a new UUID and distinct handle `session-cabd4602753404ce1dd8e1120558c6a078fd53d2aeaee75a1731c476a99cc43a`, with a native `source: fork` hook. It ended at generation 1. A subsequent `codex exec resume` of that completed child produced native `source: resume`, retained the same UUID/handle, and ended at generation 2. Both returned their exact no-tools tokens. Private evidence: `fork-resume-results.json`, `fork.jsonl` and `resume.jsonl`.
+
+This closes five fresh CLI registrations and real fork/resume identity continuity for the owner-approved list-all scope. Previous two-desktop restart proof remains separately valid. Actual desktop new-session five-trial timing, real compaction and hardware sleep/wake remain unverified follow-ups; no receive/wake support or reliable online presence is inferred from these discovery results.

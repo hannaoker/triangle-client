@@ -289,6 +289,9 @@ export function createLocalMessagingJournal({
   if (!discoveryColumns.includes('harness')) {
     db.exec("ALTER TABLE local_discovered_sessions ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude'");
   }
+  if (!discoveryColumns.includes('origin')) {
+    db.exec("ALTER TABLE local_discovered_sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'");
+  }
   const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
   if (!messageColumns.includes("late_result_text")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
@@ -1636,10 +1639,11 @@ export function createLocalMessagingJournal({
       }
       const generation=old ? old.generation+(old.lifecycle==='ended'&&event.kind==='start'&&!stale?1:0) : 1;
       if(!stale){
-        db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at,harness)
-          VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
-          generation=excluded.generation,session_id=excluded.session_id,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at`)
-          .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt,harness);
+        db.prepare(`INSERT INTO local_discovered_sessions(id,installation_id,workspace,session_id,lifecycle,generation,event_at,last_seen_at,harness,origin)
+          VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET lifecycle=excluded.lifecycle,
+          generation=excluded.generation,session_id=excluded.session_id,event_at=excluded.event_at,last_seen_at=excluded.last_seen_at,
+          origin=CASE WHEN excluded.origin='unknown' THEN local_discovered_sessions.origin ELSE excluded.origin END`)
+          .run(id,installationId,event.workspace,createHash('sha256').update(event.sessionId).digest('hex'),event.kind==='end'?'ended':'observed',generation,event.observedAt,receivedAt,harness,event.origin||'unknown');
       }
       if(!stale){
         if(event.kind==='end')db.prepare(`INSERT INTO local_discovery_ended(id,event_at,generation,last_seen_at) VALUES(?,?,?,?)
@@ -1655,7 +1659,7 @@ export function createLocalMessagingJournal({
 
   const discoveredSessionView=(row,workspace)=>({
       id:row.id,label:`${row.harness==='codex'?'Codex':'Claude'} · ${path.basename(workspace).replace(/[\u0000-\u001f\u007f]/g,'').slice(0,48)} · ${row.session_id.slice(0,8)}`,
-      kind:'conversation',harness:row.harness,workspace,generation:row.generation,
+      kind:'conversation',harness:row.harness,...(row.harness==='codex'?{origin:row.origin}:{ }),workspace,generation:row.generation,
       presence:row.lifecycle==='ended'?'offline':'unknown',lifecycle:row.lifecycle,lastSeenAt:row.last_seen_at,
       capabilities:{visible:true,reachable:false,wakeCapable:false},
     });

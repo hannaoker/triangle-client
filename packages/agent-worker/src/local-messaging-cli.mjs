@@ -352,30 +352,29 @@ export function disableSessionDiscovery(options,env=process.env){
  return {discoveryEnabled:false,hooksCleanupRequired,...(messaging?{mcpCleanupRequired:messaging.mcpCleanupRequired}:{})};
 }
 
-// Codex 0.164/state_5 compatibility adapter: inspect only this hook's own
-// session metadata. Never enumerate rows or open transcript_path. Unknown schemas
-// and sources are ineligible; process originator is not sufficient (Desktop can
-// resume an exec-origin thread without changing its source).
-export function codexDiscoveryEligibility(sessionId,env=process.env){
- if(!UUID_PATTERN.test(sessionId))return {eligible:false,reason:'invalid_session'};
+// Optional Codex 0.164/state_5 descriptive metadata, never an admission rule.
+// Read only this hook's own row; missing/changed metadata remains unknown.
+// Origin does not prove current execution owner or delivery permissions.
+export function readCodexSessionOrigin(sessionId,env=process.env){
+ if(!UUID_PATTERN.test(sessionId))return 'unknown';
  let db;
  try{
   const home=env.CODEX_HOME||path.join(env.HOME||os.homedir(),'.codex');
-  if(!path.isAbsolute(home)||fs.realpathSync(home)!==home)return {eligible:false,reason:'metadata_unavailable'};
+  if(!path.isAbsolute(home)||fs.realpathSync(home)!==home)return 'unknown';
   ancestors(home);
   const directory=fs.lstatSync(home),file=path.join(home,'state_5.sqlite');
-  if(!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o022))return {eligible:false,reason:'metadata_unavailable'};
+  if(!directory.isDirectory()||directory.uid!==process.getuid()||(directory.mode&0o022))return 'unknown';
   const stat=fs.lstatSync(file,{throwIfNoEntry:false});
   // Codex normally creates 0755/0644 metadata paths. Require owned, canonical,
   // non-writable-by-others paths without changing the owner's permissions.
-  if(!stat||!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o022))return {eligible:false,reason:'metadata_unavailable'};
+  if(!stat||!stat.isFile()||stat.isSymbolicLink()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o022))return 'unknown';
   const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite');
   db=new DatabaseSync(file,{readOnly:true});
   db.exec('PRAGMA busy_timeout=100');
   const row=db.prepare('SELECT source FROM threads WHERE id=?').get(sessionId.toLowerCase());
-  if(!row)return {eligible:false,reason:'metadata_unavailable'};
-  return ['cli','vscode'].includes(row.source)?{eligible:true}:{eligible:false,reason:'unsupported_session_source'};
- }catch{return {eligible:false,reason:'metadata_unavailable'};}
+  if(!row)return 'unknown';
+  return ['cli','vscode','exec','app-server','appServer','subagent'].includes(row.source)?row.source:'unknown';
+ }catch{return 'unknown';}
  finally{try{db?.close();}catch{}}
 }
 
@@ -390,11 +389,7 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
   const config=readPrivateJson(configPath);if(!config.discovery?.enabled)return 0;
   const integration=readPrivateJson(config.discovery.integrationPath);if(!integration.enabled||!(integration.harnesses||['claude']).includes(harness))return 0;
   const workspace=fs.realpathSync(payload.cwd);if(workspace!==integration.workspace)return 0;
-  if(harness==='codex'){
-   const eligibility=codexDiscoveryEligibility(payload.session_id,env);
-   if(!eligibility.eligible){stderr.write(`Triangle discovery skipped (${eligibility.reason})\n`);return 0;}
-  }
-  const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now(),...(harness==='codex'?{harness}:{})};
+  const event={eventId:randomUUID(),sessionId:payload.session_id,kind,workspace,observedAt:Date.now(),...(harness==='codex'?{harness,origin:readCodexSessionOrigin(payload.session_id,env)}:{})};
   const client=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,timeoutMs:1500,connectTimeoutMs:1500});
   try{
    const auth={installationId:integration.installationId,secret:integration.secret};

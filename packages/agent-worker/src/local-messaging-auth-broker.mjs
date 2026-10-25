@@ -79,12 +79,13 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
   return c;
  }
  function normalize(event,c){
-  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).filter(k=>k!=='harness').sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
+  if(!event||typeof event!=='object'||Array.isArray(event)||Object.keys(event).filter(k=>!['harness','origin'].includes(k)).sort().join(',')!=='eventId,kind,observedAt,sessionId,workspace'||
     (event.harness!==undefined&&!['claude','codex'].includes(event.harness))||
+    (event.origin!==undefined&&(event.harness!=='codex'||!['unknown','cli','vscode','exec','app-server','appServer','subagent'].includes(event.origin)))||
     !(c.harnesses||['claude']).includes(event.harness||'claude')||
     !uuid.test(event.eventId)||!uuid.test(event.sessionId)||!['start','activity','end'].includes(event.kind)||
     event.workspace!==c.workspace||!Number.isSafeInteger(event.observedAt)||event.observedAt>clock()+1000||event.observedAt<clock()-30000)throw coded('invalid_discovery_event','Invalid or stale lifecycle metadata');
-  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt,...(event.harness==='codex'?{harness:'codex'}:{})};
+  return {eventId:event.eventId.toLowerCase(),sessionId:event.sessionId.toLowerCase(),kind:event.kind,workspace:c.workspace,observedAt:event.observedAt,...(event.harness==='codex'?{harness:'codex',...(event.origin!==undefined?{origin:event.origin}:{})}:{})};
  }
  const digest=(event,installationId)=>createHash('sha256').update(installationId+'\0'+JSON.stringify(event)).digest('hex');
  return {
