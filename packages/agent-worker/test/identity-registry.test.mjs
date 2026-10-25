@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -2182,24 +2183,12 @@ test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanish
       },
     });
 
-    // 1. Simulate nlink === 0 on lstatSync of registry file and .registry.lock-journal during root scan,
-    // and nlink === 0 on first fstatSync of registry file (replaced concurrently -> triggers retry and succeeds on attempt 2)
+    // 1. Simulate nlink === 0 on the first fstatSync of the opened registry descriptor
+    // (replaced concurrently -> reported as vanished, triggers a retry that succeeds on attempt 2)
     let fstatCallsOnReg = 0;
-    let lstatCallsOnReg = 0;
     const rNlinkZero = readIdentityRegistry({
       root,
       fsHooks: {
-        lstatSync(target, options) {
-          const st = lstatSync(target, options);
-          if (!st) return st;
-          if (target.endsWith(REGISTRY_FILE_NAME)) {
-            lstatCallsOnReg += 1;
-            if (lstatCallsOnReg === 1) {
-              return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { nlink: 0 });
-            }
-          }
-          return st;
-        },
         fstatSync(fd, filePath, realFstat) {
           const st = realFstat(fd);
           if (filePath && filePath.endsWith(REGISTRY_FILE_NAME)) {
@@ -2282,7 +2271,8 @@ test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanish
     );
     assert.equal(persistentCalls, 6);
 
-    // 5. Transient .registry.lock-journal (present, absent, or nlink 0) is tolerated by both read and update
+    // 5. A present, private .registry.lock-journal is tolerated by a read
+    // (the nlink 0 and unsafe journal states are covered by the next test)
     const journalFile = path.join(root, `${LOCK_FILE_NAME}-journal`);
     writeFileSync(journalFile, "sqlite-rollback-journal-bytes", { mode: 0o600 });
     chmodSync(journalFile, 0o600);
@@ -2293,10 +2283,219 @@ test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanish
     rmSync(base, { recursive: true, force: true });
   }
 });
-test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 seconds with zero reader errors)", async () => {
+
+test("Review fix: non-regular files at the data paths are rejected promptly (FIFO, symlink, directory)", () => {
+  const base = makeTmpRoot("id-reg-nonregular-");
+  try {
+    const root = path.join(base, "identity");
+    const t1 = "2026-10-25T20:00:00.000Z";
+    const t2 = "2026-10-25T20:01:00.000Z";
+    const bAlpha = makeValidBinding("alpha", { issued_at: t2 });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: t1,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 1,
+      now: t2,
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlpha;
+        return r;
+      },
+    });
+
+    // The probe runs in a child process with a timeout, so a reader that blocks on the planted
+    // entry fails this test instead of hanging it.
+    const modulePath = path.join(REPO_ROOT, "packages/agent-worker/src/identity-registry.mjs");
+    const probeScript = `
+      import { readIdentityRegistry, updateIdentityRegistry } from ${JSON.stringify(modulePath)};
+      const root = process.argv[1];
+      const outcome = (fn) => {
+        try {
+          fn();
+          return "no-error";
+        } catch (err) {
+          return err.code + ":" + err.reason;
+        }
+      };
+      console.log(JSON.stringify({
+        read: outcome(() => readIdentityRegistry({ root })),
+        update: outcome(() =>
+          updateIdentityRegistry({
+            root,
+            expectedSequence: 2,
+            now: "2026-10-25T20:02:00.000Z",
+            action: "init",
+            subject: null,
+            mutate: (r) => r,
+          }),
+        ),
+      }));
+    `;
+    const probe = () => {
+      const res = childProcess.spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", probeScript, root],
+        { encoding: "utf8", timeout: 15000 },
+      );
+      assert.equal(res.error, undefined, `probe did not finish: ${res.error?.message}`);
+      assert.equal(res.signal, null, "probe was killed (a reader blocked on the planted entry)");
+      assert.equal(res.status, 0, res.stderr);
+      return JSON.parse(res.stdout.trim().split("\n").pop());
+    };
+
+    const planters = {
+      directory: (target) => mkdirSync(target, { mode: 0o700 }),
+      symlink: (target, saved) => symlinkSync(saved, target),
+      fifo: (target) => {
+        childProcess.execFileSync("mkfifo", [target]);
+        chmodSync(target, 0o600);
+      },
+    };
+
+    for (const fileName of [REGISTRY_FILE_NAME, AUDIT_FILE_NAME]) {
+      for (const [kind, plant] of Object.entries(planters)) {
+        const target = path.join(root, fileName);
+        const saved = path.join(base, `saved-${fileName}`);
+        renameSync(target, saved);
+        try {
+          plant(target, saved);
+          const outcome = probe();
+          assert.match(outcome.read, /^registry_unsafe:/, `${kind} at ${fileName}: read`);
+          assert.match(outcome.update, /^registry_unsafe:/, `${kind} at ${fileName}: update`);
+        } finally {
+          rmSync(target, { recursive: true, force: true });
+          renameSync(saved, target);
+        }
+        const restored = readIdentityRegistry({ root });
+        assert.equal(restored.state, "ok", `${kind} at ${fileName}: restored`);
+        assert.equal(restored.registry.sequence, 2);
+      }
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("Review fix: lock-journal states (nlink 0 tolerated; symlink, wrong mode and hard link rejected by read and update)", () => {
+  const base = makeTmpRoot("id-reg-journal-");
+  try {
+    const root = path.join(base, "identity");
+    const t1 = "2026-10-25T21:00:00.000Z";
+    const t2 = "2026-10-25T21:01:00.000Z";
+    const bAlpha = makeValidBinding("alpha", { issued_at: t2 });
+    const bBeta = makeValidBinding("beta", { issued_at: "2026-10-25T21:02:00.000Z" });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: t1,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 1,
+      now: t2,
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlpha;
+        return r;
+      },
+    });
+
+    const journalPath = path.join(root, `${LOCK_FILE_NAME}-journal`);
+    const registryPath = path.join(root, REGISTRY_FILE_NAME);
+    const auditPath = path.join(root, AUDIT_FILE_NAME);
+    const registryBytes = readFileSync(registryPath);
+    const auditBytes = readFileSync(auditPath);
+    const tryBind = () =>
+      updateIdentityRegistry({
+        root,
+        expectedSequence: 2,
+        now: "2026-10-25T21:02:00.000Z",
+        action: "bind",
+        subject: bBeta.profile_instance_id,
+        mutate: (r) => {
+          r.bindings[bBeta.profile_instance_id] = bBeta;
+          return r;
+        },
+      });
+
+    // A journal that shows nlink 0 (being deleted by SQLite) never fails the read
+    writeFileSync(journalPath, "journal", { mode: 0o600 });
+    chmodSync(journalPath, 0o600);
+    const withVanishingJournal = readIdentityRegistry({
+      root,
+      fsHooks: {
+        lstatSync(target, options, realLstat) {
+          const st = realLstat(target, options);
+          if (st && target.endsWith(`${LOCK_FILE_NAME}-journal`)) {
+            return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { nlink: 0 });
+          }
+          return st;
+        },
+      },
+    });
+    assert.equal(withVanishingJournal.state, "ok");
+    rmSync(journalPath, { force: true });
+
+    // Unsafe journals are still rejected by both read and update, and nothing is written
+    const extraLink = path.join(base, "journal-extra-link");
+    const unsafeJournals = {
+      symlink: () => symlinkSync(path.join(base, "elsewhere"), journalPath),
+      "group-readable": () => {
+        writeFileSync(journalPath, "journal", { mode: 0o644 });
+        chmodSync(journalPath, 0o644);
+      },
+      "hard-linked": () => {
+        writeFileSync(journalPath, "journal", { mode: 0o600 });
+        chmodSync(journalPath, 0o600);
+        linkSync(journalPath, extraLink);
+      },
+    };
+    for (const [kind, plant] of Object.entries(unsafeJournals)) {
+      plant();
+      try {
+        assert.throws(
+          () => readIdentityRegistry({ root }),
+          (err) => err.code === "registry_unsafe",
+          `${kind} journal: read`,
+        );
+        assert.throws(
+          () => tryBind(),
+          (err) => err.code === "registry_unsafe",
+          `${kind} journal: update`,
+        );
+        assert.deepEqual(readFileSync(registryPath), registryBytes);
+        assert.deepEqual(readFileSync(auditPath), auditBytes);
+      } finally {
+        rmSync(journalPath, { force: true });
+        rmSync(extraLink, { force: true });
+      }
+    }
+
+    // With the journal gone, updates work again
+    const after = tryBind();
+    assert.equal(after.registry.sequence, 3);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("Review Item 3: multi-process stress test (4 writer processes and 1 reader process for ~3 seconds with zero reader errors)", { timeout: 60000 }, async () => {
   const base = makeTmpRoot("id-reg-mp-stress-");
   try {
     const root = path.join(base, "identity");
+    const stopFile = path.join(base, "stop");
     updateIdentityRegistry({
       root,
       expectedSequence: 0,
@@ -2312,14 +2511,15 @@ test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 se
     const invPath = path.join(REPO_ROOT, "packages/agent-worker/src/installation-inventory.mjs");
 
     const writerScript = `
-      import { parentPort, workerData } from "node:worker_threads";
       import { createHash } from "node:crypto";
       import { readIdentityRegistry, updateIdentityRegistry, LOCAL_PROFILE_BINDING_SCHEMA } from ${JSON.stringify(
         modulePath,
       )};
       import { deriveClientInstanceId } from ${JSON.stringify(invPath)};
 
-      const { root, profileName, stopAt } = workerData;
+      const root = process.argv[1];
+      const profileName = process.argv[2];
+      const stopAt = Date.now() + Number(process.argv[3]);
       const instanceId = deriveClientInstanceId(profileName);
       const principalId = "agent_" + createHash("sha256").update("agent:" + profileName).digest("hex").slice(0, 32);
       let updates = 0;
@@ -2370,20 +2570,22 @@ test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 se
           }
         }
       }
-      parentPort.postMessage({ updates, conflicts });
+      console.log(JSON.stringify({ updates, conflicts }));
     `;
 
+    // The reader stops when the parent creates the stop file, with a hard deadline as a backstop.
     const readerScript = `
-      import { parentPort, workerData } from "node:worker_threads";
+      import { existsSync } from "node:fs";
       import { readIdentityRegistry } from ${JSON.stringify(modulePath)};
 
-      const { root, stopSignal } = workerData;
-      const view = new Int32Array(stopSignal);
+      const root = process.argv[1];
+      const stopFile = process.argv[2];
+      const hardStop = Date.now() + Number(process.argv[3]);
       let reads = 0;
       let maxSequence = 0;
       const errors = [];
 
-      while (Atomics.load(view, 0) === 0) {
+      while (!existsSync(stopFile) && Date.now() < hardStop) {
         try {
           const res = readIdentityRegistry({ root });
           reads += 1;
@@ -2394,39 +2596,45 @@ test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 se
           errors.push({ code: err.code, reason: err.reason, message: err.message });
         }
       }
-      parentPort.postMessage({ reads, maxSequence, errors });
+      console.log(JSON.stringify({ reads, maxSequence, errors }));
     `;
 
-    const stopAt = Date.now() + durationMs;
-    const stopSignal = new SharedArrayBuffer(4);
-    const stopView = new Int32Array(stopSignal);
-
-    const readerPromise = new Promise((resolve, reject) => {
-      const w = new Worker(readerScript, {
-        eval: true,
-        workerData: { root, stopSignal },
+    const runChild = (script, args) =>
+      new Promise((resolve, reject) => {
+        const child = childProcess.spawn(
+          process.execPath,
+          ["--input-type=module", "-e", script, ...args],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
       });
-      w.on("message", resolve);
-      w.on("error", reject);
-    });
+    const lastJsonLine = (run) => JSON.parse(run.stdout.trim().split("\n").pop());
 
-    const writerPromises = [];
-    for (let i = 0; i < writerCount; i++) {
-      writerPromises.push(
-        new Promise((resolve, reject) => {
-          const w = new Worker(writerScript, {
-            eval: true,
-            workerData: { root, profileName: `writer-${i}`, stopAt },
-          });
-          w.on("message", resolve);
-          w.on("error", reject);
-        }),
-      );
+    const readerPromise = runChild(readerScript, [root, stopFile, String(durationMs + 30000)]);
+    const writerRuns = await Promise.all(
+      Array.from({ length: writerCount }, (_, i) =>
+        runChild(writerScript, [root, `writer-${i}`, String(durationMs)]),
+      ),
+    );
+    writeFileSync(stopFile, "stop\n");
+    const readerRun = await readerPromise;
+
+    for (const run of [...writerRuns, readerRun]) {
+      assert.equal(run.code, 0, `child exited with ${run.code}/${run.signal}: ${run.stderr}`);
     }
-
-    const writerResults = await Promise.all(writerPromises);
-    Atomics.store(stopView, 0, 1);
-    const readerResult = await readerPromise;
+    const writerResults = writerRuns.map(lastJsonLine);
+    const readerResult = lastJsonLine(readerRun);
 
     assert.deepEqual(
       readerResult.errors,

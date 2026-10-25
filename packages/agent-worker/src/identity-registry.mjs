@@ -789,11 +789,14 @@ function verifyRootEntriesCustody(root, fsHooks = null) {
  * Opens `filePath` first with `O_NOFOLLOW`, validates custody (regular file, owner,
  * mode 0600, `nlink === 1`) on `fstatSync(fd)` of that open descriptor, and reads
  * from the same descriptor so a concurrent rename cannot swap what was checked.
+ * `O_NONBLOCK` keeps `open` from blocking on a FIFO planted at the path; the descriptor
+ * check then rejects it as a non-regular file.
  * Returns `{ status: "ok", buffer }`, `{ status: "absent" }`, or `{ status: "vanished" }`
  * (when the opened descriptor has `nlink === 0` because a writer unlinked/replaced it).
  */
 function readNoFollowDescriptor(filePath, maxBytes, oversizeCode, oversizeReason, fsHooks = null) {
-  const openFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  const openFlags =
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
   let fd;
   try {
     fd = hookOpenSync(filePath, openFlags, undefined, fsHooks);
@@ -802,7 +805,10 @@ function readNoFollowDescriptor(filePath, maxBytes, oversizeCode, oversizeReason
       return { status: "absent", buffer: null };
     }
     // On macOS/POSIX, O_NOFOLLOW on a symlink yields ELOOP (or EFTYPE on some BSDs)
-    throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+    if (err?.code === "ELOOP" || err?.code === "EFTYPE") {
+      throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+    }
+    throw codedError("registry_unsafe", "file_open_failed");
   }
 
   try {

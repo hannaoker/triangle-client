@@ -108,7 +108,9 @@ To prevent false-positive `registry_unsafe` errors when a reader runs concurrent
 - **Descriptor-based verification (`readNoFollowDescriptor`)**: Each data file (`identity-registry-v1.json` and `registry-audit.jsonl`) is opened first with `O_RDONLY | O_NOFOLLOW`, and custody checks (regular file, current UID, mode `0600`, `nlink === 1`) are evaluated on `fstatSync(fd)` of that open file descriptor before reading from the same descriptor, so a concurrent `rename` cannot replace what was checked.
 - **Vanished files and `nlink === 0`**: A path that vanishes (`ENOENT`) between the directory scan and `openSync`, or an open/stat result showing `nlink === 0` (briefly observable on APFS/POSIX while a file is being unlinked or atomically replaced), is treated as vanished rather than `registry_unsafe`.
 - **Transient lock journal tolerance**: Both the root directory scan and writer lock acquisition tolerate the transient SQLite rollback journal `.registry.lock-journal` (whether present with mode `0600`, absent, or `nlink === 0`) while still rejecting symlinks, non-regular files, foreign owners, or group/other permission bits.
-- **Bounded reader retries**: `readIdentityRegistry` retries the read up to 5 times (`READ_MAX_RETRIES = 5`, with backoff `[2, 4, 8, 12, 20]` ms) when the only problem is a transient writer timing artifact (such as `file_vanished_during_read`, `audit_log_behind_registry`, or `audit_log_too_many_uncommitted_lines`). A persistent error still throws after the retries.
+- **Non-regular files**: the open flags include `O_NONBLOCK`, so a FIFO planted at either data path is rejected with `registry_unsafe` instead of blocking the reader; a symlink (`ELOOP`) or a directory at either path is rejected the same way. Any other open failure is reported as `registry_unsafe: file_open_failed`.
+- **Bounded reader retries**: `readIdentityRegistry` retries the read up to 5 times (`READ_MAX_RETRIES = 5`, with backoff `[2, 4, 8, 12, 20]` ms, 46 ms in total) when the only problem is a transient writer timing artifact: a vanished file (`file_vanished_during_read`) or one of the audit-chain reasons `audit_log_behind_registry`, `audit_log_too_many_uncommitted_lines`, `audit_log_missing`, `audit_log_empty`, `audit_line_truncated` or `orphan_audit_log`. A persistent error still throws after the retries, so a genuinely damaged chain is reported after at most 46 ms of backoff. Updates hold the lock and never retry.
+- **Test seam (`fsHooks`)**: `readIdentityRegistry` accepts an optional `fsHooks` object (`lstatSync`, `openSync`, `fstatSync`, `readFileSync`) that tests use to simulate these races deterministically. While it is present the extra `privateFile` check on non-data entries is skipped, so production callers must not pass it.
 
 ### 3.2 Two-Step Commit Protocol and Crash Rules
 
@@ -135,7 +137,7 @@ Executed from `/Users/zhenyuhou/Projects/The Triangle/worktrees/identity-registr
    ```sh
    /Users/zhenyuhou/.local/bin/node --test packages/agent-worker/test/identity-registry.test.mjs
    ```
-   Result: **14/14 passed** (0 failed).
+   Result: **16/16 passed** (0 failed). The stress test runs 4 writer processes and 1 reader process for about 3 seconds.
 
 2. **Agent-worker inventory and bundle closure regression suites**:
    ```sh
@@ -170,3 +172,20 @@ Executed from `/Users/zhenyuhou/Projects/The Triangle/worktrees/identity-registr
 3. **No audit log rotation**: `registry-audit.jsonl` is capped at 8 MiB (`registry_audit_full`); log rotation and compaction are out of scope for this slice.
 4. **Undecided default registry location**: `root` is always an explicit caller-supplied absolute path; default path resolution (`<TRIANGLE_HOME>/identity` vs. supervisor state root, Assumption A4) is undecided and omitted here.
 5. **Library-only**: No production code or CLI imports `identity-registry.mjs` yet, so this change does not alter the running supervisor or packaged runtime manifests.
+
+---
+
+## 6. Reviewer verification and changes (reviewer: Claude, 2026-10-25)
+
+Independent probes (a script kept outside the repository, run against the finished branch): 9 of 9 pass.
+- Integrity: a principal swap at the same generation, a second unrelated binding in one bind, a revoke that also changes the origin, and an un-revoke at the same generation are all refused with `mutation_does_not_match_action`.
+- Crash debris: a torn trailing audit line reads as `uncommittedTail: 1` and the next update repairs it.
+- Races: 4 writer processes with 15 updates each all landed exactly once and the chain verified with no uncommitted tail. A concurrent reader made about 8,400 reads with zero errors.
+
+Changes made in review:
+- A FIFO planted at the registry or audit path blocked the descriptor-first read forever, where the earlier code rejected it in 1 ms. The open now uses `O_NONBLOCK`, and open failures other than `ELOOP`/`EFTYPE` are reported as `file_open_failed` instead of as a link problem. New test: a FIFO, a symlink and a directory at each data path, checked from a child process with a timeout. Without the fix it times out.
+- The stress test used worker threads. It now runs separate processes, as the review item asked and as this document states.
+- New test for the lock-journal states: `nlink` 0 is tolerated by a read; a symlink, group-readable or hard-linked journal is rejected by both a read and an update, with both files unchanged.
+- Removed a dead `lstat` hook from the race-seam test (the registry is checked on its descriptor, not by path).
+
+Open note: `fsHooks` is part of the exported `readIdentityRegistry` signature. It is documented as test-only, but nothing stops a production caller from passing it.
