@@ -1,6 +1,6 @@
 # Discovery titles, evidence-backed presence and reload guidance — 2026-10-24
 
-Status: source and tests only, branch `codex/discovery-usability` off `66fdd70` (#118). Not committed, pushed, merged or installed; the Mini runs #118. Owner request: todo 3 (remove or clearly document the reload requirement) and todo 5 (actual conversation titles and evidence-backed presence). Operator documentation is in `docs/triangle-client/installed-local-messaging.md` ("Codex discovery", "Titles and presence", "What needs a reload", "Rollout and rollback").
+Status: committed locally as `cb733f3` on `codex/discovery-usability` (off `66fdd70`, #118); not pushed or merged. Installed on the Mini on 2026-10-24 (supervisor bundle `490374ac…`, see "Installation"). Owner request: todo 3 (remove or clearly document the reload requirement) and todo 5 (actual conversation titles and evidence-backed presence). Operator documentation is in `docs/triangle-client/installed-local-messaging.md` ("Codex discovery", "Titles and presence", "What needs a reload", "Rollout and rollback").
 
 ## Decision on the reload requirement
 
@@ -32,7 +32,20 @@ It is a property of the harnesses, so it is documented and made visible rather t
 - Codex title refresh in the desktop app (the generated title may appear only after the first turn, so the first prompt's hook can miss it).
 - That reopening an already-loaded Codex chat, short of an app restart, loads new hooks.
 - Whether a Claude plugin avoids the restart for the session MCP server.
-- Any installed behavior: nothing here has run in the production supervisor.
+- Installed behavior beyond the checks recorded under "Installation".
+
+## Installation (2026-10-24, owner go-ahead)
+
+Installed from the local commit, not from a merged revision, so the Mini now runs code that is not on `origin`. Supervisor runtime only: the codex, hermes and antigravity manifests were not restaged (no manifest version change, and workers do not run the seven changed files). Bundle `e992a08d…` (#118) became `490374acbb61c8ed2d7e212612939145a7fd7d60362bc36fd6648f6baa8631f5`; manifest v12, 81 artifacts, same Node.
+
+- Preflight, read-only: a snapshot of `cb733f3` passed 297/297; dry-run staging of `66fdd70` reproduced the live bundle id exactly (so the installed runtime was the #118 source); staging `cb733f3` changed exactly seven artifacts: `claude-session-mcp-child`, `local-messaging-auth-broker`, `-cli`, `-host`, `-interactive-session`, `-journal` and `-mcp-adapter`.
+- Quiet gate: dispatcher idle, nothing queued or executing, wake idle.
+- `stage-runtime --agent supervisor`, then `triangle-client-service.sh start` (kickstart, 60 s readiness wait), verification, `commit-runtime`; any failure would have rolled back automatically. None did.
+- After: exactly one supervisor, running from the new bundle; journal unchanged (36 completed, 2 held, 14 pending replies); doctor `ok`; the service error log shows only the usual SQLite experimental warnings.
+- Live behavior. This real Claude session, registered by invoking the installed hook by hand with its own session id (its automatic hooks stopped matching the workspace when its working directory moved), listed `online` with `host-process`, `scope: session`, and its real title. A no-tools `codex exec` canary in the real workspace listed `online` (`host-process`, `session`) while running and `offline` (`end-event`) after it exited; the first hooks did not see a title, the end hook did (the first message). No row exposes a process id.
+- Records: pre-change copies and status snapshots in `~/Library/Application Support/The Triangle/archive/discovery-usability-20261024/` (checksums verified) and `releases/discovery-usability-install-verification.json`.
+- Manual rollback: restore `supervisor.manifest.pre.json` to `worker-runtime/supervisor.manifest.json` (mode 0600, atomic write), then run `scripts/triangle-client-service.sh start` with `TRIANGLE_READY_TIMEOUT_MS=60000` behind a quiet gate; the previous bundle stays on disk. Run `disable-discovery` first when restoring a release older than #118 (see the operator document).
+- Still open: how Codex Desktop hooks behave on the real app (host scope, reload) needs the owner's chats; pushing or merging the commit.
 
 ## Ideas left out on purpose
 
