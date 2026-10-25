@@ -21,7 +21,7 @@ function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
  const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness']);
- while(args.length){const flag=args.shift();if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ while(args.length){const flag=args.shift();if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -657,7 +657,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
 // entry is a marked block so setup and disable touch nothing else in the file. Tool names mirror CODEX_MCP_TOOLS
 // (a test keeps them equal): everything but sending is pre-approved, because a woken chat must be able to read and
 // answer its inbox without waiting for a person, while a send reaches another agent and keeps asking.
-const CODEX_TOOL_NAMES=['triangle_list_sessions','triangle_list_inbox','triangle_claim_message','triangle_reply_message','triangle_ack_notification','triangle_send_message','triangle_list_recipients','triangle_get_replies','triangle_consume_reply','triangle_get_status'];
+const CODEX_TOOL_NAMES=['triangle_attach_session','triangle_list_sessions','triangle_list_inbox','triangle_claim_message','triangle_reply_message','triangle_ack_notification','triangle_send_message','triangle_list_recipients','triangle_get_replies','triangle_consume_reply','triangle_get_status'];
 export const CODEX_TOML_BEGIN='# >>> triangle-session (managed by triangle-local setup-session-messaging; remove with disable-session-messaging) >>>';
 export const CODEX_TOML_END='# <<< triangle-session <<<';
 const tomlString=value=>{
@@ -709,12 +709,49 @@ function codexProjectConfig(workspace,{create}){
  if(!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe workspace Codex configuration');
  return {file,text:fs.readFileSync(file,'utf8'),mode:st.mode&0o777};
 }
+// Opt-in MCP lifecycle hooks run on the chat's own connection and inherit its _meta.threadId. They do not
+// scan sessions, accept an identity argument or ask the model to call a tool. First-prompt fallback covers
+// SessionStart firing before MCP startup or the discovery command completes. Codex still requires normal trust.
+const CODEX_ATTACH_HOOK={type:'mcp_tool',server:'triangle-session',tool:'triangle_attach_session',input:{},timeout:5,statusMessage:'Triangle: attach this Codex chat'};
+function isCodexAttachHook(h){return h&&Object.keys(h).sort().join(',')==='input,server,statusMessage,timeout,tool,type'&&
+ h.type===CODEX_ATTACH_HOOK.type&&h.server===CODEX_ATTACH_HOOK.server&&h.tool===CODEX_ATTACH_HOOK.tool&&h.timeout===5&&
+ h.statusMessage===CODEX_ATTACH_HOOK.statusMessage&&h.input&&typeof h.input==='object'&&!Array.isArray(h.input)&&Object.keys(h.input).length===0;}
+function planCodexAutoAttach(workspace,enabled){
+ codexProjectConfig(workspace,{create:false}); // validates the project directory without changing it
+ const file=path.join(workspace,'.codex','hooks.json'),st=fs.lstatSync(file,{throwIfNoEntry:false});
+ if(st&&(!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024))throw coded('unsafe_path','Unsafe workspace hook settings');
+ const text=st?fs.readFileSync(file,'utf8'):null,settings=text===null?{}:JSON.parse(text);
+ if(!settings||typeof settings!=='object'||Array.isArray(settings)||(settings.hooks&&(typeof settings.hooks!=='object'||Array.isArray(settings.hooks))))throw coded('invalid_settings','Invalid hook settings');
+ let count=0;
+ for(const event of ['SessionStart','UserPromptSubmit']){
+  const groups=settings.hooks?.[event]??[];if(!Array.isArray(groups))throw coded('invalid_settings','Invalid lifecycle hook list');
+  count+=groups.filter(g=>g.hooks?.some(isCodexAttachHook)).length;
+ }
+ if(enabled===undefined)return {enabled:count===2,changed:false,write(){}};
+ if(typeof enabled!=='boolean')throw coded('invalid_arguments','Automatic attachment must be explicitly enabled or disabled');
+ settings.hooks??={};
+ for(const event of ['SessionStart','UserPromptSubmit']){
+  const groups=settings.hooks[event]??[];
+  if(enabled&&groups.some(g=>g.hooks?.some(h=>h.server==='triangle-session'&&h.tool==='triangle_attach_session'&&!isCodexAttachHook(h))))throw coded('integration_exists','Preserve foreign Triangle attachment hook settings');
+  const kept=groups.flatMap(group=>{
+   if(!Array.isArray(group?.hooks))return [group];
+   const hooks=group.hooks.filter(h=>!isCodexAttachHook(h));
+   return hooks.length===group.hooks.length?[group]:hooks.length?[{...group,hooks}]:[];
+  });
+  if(enabled)kept.push({hooks:[CODEX_ATTACH_HOOK]});
+  if(kept.length)settings.hooks[event]=kept;else delete settings.hooks[event];
+ }
+ if(!Object.keys(settings.hooks).length)delete settings.hooks;
+ const next=JSON.stringify(settings,null,2)+'\n',changed=text!==next&&(enabled||count>0);
+ return {enabled,changed,write(){if(changed)replaceTextFile(file,next,st?st.mode&0o777:0o600);}};
+}
 // `harness` claude (default) attaches Claude chats through .mcp.json. `codex` attaches Codex chats through the
 // workspace .codex/config.toml; it needs Codex discovery and at least one exact --sender, because who may message a
 // Codex chat is never granted by default. Both share the one workspace policy file and capability.
 export function setupWorkspaceMessaging(options,env=process.env){
  const harness=options.harness??'claude';
  if(!['claude','codex'].includes(harness))throw coded('invalid_arguments','Messaging harness must be claude or codex');
+ if(options.autoAttach!==undefined&&harness!=='codex')throw coded('invalid_arguments','Automatic attachment is a Codex messaging option');
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  if(!config.discovery?.enabled)throw coded('discovery_required','Enable lifecycle discovery in this disposable workspace first');
  const d=readPrivateJson(config.discovery.integrationPath);
@@ -736,6 +773,7 @@ export function setupWorkspaceMessaging(options,env=process.env){
   allowedSenders:harness==='claude'?[desktopSender]:(kept?old.allowedSenders:[]),
   allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[desktopSender]:[])],
   ...(harness==='codex'?{codex:{enabled:true,allowedSenders:senders}}:old?.codex?{codex:old.codex}:{})};
+ const autoAttach=harness==='codex'?planCodexAutoAttach(d.workspace,options.autoAttach):null;
  const name='triangle-session';
  let write;
  if(harness==='claude'){
@@ -758,9 +796,10 @@ export function setupWorkspaceMessaging(options,env=process.env){
  }
  writePrivateJson(integrationPath,policy);
  write();
+ autoAttach?.write();
  writePrivateJson(configPath,{...config,sessionMessaging:{enabled:true,integrationPath}});
  return {workspace:d.workspace,harness,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false,
-  ...(harness==='codex'?{codexConfig:path.join(d.workspace,'.codex','config.toml'),allowedSenders:senders,
+  ...(harness==='codex'?{autoAttach:autoAttach.enabled,requiresHarnessHookApproval:autoAttach.changed&&autoAttach.enabled,codexConfig:path.join(d.workspace,'.codex','config.toml'),allowedSenders:senders,
    wakeConfigured:config.wake?.enabled===true&&typeof config.wake.codexPath==='string'&&typeof config.wake.codexHome==='string',requiresProjectTrust:true}:{})};
 }
 export function disableWorkspaceMessaging(options,env=process.env){
@@ -801,6 +840,10 @@ export function disableWorkspaceMessaging(options,env=process.env){
     if(next.trim()==='')fs.unlinkSync(current.file);else replaceTextFile(current.file,next,current.mode);
    }
   }
+ }catch{mcpCleanupRequired=true;}
+ try{
+  const workspace=options.workspace||policy?.workspace||config.discovery?.workspace;
+  if(typeof workspace==='string'&&fs.existsSync(workspace))planCodexAutoAttach(workspace,false).write();
  }catch{mcpCleanupRequired=true;}
  return {sessionMessagingEnabled:false,mcpCleanupRequired};
 }

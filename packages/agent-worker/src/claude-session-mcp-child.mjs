@@ -638,12 +638,16 @@ export async function createAttachedClaudeSessionMcpChild(options){
 // may serve several chats, and a chat attaches on its first Triangle tool call. Wake runs `codex queue` against the
 // chat's own thread from inside this child, with the executable and CODEX_HOME the owner pinned for wake, so the
 // supervisor never needs to store a raw thread id.
-export const CODEX_MCP_TOOLS = CLAUDE_MCP_TOOLS.map((tool) => (tool.name === "triangle_get_status"
+export const CODEX_MCP_TOOLS = [{
+  name: "triangle_attach_session",
+  description: "Lifecycle hook: attach only this calling Codex chat without reading its inbox or sending a message. No arguments or peer identity accepted.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+}, ...CLAUDE_MCP_TOOLS.map((tool) => (tool.name === "triangle_get_status"
   ? {
     ...tool,
-    description: "Show this chat's Triangle address and inbox counts, or the status of a sent message. Call it once at the start of a conversation: the first Triangle tool call is what makes this chat reachable by other agents.",
+    description: "Show this chat's Triangle address and inbox counts, or the status of a sent message. When automatic lifecycle attachment is enabled, this chat attaches without a model tool call. Otherwise call this once to make the chat reachable by other agents.",
   }
-  : tool));
+  : tool))];
 const MAX_CODEX_CHATS_PER_PROCESS = 16;
 
 export function codexCallIdentity(meta) {
@@ -729,7 +733,7 @@ export function createCodexSessionMcpChild({
 
   // `renew` forces a fresh attach (the heartbeat, which keeps the lease alive); `onReuse` tells the caller it got a
   // grant from an earlier attach, which a supervisor restart may have outdated.
-  async function credentialFor(state, { renew = false, onReuse = null } = {}) {
+  async function credentialFor(state, { renew = false, onReuse = null, timeout = null } = {}) {
     if (closed) throw coded("client_closed", "MCP child is closed");
     const bound = readPrivateJson(config.integrationPath);
     if (typeof bound.threadId === "string" && bound.threadId.toLowerCase() === state.threadId) {
@@ -752,7 +756,7 @@ export function createCodexSessionMcpChild({
       harness: "codex",
       wakeCapable: wake !== null,
       ...(state.generation === null ? {} : { generation: state.generation }),
-    });
+    }, timeout === null ? {} : { timeout });
     if (state.generation === null) state.generation = grant.generation;
     if (grant.senderId !== state.address || grant.sessionId !== state.identity.pseudoSessionId
       || grant.bindingId !== state.childId || grant.generation !== state.generation) {
@@ -762,6 +766,24 @@ export function createCodexSessionMcpChild({
     state.grantAt = now;
     state.attached = true;
     return grant.credential;
+  }
+
+  // Desktop can run MCP hooks alongside the discovery command. Wait briefly for that command to register
+  // this lifecycle, without asking the model to poll or starting another turn. Only an explicit offline
+  // refusal is retryable; timeouts have unknown outcomes and other errors must retain their semantics.
+  async function attachFromHook(state, options) {
+    const deadline = performance.now() + 2000;
+    let lastOfflineError = null;
+    while (true) {
+      if (lastOfflineError && deadline - performance.now() <= 50) throw lastOfflineError;
+      try {
+        return await credentialFor(state, { ...options, renew: true, timeout: Math.max(1, Math.ceil(deadline - performance.now())) });
+      } catch (error) {
+        if (error?.code !== "session_offline" || performance.now() >= deadline) throw error;
+        lastOfflineError = error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - performance.now()))));
+      }
+    }
   }
 
   // One wake attempt for one chat: reserve (the supervisor decides whether anything is owed), queue the hint to the
@@ -839,15 +861,23 @@ export function createCodexSessionMcpChild({
         case "tools/call": {
           const { name, arguments: args = {} } = params;
           if (!args || typeof args !== "object") throw new Error("Invalid tool arguments: expected object");
+          if (name === "triangle_attach_session" && (Array.isArray(args) || Object.keys(args).length !== 0)) {
+            throw coded("invalid_arguments", "Automatic attachment accepts no identity or other arguments");
+          }
           state = chatState(codexCallIdentity(params._meta));
-          const credential = await credentialFor(state, { renew: fresh, onReuse: () => { reusedGrant = true; } });
-          const resultData = await runSessionTool({ client: state.client, credential, name, args, generation: state.generation });
+          const credential = await (name === "triangle_attach_session" ? attachFromHook : credentialFor)(state, { renew: fresh, onReuse: () => { reusedGrant = true; } });
+          const resultData = name === "triangle_attach_session" ? {} : await runSessionTool({ client: state.client, credential, name, args, generation: state.generation });
           return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(resultData) }], isError: false } };
         }
         default:
           return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
       }
     } catch (err) {
+      // The fixed conversation already has its own owner/inbox. A lifecycle hook is a harmless no-op there;
+      // ordinary tools still explain that it must use the existing identity. Never attach a second inbox.
+      if (method === "tools/call" && params.name === "triangle_attach_session" && err?.code === "bound_codex_context") {
+        return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "{}" }], isError: false } };
+      }
       // A reused grant can predate a supervisor restart, and a resumed chat has a new lifecycle generation (its old
       // attachment then reads as offline). Both are refused before anything is processed, so one fresh attach and a
       // single retry of the whole call is safe. A chat that really ended fails the fresh attach and says so.
