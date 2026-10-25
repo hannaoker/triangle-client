@@ -1285,7 +1285,7 @@ test("Item 3: audit chain verification detects edited, removed, reordered, dupli
     );
     restore();
 
-    // 5. Truncated line (missing trailing newline / cut mid-JSON)
+    // 5. Truncated line inside the committed region (line 3 is committed, cut mid-JSON) -> registry_chain_broken
     writeFileSync(auditPath, validAuditText.slice(0, -10), { mode: 0o600 });
     assert.throws(
       () => readIdentityRegistry({ root }),
@@ -2012,4 +2012,154 @@ test("Review Item 1: audit entry must describe the exact mutation (mutation_does
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("Review Item 2: torn trailing audit line treated as uncommitted crash debris and repaired on next update", () => {
+  const base = makeTmpRoot("id-reg-torn-audit-");
+  try {
+    // Case A: Torn fragment with an absent registry (crash during first write before newline)
+    const absentRoot = path.join(base, "absent-torn");
+    mkdirSync(absentRoot, { mode: 0o700 });
+    const absentAuditPath = path.join(absentRoot, AUDIT_FILE_NAME);
+    writeFileSync(absentAuditPath, '{"action":"init","at":"2026-10-25T17:00', { mode: 0o600 });
+    chmodSync(absentAuditPath, 0o600);
+
+    // Read reports absent and does not fail with registry_chain_broken
+    const rAbsent = readIdentityRegistry({ root: absentRoot });
+    assert.deepEqual(rAbsent, { state: "absent" });
+
+    // First write after crash truncates the torn fragment and succeeds cleanly
+    const t0 = "2026-10-25T17:01:00.000Z";
+    const uInit = updateIdentityRegistry({
+      root: absentRoot,
+      expectedSequence: 0,
+      now: t0,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+    assert.equal(uInit.registry.sequence, 1);
+    const rAfterInit = readIdentityRegistry({ root: absentRoot });
+    assert.equal(rAfterInit.state, "ok");
+    assert.deepEqual(rAfterInit.audit, { verifiedThrough: 1, uncommittedTail: 0 });
+    assert.equal(readFileSync(absentAuditPath, "utf8").trim().split("\n").length, 1);
+
+    // Case B: Torn fragment after a valid committed chain (read ok with uncommittedTail: 1, next update repairs it)
+    const root = path.join(base, "committed-torn");
+    const t1 = "2026-10-25T17:02:00.000Z";
+    const t2 = "2026-10-25T17:03:00.000Z";
+    const bAlpha = makeValidBinding("alpha", { issued_at: t2 });
+
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: t1,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 1,
+      now: t2,
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlpha;
+        return r;
+      },
+    });
+
+    const auditPath = path.join(root, AUDIT_FILE_NAME);
+    const committedAuditText = readFileSync(auditPath, "utf8");
+    const committedLines = committedAuditText.trim().split("\n");
+    assert.equal(committedLines.length, 2);
+
+    // Append a torn partial line 3 (no trailing newline) after the 2 committed lines
+    writeFileSync(
+      auditPath,
+      `${committedAuditText}{"action":"revoke","at":"2026-10-25T17:04:00.000Z","bindingId":"bind_partial`,
+      { mode: 0o600 },
+    );
+    chmodSync(auditPath, 0o600);
+
+    const rTorn = readIdentityRegistry({ root });
+    assert.equal(rTorn.state, "ok");
+    assert.equal(rTorn.registry.sequence, 2);
+    assert.deepEqual(rTorn.audit, { verifiedThrough: 2, uncommittedTail: 1 });
+
+    // Next update truncates the torn fragment and appends sequence 3 cleanly
+    const t3 = "2026-10-25T17:05:00.000Z";
+    const uRevoke = updateIdentityRegistry({
+      root,
+      expectedSequence: 2,
+      now: t3,
+      action: "revoke",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id].revoked_at = t3;
+        return r;
+      },
+    });
+    assert.equal(uRevoke.registry.sequence, 3);
+
+    const rRepaired = readIdentityRegistry({ root });
+    assert.equal(rRepaired.state, "ok");
+    assert.equal(rRepaired.registry.sequence, 3);
+    assert.deepEqual(rRepaired.audit, { verifiedThrough: 3, uncommittedTail: 0 });
+    const repairedLines = readFileSync(auditPath, "utf8").trim().split("\n");
+    assert.equal(repairedLines.length, 3);
+
+    // Case C: Torn fragment when complete lines stop short of the head (seq 3 head, only 2 complete lines + torn 3rd) -> registry_chain_broken
+    writeFileSync(
+      auditPath,
+      `${committedLines[0]}\n${committedLines[1]}\n${repairedLines[2].slice(0, 40)}`,
+      { mode: 0o600 },
+    );
+    chmodSync(auditPath, 0o600);
+    assert.throws(
+      () => readIdentityRegistry({ root }),
+      (err) => err.code === "registry_chain_broken",
+    );
+
+    // Case D: Line cut inside the committed region (line 2 cut mid-line, followed by line 3) -> registry_chain_broken
+    writeFileSync(
+      auditPath,
+      `${committedLines[0]}\n${committedLines[1].slice(0, 35)}\n${repairedLines[2]}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(auditPath, 0o600);
+    assert.throws(
+      () => readIdentityRegistry({ root }),
+      (err) => err.code === "registry_chain_broken",
+    );
+
+    // Case E: Complete uncommitted line 4 PLUS torn fragment 5 (more than 1 uncommitted item beyond seq 3) -> registry_chain_broken
+    const e3 = JSON.parse(repairedLines[2]);
+    const e4WithoutHash = {
+      sequence: 4,
+      at: "2026-10-25T17:06:00.000Z",
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      bindingId: bAlpha.binding_id,
+      prevHash: e3.hash,
+    };
+    const e4 = {
+      ...e4WithoutHash,
+      hash: createHash("sha256").update(canonicalJson(e4WithoutHash)).digest("hex"),
+    };
+    writeFileSync(
+      auditPath,
+      `${repairedLines.join("\n")}\n${canonicalJson(e4)}\n{"torn":true`,
+      { mode: 0o600 },
+    );
+    chmodSync(auditPath, 0o600);
+    assert.throws(
+      () => readIdentityRegistry({ root }),
+      (err) => err.code === "registry_chain_broken",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 

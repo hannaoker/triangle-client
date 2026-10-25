@@ -729,18 +729,25 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
 
   const text = auditBuf.toString("utf8");
   if (text.length === 0) {
-    if (expectedHead && expectedHead.sequence === 0 && expectedHead.hash === ZERO_HASH_64) {
+    if (expectedHead === null) {
+      return { entries: [], uncommittedTail: 0, verifiedThrough: 0, committedByteLength: 0 };
+    }
+    if (expectedHead.sequence === 0 && expectedHead.hash === ZERO_HASH_64) {
       return { entries: [], uncommittedTail: 0, verifiedThrough: 0, committedByteLength: 0 };
     }
     throw codedError("registry_chain_broken", "audit_log_empty");
   }
 
-  // Every line in a valid JSONL file must end with \n (no truncated partial line)
-  if (!text.endsWith("\n")) {
-    throw codedError("registry_chain_broken", "audit_line_truncated");
+  const hasTornTrailingLine = !text.endsWith("\n");
+  let rawLines;
+  if (hasTornTrailingLine) {
+    const parts = text.split("\n");
+    parts.pop(); // discard the incomplete trailing fragment after the last \n
+    rawLines = parts;
+  } else {
+    rawLines = text.slice(0, -1).split("\n");
   }
 
-  const rawLines = text.slice(0, -1).split("\n");
   const entries = [];
   let prevHash = ZERO_HASH_64;
   let byteOffset = 0;
@@ -765,13 +772,13 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
     if (parsed.prevHash !== prevHash) {
       throw codedError("registry_chain_broken", "audit_prev_hash_mismatch");
     }
-  if (expectedSeq === 1) {
-    if (parsed.action !== "init" && parsed.action !== "bind") {
-      throw codedError("registry_chain_broken", "invalid_first_audit_action");
+    if (expectedSeq === 1) {
+      if (parsed.action !== "init" && parsed.action !== "bind") {
+        throw codedError("registry_chain_broken", "invalid_first_audit_action");
+      }
+    } else if (parsed.action === "init") {
+      throw codedError("registry_chain_broken", "unexpected_init_audit_action");
     }
-  } else if (parsed.action === "init") {
-    throw codedError("registry_chain_broken", "unexpected_init_audit_action");
-  }
     prevHash = parsed.hash;
     entries.push(parsed);
     byteOffset += Buffer.byteLength(line, "utf8") + 1;
@@ -783,8 +790,17 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
   if (expectedHead === null) {
     // Registry file is absent, but audit file exists!
     // Crash after step 1 (first audit append) and before step 2 (first registry write)
-    // leaves exactly 1 line with sequence 1. Any other content is broken chain.
+    // leaves either a single torn trailing fragment (0 complete lines) or 1 complete line (no torn fragment).
+    if (hasTornTrailingLine && entries.length === 0) {
+      return {
+        entries: [],
+        uncommittedTail: 1,
+        verifiedThrough: 0,
+        committedByteLength: 0,
+      };
+    }
     if (
+      !hasTornTrailingLine &&
       entries.length === 1 &&
       entries[0].sequence === 1 &&
       (entries[0].action === "init" || entries[0].action === "bind")
@@ -800,19 +816,25 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
   }
 
   if (expectedHead.sequence === 0) {
-    if (entries.length === 0) {
+    const uncommittedCount = entries.length + (hasTornTrailingLine ? 1 : 0);
+    if (uncommittedCount === 0) {
       return { entries: [], uncommittedTail: 0, verifiedThrough: 0, committedByteLength: 0 };
     }
-    if (entries.length === 1 && entries[0].sequence === 1) {
+    if (uncommittedCount === 1) {
       return { entries, uncommittedTail: 1, verifiedThrough: 0, committedByteLength: 0 };
     }
     throw codedError("registry_chain_broken", "unexpected_audit_entries_for_seq_zero");
   }
 
   if (entries.length < expectedHead.sequence) {
+    if (hasTornTrailingLine && entries.length === expectedHead.sequence - 1) {
+      throw codedError("registry_chain_broken", "audit_line_truncated");
+    }
     throw codedError("registry_chain_broken", "audit_log_behind_registry");
   }
-  if (entries.length > expectedHead.sequence + 1) {
+
+  const uncommittedTail = (entries.length - expectedHead.sequence) + (hasTornTrailingLine ? 1 : 0);
+  if (uncommittedTail > 1) {
     throw codedError("registry_chain_broken", "audit_log_too_many_uncommitted_lines");
   }
 
@@ -821,7 +843,6 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
     throw codedError("registry_chain_broken", "audit_head_hash_mismatch");
   }
 
-  const uncommittedTail = entries.length - expectedHead.sequence;
   return {
     entries,
     uncommittedTail,
