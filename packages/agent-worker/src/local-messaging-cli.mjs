@@ -497,7 +497,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -527,6 +527,27 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    input,
    output,
   });
+  let stopping=null;
+  const stop=()=>{
+   stopping??=child.close().catch(()=>{process.exitCode=1;}).finally(()=>{input.destroy?.();});
+  };
+  process.once('SIGINT',stop);
+  process.once('SIGTERM',stop);
+  try {
+   await child.run();
+  } finally {
+   process.removeListener('SIGINT',stop);
+   process.removeListener('SIGTERM',stop);
+   await child.close();
+   if(stopping)await stopping;
+  }
+  return 0;
+ }
+ if(command==='codex-session-mcp'){
+  const configPath=options.config||defaultLocalConfigPath(env);
+  if(!options['workspace-messaging'])throw coded('invalid_arguments','The workspace messaging policy path is required');
+  const {createCodexSessionMcpChild}=await import('./claude-session-mcp-child.mjs');
+  const child=createCodexSessionMcpChild({configPath,policyPath:options['workspace-messaging'],input,output});
   let stopping=null;
   const stop=()=>{
    stopping??=child.close().catch(()=>{process.exitCode=1;}).finally(()=>{input.destroy?.();});
@@ -635,34 +656,113 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
 }
 
 
+// Codex reads project-scoped MCP servers from <workspace>/.codex/config.toml (trusted projects only). The Triangle
+// entry is a marked block so setup and disable touch nothing else in the file. Tool names mirror CODEX_MCP_TOOLS
+// (a test keeps them equal): everything but sending is pre-approved, because a woken chat must be able to read and
+// answer its inbox without waiting for a person, while a send reaches another agent and keeps asking.
+const CODEX_TOOL_NAMES=['triangle_list_sessions','triangle_list_inbox','triangle_claim_message','triangle_reply_message','triangle_ack_notification','triangle_send_message','triangle_list_recipients','triangle_get_replies','triangle_consume_reply','triangle_get_status'];
+export const CODEX_TOML_BEGIN='# >>> triangle-session (managed by triangle-local setup-session-messaging; remove with disable-session-messaging) >>>';
+export const CODEX_TOML_END='# <<< triangle-session <<<';
+const tomlString=value=>{
+ if(typeof value!=='string'||/[\x00-\x1f\x7f]/.test(value))throw coded('unsafe_path','Unsafe value for the Codex configuration');
+ return '"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
+};
+export function codexMcpBlock({wrapper,configPath,policyPath}){
+ const lines=[CODEX_TOML_BEGIN,'[mcp_servers.triangle-session]',`command = ${tomlString(wrapper)}`,
+  `args = [${['codex-session-mcp','--config',configPath,'--workspace-messaging',policyPath].map(tomlString).join(', ')}]`,'startup_timeout_sec = 30',''];
+ for(const name of CODEX_TOOL_NAMES.filter(name=>name!=='triangle_send_message'))lines.push(`[mcp_servers.triangle-session.tools.${name}]`,'approval_mode = "approve"','');
+ lines.push('# triangle_send_message keeps asking for approval: it reaches another agent.',CODEX_TOML_END);
+ return lines.join('\n');
+}
+function codexBlockBounds(text){
+ const begin=text.indexOf(CODEX_TOML_BEGIN),end=text.indexOf(CODEX_TOML_END);
+ if((begin<0)!==(end<0)||end<begin)throw coded('invalid_settings','Damaged managed Triangle block in the Codex configuration');
+ return begin<0?null:{begin,end:end+CODEX_TOML_END.length};
+}
+export function withCodexMcpBlock(text,block){
+ const bounds=codexBlockBounds(text);
+ const outside=bounds?text.slice(0,bounds.begin)+text.slice(bounds.end):text;
+ if(/^\s*\[\s*mcp_servers\s*\.\s*(?:"triangle-session"|triangle-session)\s*[\].]/m.test(outside))throw coded('integration_exists','Preserve the existing Triangle MCP configuration; remove it or choose another workspace');
+ if(bounds)return text.slice(0,bounds.begin)+block+text.slice(bounds.end);
+ return text+(text===''?'':text.endsWith('\n\n')?'':text.endsWith('\n')?'\n':'\n\n')+block+'\n';
+}
+export function withoutCodexMcpBlock(text){
+ const bounds=codexBlockBounds(text);
+ if(!bounds)return text;
+ const before=text.slice(0,bounds.begin).replace(/\n{2,}$/,'\n'),after=text.slice(bounds.end).replace(/^\n/,'');
+ return before+after;
+}
+function replaceTextFile(file,text,mode=0o600){
+ const temp=`${file}.triangle-${randomUUID()}`;let fd;
+ try{
+  fd=fs.openSync(temp,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,mode);
+  fs.writeFileSync(fd,text);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+  fs.renameSync(temp,file);
+ }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(temp);}catch{}}
+}
+function codexProjectConfig(workspace,{create}){
+ const directory=path.join(workspace,'.codex'),file=path.join(directory,'config.toml');
+ if(!fs.existsSync(directory)){if(!create)return {file,text:null,mode:0o600};fs.mkdirSync(directory,{mode:0o700});}
+ const info=fs.lstatSync(directory);
+ if(!info.isDirectory()||info.uid!==process.getuid()||(info.mode&0o022)||fs.realpathSync(workspace)!==workspace||fs.realpathSync(directory)!==directory)throw coded('unsafe_path','Unsafe workspace Codex settings directory');
+ if(!fs.existsSync(file))return {file,text:create?'':null,mode:0o600};
+ const st=fs.lstatSync(file);
+ if(!st.isFile()||st.uid!==process.getuid()||st.nlink!==1||st.size>1024*1024)throw coded('unsafe_path','Unsafe workspace Codex configuration');
+ return {file,text:fs.readFileSync(file,'utf8'),mode:st.mode&0o777};
+}
+// `harness` claude (default) attaches Claude chats through .mcp.json. `codex` attaches Codex chats through the
+// workspace .codex/config.toml; it needs Codex discovery and at least one exact --sender, because who may message a
+// Codex chat is never granted by default. Both share the one workspace policy file and capability.
 export function setupWorkspaceMessaging(options,env=process.env){
+ const harness=options.harness??'claude';
+ if(!['claude','codex'].includes(harness))throw coded('invalid_arguments','Messaging harness must be claude or codex');
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  if(!config.discovery?.enabled)throw coded('discovery_required','Enable lifecycle discovery in this disposable workspace first');
  const d=readPrivateJson(config.discovery.integrationPath);
  if(!d.enabled||!options.workspace||fs.realpathSync(options.workspace)!==d.workspace)throw coded('workspace_mismatch','Explicit opted-in discovery workspace required');
- if(!(d.harnesses||['claude']).includes('claude'))throw coded('claude_discovery_required','Enable Claude discovery with setup-discovery --harness claude before attaching Claude messaging');
+ if(!(d.harnesses||['claude']).includes(harness))throw coded(`${harness}_discovery_required`,`Enable ${harness} discovery with setup-discovery --harness ${harness} before attaching ${harness} messaging`);
+ let senders;
+ if(harness==='codex'){
+  senders=options.senders;
+  if(!Array.isArray(senders)||!senders.length||senders.length>64||new Set(senders).size!==senders.length||senders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_arguments','Choose explicit distinct sender IDs with --sender; nobody may message a Codex chat by default');
+ }
  const wrapper=options['local-cli']||path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/bin/triangle-local');
  const st=fs.lstatSync(wrapper);
  if(fs.realpathSync(wrapper)!==wrapper||!st.isFile()||st.uid!==process.getuid()||(st.mode&0o022)||!(st.mode&0o100))throw coded('unsafe_path','Owner installed wrapper required');
  const integrationPath=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
  const old=fs.existsSync(integrationPath)?readPrivateJson(integrationPath):null;
- const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:old?.enabled===true&&old?.installationId===d.installationId?old.secret:randomBytes(32).toString('hex'),allowedSenders:[readPrivateJson(config.integrationPath).senderId],allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[readPrivateJson(config.integrationPath).senderId]:[])]};
- const file=path.join(d.workspace,'.mcp.json');
- let mcp={};
- if(fs.existsSync(file)){
-  const stat=fs.lstatSync(file);
-  if(!stat.isFile()||stat.uid!==process.getuid()||stat.nlink!==1||stat.size>1024*1024)throw coded('unsafe_path','Unsafe workspace MCP configuration');
-  mcp=JSON.parse(fs.readFileSync(file,'utf8'));
- }
- if(!mcp||typeof mcp!=='object'||Array.isArray(mcp)||mcp.mcpServers&&(typeof mcp.mcpServers!=='object'||Array.isArray(mcp.mcpServers)))throw coded('invalid_settings','Invalid MCP configuration');
+ const desktopSender=readPrivateJson(config.integrationPath).senderId;
+ const kept=old?.enabled===true&&old?.installationId===d.installationId;
+ const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:kept?old.secret:randomBytes(32).toString('hex'),
+  allowedSenders:harness==='claude'?[desktopSender]:(kept?old.allowedSenders:[]),
+  allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[desktopSender]:[])],
+  ...(harness==='codex'?{codex:{enabled:true,allowedSenders:senders}}:old?.codex?{codex:old.codex}:{})};
  const name='triangle-session';
- const entry={command:wrapper,args:['claude-session-mcp','--config',configPath,'--workspace-messaging',integrationPath,'--expected-version',SUPPORTED_CLAUDE_VERSION]};
- if(mcp.mcpServers?.[name]&&JSON.stringify(mcp.mcpServers[name])!==JSON.stringify(entry))throw coded('integration_exists','Preserve existing Triangle MCP configuration; choose a disposable workspace');
+ let write;
+ if(harness==='claude'){
+  const file=path.join(d.workspace,'.mcp.json');
+  let mcp={};
+  if(fs.existsSync(file)){
+   const stat=fs.lstatSync(file);
+   if(!stat.isFile()||stat.uid!==process.getuid()||stat.nlink!==1||stat.size>1024*1024)throw coded('unsafe_path','Unsafe workspace MCP configuration');
+   mcp=JSON.parse(fs.readFileSync(file,'utf8'));
+  }
+  if(!mcp||typeof mcp!=='object'||Array.isArray(mcp)||mcp.mcpServers&&(typeof mcp.mcpServers!=='object'||Array.isArray(mcp.mcpServers)))throw coded('invalid_settings','Invalid MCP configuration');
+  const entry={command:wrapper,args:['claude-session-mcp','--config',configPath,'--workspace-messaging',integrationPath,'--expected-version',SUPPORTED_CLAUDE_VERSION]};
+  if(mcp.mcpServers?.[name]&&JSON.stringify(mcp.mcpServers[name])!==JSON.stringify(entry))throw coded('integration_exists','Preserve existing Triangle MCP configuration; choose a disposable workspace');
+  // Workspace config is not a credential; preserve unrelated MCP entries atomically.
+  write=()=>replaceJsonFile(file,{...mcp,mcpServers:{...mcp.mcpServers,[name]:entry}});
+ }else{
+  const current=codexProjectConfig(d.workspace,{create:true});
+  const text=withCodexMcpBlock(current.text,codexMcpBlock({wrapper,configPath,policyPath:integrationPath}));
+  write=()=>replaceTextFile(current.file,text,current.mode);
+ }
  writePrivateJson(integrationPath,policy);
- // Workspace config is not a credential; preserve unrelated MCP entries atomically.
- replaceJsonFile(file,{...mcp,mcpServers:{...mcp.mcpServers,[name]:entry}});
+ write();
  writePrivateJson(configPath,{...config,sessionMessaging:{enabled:true,integrationPath}});
- return {workspace:d.workspace,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false};
+ return {workspace:d.workspace,harness,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false,
+  ...(harness==='codex'?{codexConfig:path.join(d.workspace,'.codex','config.toml'),allowedSenders:senders,
+   wakeConfigured:config.wake?.enabled===true&&typeof config.wake.codexPath==='string'&&typeof config.wake.codexHome==='string',requiresProjectTrust:true}:{})};
 }
 export function disableWorkspaceMessaging(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
@@ -689,6 +789,17 @@ export function disableWorkspaceMessaging(options,env=process.env){
      delete mcp.mcpServers['triangle-session'];
      replaceJsonFile(mcpPath,mcp);
     }
+   }
+  }
+ }catch{mcpCleanupRequired=true;}
+ // The Codex entry is a marked block in the workspace's .codex/config.toml; unrelated settings are left alone.
+ try{
+  const workspace=options.workspace||policy?.workspace||config.discovery?.workspace;
+  if(typeof workspace==='string'&&fs.existsSync(path.join(workspace,'.codex','config.toml'))){
+   const current=codexProjectConfig(workspace,{create:false});
+   if(current.text!==null&&current.text.includes(CODEX_TOML_BEGIN)){
+    const next=withoutCodexMcpBlock(current.text);
+    if(next.trim()==='')fs.unlinkSync(current.file);else replaceTextFile(current.file,next,current.mode);
    }
   }
  }catch{mcpCleanupRequired=true;}

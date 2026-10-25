@@ -190,10 +190,16 @@ function resolvedWorkspace(workspace) {
 // Workspace participation is a distinct owner capability. Discovery credentials never authorize messaging.
 export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
- if(!c||Object.keys(c).sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||
+ // `codex` is the optional second harness: its own receiver policy (exact senders, hex principals or session addresses).
+ if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||
    !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
+ if(c.codex!==undefined){
+  const x=c.codex;
+  if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).sort().join(',')!=='allowedSenders,enabled'||typeof x.enabled!=='boolean'||!Array.isArray(x.allowedSenders)||
+    x.allowedSenders.length>64||new Set(x.allowedSenders).size!==x.allowedSenders.length||x.allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
+ }
  return c;
 }
 // A session's address: derived from the installation, the opted-in workspace and the harness session id, so it is
@@ -210,7 +216,11 @@ export function attachedSessionIdentity(sessionId){
 // Harnesses load MCP servers when a chat starts, so a chat that began before the workspace was opted in (or whose
 // server failed to start or was not approved) has no attachment until it is reloaded.
 export const ATTACH_HINT='No Triangle MCP child is attached to this chat. Chats load MCP servers when they start: reload or restart this chat, or start a new one, and check that its MCP server was approved.';
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],logger=null,processProbe=undefined}) {
+// Codex gives its MCP server no chat identity until the chat's first tool call, so a Codex chat attaches then.
+export const CODEX_ATTACH_HINT='This Codex chat has not called a Triangle tool yet, or its Triangle MCP server is not loaded. It becomes reachable on its first Triangle tool call (for example triangle_get_status). Codex loads MCP servers when a chat starts: restart the Codex app or start a new chat after setup.';
+// Codex addresses live in their own namespace, exactly as lifecycle discovery derives them (see recordDiscoveryEvent).
+export const sessionAddressKey=(harness,sessionId)=>harness==='codex'?'codex:'+sessionId:sessionId;
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,logger=null,processProbe=undefined}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -227,13 +237,21 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  // configuration allows. A replaced Codex sender or a removed worker loses session access immediately.
  const liveSenders=ownerSenderId===null?null:new Set([ownerSenderId,...additionalPrincipals]);
  const liveRecipients=configuredRecipients===null?null:new Set([...configuredRecipients,...additionalPrincipals]);
+ // Who may message a Codex chat is a separate list. Its principals are checked against the live configuration;
+ // a session address is an exact sender that is validated when it sends.
+ const liveCodexSenders=codexSenderPrincipals===null?null:new Set(codexSenderPrincipals);
  function policy(){const c=readSessionMessagingPolicy(policyPath),d=readPrivateJson(discoveryPath);
-  if(!c.enabled||!d.enabled||!(d.harnesses||['claude']).includes('claude')||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
-  return {...c,
+  // A harness is on only if the owner opted its discovery in and, for Codex, enabled its messaging.
+  const harnesses=d.harnesses||['claude'],claudeOn=harnesses.includes('claude'),codexOn=c.codex?.enabled===true&&harnesses.includes('codex');
+  if(!c.enabled||!d.enabled||(!claudeOn&&!codexOn)||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace messaging is disabled');
+  const codexSenders=c.codex?.allowedSenders??[];
+  return {...c,claudeOn,codexOn,
    allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
+   codexSenders:liveCodexSenders?codexSenders.filter(id=>id.startsWith('session-')||liveCodexSenders.has(id)):codexSenders,
    allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
  // Why a session cannot be reached right now, judged from data already loaded (no I/O); null when it can be.
  const offlineReason=(c,r,a,scope=policyScope(c))=>!r||r.lifecycle==='ended'?'Session has ended or is not discovered'
+  :(r.harness==='codex'?!c.codexOn:!c.claudeOn)?'Messaging is disabled for this harness'
   :!a||a.installation_id!==scope||a.generation!==r.generation||a.expires_at<=clock()?'Session MCP child is offline':null;
  // One policy read, then primary-key lookups: no scan of the directory for a single session.
  async function current(id){
@@ -244,42 +262,57 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   return {c,r,a};
  }
  let lastSweep=0;
- function verify(request){let c;try{c=policy();if(!equalSecret(request?.secret,c.secret)||request.installationId!==c.installationId||!UUID_PATTERN.test(request.childId)||!UUID_PATTERN.test(request.sessionId))throw coded('unauthorized','Invalid session attachment capability');}
+ function verify(request,harness){let c;try{c=policy();if(!equalSecret(request?.secret,c.secret)||request.installationId!==c.installationId||!UUID_PATTERN.test(request.childId)||!UUID_PATTERN.test(request.sessionId))throw coded('unauthorized','Invalid session attachment capability');}
   catch(error){failures.checkAndConsume('failed');throw error;}
   // Every session has its own budget (the heartbeat plus the occasional fresh grant for tool calls): a chatty session
   // must not starve the other sessions' leases. Only authenticated callers reach this, and idle buckets are swept.
   const now=Date.now();if(now-lastSweep>=60000){lastSweep=now;limiter.sweep();}
-  limiter.checkAndConsume(sessionAddress(c.installationId,c.workspace,request.sessionId));return c;}
+  limiter.checkAndConsume(sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId)));return c;}
+ const harnessOf=request=>{
+  const harness=request?.harness===undefined?'claude':request.harness;
+  if(!['claude','codex'].includes(harness))throw coded('invalid_request','Unsupported session harness');
+  return harness;
+ };
+ // Reachable Codex chats a given sender may message, for its credential's recipient claim. Only senders the owner
+ // listed for Codex pay for the scan.
+ async function codexReceiversFor(c,sender){
+  if(!c.codexOn||!c.codexSenders.includes(sender))return [];
+  const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
+  return (await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace}))
+   .filter(row=>row.harness==='codex'&&offlineReason(c,row,attachments.get(row.id),scope)===null).map(row=>row.id);
+ }
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
   allowedRecipients(){try{const list=[...policy().allowedRecipients];healthy();return list;}catch(error){degraded(error);return [];}},
   async attach(request){
-   const c=verify(request),identity=attachedSessionIdentity(request.sessionId);
-   const id=sessionAddress(c.installationId,c.workspace,request.sessionId);
+   const harness=harnessOf(request),c=verify(request,harness),key=sessionAddressKey(harness,request.sessionId),identity=attachedSessionIdentity(key);
+   if(!(harness==='codex'?c.codexOn:c.claudeOn))throw coded('session_disabled','Messaging is not enabled for this harness');
+   const id=sessionAddress(c.installationId,c.workspace,key);
    const r=await journal.getDiscoveredSession({id,installationId:c.installationId,workspace:c.workspace});
    if(!r||r.lifecycle==='ended')throw coded('session_offline','Own lifecycle hook must register an active session first');
    if(request.generation!==undefined&&request.generation!==r.generation)throw coded('session_fenced','Session lifecycle generation changed');
    await journal.attachDiscoveredSession({id,childId:request.childId,generation:r.generation,installationId:policyScope(c),wakeCapable:request.wakeCapable===true,now:clock()});
    await journal.bindAttachedSessionWake({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
-    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients]})};
+    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await codexReceiversFor(c,id)]})};
   },
-  async detach(request){const c=verify(request);const id=sessionAddress(c.installationId,c.workspace,request.sessionId);await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
+  async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
-  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c}=await current(to);if(!c.allowedSenders.includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
+  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!(r.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
   // One policy read, one directory listing and one attachment listing however many sessions there are.
   async listFor(reader){let result=[];try{
     const c=policy();
-    if(c.allowedSenders.includes(reader)){ // a reader outside the policy is simply shown nothing
+    // A reader outside a harness's sender list is simply shown nothing of that harness.
+    const claudeReader=c.claudeOn&&c.allowedSenders.includes(reader),codexReader=c.codexOn&&c.codexSenders.includes(reader);
+    if(claudeReader||codexReader){
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
-     // Codex discovery never grants a Claude attachment route.
-     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>row.harness==='claude');
+     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>row.harness==='codex'?codexReader:claudeReader);
      const up=new Map(rows.map(row=>[row.id,offlineReason(c,row,attachments.get(row.id),scope)===null]));
      // A session without a live lease is not offline: only an end event or a vanished host process says that.
      const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});
      result=listed.map(row=>({...row,attachment:up.get(row.id)?'attached':row.lifecycle==='ended'?'ended':'not-attached',
-      ...(!up.get(row.id)&&row.lifecycle!=='ended'?{attachmentHint:ATTACH_HINT}:{}),
+      ...(!up.get(row.id)&&row.lifecycle!=='ended'?{attachmentHint:row.harness==='codex'?CODEX_ATTACH_HINT:ATTACH_HINT}:{}),
       capabilities:{visible:true,reachable:up.get(row.id),wakeCapable:up.get(row.id)&&!!attachments.get(row.id).wake_capable}}));
     }
     healthy();}catch(error){degraded(error);}return result;},

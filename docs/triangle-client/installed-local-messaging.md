@@ -204,9 +204,10 @@ harness keeps the first. `disable-discovery` removes the managed hooks of both.
 Codex entries read `Codex · <title> · <workspace> · <hash>` and carry an optional
 descriptive `origin` (`cli`, `vscode`, `exec`, app-server variants, `subagent` or
 `unknown`). Origin says where the chat began, not who runs it now, and nothing is
-excluded by it. They never carry a receive or wake capability (`reachable: false`,
-`wakeCapable: false`): only the one conversation bound with `setup` (and
-`setup-inbox` for incoming requests) can receive and be woken. "All sessions"
+excluded by it. Discovery alone carries no receive or wake capability
+(`reachable: false`, `wakeCapable: false`): the one conversation bound with `setup`
+(and `setup-inbox` for incoming requests) can receive and be woken, and any Codex
+chat can be attached with the separate opt-in under "Codex chat attachment". "All sessions"
 means chats whose hooks report from the opted-in workspace. There is no scan of
 other chats, so a chat that has not run a hook since the hooks were installed is
 not listed.
@@ -272,7 +273,7 @@ discovered Claude chat) and this table records what has been measured.
 | Added after the chat started | Claude (Desktop, CLI) | Codex (Desktop, CLI) |
 | --- | --- | --- |
 | Discovery hooks (`setup-discovery`) | **No reload.** Open chats registered on their next prompt (measured 2026-10-23, Claude Desktop). Claude Code's documentation says edits to settings-file hooks are normally picked up by a file watcher. | **Reload needed.** Chats that were already loaded kept their old hook set (measured 2026-10-24, Codex 0.164.0). Both desktop chats registered after the owner restarted the Codex app, 1.4 and 1.2 seconds after their MCP launch. Whether reopening a loaded chat without an app restart is enough was not measured. New chats, and finished chats resumed later, register on their own. The hooks must also be trusted. |
-| Messaging MCP entry (`setup-session-messaging`, `.mcp.json`) | **Existing chats do not gain it.** An app restart was required in the 2026-10-23 test, and Claude Code's documentation does not say that a new project server loads into a running session. Approve the project server when Claude asks. | Not offered for arbitrary chats yet; only the one bound conversation can receive and be woken. |
+| Messaging MCP entry (`setup-session-messaging`, `.mcp.json`) | **Existing chats do not gain it.** An app restart was required in the 2026-10-23 test, and Claude Code's documentation does not say that a new project server loads into a running session. Approve the project server when Claude asks. | The project `.codex/config.toml` is read for trusted projects only, and the desktop app's MCP steps say to restart after configuring; not measured for this entry. The chat then attaches on its first Triangle tool call ("Codex chat attachment"). |
 
 What an operator sees:
 
@@ -366,6 +367,75 @@ redirects work to another chat, or launches a replacement. Existing
 claim/retention behavior is unchanged; this adds no new task expiry contract.
 Same-account shell isolation is not claimed. Cross-machine transport and worker
 launch remain deferred.
+
+## Codex chat attachment (candidate)
+
+Lets any Codex chat in an opted-in workspace receive Triangle messages, answer them
+and be woken, without binding it. It shares the workspace messaging capability and
+policy file with Claude attachment and adds a Codex section to the policy.
+
+```text
+triangle-local setup-session-messaging --harness codex --workspace /absolute/workspace \
+  --sender <exact id> [--sender <exact id> ...]
+```
+
+Prerequisite: `setup-discovery --harness codex` for the same workspace. Each
+`--sender` is an exact principal id (64 hex characters) or session address
+(`session-` and 64 hex) that may message Codex chats. None is granted by default,
+and the list is separate from the Claude receiver list. Restart the existing
+supervisor afterwards. Codex reads a project's `.codex/config.toml` for trusted
+projects only, so trust the workspace in Codex, then restart the Codex app or start
+a new chat so the server loads.
+
+Setup writes a marked block into `<workspace>/.codex/config.toml` and leaves the rest
+of that file alone: the `triangle-session` server (`triangle-local codex-session-mcp
+--config … --workspace-messaging …`) and a pre-approval for every tool except
+`triangle_send_message`, so a woken chat can read and answer its inbox without
+waiting for a person while a send, which reaches another agent, keeps asking.
+Setup refuses an existing `triangle-session` table that it did not write, and
+rerunning it changes nothing. `disable-session-messaging` removes the block (and the
+file if nothing else was in it) and fences the capability for both harnesses.
+
+**How a chat attaches.** Codex tells an MCP server which chat is calling only in the
+call itself (`_meta.threadId` and `sessionId`, observed on Codex 0.164.0). It is not
+in the environment, in `initialize`, in `tools/list` or in the MCP server
+instructions, which Codex does not show the model. So a chat attaches on its first
+Triangle tool call: ask it to call `triangle_get_status` (it returns the chat's own
+`session-…` address), or put that instruction in the workspace `AGENTS.md`. Until
+then it is listed `attachment: "not-attached"` with a hint, and nothing can be sent
+to or wake it. The call must name exactly one chat (a subagent thread is refused),
+and the chat must already be registered by its own lifecycle hook. One MCP process
+can serve several chats; each has its own address, lease and inbox.
+
+**Receiving.** The tools are the Claude chat's: `triangle_list_inbox`,
+`triangle_claim_message`, `triangle_reply_message`, `triangle_ack_notification`,
+`triangle_get_replies`, `triangle_consume_reply`, `triangle_list_sessions`,
+`triangle_list_recipients`, `triangle_send_message` and `triangle_get_status`.
+A message to an attached chat is never run by a worker; the chat reads it as
+untrusted peer content and replies to the original sender. A Codex chat can send
+only to the owner's configured recipients, not to other sessions. A Claude chat can
+message a Codex chat only if its exact address is among the `--sender` values.
+
+**Wake.** While a message or reply is waiting, the chat's MCP child runs
+`codex queue --thread <the chat's own id> --message <fixed hint>` with the
+`codexPath` and `codexHome` the owner pinned under `wake` in the local configuration,
+so wake needs `wake.enabled`; without it chats are pull-only. The hint carries
+counts and no peer text, is never retried, and is cleared by the chat's own
+acknowledgment. The supervisor stores only hashes; the raw thread id exists only in
+the child's memory. A chat that has never called a Triangle tool cannot be woken,
+because neither the child nor the supervisor knows its thread before that call.
+
+**Bound conversation.** The conversation bound with `setup` keeps its own identity
+(64 hex) and inbox. If it also loads this server it appears a second time under a
+session address; use one route for it.
+
+**Evidence and limits.** Real Codex 0.164.0 `exec` on an isolated host: a chat
+attached on its first call, was `online` through `mcp-lease`, claimed and answered a
+message from the owner side, and detached when it exited; `codex queue` through the
+wake adapter was accepted for that finished chat's thread. Not yet shown: Codex
+Desktop starting a turn from the queued hint in an idle chat. Rollback: run
+`disable-session-messaging`; older releases reject a policy file that has the
+`codex` section, so disable first.
 
 ## Bound Codex incoming requests (candidate)
 
