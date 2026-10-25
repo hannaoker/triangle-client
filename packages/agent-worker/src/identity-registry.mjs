@@ -22,6 +22,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   ftruncateSync,
   lstatSync,
@@ -59,7 +60,18 @@ export const MAX_REGISTRY_BINDINGS = 1000;
 export const MAX_REGISTRY_BYTES = 1024 * 1024; // 1 MiB
 export const MAX_AUDIT_BYTES = 8 * 1024 * 1024; // 8 MiB
 export const LOCK_TIMEOUT_MS = 5000;
+export const READ_MAX_RETRIES = 5;
 export const ZERO_HASH_64 = "0".repeat(64);
+
+const READ_RETRY_BACKOFF_MS = [2, 4, 8, 12, 20];
+const TRANSIENT_AUDIT_REASONS = new Set([
+  "audit_log_behind_registry",
+  "audit_log_too_many_uncommitted_lines",
+  "audit_log_missing",
+  "audit_log_empty",
+  "audit_line_truncated",
+  "orphan_audit_log",
+]);
 
 const BINDING_ID_PATTERN = /^bind_[a-f0-9]{32}$/;
 const HEX_64_PATTERN = /^[a-f0-9]{64}$/;
@@ -647,9 +659,50 @@ function ensureSafeRootForWrite(root) {
   checkSafeExistingRoot(root);
 }
 
-function assertSafeFileStat(filePath) {
-  const st = lstatSync(filePath, { throwIfNoEntry: false });
-  if (!st) return null;
+function hookLstatSync(filePath, fsHooks) {
+  if (fsHooks && typeof fsHooks.lstatSync === "function") {
+    return fsHooks.lstatSync(filePath, { throwIfNoEntry: false }, lstatSync);
+  }
+  return lstatSync(filePath, { throwIfNoEntry: false });
+}
+
+function hookOpenSync(filePath, flags, mode, fsHooks) {
+  if (fsHooks && typeof fsHooks.openSync === "function") {
+    const custom = fsHooks.openSync(filePath, flags, mode, openSync);
+    if (custom !== undefined) return custom;
+  }
+  return openSync(filePath, flags, mode);
+}
+
+function hookFstatSync(fd, filePath, fsHooks) {
+  if (fsHooks && typeof fsHooks.fstatSync === "function") {
+    return fsHooks.fstatSync(fd, filePath, fstatSync);
+  }
+  return fstatSync(fd);
+}
+
+function hookReadFileSync(fd, filePath, fsHooks) {
+  if (fsHooks && typeof fsHooks.readFileSync === "function") {
+    return fsHooks.readFileSync(fd, filePath, readFileSync);
+  }
+  return readFileSync(fd);
+}
+
+/**
+ * Checks a path's stat when not opening a descriptor (e.g., directory scan or lock check).
+ * Treats `nlink === 0` or missing entry as vanished (`null`), never unsafe.
+ */
+function assertSafeFileStat(filePath, fsHooks = null) {
+  let st;
+  try {
+    st = hookLstatSync(filePath, fsHooks);
+  } catch (err) {
+    if (err?.code === "ENOENT") return null;
+    throw codedError("registry_unsafe", "unsafe_file");
+  }
+  if (!st || (!st.isSymbolicLink() && st.nlink === 0)) {
+    return null;
+  }
   if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
     throw codedError("registry_unsafe", "unsafe_file_type_or_links");
   }
@@ -659,59 +712,128 @@ function assertSafeFileStat(filePath) {
   if ((st.mode & 0o777) !== 0o600) {
     throw codedError("registry_unsafe", "file_wrong_mode");
   }
-  try {
-    privateFile(filePath);
-  } catch {
-    throw codedError("registry_unsafe", "unsafe_file");
+  if (!fsHooks) {
+    try {
+      privateFile(filePath);
+    } catch {
+      const retrySt = lstatSync(filePath, { throwIfNoEntry: false });
+      if (!retrySt || (!retrySt.isSymbolicLink() && retrySt.nlink === 0)) {
+        return null;
+      }
+      throw codedError("registry_unsafe", "unsafe_file");
+    }
   }
   return st;
 }
 
-function verifyRootEntriesCustody(root) {
+/**
+ * Checks the transient SQLite rollback journal `.registry.lock-journal`:
+ * tolerates present, absent, or `nlink === 0`, while still rejecting symlinks,
+ * non-regular files, wrong owner, or group/other permission bits.
+ */
+function checkTransientLockJournal(journalPath, fsHooks = null) {
+  let st;
+  try {
+    st = hookLstatSync(journalPath, fsHooks);
+  } catch (err) {
+    if (err?.code === "ENOENT") return;
+    throw codedError("registry_unsafe", "unsafe_lock_journal");
+  }
+  if (!st || (!st.isSymbolicLink() && st.nlink === 0)) {
+    return;
+  }
+  if (st.isSymbolicLink() || !st.isFile() || st.nlink > 1) {
+    throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+  }
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+    throw codedError("registry_unsafe", "file_wrong_owner");
+  }
+  if ((st.mode & 0o077) !== 0) {
+    throw codedError("registry_unsafe", "file_wrong_mode");
+  }
+}
+
+function verifyRootEntriesCustody(root, fsHooks = null) {
   let names;
   try {
     names = readdirSync(root);
   } catch {
     throw codedError("registry_unsafe", "root_unreadable");
   }
+  const lockJournalName = `${LOCK_FILE_NAME}-journal`;
   for (const name of names) {
-    // Ignore leftover atomic temp files during read, but still reject symlinks if any entry is inspected
+    const full = path.join(root, name);
+    // Ignore leftover or active atomic temp files during read, rejecting only symlinks/non-files
     if (name.startsWith(`${REGISTRY_FILE_NAME}.tmp-`)) {
-      const tmpStat = lstatSync(path.join(root, name), { throwIfNoEntry: false });
+      const tmpStat = hookLstatSync(full, fsHooks);
       if (tmpStat && (tmpStat.isSymbolicLink() || !tmpStat.isFile())) {
         throw codedError("registry_unsafe", "unsafe_temp_entry");
       }
       continue;
     }
-    const full = path.join(root, name);
-    assertSafeFileStat(full);
+    // Tolerate transient SQLite lock journal (present, absent, or nlink 0)
+    if (name === lockJournalName) {
+      checkTransientLockJournal(full, fsHooks);
+      continue;
+    }
+    // Registry and audit files are verified on their open descriptors in readNoFollowBuffer;
+    // still check any other file (such as .registry.lock) with nlink 0 treated as vanished.
+    if (name === REGISTRY_FILE_NAME || name === AUDIT_FILE_NAME) {
+      continue;
+    }
+    assertSafeFileStat(full, fsHooks);
   }
 }
 
-function readNoFollowBuffer(filePath, maxBytes, oversizeCode, oversizeReason) {
-  const st = assertSafeFileStat(filePath);
-  if (!st) return null;
-  if (st.size > maxBytes) {
-    throw codedError(oversizeCode, oversizeReason);
-  }
+/**
+ * Opens `filePath` first with `O_NOFOLLOW`, validates custody (regular file, owner,
+ * mode 0600, `nlink === 1`) on `fstatSync(fd)` of that open descriptor, and reads
+ * from the same descriptor so a concurrent rename cannot swap what was checked.
+ * Returns `{ status: "ok", buffer }`, `{ status: "absent" }`, or `{ status: "vanished" }`
+ * (when the opened descriptor has `nlink === 0` because a writer unlinked/replaced it).
+ */
+function readNoFollowDescriptor(filePath, maxBytes, oversizeCode, oversizeReason, fsHooks = null) {
   const openFlags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
   let fd;
   try {
-    fd = openSync(filePath, openFlags);
-    const buf = readFileSync(fd);
+    fd = hookOpenSync(filePath, openFlags, undefined, fsHooks);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return { status: "absent", buffer: null };
+    }
+    // On macOS/POSIX, O_NOFOLLOW on a symlink yields ELOOP (or EFTYPE on some BSDs)
+    throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+  }
+
+  try {
+    const st = hookFstatSync(fd, filePath, fsHooks);
+    if (!st.isFile() || st.isSymbolicLink()) {
+      throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+    }
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+      throw codedError("registry_unsafe", "file_wrong_owner");
+    }
+    if ((st.mode & 0o777) !== 0o600) {
+      throw codedError("registry_unsafe", "file_wrong_mode");
+    }
+    if (st.nlink === 0) {
+      return { status: "vanished", buffer: null };
+    }
+    if (st.nlink !== 1) {
+      throw codedError("registry_unsafe", "unsafe_file_type_or_links");
+    }
+    if (st.size > maxBytes) {
+      throw codedError(oversizeCode, oversizeReason);
+    }
+    const buf = hookReadFileSync(fd, filePath, fsHooks);
     if (buf.length > maxBytes) {
       throw codedError(oversizeCode, oversizeReason);
     }
-    return buf;
-  } catch (err) {
-    if (err?.code === oversizeCode || err?.code === "registry_unsafe") throw err;
-    throw codedError("registry_unsafe", "file_open_failed");
+    return { status: "ok", buffer: buf };
   } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
+    try {
+      closeSync(fd);
+    } catch {}
   }
 }
 
@@ -851,7 +973,7 @@ function parseAndVerifyAuditLog(auditBuf, expectedHead) {
   };
 }
 
-function readAndVerifyUnlocked(root) {
+function readAndVerifyUnlocked(root, fsHooks = null) {
   const exists = checkSafeExistingRoot(root);
   if (!exists) {
     return {
@@ -864,28 +986,45 @@ function readAndVerifyUnlocked(root) {
     };
   }
 
-  verifyRootEntriesCustody(root);
+  verifyRootEntriesCustody(root, fsHooks);
 
   const registryPath = path.join(root, REGISTRY_FILE_NAME);
   const auditPath = path.join(root, AUDIT_FILE_NAME);
 
-  const regBuf = readNoFollowBuffer(
+  const regRes = readNoFollowDescriptor(
     registryPath,
     MAX_REGISTRY_BYTES,
     "registry_corrupt",
     "registry_oversized",
+    fsHooks,
   );
+  if (regRes.status === "vanished") {
+    const err = codedError("registry_chain_broken", "file_vanished_during_read");
+    err.transientRace = true;
+    throw err;
+  }
+
   // Read audit file up to MAX_AUDIT_BYTES + 1 MiB to parse and verify existing chain
-  const auditBuf = readNoFollowBuffer(
+  const auditRes = readNoFollowDescriptor(
     auditPath,
     MAX_AUDIT_BYTES + 1024 * 1024,
     "registry_corrupt",
     "audit_oversized",
+    fsHooks,
   );
+  if (auditRes.status === "vanished") {
+    const err = codedError("registry_chain_broken", "file_vanished_during_read");
+    err.transientRace = true;
+    throw err;
+  }
+
+  const regBuf = regRes.buffer;
+  const auditBuf = auditRes.buffer;
 
   if (regBuf === null) {
     if (auditBuf !== null) {
-      // Check if it is a single uncommitted init line from a crashed initial write
+      // Check if it is a single uncommitted init/bind line from a crashed initial write,
+      // or if a writer replaced/unlinked the registry file transiently while audit has >1 lines.
       const auditCheck = parseAndVerifyAuditLog(auditBuf, null);
       return {
         state: "absent",
@@ -942,20 +1081,44 @@ function readAndVerifyUnlocked(root) {
   };
 }
 
+function isRetryableReadTimingError(err) {
+  if (!err || typeof err !== "object") return false;
+  if (err.transientRace === true) return true;
+  if (err.code === "registry_chain_broken" && TRANSIENT_AUDIT_REASONS.has(err.reason)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Reads and validates the identity registry and hash-chained audit log at `root`.
  * Read-only: never creates directories, lock files, or modifies permissions.
+ * Retries up to 5 times with 2–20 ms backoff when a transient writer race occurs.
+ * Optional `fsHooks` is a test-only seam for deterministically simulating stat/open/read races.
  */
-export function readIdentityRegistry({ root } = {}) {
-  const result = readAndVerifyUnlocked(root);
-  if (result.state === "absent") {
-    return deepFreeze({ state: "absent" });
+export function readIdentityRegistry({ root, fsHooks = null } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= READ_MAX_RETRIES; attempt++) {
+    try {
+      const result = readAndVerifyUnlocked(root, fsHooks);
+      if (result.state === "absent") {
+        return deepFreeze({ state: "absent" });
+      }
+      return deepFreeze({
+        state: "ok",
+        registry: result.registry,
+        audit: result.audit,
+      });
+    } catch (err) {
+      lastError = err;
+      if (attempt < READ_MAX_RETRIES && isRetryableReadTimingError(err)) {
+        sleepSyncMs(READ_RETRY_BACKOFF_MS[attempt] ?? 20);
+        continue;
+      }
+      throw err;
+    }
   }
-  return deepFreeze({
-    state: "ok",
-    registry: result.registry,
-    audit: result.audit,
-  });
+  throw lastError;
 }
 
 const HELD_LOCKS = new Set();
@@ -999,7 +1162,7 @@ function withRegistryLock(root, timeoutMs, fn) {
   }
   const lockPath = path.join(root, LOCK_FILE_NAME);
   const journalPath = `${lockPath}-journal`;
-  assertSafeFileStat(journalPath);
+  checkTransientLockJournal(journalPath);
   const st = assertSafeFileStat(lockPath);
   if (!st) {
     try {

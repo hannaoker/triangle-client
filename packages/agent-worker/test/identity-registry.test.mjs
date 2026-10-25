@@ -2162,4 +2162,303 @@ test("Review Item 2: torn trailing audit line treated as uncommitted crash debri
   }
 });
 
+test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanished file / lock-journal handling, and reader retries", () => {
+  const base = makeTmpRoot("id-reg-race-seam-");
+  try {
+    const root = path.join(base, "identity");
+    const t1 = "2026-10-25T18:00:00.000Z";
+    const t2 = "2026-10-25T18:01:00.000Z";
+    const bAlpha = makeValidBinding("alpha", { issued_at: t2 });
+
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: t1,
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 1,
+      now: t2,
+      action: "bind",
+      subject: bAlpha.profile_instance_id,
+      mutate: (r) => {
+        r.bindings[bAlpha.profile_instance_id] = bAlpha;
+        return r;
+      },
+    });
+
+    // 1. Simulate nlink === 0 on lstatSync of registry file and .registry.lock-journal during root scan,
+    // and nlink === 0 on first fstatSync of registry file (replaced concurrently -> triggers retry and succeeds on attempt 2)
+    let fstatCallsOnReg = 0;
+    let lstatCallsOnReg = 0;
+    const rNlinkZero = readIdentityRegistry({
+      root,
+      fsHooks: {
+        lstatSync(target, options) {
+          const st = lstatSync(target, options);
+          if (!st) return st;
+          if (target.endsWith(REGISTRY_FILE_NAME)) {
+            lstatCallsOnReg += 1;
+            if (lstatCallsOnReg === 1) {
+              return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { nlink: 0 });
+            }
+          }
+          return st;
+        },
+        fstatSync(fd, filePath, realFstat) {
+          const st = realFstat(fd);
+          if (filePath && filePath.endsWith(REGISTRY_FILE_NAME)) {
+            fstatCallsOnReg += 1;
+            if (fstatCallsOnReg === 1) {
+              // Simulate the opened descriptor having been unlinked by a concurrent rename (nlink 0)
+              return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { nlink: 0 });
+            }
+          }
+          return st;
+        },
+      },
+    });
+    assert.equal(rNlinkZero.state, "ok");
+    assert.equal(rNlinkZero.registry.sequence, 2);
+    assert.equal(fstatCallsOnReg, 2);
+
+    // 2. Simulate a vanishing file (openSync throws ENOENT on first attempt for registry file while audit exists -> retries and succeeds on second attempt)
+    let openCallsOnReg = 0;
+    const rVanishedOnce = readIdentityRegistry({
+      root,
+      fsHooks: {
+        openSync(target, flags, mode) {
+          if (target.endsWith(REGISTRY_FILE_NAME)) {
+            openCallsOnReg += 1;
+            if (openCallsOnReg === 1) {
+              const err = new Error("ENOENT");
+              err.code = "ENOENT";
+              throw err;
+            }
+          }
+          return undefined; // fall through to real openSync
+        },
+      },
+    });
+    assert.equal(rVanishedOnce.state, "ok");
+    assert.equal(rVanishedOnce.registry.sequence, 2);
+    assert.equal(openCallsOnReg, 2);
+
+    // 3. Simulate audit_log_behind_registry on first attempt that succeeds on second attempt
+    const auditPath = path.join(root, AUDIT_FILE_NAME);
+    const fullAuditBuf = readFileSync(auditPath);
+    const firstLineBuf = Buffer.from(`${fullAuditBuf.toString("utf8").split("\n")[0]}\n`, "utf8");
+    let auditReadCalls = 0;
+    const rRetryBehind = readIdentityRegistry({
+      root,
+      fsHooks: {
+        readFileSync(fd, filePath, realReadFileSync) {
+          if (filePath && filePath.endsWith(AUDIT_FILE_NAME)) {
+            auditReadCalls += 1;
+            if (auditReadCalls === 1) {
+              return firstLineBuf; // only 1 line when registry is at seq 2 -> audit_log_behind_registry
+            }
+          }
+          return realReadFileSync(fd);
+        },
+      },
+    });
+    assert.equal(rRetryBehind.state, "ok");
+    assert.equal(rRetryBehind.registry.sequence, 2);
+    assert.equal(auditReadCalls, 2);
+
+    // 4. Persistent timing artifact (audit_log_behind_registry on all attempts) gives up after 5 retries (6 total attempts) and throws registry_chain_broken
+    let persistentCalls = 0;
+    assert.throws(
+      () =>
+        readIdentityRegistry({
+          root,
+          fsHooks: {
+            readFileSync(fd, filePath, realReadFileSync) {
+              if (filePath && filePath.endsWith(AUDIT_FILE_NAME)) {
+                persistentCalls += 1;
+                return firstLineBuf;
+              }
+              return realReadFileSync(fd);
+            },
+          },
+        }),
+      (err) => err.code === "registry_chain_broken" && err.reason === "audit_log_behind_registry",
+    );
+    assert.equal(persistentCalls, 6);
+
+    // 5. Transient .registry.lock-journal (present, absent, or nlink 0) is tolerated by both read and update
+    const journalFile = path.join(root, `${LOCK_FILE_NAME}-journal`);
+    writeFileSync(journalFile, "sqlite-rollback-journal-bytes", { mode: 0o600 });
+    chmodSync(journalFile, 0o600);
+    const rWithJournal = readIdentityRegistry({ root });
+    assert.equal(rWithJournal.state, "ok");
+    rmSync(journalFile, { force: true });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 seconds with zero reader errors)", async () => {
+  const base = makeTmpRoot("id-reg-mp-stress-");
+  try {
+    const root = path.join(base, "identity");
+    updateIdentityRegistry({
+      root,
+      expectedSequence: 0,
+      now: "2026-10-25T19:00:00.000Z",
+      action: "init",
+      subject: null,
+      mutate: (r) => r,
+    });
+
+    const durationMs = 3000;
+    const writerCount = 4;
+    const modulePath = path.join(REPO_ROOT, "packages/agent-worker/src/identity-registry.mjs");
+    const invPath = path.join(REPO_ROOT, "packages/agent-worker/src/installation-inventory.mjs");
+
+    const writerScript = `
+      import { parentPort, workerData } from "node:worker_threads";
+      import { createHash } from "node:crypto";
+      import { readIdentityRegistry, updateIdentityRegistry, LOCAL_PROFILE_BINDING_SCHEMA } from ${JSON.stringify(
+        modulePath,
+      )};
+      import { deriveClientInstanceId } from ${JSON.stringify(invPath)};
+
+      const { root, profileName, stopAt } = workerData;
+      const instanceId = deriveClientInstanceId(profileName);
+      const principalId = "agent_" + createHash("sha256").update("agent:" + profileName).digest("hex").slice(0, 32);
+      let updates = 0;
+      let conflicts = 0;
+
+      while (Date.now() < stopAt) {
+        const current = readIdentityRegistry({ root });
+        const seq = current.state === "absent" ? 0 : current.registry.sequence;
+        const existing = current.state === "ok" ? current.registry.bindings[instanceId] : null;
+        const nextGen = existing ? existing.binding_generation + 1 : 1;
+        const bindId = "bind_" + createHash("sha256").update(profileName + ":" + nextGen + ":" + seq).digest("hex").slice(0, 32);
+        const nowIso = new Date().toISOString();
+
+        try {
+          updateIdentityRegistry({
+            root,
+            expectedSequence: seq,
+            now: nowIso,
+            action: "bind",
+            subject: instanceId,
+            mutate: (reg) => {
+              reg.bindings[instanceId] = {
+                schema: LOCAL_PROFILE_BINDING_SCHEMA,
+                binding_id: bindId,
+                trust_mode: "mesh-managed",
+                principal_id: principalId,
+                profile_name: profileName,
+                profile_instance_id: instanceId,
+                authority_origin: "https://mesh.example.test",
+                binding_generation: nextGen,
+                issued_at: nowIso,
+                revoked_at: null,
+                proof: {
+                  kind: "disk_observation",
+                  observed_on_disk: true,
+                  verified_live_authority: false,
+                },
+              };
+              return reg;
+            },
+          });
+          updates += 1;
+        } catch (err) {
+          if (err.code === "registry_sequence_conflict" || err.code === "registry_busy") {
+            conflicts += 1;
+          } else {
+            throw err;
+          }
+        }
+      }
+      parentPort.postMessage({ updates, conflicts });
+    `;
+
+    const readerScript = `
+      import { parentPort, workerData } from "node:worker_threads";
+      import { readIdentityRegistry } from ${JSON.stringify(modulePath)};
+
+      const { root, stopSignal } = workerData;
+      const view = new Int32Array(stopSignal);
+      let reads = 0;
+      let maxSequence = 0;
+      const errors = [];
+
+      while (Atomics.load(view, 0) === 0) {
+        try {
+          const res = readIdentityRegistry({ root });
+          reads += 1;
+          if (res.state === "ok" && res.registry.sequence > maxSequence) {
+            maxSequence = res.registry.sequence;
+          }
+        } catch (err) {
+          errors.push({ code: err.code, reason: err.reason, message: err.message });
+        }
+      }
+      parentPort.postMessage({ reads, maxSequence, errors });
+    `;
+
+    const stopAt = Date.now() + durationMs;
+    const stopSignal = new SharedArrayBuffer(4);
+    const stopView = new Int32Array(stopSignal);
+
+    const readerPromise = new Promise((resolve, reject) => {
+      const w = new Worker(readerScript, {
+        eval: true,
+        workerData: { root, stopSignal },
+      });
+      w.on("message", resolve);
+      w.on("error", reject);
+    });
+
+    const writerPromises = [];
+    for (let i = 0; i < writerCount; i++) {
+      writerPromises.push(
+        new Promise((resolve, reject) => {
+          const w = new Worker(writerScript, {
+            eval: true,
+            workerData: { root, profileName: `writer-${i}`, stopAt },
+          });
+          w.on("message", resolve);
+          w.on("error", reject);
+        }),
+      );
+    }
+
+    const writerResults = await Promise.all(writerPromises);
+    Atomics.store(stopView, 0, 1);
+    const readerResult = await readerPromise;
+
+    assert.deepEqual(
+      readerResult.errors,
+      [],
+      `Expected zero reader errors during concurrent writes, got: ${JSON.stringify(readerResult.errors)}`,
+    );
+    assert.ok(readerResult.reads > 50, `Expected > 50 reads, got ${readerResult.reads}`);
+
+    const totalWriterUpdates = writerResults.reduce((acc, r) => acc + r.updates, 0);
+    assert.ok(totalWriterUpdates >= 4, `Expected writers to commit updates, got ${totalWriterUpdates}`);
+
+    const finalRead = readIdentityRegistry({ root });
+    assert.equal(finalRead.state, "ok");
+    // Initial init was sequence 1, plus totalWriterUpdates committed updates
+    assert.equal(finalRead.registry.sequence, 1 + totalWriterUpdates);
+    assert.deepEqual(finalRead.audit, {
+      verifiedThrough: 1 + totalWriterUpdates,
+      uncommittedTail: 0,
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+
 
