@@ -763,7 +763,6 @@ test("Item 2: absent root read, init write, bind, revoke, sequence conflict, and
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 2: crash injection at each point, uncommittedTail recovery, and leftover temp files ignored", () => {
   const base = makeTmpRoot("id-reg-crash-");
   try {
@@ -909,7 +908,6 @@ test("Item 2: crash injection at each point, uncommittedTail recovery, and lefto
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 2: concurrent writers (one wins, the other gets registry_sequence_conflict or registry_busy)", async () => {
   const base = makeTmpRoot("id-reg-concurrent-");
   try {
@@ -1045,7 +1043,6 @@ test("Item 2: concurrent writers (one wins, the other gets registry_sequence_con
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 2: custody safety checks (symlink, hard link, wrong mode, non-directory root) rejected without modification", () => {
   const base = makeTmpRoot("id-reg-custody-");
   try {
@@ -1191,7 +1188,6 @@ test("Item 2: custody safety checks (symlink, hard link, wrong mode, non-directo
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 3: audit chain verification detects edited, removed, reordered, duplicated, or truncated lines, head mismatch, and 8 MiB limit", () => {
   const base = makeTmpRoot("id-reg-audit-");
   try {
@@ -1439,7 +1435,6 @@ test("Item 3: audit chain verification detects edited, removed, reordered, dupli
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 4: boundaries (no network, no process spawn, nothing outside root, leaves profiles-v1 and client untouched, deterministic bytes)", () => {
   const base = makeTmpRoot("id-reg-boundaries-");
   try {
@@ -1642,7 +1637,6 @@ test("Item 4: boundaries (no network, no process spawn, nothing outside root, le
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Item 4: source-level isolation — no file under packages/*/src other than identity-registry.mjs imports it", () => {
   const packagesDir = path.join(REPO_ROOT, "packages");
   const selfFile = path.join(REPO_ROOT, "packages/agent-worker/src/identity-registry.mjs");
@@ -2012,7 +2006,6 @@ test("Review Item 1: audit entry must describe the exact mutation (mutation_does
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Review Item 2: torn trailing audit line treated as uncommitted crash debris and repaired on next update", () => {
   const base = makeTmpRoot("id-reg-torn-audit-");
   try {
@@ -2161,7 +2154,6 @@ test("Review Item 2: torn trailing audit line treated as uncommitted crash debri
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanished file / lock-journal handling, and reader retries", () => {
   const base = makeTmpRoot("id-reg-race-seam-");
   try {
@@ -2301,7 +2293,6 @@ test("Review Item 3: descriptor-based custody checks, transient nlink 0 / vanish
     rmSync(base, { recursive: true, force: true });
   }
 });
-
 test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 seconds with zero reader errors)", async () => {
   const base = makeTmpRoot("id-reg-mp-stress-");
   try {
@@ -2459,6 +2450,3 @@ test("Review Item 3: multi-process stress test (4 writers and 1 reader for ~3 se
     rmSync(base, { recursive: true, force: true });
   }
 });
-
-
-

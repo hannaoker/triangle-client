@@ -10,8 +10,8 @@ Branch: `antigravity/identity-registry-storage` (based on `origin/main` `5e091da
 
 This change implements the host-local identity registry storage foundation specified in `docs/plans/2026-10-25-identity-reconciliation-design.md` (Section 4.1, Section 7 row 8, Section 8 steps 2–4, and Section 11 Slice 1a/1b and Assumption A4):
 
-- **`packages/agent-worker/src/identity-registry.mjs`**: Closed-schema validation (`identity_registry_v1` and the Slice 1a reduced `local_profile_binding_v1`), deterministic `canonicalJson` serialization, safe private path/file custody checks, SQLite exclusive lock acquisition (`<root>/.registry.lock`), atomic compare-and-set updates (`updateIdentityRegistry`), and an append-only SHA-256 hash-chained audit log (`<root>/registry-audit.jsonl`).
-- **`packages/agent-worker/test/identity-registry.test.mjs`**: Unit, concurrency, fault-injection, custody, hash-chain tampering, and boundary isolation tests.
+- **`packages/agent-worker/src/identity-registry.mjs`**: Closed-schema validation (`identity_registry_v1` and the Slice 1a reduced `local_profile_binding_v1`), deterministic `canonicalJson` serialization, descriptor-based private path/file custody checks, SQLite exclusive lock acquisition (`<root>/.registry.lock`), atomic compare-and-set updates (`updateIdentityRegistry`) with exact action-to-mutation diff verification, and an append-only SHA-256 hash-chained audit log (`<root>/registry-audit.jsonl`).
+- **`packages/agent-worker/test/identity-registry.test.mjs`**: Unit, action-mutation diff, crash-debris recovery, descriptor-custody/retry race, multi-process stress, hash-chain tampering, and boundary isolation tests.
 
 Nothing in production imports this module yet. No CLI command is added, and no manifest, installer, supervisor, `package.json`, or Swift file is modified.
 
@@ -64,11 +64,19 @@ Validation invariants (`validateIdentityRegistry`):
 - `trust_mode` accepts only `"mesh-managed"` in this slice (`"serverless-peer"` is rejected).
 - `principal_id` matches `^agent_[a-f0-9]{32}$`; `binding_id` matches `^bind_[a-f0-9]{32}$` and is unique across all bindings in the registry.
 - `authority_origin` satisfies `isValidBareHttpsOrigin`.
-- `binding_generation` is a safe integer $\ge 1$; updates disallow decreasing `binding_generation` or deleting existing binding keys (revocation sets `revoked_at` to an ISO-8601 UTC timestamp $\ge$ `issued_at`).
+- `binding_generation` is a safe integer $\ge 1$.
 - `proof` must be `{ kind: "disk_observation", observed_on_disk: true, verified_live_authority: false }`.
 - Validation returns a deep-frozen copy or throws a coded `invalid_registry` error whose message contains only a bounded reason code and never echoes caller input.
 
-### 2.2 Audit Log (`<root>/registry-audit.jsonl`, mode `0600`, max 8 MiB)
+### 2.2 Action-to-Mutation Diff Rules (`assertMutationMatchesAction`)
+
+Every `updateIdentityRegistry` call compares the previous and new `bindings` maps and requires that the mutation matches `(action, subject)` exactly, or throws `invalid_registry` with bounded reason `mutation_does_not_match_action` and writes nothing:
+- **`init`**: Allowed only when the registry is currently `"absent"`; `subject` must be `null` and the resulting `bindings` must be empty (`{}`).
+- **`bind` (subject absent before)**: Creates the binding for `subject` with `binding_generation === 1` and `revoked_at === null`; no other binding may be added, removed, or modified.
+- **`bind` (subject present before — rebind)**: Updates only `subject` with `binding_generation === old.binding_generation + 1`, `revoked_at === null`, a different `binding_id`, and identical `profile_name` and `profile_instance_id` (`issued_at`, `principal_id`, and `authority_origin` may change); no other binding may differ.
+- **`revoke`**: Requires an existing active binding for `subject` (`old.revoked_at === null`); the new binding must be identical to the old binding in every field except `revoked_at`, which is set to an ISO-8601 UTC timestamp $\ge$ `issued_at` (with `binding_generation` unchanged); no other binding may differ.
+
+### 2.3 Audit Log (`<root>/registry-audit.jsonl`, mode `0600`, max 8 MiB)
 
 Each line is `canonicalJson(entry) + "\n"` with closed keys:
 
@@ -84,28 +92,38 @@ Each line is `canonicalJson(entry) + "\n"` with closed keys:
 - Audit entries contain no secrets, profile contents, or message text.
 - Updates that would cause `registry-audit.jsonl` to exceed 8 MiB (`MAX_AUDIT_BYTES = 8388608`) fail with `registry_audit_full` before writing.
 
-### 2.3 Lock File (`<root>/.registry.lock`, mode `0600`)
+### 2.4 Lock File (`<root>/.registry.lock`, mode `0600`)
 
 Writers acquire an exclusive SQLite transaction (`BEGIN EXCLUSIVE`) on `<root>/.registry.lock`, polling up to 5 seconds (`LOCK_TIMEOUT_MS = 5000`) before failing with `registry_busy`. Read operations (`readIdentityRegistry`) are strictly read-only and never create directories or lock files.
 
 ---
 
-## 3. Commit Protocol and Crash Recovery
+## 3. Commit Protocol, Crash Recovery, and Concurrent Reader Race Handling
 
-All custody checks reuse `ancestors`, `privateDir`, and `privateFile` from `packages/agent-worker/src/delivery-private-path.mjs`: `root` must be a canonical `0700` directory owned by the current UID with safe ancestors, and every file inside `root` must be a regular single-link (`nlink === 1`) `0600` file owned by the current UID (no symlinks; never repaired or chmodded on error).
+### 3.1 Custody and Descriptor-Based Reads
+
+Path and directory checks reuse `ancestors`, `privateDir`, and `privateFile` from `packages/agent-worker/src/delivery-private-path.mjs`: `root` must be a canonical `0700` directory owned by the current UID with safe ancestors, and files inside `root` are never repaired or chmodded on error.
+
+To prevent false-positive `registry_unsafe` errors when a reader runs concurrently with committing writers:
+- **Descriptor-based verification (`readNoFollowDescriptor`)**: Each data file (`identity-registry-v1.json` and `registry-audit.jsonl`) is opened first with `O_RDONLY | O_NOFOLLOW`, and custody checks (regular file, current UID, mode `0600`, `nlink === 1`) are evaluated on `fstatSync(fd)` of that open file descriptor before reading from the same descriptor, so a concurrent `rename` cannot replace what was checked.
+- **Vanished files and `nlink === 0`**: A path that vanishes (`ENOENT`) between the directory scan and `openSync`, or an open/stat result showing `nlink === 0` (briefly observable on APFS/POSIX while a file is being unlinked or atomically replaced), is treated as vanished rather than `registry_unsafe`.
+- **Transient lock journal tolerance**: Both the root directory scan and writer lock acquisition tolerate the transient SQLite rollback journal `.registry.lock-journal` (whether present with mode `0600`, absent, or `nlink === 0`) while still rejecting symlinks, non-regular files, foreign owners, or group/other permission bits.
+- **Bounded reader retries**: `readIdentityRegistry` retries the read up to 5 times (`READ_MAX_RETRIES = 5`, with backoff `[2, 4, 8, 12, 20]` ms) when the only problem is a transient writer timing artifact (such as `file_vanished_during_read`, `audit_log_behind_registry`, or `audit_log_too_many_uncommitted_lines`). A persistent error still throws after the retries.
+
+### 3.2 Two-Step Commit Protocol and Crash Rules
 
 Under the exclusive `.registry.lock`, `updateIdentityRegistry` executes:
 
 1. **Re-read and verify**: Reads and verifies the current registry and audit chain. Requires `currentSequence === expectedSequence` (`0` when absent) or throws `registry_sequence_conflict` without writing.
-2. **Mutate and validate**: Passes a deep clone of the current registry to `mutate(clone)`, verifies `mutate` did not alter `sequence`, `updatedAt`, `auditHead`, or existing `createdAt`, enforces monotonic `binding_generation` and non-deletion of bindings, and validates the next registry and audit entry in memory.
-3. **Step 1 — Audit append**: If a previous crash left 1 uncommitted tail line (`uncommittedTail === 1`), truncates `registry-audit.jsonl` back to the last committed byte offset, appends the new line (`sequence = currentSequence + 1`), and calls `fsyncSync`.
+2. **Mutate, validate, and diff**: Passes a deep clone of the current registry to `mutate(clone)`, verifies `mutate` did not alter `sequence`, `updatedAt`, `auditHead`, or existing `createdAt`, validates the candidate registry against the closed schema, and enforces `assertMutationMatchesAction`.
+3. **Step 1 — Audit append**: If a previous crash left 1 uncommitted tail item (`uncommittedTail === 1`, either a complete uncommitted line or a torn trailing fragment), truncates `registry-audit.jsonl` back to `committedByteLength`, appends the new line (`sequence = currentSequence + 1`), and calls `fsyncSync`.
 4. **Step 2 — Atomic registry replacement (Commit Point)**: Writes the serialized registry to `<root>/identity-registry-v1.json.tmp-<pid>-<random>`, calls `fsyncSync`, closes, renames it over `identity-registry-v1.json`, and fsyncs `<root>`.
 
 Crash rules:
-- **Crash before Step 1 completes**: Neither file changes (or a truncated/partial line is detected as `registry_chain_broken`).
-- **Crash after Step 1 and before Step 2 rename**: `registry-audit.jsonl` has exactly one valid hash-chained line beyond `registry.auditHead.sequence`. `readIdentityRegistry` reports `audit: { verifiedThrough: registry.sequence, uncommittedTail: 1 }` and returns the committed `registry`. The next locked `updateIdentityRegistry` truncates that uncommitted line before appending its new line. Any leftover `.tmp-*` file is ignored by reads and cleaned up or ignored.
+- **Crash during Step 1 (torn trailing audit line)**: If a write is cut short before the trailing newline (`\n`), `parseAndVerifyAuditLog` treats the final incomplete fragment as uncommitted crash debris (`uncommittedTail: 1`) when all complete lines before it verify through `registry.auditHead` (or when the registry is absent and no complete line precedes it). Reads succeed and ignore the torn fragment, and the next locked `updateIdentityRegistry` truncates the file back to `committedByteLength` before appending. A torn line inside the committed region, or complete lines that stop short of `registry.auditHead`, still throws `registry_chain_broken`.
+- **Crash after Step 1 and before Step 2 rename**: `registry-audit.jsonl` has one complete hash-chained line beyond `registry.auditHead.sequence` (or 1 initial `init`/`bind` line when the registry file is still absent). `readIdentityRegistry` reports `uncommittedTail: 1` (or `state: "absent"` when the registry file was never installed), and the next locked `updateIdentityRegistry` truncates back to `committedByteLength` before appending its new line. Leftover `.tmp-*` files are ignored by reads.
 - **Crash after Step 2 rename**: The commit point has passed; subsequent reads see `sequence + 1` and `uncommittedTail: 0`.
-- **Any other discrepancy**: Missing lines, >1 extra lines, edited/reordered/duplicated/truncated lines, or `auditHead` hash mismatch throws `registry_chain_broken`.
+- **Any other discrepancy**: Missing committed lines, >1 uncommitted items beyond `auditHead`, edited/reordered/duplicated lines, a line cut inside the committed region, or an `auditHead` hash mismatch throws `registry_chain_broken`.
 
 ---
 
@@ -113,11 +131,11 @@ Crash rules:
 
 Executed from `/Users/zhenyuhou/Projects/The Triangle/worktrees/identity-registry-storage`:
 
-1. **Identity registry unit and boundary tests**:
+1. **Identity registry unit, fault, race, and boundary tests**:
    ```sh
    /Users/zhenyuhou/.local/bin/node --test packages/agent-worker/test/identity-registry.test.mjs
    ```
-   Result: **10/10 passed** (0 failed).
+   Result: **14/14 passed** (0 failed).
 
 2. **Agent-worker inventory and bundle closure regression suites**:
    ```sh
@@ -125,15 +143,21 @@ Executed from `/Users/zhenyuhou/Projects/The Triangle/worktrees/identity-registr
    ```
    Result: **70/70 passed** (0 failed).
 
-3. **Client package regression suite**:
+3. **Triangle CLI regression suite**:
+   ```sh
+   npm --prefix packages/triangle-cli test
+   ```
+   Result: **93/93 passed** (0 failed).
+
+4. **Client package regression suite**:
    ```sh
    /Users/zhenyuhou/.local/bin/node --test tests/client-package.test.mjs
    ```
    Result: **9/9 passed** (0 failed).
 
-4. **Whitespace and formatting check**:
+5. **Whitespace and formatting check**:
    ```sh
-   git diff --check 5e091da12e38ec273b8e5941c6da99d526043f41
+   git diff --check 5e091da
    ```
    Result: Exit code `0` (clean).
 
