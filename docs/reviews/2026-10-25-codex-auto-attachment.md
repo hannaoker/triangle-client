@@ -1,6 +1,6 @@
 # Codex automatic lifecycle attachment — 2026-10-25
 
-Status: candidate on `codex/automatic-session-attachment`; not installed or enabled in the real workspace. Existing production runtime remains PR #120. This removes the need for an agent/model to call `triangle_get_status` manually on startup or resume where Codex runs its lifecycle hooks; it does not reopen unloaded chats or claim that selecting a chat alone fires hooks.
+Status: installed and enabled in the real workspace after explicit owner approval. Clean candidate `f6c2975` passed Desktop new/resumed-chat acceptance; merge is authorized conditional on these checks. See final acceptance below. This removes the need for an agent/model to call `triangle_get_status` manually on startup or resume where Codex runs its lifecycle hooks; it does not reopen unloaded chats or claim that selecting a chat alone fires hooks.
 
 ## Motivation and shape
 
@@ -41,7 +41,7 @@ Affected messaging/discovery/Claude/Grok/inbox/wake/supervisor/closure suite: **
 - Unsafe/foreign hooks fail before policy or MCP settings writes.
 - Installed CLI entry parses opt-in/opt-out and rejects conflicting flags.
 
-Required live gate before claiming Desktop usability:
+Live release-gate checklist (completed by the acceptance below):
 
 1. Merge/install the candidate only with the owner's explicit release approval.
 2. Enable the two real-workspace attachment hooks and obtain normal trust for those exact definitions; approval of the metadata-only disposable probes is not approval of production hook activation.
@@ -60,3 +60,17 @@ The owner approved candidate installation, two real-workspace hooks and merge co
 Temporary metadata-only tracing of the candidate MCP child confirmed a real Desktop `triangle_attach_session` invocation with `_meta.threadId`, followed by explicit `session_offline`: the hook ran concurrently with the command that registers discovery. No message content or credentials were traced. Tracing is not part of the source change and must be removed before final acceptance.
 
 The fix waits at most two seconds for explicit `session_offline` refusals inside the hook, bounded by the remaining RPC budget. Timeouts and other errors are not blindly retried. Each hook forces a fresh grant so same-child resume cannot return a cached old-generation credential; existing generation-fencing recovery still applies. Regression deliberately starts attachment before discovery, verifies success only after a real lifecycle report, checks resume at generation 2, and checks failure when no lifecycle ever arrives.
+
+
+## Final clean Desktop acceptance
+
+Clean candidate `f6c2975` installed as supervisor bundle `a0d020fa…` (v12, 81 hash-verified artifacts), with temporary tracing removed. Doctor passed and receiver policy, host configuration and old backlog remained unchanged.
+
+- New app-created Desktop chat `Triangle automatic attachment clean acceptance`: first turn said only `CLEAN_AUTO_ATTACH_READY`, with **zero model tool calls**. Its lifecycle hook attached it at generation 1.
+- The initial wake reached the chat, which retrieved/acknowledged the request but could not locate the structured human approval in the source history. An app follow-up pointed it to the exact direct human turn. That first assisted reply is not counted as a fully automatic reply.
+- A subsequent clean canary required no post-send app prompt: automatic wake, inbox verification, claim, exact correlated reply and ack passed. Admission to reply: 15.276 s.
+- Actual archive emitted an end event and set attachment expiry to 0. After unarchive, the resumed turn said only `CLEAN_AUTO_REOPEN_READY`, with **zero model tool calls**. Same address, generation 2, new child lease.
+- Post-reopen clean canary completed automatic wake/claim/reply/ack without a post-send app prompt. Admission to reply: 9.098 s.
+- The bound fixed conversation had no second session attachment. All canary replies were consumed individually; 14 older replies and 2 held tasks were untouched.
+
+Evidence on the Mini: `releases/pr121-desktop-acceptance.json` and `releases/pr121-install-verification.json` under the Triangle application root. These are measured samples, not latency guarantees. Activation still requires normal trust for the exact hook definitions, and the app may need a restart to load changed settings. This does not open an unloaded conversation; it attaches when Codex emits the lifecycle events. Cross-machine behavior is not claimed.

@@ -437,7 +437,7 @@ Desktop starting a turn from the queued hint in an idle chat. Rollback: run
 `disable-session-messaging`; older releases reject a policy file that has the
 `codex` section, so disable first.
 
-### Optional automatic Codex attachment (candidate; not enabled by default)
+### Optional automatic Codex attachment (owner opt-in)
 
 With a runtime containing `triangle_attach_session`, add `--auto-attach` to the existing
 `triangle-local setup-session-messaging --harness codex --workspace <workspace> --sender <exact-owner-id>`
@@ -459,8 +459,9 @@ attachment hooks; manual first-tool-call attachment stays available. Full
 Unrelated hooks and configuration, including their file permissions, are preserved.
 
 This runs only when Codex actually emits lifecycle events with the MCP server connected;
-it does not reopen an unloaded chat. CLI 0.164.0 automatic-hook metadata was measured;
-Desktop startup/resume without a model-side Triangle call remains an installed-path gate.
+it does not reopen an unloaded chat. CLI 0.164.0 and Desktop-bundled 0.164.0-alpha.11.1 hook metadata were measured.
+Installed Desktop new/reopened chats attached without model-side tool calls and completed
+automatic wake/reply acceptance; these checks do not establish unopened-chat wake.
 See `docs/reviews/2026-10-25-codex-auto-attachment.md` for evidence and rollout checks.
 
 ## Bound Codex incoming requests (candidate)
