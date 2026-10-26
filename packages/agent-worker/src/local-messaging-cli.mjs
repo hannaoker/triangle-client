@@ -20,8 +20,8 @@ export function defaultLocalConfigPath(env=process.env){return path.join(env.HOM
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
- const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness']);
- while(args.length){const flag=args.shift();if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root']);
+ while(args.length){const flag=args.shift();if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -494,10 +494,11 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
+ if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -865,6 +866,53 @@ export function disableDesktopInbox(options,env=process.env){
  let policyCleanupRequired=false;
  if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});}catch{policyCleanupRequired=true;}}
  return {inboxEnabled:false,policyCleanupRequired,requiresServiceRestart:true};
+}
+
+export function setupRouter(options={},env=process.env){
+ let stateRoot=options['state-root']||options.stateRoot;
+ if(!stateRoot){
+  const configPath=options.config||defaultLocalConfigPath(env);
+  if(fs.existsSync(configPath)){
+   try{
+    const config=readPrivateJson(configPath);
+    stateRoot=config.stateRoot||path.join(path.dirname(configPath),'local');
+   }catch{
+    stateRoot=path.join(path.dirname(configPath),'local');
+   }
+  }else{
+   stateRoot=path.join(path.dirname(configPath),'local');
+  }
+ }
+ if(typeof stateRoot!=='string'||!path.isAbsolute(stateRoot)||stateRoot.includes('\0')){
+  throw coded('unsafe_path','state-root must be an absolute path');
+ }
+ const enable=Boolean(options.enable);
+ const disable=Boolean(options.disable);
+ if((enable&&disable)||(!enable&&!disable)){
+  throw coded('invalid_arguments','Specify exactly one of --enable or --disable');
+ }
+ const routerPath=path.join(stateRoot,'router.json');
+ let existing=null;
+ if(fs.existsSync(routerPath)){
+  try{existing=readPrivateJson(routerPath);}catch{}
+ }
+ const registryRoot=options['registry-root']??options.registryRoot??existing?.registryRoot;
+ if(registryRoot!==undefined&&registryRoot!==null){
+  if(typeof registryRoot!=='string'||!path.isAbsolute(registryRoot)||registryRoot.includes('\0')){
+   throw coded('invalid_arguments','registryRoot must be an absolute path');
+  }
+ }
+ const routerConfig={
+  version:1,
+  enabled:enable,
+  ...(registryRoot?{registryRoot}:{}),
+ };
+ writePrivateJson(routerPath,routerConfig);
+ return {
+  routerEnabled:enable,
+  routerPath,
+  ...(registryRoot?{registryRoot}:{}),
+ };
 }
 
 // The entry point runs last: everything above, including the module-level constants the setup commands use, must be

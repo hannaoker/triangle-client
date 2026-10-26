@@ -67,13 +67,15 @@ export function createTestMemoryJournal() {
       inReplyTo = null,
       text = "",
       metadata = {},
+      to_principal = null,
+      resolved_via = null,
     }) {
       if (isClosed) throw coded("journal_closed", "Journal is closed");
       if (!messageId || !sender || !recipient) {
         throw coded("invalid_record", "sender, recipient, and messageId are required");
       }
 
-      const candidate = { sender, recipient, messageId, requestId, inReplyTo, text, metadata };
+      const candidate = { sender, recipient, messageId, requestId, inReplyTo, text, metadata, to_principal, resolved_via };
       const existing = records.get(messageId);
       if (existing) {
         if (isEnvelopeEqual(existing, candidate)) {
