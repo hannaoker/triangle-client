@@ -210,3 +210,11 @@ Rehearsal was executed under `/private/tmp/triangle-r15-package-path-verify/` (r
 - **G2 (Helper Installation):** Outstanding owner authorization for installing compiled `triangle-mailbox` and `triangle-client`.
 - **G3 (Live Service Staging):** Outstanding owner authorization to stage live supervisor/worker runtimes and restart `dev.thetriangle.client` via `launchctl`.
 - **G4 (Router Activation):** Outstanding owner authorization to enable router dynamically in production `router.json`.
+
+### Codex follow-up: rebuilt archive and package-path run
+
+Codex independently verified rebuilt archive SHA-256 `9a9d99c9d38474e04fb8ec3d660351bb6294e21dbb75b2d2a44a478a69e7bb53`, strict signatures for both extracted native binaries, and byte equality between checkout and extracted installer/server/journal/router modules. The Hermes shebang hunk is back to baseline. All 31 affected Hermes-wrapper and runtime-closure tests passed independently.
+
+Codex reran the extracted bundled Node with `/private/tmp/triangle-r15-package-path-verify/package-path-rehearsal.mjs`; exit 0, including extracted CLI, scratch staging and extracted-module socket canaries. Output: `/private/tmp/triangle-r15-package-path-independent.log`. No live installation was changed.
+
+Rollback evidence correction: this script stages Hermes into an initially empty scratch installation and rolls that stage back. Its final Hermes manifest is absent. The script does not validate a restored prior Hermes manifest, despite the earlier task reply claiming that. This proves rollback to absence, not restoration of an existing v12 installation. The previous worktree-source rehearsal is separate evidence. Full phase-by-phase restoration, especially the installed v12 baseline and journal snapshot, remains a release gate before live activation. A bundled-node invocation and explicit extracted imports are verified here; the script's `safeImport` guard checks direct entry paths rather than every transitive import with a loader hook.
