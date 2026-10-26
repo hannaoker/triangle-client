@@ -63,6 +63,27 @@ export function renderDoctor(report) {
     for (const a of report.agents) lines.push(`  - ${a.handle} (${a.agent_id}) · ${a.state} · permissions rev ${a.revision ?? "?"}${a.on_this_device ? " · key on this device" : ""}`);
   }
   for (const w of report.warnings) lines.push(`! ${w}`);
+  if (report.identity) {
+    lines.push("Identity (host-local; disk observations, not live authority verification)");
+    const reg = report.identity.registry ?? {};
+    const root = report.identityRegistryRoot ?? "";
+    lines.push(`Registry:  ${reg.state} · sequence ${reg.sequence ?? 0} · ${root}`);
+    if (Array.isArray(report.identity.profiles)) {
+      for (const p of report.identity.profiles) {
+        const prin = p.principalId ?? "-";
+        const orig = p.authorityOrigin ?? "-";
+        const gen = p.generation != null ? `gen ${p.generation}` : "-";
+        lines.push(`  - ${p.state} · ${p.profile} · ${prin} · ${orig} · ${gen}`);
+      }
+    }
+    if (Array.isArray(report.identity.diagnostics)) {
+      for (const d of report.identity.diagnostics) {
+        const tag = d.severity === "fault" ? "[fault]" : "[warn]";
+        const action = d.action ? ` ${d.action}` : "";
+        lines.push(`  ${tag} ${d.message}${action}`);
+      }
+    }
+  }
   lines.push("", ...TRUST_COPY.map((line) => `  ${line}`));
   return lines.join("\n");
 }

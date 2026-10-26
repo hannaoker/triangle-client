@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // triangle — join a MESH, manage this device's agents and their permissions.
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import path, { dirname, isAbsolute, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
@@ -14,6 +14,7 @@ import {
   renderIdentityMigratePartial,
   renderIdentityMigratePlan,
 } from "./identity-migrate.mjs";
+import { identityStatus } from "./identity-status.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
 import { defaultHome } from "./custody.mjs";
@@ -53,7 +54,8 @@ export const USAGE = `Usage: triangle <command> [options]
   identity migrate --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
                               Propose or apply owner-confirmed identity mapping records.
                               The registry defaults to identity/ beside the client directory.
-  status | doctor             What this device controls and what needs attention.
+  status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
+                              What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
 Linux: setup defaults to identity enrollment; --harness codex installs a managed user service.
@@ -66,7 +68,7 @@ export class UsageError extends Error {}
 export function parseArgs(argv) {
   const positional = [];
   const flags = {};
-  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes", "identity-only"]);
+  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes", "identity-only", "identity"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--") { positional.push(...argv.slice(i + 1)); break; }
@@ -412,9 +414,38 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
       }
       case "status":
       case "doctor": {
-        allowOnly(flags, []);
+        let clientRoot;
+        let registryRoot;
+        if (flags.identity) {
+          allowOnly(flags, ["identity", "client-root", "registry-root"]);
+          clientRoot = flags["client-root"] ?? path.join(path.dirname(path.resolve(home)), "client");
+          if (!path.isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          registryRoot = flags["registry-root"] ?? defaultRegistryRoot(clientRoot);
+          if (!path.isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
+        } else {
+          allowOnly(flags, []);
+        }
         const session = openSession({ home, env, fetchImpl, requireJoined: false });
         const report = await doctor(session);
+
+        if (flags.identity) {
+          const identityView = await identityStatus({
+            clientRoot,
+            registryRoot,
+            ...identityDependencies,
+          });
+
+          report.identity = identityView;
+          report.identityRegistryRoot = registryRoot;
+
+          if (command === "doctor") {
+            for (const d of identityView.diagnostics ?? []) {
+              const actionStr = d.action ? ` ${d.action}` : "";
+              report.warnings.push(`Identity: ${d.message}${actionStr}`);
+            }
+          }
+        }
+
         await print(io, flags, report, renderDoctor);
         return report.warnings.length && command === "doctor" ? 1 : 0;
       }

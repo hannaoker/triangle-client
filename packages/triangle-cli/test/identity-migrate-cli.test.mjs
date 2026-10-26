@@ -2,12 +2,14 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import {
+  cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
 } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -437,5 +439,34 @@ test("identity migrate CLI: the registry defaults to identity/ beside the client
   } finally {
     rmSync(f.root, { recursive: true, force: true });
     rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test("identity migrate CLI: missing agent-worker modules throws LocalStateError (exit 1, no stack, no path)", async () => {
+  const tmp = mkdtempSync("/private/tmp/id-mig-missing-worker-");
+  try {
+    const srcDir = path.resolve(import.meta.dirname, "../src");
+    cpSync(srcDir, path.join(tmp, "src"), { recursive: true });
+    const isolatedCliUrl = pathToFileURL(path.join(tmp, "src", "cli.mjs")).href;
+    const { main: isolatedMain } = await import(isolatedCliUrl);
+
+    const out = [];
+    const err = [];
+    const code = await isolatedMain(
+      ["identity", "migrate", "--client-root", "/private/tmp/client", "--registry-root", "/private/tmp/registry"],
+      { io: { stdout: (s) => out.push(s), stderr: (s) => err.push(s) } }
+    );
+
+    assert.equal(code, 1);
+    assert.equal(err.length, 1);
+    assert.equal(
+      err[0],
+      "Identity mapping foundation (@the-triangle/agent-worker) is not available in this installation."
+    );
+    assert.ok(!err[0].includes("\n"), "stderr must be a single line");
+    assert.ok(!err[0].includes("at "), "stderr must not contain stack trace");
+    assert.ok(!err[0].includes("/private/"), "stderr must not contain absolute paths");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

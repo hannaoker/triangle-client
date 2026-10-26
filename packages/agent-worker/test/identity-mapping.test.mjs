@@ -818,6 +818,7 @@ test("Item 4: boundaries — source-level test that no file under packages/*/src
     path.join(packagesDir, "triangle-cli", "src", "identity-migrate.mjs"),
     path.join(packagesDir, "triangle-cli", "src", "cli.mjs"),
     path.join(packagesDir, "agent-worker", "src", "identity-mapping.mjs"),
+    path.join(packagesDir, "agent-worker", "src", "identity-view.mjs"),
   ]);
 
   for (const f of mjsFiles) {

@@ -1646,6 +1646,7 @@ test("Item 4: source-level isolation — only the identity mapping modules impor
   const allowedImporters = new Set([
     path.join(REPO_ROOT, "packages/agent-worker/src/identity-mapping.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/identity-migrate.mjs"),
+    path.join(REPO_ROOT, "packages/triangle-cli/src/identity-status.mjs"),
   ]);
   const offending = [];
 

@@ -839,10 +839,10 @@ test("diagnostics exclude arbitrary underlying messages and mask malformed strin
 
   const rawInventory = {
     warnings: [
-      { code: "test_warning_code", message: SENTINEL_WARNING, profile: "bob" },
+      { code: "registry_entry_invalid", message: SENTINEL_WARNING, profile: "bob" },
     ],
     blockers: [
-      { code: "test_blocker_code", message: SENTINEL_BLOCKER, profile: "alice" },
+      { code: "registry_unsafe", message: SENTINEL_BLOCKER, profile: "alice" },
     ],
     profiles: [
       // Valid profile with normal display labels and valid identifiers
@@ -892,8 +892,8 @@ test("diagnostics exclude arbitrary underlying messages and mask malformed strin
   assert.ok(!serialized.includes(SENTINEL_BLOCKER), "Blocker sentinel message was copied into report");
 
   // Valid bounded codes and profiles are retained with fixed diagnostic text
-  assert.ok(report.diagnostics.some((d) => d.code === "test_warning_code" && d.profile === "bob" && d.message.includes("Underlying installation warning (test_warning_code)")));
-  assert.ok(report.diagnostics.some((d) => d.code === "test_blocker_code" && d.profile === "alice" && d.message.includes("Underlying installation blocker (test_blocker_code)")));
+  assert.ok(report.diagnostics.some((d) => d.code === "registry_entry_invalid" && d.profile === "bob" && d.message.includes("Underlying installation warning (registry_entry_invalid)")));
+  assert.ok(report.diagnostics.some((d) => d.code === "registry_unsafe" && d.profile === "alice" && d.message.includes("Underlying installation blocker (registry_unsafe)")));
 
   // 2. Malformed payload strings in agentId and sessionId must NOT be echoed in diagnostic messages
   assert.ok(!serialized.includes(MALFORMED_TOKEN_PAYLOAD), "Malformed agent ID payload echoed in diagnostic message");
@@ -905,4 +905,129 @@ test("diagnostics exclude arbitrary underlying messages and mask malformed strin
   assert.ok(serialized.includes("https://example.test"));
   assert.ok(serialized.includes("bob"));
   assert.ok(serialized.includes("alice"));
+});
+
+test("Item 1a: installation-health diagnostics allowlist, omission count, and fallback", () => {
+  const rawInventory = {
+    blockers: [
+      { code: "claimer_not_held", profile: "bob" },
+      { code: "binding_missing", profile: "alice" },
+      { code: "registry_absent" },
+      { code: "registry_unsafe", profile: "bob" },
+      { code: "not a valid code!", profile: "alice" },
+    ],
+    warnings: [
+      { code: "progress_evidence_unavailable", profile: "bob" },
+      { code: "registry_entry_invalid", profile: "alice" },
+      { code: null, profile: "bob" },
+    ],
+    profiles: [],
+  };
+
+  const report = buildIdentityInventory(rawInventory);
+
+  // Dropped well-formed codes: claimer_not_held, binding_missing, progress_evidence_unavailable (3 dropped)
+  assert.equal(report.summary.omittedHealthDiagnosticCount, 3);
+
+  // Allowed codes kept: registry_absent, registry_unsafe (blockers) and registry_entry_invalid (warning)
+  // Non-well-formed codes kept: underlying_blocker (fault) and underlying_warning (warning)
+  const codes = report.diagnostics.map((d) => d.code);
+  assert.ok(codes.includes("registry_absent"));
+  assert.ok(codes.includes("registry_unsafe"));
+  assert.ok(codes.includes("registry_entry_invalid"));
+  assert.ok(codes.includes("underlying_blocker"));
+  assert.ok(codes.includes("underlying_warning"));
+
+  assert.ok(!codes.includes("claimer_not_held"));
+  assert.ok(!codes.includes("binding_missing"));
+  assert.ok(!codes.includes("progress_evidence_unavailable"));
+
+  assert.equal(report.summary.faultCount, 3); // registry_absent, registry_unsafe, underlying_blocker
+  assert.equal(report.summary.warningCount, 2); // registry_entry_invalid, underlying_warning
+});
+
+test("Item 1b: locale-independent code-unit order for identities, unmapped profiles, and diagnostics", () => {
+  // In ICU localeCompare, "a_b".localeCompare("a-b") < 0 (a_b comes first).
+  // In code-unit comparison, '-' (45) < '_' (95), so "a-b" comes first.
+  assert.ok("a_b".localeCompare("a-b") < 0, "Precondition: localeCompare puts a_b before a-b");
+  assert.ok("a-b" < "a_b", "Precondition: code-unit order puts a-b before a_b");
+
+  // 1. Identities ordering
+  const rawIdentities = {
+    profiles: [
+      {
+        profile: "a_b",
+        instanceId: deriveClientInstanceId("a_b"),
+        enabled: true,
+        status: "ok",
+        lane: "worker",
+        runtimeAdapter: "codex",
+        deliveryMode: "worker",
+        identity: {
+          state: "bound",
+          agentId: "agent_22222222222222222222222222222222",
+          origin: "https://example.test",
+        },
+      },
+      {
+        profile: "a-b",
+        instanceId: deriveClientInstanceId("a-b"),
+        enabled: true,
+        status: "ok",
+        lane: "worker",
+        runtimeAdapter: "codex",
+        deliveryMode: "worker",
+        identity: {
+          state: "bound",
+          agentId: "agent_11111111111111111111111111111111",
+          origin: "https://example.test",
+        },
+      },
+    ],
+  };
+
+  const report1 = buildIdentityInventory(rawIdentities);
+  assert.equal(report1.identities[0].profiles[0].profile, "a-b");
+  assert.equal(report1.identities[1].profiles[0].profile, "a_b");
+
+  // 2. Unmapped profiles ordering
+  const rawUnmapped = {
+    profiles: [
+      {
+        profile: "a_b",
+        instanceId: deriveClientInstanceId("a_b"),
+        enabled: true,
+        status: "ok",
+        lane: "worker",
+        runtimeAdapter: "codex",
+        deliveryMode: "worker",
+        identity: { state: "unbound" },
+      },
+      {
+        profile: "a-b",
+        instanceId: deriveClientInstanceId("a-b"),
+        enabled: true,
+        status: "ok",
+        lane: "worker",
+        runtimeAdapter: "codex",
+        deliveryMode: "worker",
+        identity: { state: "unbound" },
+      },
+    ],
+  };
+
+  const report2 = buildIdentityInventory(rawUnmapped);
+  assert.equal(report2.unmappedProfiles[0].profile, "a-b");
+  assert.equal(report2.unmappedProfiles[1].profile, "a_b");
+
+  // 3. Diagnostics ordering (by profile tie-breaker)
+  const rawDiagnostics = {
+    blockers: [
+      { code: "registry_unsafe", profile: "a_b" },
+      { code: "registry_unsafe", profile: "a-b" },
+    ],
+  };
+  const report3 = buildIdentityInventory(rawDiagnostics);
+  assert.equal(report3.diagnostics[0].profile, "a-b");
+  assert.equal(report3.diagnostics[1].profile, "a_b");
 });

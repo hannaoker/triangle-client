@@ -1,4 +1,5 @@
 import path from "node:path";
+import { LocalStateError } from "./errors.mjs";
 
 /**
  * Invokes the read-only identity inventory projection.
@@ -42,7 +43,7 @@ export async function identityInventory({
       workerInstallation = await import("../../agent-worker/src/installation-inventory.mjs");
       workerIdentity = await import("../../agent-worker/src/identity-inventory.mjs");
     } catch (error) {
-      const err = new Error(
+      const err = new LocalStateError(
         "Installation inventory foundation (@the-triangle/agent-worker) is not available in this installation."
       );
       err.cause = error;
@@ -86,6 +87,9 @@ export function renderIdentityInventory(report) {
     `${summary.faultCount ?? 0} fault(s), ` +
     `${summary.warningCount ?? 0} warning(s)`
   );
+  if (typeof summary.omittedHealthDiagnosticCount === "number" && summary.omittedHealthDiagnosticCount > 0) {
+    lines.push(`Installation-health diagnostics omitted: ${summary.omittedHealthDiagnosticCount} (see triangle-local status).`);
+  }
 
   if (Array.isArray(report.identities) && report.identities.length > 0) {
     lines.push("Identities:");

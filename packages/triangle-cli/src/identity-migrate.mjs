@@ -1,4 +1,5 @@
 import path from "node:path";
+import { LocalStateError } from "./errors.mjs";
 
 /**
  * Default registry location (owner decision A4): `identity/` beside `client/` in the
@@ -69,7 +70,7 @@ export async function identityMigrate({
       workerRegistry = await import("../../agent-worker/src/identity-registry.mjs");
       workerMapping = await import("../../agent-worker/src/identity-mapping.mjs");
     } catch (error) {
-      const err = new Error(
+      const err = new LocalStateError(
         "Identity mapping foundation (@the-triangle/agent-worker) is not available in this installation."
       );
       err.cause = error;
