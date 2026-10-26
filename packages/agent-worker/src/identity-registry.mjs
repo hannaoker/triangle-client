@@ -41,13 +41,11 @@ import path from "node:path";
 import { ancestors, privateDir, privateFile } from "./delivery-private-path.mjs";
 import {
   AGENT_ID_PATTERN,
+  deriveClientInstanceId,
   INSTANCE_ID_PATTERN,
   isValidBareHttpsOrigin,
-} from "./identity-inventory.mjs";
-import {
-  deriveClientInstanceId,
   isValidProfileName,
-} from "./installation-inventory.mjs";
+} from "./identity-primitives.mjs";
 
 export const IDENTITY_REGISTRY_SCHEMA = "identity_registry_v1";
 export const LOCAL_PROFILE_BINDING_SCHEMA = "local_profile_binding_v1";

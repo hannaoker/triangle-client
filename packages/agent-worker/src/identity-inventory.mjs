@@ -30,18 +30,23 @@
  */
 
 import {
+  AGENT_ID_PATTERN,
   deriveClientInstanceId,
+  INSTANCE_ID_PATTERN,
+  isValidBareHttpsOrigin,
   isValidProfileName,
+  SESSION_ID_PATTERN,
+} from "./identity-primitives.mjs";
+import {
   stripSecretKeys,
   UNAVAILABLE,
   UNSUPPORTED,
 } from "./installation-inventory.mjs";
 
 export { UNAVAILABLE, UNSUPPORTED };
+// Re-exported so existing importers keep working; the definitions live in identity-primitives.mjs.
+export { AGENT_ID_PATTERN, INSTANCE_ID_PATTERN, SESSION_ID_PATTERN, isValidBareHttpsOrigin };
 
-export const AGENT_ID_PATTERN = /^agent_[a-f0-9]{32}$/;
-export const INSTANCE_ID_PATTERN = /^[a-f0-9]{64}$/;
-export const SESSION_ID_PATTERN = /^session-[a-f0-9]{64}$/;
 const DIAGNOSTIC_CODE_PATTERN = /^[a-z0-9_.-]{1,64}$/i;
 const HANDLE_PATTERN = /^[a-zA-Z0-9_.-]{1,64}$/;
 
@@ -68,38 +73,6 @@ function deepFreeze(obj) {
   return obj;
 }
 
-/**
- * Validates that an origin is a bare HTTPS origin:
- * - Scheme must be https://
- * - Non-empty hostname
- * - No userinfo (@)
- * - No path (not even trailing slash '/')
- * - No query (?)
- * - No fragment (#)
- *
- * @param {unknown} value
- * @returns {boolean}
- */
-export function isValidBareHttpsOrigin(value) {
-  if (typeof value !== "string" || !value.startsWith("https://")) return false;
-  // Raw path check: origin cannot have path, trailing slash, query, or hash
-  const rawPath = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*(.*)$/s.exec(value);
-  if (rawPath == null || rawPath[1] !== "") return false;
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  return url.protocol === "https:"
-    && url.hostname.length > 0
-    && url.username === ""
-    && url.password === ""
-    && !value.includes("@")
-    && !value.includes("?")
-    && !value.includes("#")
-    && url.origin === value;
-}
 
 const ALLOWED_HEALTH_DIAGNOSTIC_CODES = new Set([
   "registry_absent",

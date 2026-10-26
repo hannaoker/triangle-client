@@ -10,14 +10,12 @@
 
 import { createHash } from "node:crypto";
 import {
-  deriveClientInstanceId,
-  isValidProfileName,
-} from "./installation-inventory.mjs";
-import {
   AGENT_ID_PATTERN,
+  deriveClientInstanceId,
   INSTANCE_ID_PATTERN,
   isValidBareHttpsOrigin,
-} from "./identity-inventory.mjs";
+  isValidProfileName,
+} from "./identity-primitives.mjs";
 import {
   canonicalJson,
   readIdentityRegistry,
