@@ -354,7 +354,10 @@ def discover_runtime_roots(agent, cli):
         managed = managed_hermes_runtime(entry, launcher)
         if not first.startswith("#!/"):
             fail("Hermes entrypoint lacks an absolute interpreter")
-        interpreter = managed[3] if managed else checked_file(os.path.realpath(first[2:].split()[0]), executable=True, owners={os.getuid(), 0})
+        shebang_path = first[2:].strip()
+        if " " in shebang_path and not os.path.exists(shebang_path):
+            shebang_path = shebang_path.split()[0]
+        interpreter = managed[3] if managed else checked_file(os.path.realpath(shebang_path), executable=True, owners={os.getuid(), 0})
         venv = managed[1] if managed else os.path.dirname(os.path.dirname(entry))
         agent_root = managed[0] if managed else os.path.dirname(venv)
         if managed:

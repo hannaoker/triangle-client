@@ -397,16 +397,18 @@ export function createUnifiedRouter({
     const state = localState(phase);
 
     let target;
+    const isPrincipal = options.record
+      ? (options.record.resolved_via === "principal" || Boolean(options.record.to_principal))
+      : (options.resolution?.via === "principal");
+
     if (options.target !== undefined) {
       target = projectTarget(options.target);
-    } else if (
-      options.resolution?.via === "principal" ||
-      options.record?.resolved_via === "principal" ||
-      Boolean(options.record?.to_principal)
-    ) {
-      const recipientId = options.resolution?.resolvedTo || options.record?.recipient;
+    } else if (isPrincipal) {
+      const recipientId = options.record?.recipient || options.resolution?.resolvedTo;
       const profile = options.resolution?.profile || lookupProfile(recipientId);
-      const principal = options.resolution?.principal ?? options.record?.to_principal;
+      const principal = (options.record && "to_principal" in options.record)
+        ? options.record.to_principal
+        : (options.resolution?.principal ?? null);
       target = projectTarget({
         via: "principal",
         ...(principal ? { principal } : {}),
@@ -414,11 +416,13 @@ export function createUnifiedRouter({
       });
     } else {
       const instanceId =
-        options.resolution?.resolvedTo || options.record?.recipient || clean.to;
+        options.record?.recipient || options.resolution?.resolvedTo || clean.to;
       const profile = options.resolution?.profile || lookupProfile(instanceId);
-      let principal = options.resolution?.principal;
+      let principal = (options.record && "to_principal" in options.record)
+        ? options.record.to_principal
+        : options.resolution?.principal;
 
-      if (!principal && instanceId && snapshotProvider && typeof snapshotProvider.get === "function") {
+      if (!principal && !options.record && instanceId && snapshotProvider && typeof snapshotProvider.get === "function") {
         try {
           const snap = options.snapshot ?? snapshotProvider.get();
           if (snap?.state === "ok") {
@@ -636,6 +640,43 @@ export function createUnifiedRouter({
   }
 
   /**
+   * Decorates list_inbox response, ensuring raw internal journal columns
+   * (to_principal, resolved_via) are stripped in both router modes while
+   * preserving stable pagination and cursor fields.
+   *
+   * @param {object|Array} responseOrItems Inbox response object or items array.
+   * @param {object} [options]
+   * @returns {object|Array} Decorated inbox response.
+   */
+  function decorateInbox(responseOrItems, options = {}) {
+    const isContainer =
+      responseOrItems !== null &&
+      typeof responseOrItems === "object" &&
+      Array.isArray(responseOrItems.items);
+
+    const list = isContainer ? responseOrItems.items : responseOrItems;
+    if (!Array.isArray(list)) {
+      throw new TypeError("inbox items must be an array or an object with an items array");
+    }
+
+    const processed = list.map((item) => {
+      if (item === null || typeof item !== "object") return item;
+      return Object.freeze(sanitizeDto(item));
+    });
+
+    if (isContainer) {
+      const cleanContainer = sanitizeDto(responseOrItems);
+      return Object.freeze({
+        ...cleanContainer,
+        items: Object.freeze(processed),
+        nextCursor: responseOrItems.nextCursor ?? null,
+      });
+    }
+
+    return Object.freeze(processed);
+  }
+
+  /**
    * Generates status block for local_status.router.
    *
    * @param {object} [options]
@@ -710,6 +751,7 @@ export function createUnifiedRouter({
     decorateStatus,
     decorateReplies,
     decorateSessions,
+    decorateInbox,
     statusBlock,
     getCounters,
     resetCounters,
@@ -742,6 +784,11 @@ export function decorateReplies(responseOrReplies, options = {}) {
 export function decorateSessions(responseOrSessions, options = {}) {
   const router = options.router ?? createUnifiedRouter(options);
   return router.decorateSessions(responseOrSessions, options);
+}
+
+export function decorateInbox(responseOrItems, options = {}) {
+  const router = options.router ?? createUnifiedRouter(options);
+  return router.decorateInbox(responseOrItems, options);
 }
 
 export function statusBlock(options = {}) {

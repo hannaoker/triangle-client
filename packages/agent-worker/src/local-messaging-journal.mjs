@@ -120,6 +120,38 @@ function computeEnvelopeHash(envelope) {
   return createHash("sha256").update(canonicalJson(norm), "utf8").digest("hex");
 }
 
+function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
+  const storedPrincipal = existing.to_principal ?? null;
+  const storedVia = existing.resolved_via ?? null;
+  const normIncomingPrincipal = incomingPrincipal ?? null;
+  const normIncomingVia = incomingVia ?? null;
+
+  // 1. Principal intent must be strictly identical:
+  // - same principal string, or both null (legacy / ID sends).
+  if (storedPrincipal !== normIncomingPrincipal) {
+    return false;
+  }
+
+  // 2. If both are principal sends, resolved_via must be 'principal'
+  if (storedPrincipal !== null) {
+    return storedVia === "principal" && normIncomingVia === "principal";
+  }
+
+  // 3. Neither is a principal send (both storedPrincipal and normIncomingPrincipal are null).
+  // Safe legacy null behavior:
+  // - If either storedVia or normIncomingVia is null (legacy v12 row or disabled mode),
+  //   the other may be null or 'id' (both indicate non-principal / ID addressing).
+  // - If both are non-null, they must match ('id' === 'id').
+  // In no case may via be 'principal' when principal is null.
+  if (storedVia === "principal" || normIncomingVia === "principal") {
+    return false;
+  }
+  if (storedVia === null || normIncomingVia === null) {
+    return true;
+  }
+  return storedVia === normIncomingVia;
+}
+
 function mapMessageRow(row) {
   if (!row) return null;
   const metadata = row.metadata_json ? JSON.parse(row.metadata_json) : null;
@@ -397,7 +429,11 @@ export function createLocalMessagingJournal({
     try {
       const existing = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
       if (existing) {
-        if (existing.canonical_hash === hash && (existing.recipient_type ?? "runner") === recipientType) {
+        if (
+          existing.canonical_hash === hash &&
+          (existing.recipient_type ?? "runner") === recipientType &&
+          isRouteIntentMatch(existing, to_principal, resolved_via)
+        ) {
           db.exec("COMMIT");
           return { ...mapMessageRow(existing), isDuplicate: true };
         }

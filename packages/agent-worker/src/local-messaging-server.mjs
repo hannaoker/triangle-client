@@ -110,6 +110,16 @@ export function createRouterStatCache(stateRoot) {
     if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot) || stateRoot.includes("\0")) {
       return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
     }
+
+    // Fail-closed parent directory custody check on every cached call
+    try {
+      validatePrivateDirectory(stateRoot);
+    } catch {
+      cachedKey = "unsafe_state_root";
+      cachedConfig = { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+      return cachedConfig;
+    }
+
     const routerPath = path.join(stateRoot, "router.json");
     let stat;
     try {
@@ -125,7 +135,20 @@ export function createRouterStatCache(stateRoot) {
       return cachedConfig;
     }
 
-    const currentKey = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.mode}`;
+    // Fail-closed file ownership/type/link checks on every call
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid() ||
+      (stat.mode & 0o077) !== 0
+    ) {
+      cachedKey = "unsafe_file";
+      cachedConfig = { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+      return cachedConfig;
+    }
+
+    const currentKey = `${stat.dev}:${stat.ino}:${stat.nlink}:${stat.uid}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     if (cachedKey === currentKey && cachedConfig) {
       return cachedConfig;
     }
@@ -609,7 +632,15 @@ export function createLocalControlServer({
               to_principal: record.to_principal,
               resolved_via: record.resolved_via,
             };
-            const decoratedReceipt = activeRouter.decorateSend(rawReceipt, { resolution, record });
+            const duplicateResolution = record.isDuplicate
+              ? {
+                  resolved: record.resolved_via === "principal",
+                  via: record.resolved_via,
+                  principal: record.to_principal,
+                  resolvedTo: record.recipient,
+                }
+              : resolution;
+            const decoratedReceipt = activeRouter.decorateSend(rawReceipt, { resolution: duplicateResolution, record });
             const resp = createSuccessResponse(
               id,
               decoratedReceipt,
@@ -676,10 +707,11 @@ export function createLocalControlServer({
             limit: cappedLimit,
           });
 
-          // Ensure reply list strictly fits within envelope limits
-          const bounded = boundRepliesToEnvelope(replies);
-          const decoratedReplies = activeRouter.decorateReplies({ replies: bounded });
-          const resp = createSuccessResponse(id, decoratedReplies, PROTOCOL_VERSION);
+          // Decorate BEFORE bounding so additional route metadata is accounted for
+          // and the final decorated envelope strictly fits within protocol limits
+          const decoratedReplies = activeRouter.decorateReplies({ replies });
+          const bounded = boundRepliesToEnvelope(decoratedReplies.replies);
+          const resp = createSuccessResponse(id, { replies: bounded }, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
@@ -828,7 +860,20 @@ export function createLocalControlServer({
             limit: cappedLimit,
             cursor,
           });
-          const resp = createSuccessResponse(id, { items: result.items, nextCursor: result.nextCursor ?? null }, PROTOCOL_VERSION);
+          const rawResponse = {
+            items: result.items || [],
+            nextCursor: result.nextCursor ?? null,
+          };
+          const decorated = typeof activeRouter.decorateInbox === "function"
+            ? activeRouter.decorateInbox(rawResponse)
+            : {
+                items: (result.items || []).map((item) => {
+                  const { to_principal, resolved_via, ...rest } = item;
+                  return rest;
+                }),
+                nextCursor: result.nextCursor ?? null,
+              };
+          const resp = createSuccessResponse(id, decorated, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
@@ -857,7 +902,10 @@ export function createLocalControlServer({
           if (!outcome) {
             throw coded("claim_failed", "Message is not available for claim");
           }
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          const safeOutcome = { ...outcome };
+          delete safeOutcome.to_principal;
+          delete safeOutcome.resolved_via;
+          const resp = createSuccessResponse(id, safeOutcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }

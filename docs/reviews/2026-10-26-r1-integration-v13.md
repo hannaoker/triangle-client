@@ -1,7 +1,7 @@
 # Review: R1.4 Integration and v13 Release Train
 
-Date: 2026-10-26  
-Branch: `codex/r1-integration-v13`  
+Date: 2026-10-26
+Branch: `codex/r1-integration-v13`
 Base Commit: `2e074043606960b46a37b1a7cb1a6e57641b9250` (PR #133 merged)
 
 ---
