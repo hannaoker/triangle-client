@@ -137,3 +137,26 @@ test('offline operator recovery requires disabled wake and exclusive journal own
   assert.equal((await journal.getWakeBinding(integration.senderId)).deliveryState,'idle');
  } finally {await journal?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+ test('installed CLI send forwards principals to server resolution without granting authority',async()=>{
+ const {updateIdentityRegistry}=await import('../src/identity-registry.mjs');
+ const root=fs.mkdtempSync('/private/tmp/tri-principal-cli-');fs.chmodSync(root,0o700);let subsystem;
+ try {
+  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'old',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'test-thread',recipients:['gravity2']});
+  const config=readPrivateJson(configPath),integration=readPrivateJson(config.integrationPath),recipient=config.recipients[0].instanceId;
+  const registryRoot=path.join(root,'identity'),principal='agent_'+ 'b'.repeat(32);
+  updateIdentityRegistry({root:registryRoot,expectedSequence:0,action:'init',subject:null,mutate:r=>r});
+  updateIdentityRegistry({root:registryRoot,expectedSequence:1,action:'bind',subject:recipient,mutate:r=>{r.bindings[recipient]={schema:'local_profile_binding_v1',binding_id:'bind_'+ 'c'.repeat(32),trust_mode:'mesh-managed',principal_id:principal,profile_name:'gravity2',profile_instance_id:recipient,authority_origin:'https://example.test',binding_generation:1,issued_at:'2026-10-26T00:00:00.000Z',revoked_at:null,proof:{kind:'disk_observation',observed_on_disk:true,verified_live_authority:false}};return r;}});
+  writePrivateJson(path.join(config.stateRoot,'router.json'),{version:1,enabled:true,registryRoot});
+  const journal=createTestMemoryJournal(),dispatcher=createTestRecoverableDispatcher({journal});
+  const broker=createDesktopCredentialBroker({...config,recipients:[recipient],issue:(sender,options)=>subsystem.issueTurnCredential(sender,options)});
+  subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,journal,dispatcher,registry:[integration.senderId,recipient],recipientDirectory:[{id:recipient,label:'gravity2',kind:'worker'}],aclRules:{[integration.senderId]:[recipient]},credentialBroker:params=>({credential:broker.exchange(params),senderId:broker.senderId,threadId:broker.threadId})});
+  await subsystem.start();
+  const args=['send','--config',configPath,'--to',principal,'--text','canary','--message-id','cli-principal','--request-id','cli-principal'];
+  const result=JSON.parse((await exec(process.execPath,[cli,...args])).stdout);
+  assert.equal(result.admission.accepted,true);assert.equal(result.admission.target.principal,principal);assert.equal(result.admission.route,'local');
+  await assert.rejects(exec(process.execPath,[cli,...args.map(v=>v===principal?'agent_'+ 'd'.repeat(32):v)]),e=>JSON.parse(e.stdout).error==='recipient_not_found');
+ }finally{await subsystem?.stop();fs.rmSync(root,{recursive:true,force:true});}
+ });
