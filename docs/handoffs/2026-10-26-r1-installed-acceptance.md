@@ -17,10 +17,14 @@ Evidence: `~/Library/Application Support/The Triangle/releases/r1-install-verifi
 
 The first installed principal canary was rejected by triangle-local before reaching the router. #135 forwards well-formed principal IDs to server resolution while preserving server ACL and capability checks. Nineteen CLI/R1 tests passed, including a CLI-to-server principal regression. The merged correction was staged into all runtimes before the successful live canary.
 
-## Remaining live acceptance
+## Claude installed acceptance — completed
 
-Claude retrieval/principal send is not proved. A request to the existing paired Claude conversation is queued as `r1-claude-acceptance-20261026-01`. No discovered Claude session is currently reachable. The owner has been asked to open a Claude scratch chat, call triangle_get_status and supply its address. Do not claim enqueueing this request means Claude received or executed it. Retrieve only this request's correlated reply; leave old replies and held work alone.
+The owner approved workspace-wide Claude attachment on 2026-10-26; setup installed the managed `.mcp.json` entry and the service restarted. Existing Codex settings were preserved. Only the bound Codex identity is allowed to send to Claude. After reload, the owner supplied attached session `session-5f719e7589588c4e1f74cc3a6a69f4ef731dd35c9ee1482e9a344268933ecc69`, generation 2. Discovery reported reachable/wake-capable; the wake was accepted before the request was eventually claimed. Wake acceptance alone was not counted as execution.
 
-If the owner supplies a different reachable Claude address, avoid duplicating instructions: establish whether the paired request can be processed or explicitly retire that canary using supported owner controls. Do not borrow session identities or forge credentials.
+Codex independently verified the real journal records for `r1-claude-origin-20261026-01`: sender is that Claude session, recipient is gravity2, stored principal is `agent_3764a37cb50683d20726bc8d43e21a88`, resolved_via principal, phase completed. The correlated worker reply was exactly `R1_CLAUDE_PRINCIPAL_OK`, addressed to the same Claude sender, with matching requestId/inReplyTo and consumed=true. Worker round trip was 44.127 seconds. Claude reported using only Triangle MCP tools; that tool-use claim is separate from the independently verified routing/correlation records. Claude replied to Codex on `r1-claude-session-20261026-01`; Codex consumed only that report and acknowledged its wake.
 
-Full installed acceptance is still conditional on the remaining Claude test and owner acceptance of the evidence. Cross-machine, Iroh/MESH routing and R2 provenance/reply-route work remain deferred. `package-install.json` was already stale; this run used the native helper installer and runtime staging, not a complete distribution-package installation.
+Machine evidence is updated in `releases/r1-install-verification.json`. The earlier request `r1-claude-acceptance-20261026-01` addressed to the old paired conversation remains a separate queued test request; it was not delivered to this attached session or counted as success. Do not silently delete it or borrow the paired identity to claim it.
+
+## Remaining limits
+
+The installed local principal request/reply checks are now verified for Codex and Claude senders, alongside restart deduplication and negative route checks. The owner still accepts the evidence; cross-machine, Iroh/MESH routing and R2 provenance/reply-route work remain deferred. The owner waived restoration rehearsal. `package-install.json` was already stale; this run used the native helper installer and runtime staging, not a complete distribution-package installation.
