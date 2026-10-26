@@ -120,6 +120,38 @@ function computeEnvelopeHash(envelope) {
   return createHash("sha256").update(canonicalJson(norm), "utf8").digest("hex");
 }
 
+function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
+  const storedPrincipal = existing.to_principal ?? null;
+  const storedVia = existing.resolved_via ?? null;
+  const normIncomingPrincipal = incomingPrincipal ?? null;
+  const normIncomingVia = incomingVia ?? null;
+
+  // 1. Principal intent must be strictly identical:
+  // - same principal string, or both null (legacy / ID sends).
+  if (storedPrincipal !== normIncomingPrincipal) {
+    return false;
+  }
+
+  // 2. If both are principal sends, resolved_via must be 'principal'
+  if (storedPrincipal !== null) {
+    return storedVia === "principal" && normIncomingVia === "principal";
+  }
+
+  // 3. Neither is a principal send (both storedPrincipal and normIncomingPrincipal are null).
+  // Safe legacy null behavior:
+  // - If either storedVia or normIncomingVia is null (legacy v12 row or disabled mode),
+  //   the other may be null or 'id' (both indicate non-principal / ID addressing).
+  // - If both are non-null, they must match ('id' === 'id').
+  // In no case may via be 'principal' when principal is null.
+  if (storedVia === "principal" || normIncomingVia === "principal") {
+    return false;
+  }
+  if (storedVia === null || normIncomingVia === null) {
+    return true;
+  }
+  return storedVia === normIncomingVia;
+}
+
 function mapMessageRow(row) {
   if (!row) return null;
   const metadata = row.metadata_json ? JSON.parse(row.metadata_json) : null;
@@ -144,6 +176,8 @@ function mapMessageRow(row) {
     hasLateResult: Boolean(row.late_result_text),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    to_principal: row.to_principal ?? null,
+    resolved_via: row.resolved_via ?? null,
   };
 }
 
@@ -222,7 +256,9 @@ export function createLocalMessagingJournal({
       reason TEXT,
       runtime_error TEXT,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      to_principal TEXT,
+      resolved_via TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_local_messages_phase ON local_messages(phase);
     CREATE INDEX IF NOT EXISTS idx_local_messages_req ON local_messages(request_id);
@@ -322,6 +358,12 @@ export function createLocalMessagingJournal({
   if (!messageColumns.includes("claim_operation_id")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN claim_operation_id TEXT");
   }
+  if (!messageColumns.includes("to_principal")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN to_principal TEXT");
+  }
+  if (!messageColumns.includes("resolved_via")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN resolved_via TEXT");
+  }
   const wakeColumns = db.prepare("PRAGMA table_info(local_wake_bindings)").all().map((c) => c.name);
   if (!wakeColumns.includes("auth_binding_id")) {
     db.exec("ALTER TABLE local_wake_bindings ADD COLUMN auth_binding_id TEXT");
@@ -377,6 +419,8 @@ export function createLocalMessagingJournal({
     if (!sender || !recipient || !messageId || !requestId || typeof text !== "string") {
       throw coded("invalid_envelope", "Envelope missing required fields");
     }
+    const to_principal = envelope.to_principal ?? options.to_principal ?? null;
+    const resolved_via = envelope.resolved_via ?? options.resolved_via ?? null;
 
     const recipientType = envelope.recipientType ?? options.recipientType ?? "runner";
     const hash = computeEnvelopeHash(envelope);
@@ -385,7 +429,11 @@ export function createLocalMessagingJournal({
     try {
       const existing = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
       if (existing) {
-        if (existing.canonical_hash === hash && (existing.recipient_type ?? "runner") === recipientType) {
+        if (
+          existing.canonical_hash === hash &&
+          (existing.recipient_type ?? "runner") === recipientType &&
+          isRouteIntentMatch(existing, to_principal, resolved_via)
+        ) {
           db.exec("COMMIT");
           return { ...mapMessageRow(existing), isDuplicate: true };
         }
@@ -413,9 +461,9 @@ export function createLocalMessagingJournal({
       const metadataJson = metadata ? JSON.stringify(metadata) : null;
       db.prepare(`
         INSERT INTO local_messages (
-          message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?)
-      `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now);
+          message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at, to_principal, resolved_via
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?, ?, ?)
+      `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now, to_principal, resolved_via);
 
       db.prepare(`
         INSERT INTO local_pair_admissions (pair_key, message_id, created_at)

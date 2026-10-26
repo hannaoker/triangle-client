@@ -17,6 +17,8 @@ import {
   MAX_FIELD_STRING_LENGTH,
 } from "./local-messaging-protocol.mjs";
 import { coded, sanitizeError } from "./local-messaging-errors.mjs";
+import { createUnifiedRouter } from "./unified-router.mjs";
+import { createRegistrySnapshotProvider } from "./router-registry-snapshot.mjs";
 
 const MAX_INFLIGHT_PER_SOCKET = 50;
 const MAX_REQUEST_ID_LENGTH = 128;
@@ -29,6 +31,137 @@ function identifier(value, name, { optional = false } = {}) {
     throw coded("invalid_request", `${name} must be a bounded identifier string`);
   }
   return value;
+}
+
+export function loadRouterConfig(stateRoot) {
+  if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot) || stateRoot.includes("\0")) {
+    return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+  }
+  try {
+    validatePrivateDirectory(stateRoot);
+  } catch {
+    return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+  }
+  const routerPath = path.join(stateRoot, "router.json");
+  let stat;
+  try {
+    stat = fs.lstatSync(routerPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      return { enabled: false, registryRoot: null, error: null };
+    }
+    return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+  }
+
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+  }
+  if (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) {
+    return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+  }
+  if (stat.size > 4096) {
+    return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+  }
+
+  let parsed;
+  try {
+    const raw = fs.readFileSync(routerPath, "utf8");
+    parsed = JSON.parse(raw);
+  } catch {
+    return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+  }
+
+  const allowedKeys = new Set(["version", "enabled", "registryRoot"]);
+  for (const k of Object.keys(parsed)) {
+    if (!allowedKeys.has(k)) {
+      return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+    }
+  }
+
+  if (parsed.version !== 1 || typeof parsed.enabled !== "boolean") {
+    return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+  }
+
+  if (
+    parsed.registryRoot !== undefined &&
+    (typeof parsed.registryRoot !== "string" ||
+      !path.isAbsolute(parsed.registryRoot) ||
+      parsed.registryRoot.includes("\0"))
+  ) {
+    return { enabled: false, registryRoot: null, error: "invalid_router_config" };
+  }
+
+  return {
+    enabled: parsed.enabled,
+    registryRoot: parsed.registryRoot ?? null,
+    error: null,
+  };
+}
+
+export function createRouterStatCache(stateRoot) {
+  let cachedKey = null;
+  let cachedConfig = null;
+
+  function refresh() {
+    if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot) || stateRoot.includes("\0")) {
+      return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+    }
+
+    // Fail-closed parent directory custody check on every cached call
+    try {
+      validatePrivateDirectory(stateRoot);
+    } catch {
+      cachedKey = "unsafe_state_root";
+      cachedConfig = { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+      return cachedConfig;
+    }
+
+    const routerPath = path.join(stateRoot, "router.json");
+    let stat;
+    try {
+      stat = fs.lstatSync(routerPath);
+    } catch (err) {
+      if (err?.code === "ENOENT") {
+        cachedKey = "absent";
+        cachedConfig = { enabled: false, registryRoot: null, error: null };
+        return cachedConfig;
+      }
+      cachedKey = `err:${err?.code || "unknown"}`;
+      cachedConfig = { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+      return cachedConfig;
+    }
+
+    // Fail-closed file ownership/type/link checks on every call
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid() ||
+      (stat.mode & 0o077) !== 0
+    ) {
+      cachedKey = "unsafe_file";
+      cachedConfig = { enabled: false, registryRoot: null, error: "unsafe_router_config" };
+      return cachedConfig;
+    }
+
+    const currentKey = `${stat.dev}:${stat.ino}:${stat.nlink}:${stat.uid}:${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    if (cachedKey === currentKey && cachedConfig) {
+      return cachedConfig;
+    }
+
+    cachedKey = currentKey;
+    cachedConfig = loadRouterConfig(stateRoot);
+    return cachedConfig;
+  }
+
+  return {
+    get: refresh,
+    refresh,
+  };
 }
 
 export function createLocalControlServer({
@@ -50,6 +183,8 @@ export function createLocalControlServer({
   dispatcher,
   notifier = null,
   logger = { info() {}, warn() {}, error() {} },
+  stateRoot = null,
+  router = null,
 } = {}) {
   if (!socketPath || typeof socketPath !== "string") {
     throw coded("invalid_options", "socketPath is required");
@@ -99,6 +234,36 @@ export function createLocalControlServer({
     }
     directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown", ...(entry.harness === "grok" ? {harness:"grok",capabilities:{queueable:true,wakeCapable:false,pullInbox:true}} : {}) });
   }
+
+  const effectiveStateRoot = stateRoot || path.dirname(socketPath);
+  const routerStatCache = createRouterStatCache(effectiveStateRoot);
+
+  let currentSnapshotRoot = null;
+  let snapshotProvider = null;
+
+  function getSnapshotProvider() {
+    const config = routerStatCache.get();
+    const effectiveRoot = config.registryRoot || path.resolve(effectiveStateRoot, "../../identity");
+    if (snapshotProvider && currentSnapshotRoot === effectiveRoot) {
+      return snapshotProvider;
+    }
+    currentSnapshotRoot = effectiveRoot;
+    snapshotProvider = createRegistrySnapshotProvider({ root: effectiveRoot });
+    return snapshotProvider;
+  }
+
+  const internalRouter = createUnifiedRouter({
+    enabled: () => routerStatCache.get().enabled,
+    snapshotProvider: {
+      get() {
+        const provider = getSnapshotProvider();
+        return provider.get();
+      },
+    },
+    recipients: () => Array.from(directory.values()),
+  });
+
+  const activeRouter = router || internalRouter;
 
   let server = null;
   let boundInode = null;
@@ -208,7 +373,15 @@ export function createLocalControlServer({
             break;
           }
           if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
-          socket.write(encodeFrame(createSuccessResponse(id, await statusProvider())));
+          const baseStatus = await statusProvider();
+          const routerConf = routerStatCache.get();
+          const statusBlock = activeRouter.statusBlock();
+          const routerBlock = routerConf.error ? { ...statusBlock, error: routerConf.error } : statusBlock;
+          const decoratedStatus = {
+            ...baseStatus,
+            router: baseStatus.router ?? routerBlock,
+          };
+          socket.write(encodeFrame(createSuccessResponse(id, decoratedStatus)));
           break;
         }
         case "exchange_session": {
@@ -257,7 +430,9 @@ export function createLocalControlServer({
             const known=new Set(sessions.map(entry=>entry.id));
             sessions.push(...discovered.filter(entry=>!known.has(entry.id)));
           }
-          socket.write(encodeFrame(createSuccessResponse(id, { sessions: interactiveBroker?.filterDirectory?interactiveBroker.filterDirectory(senderId,sessions):sessions }, PROTOCOL_VERSION)));
+          const rawSessions = interactiveBroker?.filterDirectory ? interactiveBroker.filterDirectory(senderId, sessions) : sessions;
+          const decoratedSessions = activeRouter.decorateSessions({ sessions: rawSessions });
+          socket.write(encodeFrame(createSuccessResponse(id, decoratedSessions, PROTOCOL_VERSION)));
           break;
         }
         case "discover_recipients": {
@@ -266,7 +441,23 @@ export function createLocalControlServer({
             const allowedSet = new Set(claims.allowedRecipients);
             recipients = recipients.filter((r) => allowedSet.has(r));
           }
-          const resp = createSuccessResponse(id, { recipients }, PROTOCOL_VERSION);
+          const routerConf = routerStatCache.get();
+          const payload = { recipients };
+          if (routerConf.enabled) {
+            let snap = null;
+            try {
+              snap = getSnapshotProvider().get();
+            } catch {}
+            payload.entries = recipients.map((rId) => {
+              let principal = null;
+              if (snap?.state === "ok") {
+                const binding = snap.bindingForInstance(rId);
+                if (binding?.principal_id) principal = binding.principal_id;
+              }
+              return { id: rId, principal };
+            });
+          }
+          const resp = createSuccessResponse(id, payload, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
@@ -285,12 +476,36 @@ export function createLocalControlServer({
             throw coded("payload_too_large", `Message text exceeds field limit of ${MAX_FIELD_STRING_LENGTH}`);
           }
 
+          // 0. Recipient resolution through unified router before ACL and limiter
+          const resolution = await activeRouter.resolveSend(
+            { senderId, to },
+            {
+              canMessage: async (sId, candidateId) => {
+                if (claims?.allowedRecipients && !claims.allowedRecipients.includes(candidateId)) {
+                  return false;
+                }
+                try {
+                  if (typeof acl.isAllowed === "function") {
+                    const allowed = await acl.isAllowed(sId, candidateId);
+                    if (!allowed) return false;
+                  } else {
+                    await acl.checkAllowed(sId, candidateId);
+                  }
+                  return true;
+                } catch {
+                  return false;
+                }
+              },
+            }
+          );
+          const effectiveTo = resolution.resolvedTo;
+
           // 1. ACL check
-          await acl.checkAllowed(senderId, to);
+          await acl.checkAllowed(senderId, effectiveTo);
 
           // 2. Turn claims recipient check (fail closed)
-          if (claims?.allowedRecipients && !claims.allowedRecipients.includes(to)) {
-            throw coded("recipient_not_allowed", `Recipient ${to} is not permitted by turn credential claims`);
+          if (claims?.allowedRecipients && !claims.allowedRecipients.includes(effectiveTo)) {
+            throw coded("recipient_not_allowed", `Recipient ${effectiveTo} is not permitted by turn credential claims`);
           }
 
           // 3. Rate limiter check and reserve BEFORE first await
@@ -326,17 +541,17 @@ export function createLocalControlServer({
             // Pair cap fallback only for injected test journals lacking durable pair limiter:
             // Do NOT charge for known duplicates!
             if (!journal.hasDurablePairLimiter && exchangeLimiter && !existingRecord) {
-              pairReservation = exchangeLimiter.reserve(senderId, to);
+              pairReservation = exchangeLimiter.reserve(senderId, effectiveTo);
             }
 
             // 5. Record to durable shared journal
-            const recipientType = (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(to) : interactiveRecipients.includes(to)))
+            const recipientType = (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(effectiveTo) : interactiveRecipients.includes(effectiveTo)))
               ? "interactive"
               : "runner";
 
             const record = await journal.recordSend({
               sender: senderId,
-              recipient: to,
+              recipient: effectiveTo,
               recipientType,
               messageId,
               requestId: effectiveRequestId,
@@ -346,6 +561,8 @@ export function createLocalControlServer({
                 ...(metadata || {}),
                 _loopDepth: calculatedDepth,
               },
+              to_principal: resolution.resolved ? resolution.principal : null,
+              resolved_via: resolution.resolved ? resolution.via : (resolution.via ?? null),
             });
 
             // 6. Limits committed only AFTER successful admission
@@ -371,7 +588,7 @@ export function createLocalControlServer({
             // Dispatches admission; dispatcher owns deduping and avoiding concurrent overlap
             const admissionJob = {
               sender: senderId,
-              recipient: to,
+              recipient: effectiveTo,
               messageId,
               requestId: record.requestId,
               inReplyTo,
@@ -406,15 +623,27 @@ export function createLocalControlServer({
             notifier?.notifyObligationChange?.();
 
             // 8. Return custody receipt promptly carrying original stored requestId
+            const rawReceipt = {
+              accepted: true,
+              messageId: record.messageId,
+              requestId: record.requestId,
+              status: record.phase || "queued_local",
+              isDuplicate: record.isDuplicate || false,
+              to_principal: record.to_principal,
+              resolved_via: record.resolved_via,
+            };
+            const duplicateResolution = record.isDuplicate
+              ? {
+                  resolved: record.resolved_via === "principal",
+                  via: record.resolved_via,
+                  principal: record.to_principal,
+                  resolvedTo: record.recipient,
+                }
+              : resolution;
+            const decoratedReceipt = activeRouter.decorateSend(rawReceipt, { resolution: duplicateResolution, record });
             const resp = createSuccessResponse(
               id,
-              {
-                accepted: true,
-                messageId: record.messageId,
-                requestId: record.requestId,
-                status: record.phase || "queued_local",
-                isDuplicate: record.isDuplicate || false,
-              },
+              decoratedReceipt,
               PROTOCOL_VERSION,
             );
             socket.write(encodeFrame(resp));
@@ -446,16 +675,20 @@ export function createLocalControlServer({
             safeRuntimeError = "Execution failure occurred";
           }
 
+          const rawStatus = {
+            messageId: record.messageId,
+            phase: record.phase,
+            reason: record.reason || null,
+            runtimeError: safeRuntimeError,
+            // Presence only: a result that arrived after a timeout is for the owner, not the sender.
+            hasLateResult: record.hasLateResult === true,
+            to_principal: record.to_principal,
+            resolved_via: record.resolved_via,
+          };
+          const decoratedStatus = activeRouter.decorateStatus(rawStatus, { record });
           const resp = createSuccessResponse(
             id,
-            {
-              messageId: record.messageId,
-              phase: record.phase,
-              reason: record.reason || null,
-              runtimeError: safeRuntimeError,
-              // Presence only: a result that arrived after a timeout is for the owner, not the sender.
-              hasLateResult: record.hasLateResult === true,
-            },
+            decoratedStatus,
             PROTOCOL_VERSION,
           );
           socket.write(encodeFrame(resp));
@@ -474,8 +707,10 @@ export function createLocalControlServer({
             limit: cappedLimit,
           });
 
-          // Ensure reply list strictly fits within envelope limits
-          const bounded = boundRepliesToEnvelope(replies);
+          // Decorate BEFORE bounding so additional route metadata is accounted for
+          // and the final decorated envelope strictly fits within protocol limits
+          const decoratedReplies = activeRouter.decorateReplies({ replies });
+          const bounded = boundRepliesToEnvelope(decoratedReplies.replies);
           const resp = createSuccessResponse(id, { replies: bounded }, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
@@ -625,7 +860,20 @@ export function createLocalControlServer({
             limit: cappedLimit,
             cursor,
           });
-          const resp = createSuccessResponse(id, { items: result.items, nextCursor: result.nextCursor ?? null }, PROTOCOL_VERSION);
+          const rawResponse = {
+            items: result.items || [],
+            nextCursor: result.nextCursor ?? null,
+          };
+          const decorated = typeof activeRouter.decorateInbox === "function"
+            ? activeRouter.decorateInbox(rawResponse)
+            : {
+                items: (result.items || []).map((item) => {
+                  const { to_principal, resolved_via, ...rest } = item;
+                  return rest;
+                }),
+                nextCursor: result.nextCursor ?? null,
+              };
+          const resp = createSuccessResponse(id, decorated, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
@@ -654,7 +902,10 @@ export function createLocalControlServer({
           if (!outcome) {
             throw coded("claim_failed", "Message is not available for claim");
           }
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
+          const safeOutcome = { ...outcome };
+          delete safeOutcome.to_principal;
+          delete safeOutcome.resolved_via;
+          const resp = createSuccessResponse(id, safeOutcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
