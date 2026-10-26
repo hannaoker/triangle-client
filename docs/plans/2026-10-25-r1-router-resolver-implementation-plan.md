@@ -1,6 +1,6 @@
 # R1 implementation plan: router, resolver and the v13 release train
 
-Status: plan, 2026-10-25. No code. It turns slice R1 of the item 6 design (`2026-10-25-unified-messaging-interface-design.md`, section 7) into buildable pieces, using the identity work now on main (#123 to #127). Facts marked "checked" were read in the code or on this Mac on 2026-10-25. Three owner decisions are open (section 9). Nothing here authorizes an install; the owner gates are in section 6.
+Status: plan, 2026-10-25. No code. It turns slice R1 of the item 6 design (`2026-10-25-unified-messaging-interface-design.md`, section 7) into buildable pieces, using the identity work now on main (#123 to #127). Facts marked "checked" were read in the code or on this Mac on 2026-10-25. The three owner decisions in section 9 are settled. Nothing here authorizes an install; the owner gates are in section 6.
 
 ## 1. What R1 is
 
@@ -185,9 +185,16 @@ Afterwards write `releases/r1-install-verification.json` (hashes, bundle ids, co
 
 ## 9. Owner decisions
 
-1. **Release shape.** Item 6 decision 4 chose one manifest bump for R1 to R5. R3 and R5 (Iroh and MESH adapters) are deferred by the 2026-10-23 priority update, and an explicit file list cannot name modules that do not exist yet, so a literal single bump would hold the first install until the remote slices exist. **A (recommended):** install v13 for R1 now, and let R3 and R5 bring v14 when they exist (each bump costs the section 5.2 changes and a helper install). **B:** keep R1 merged but uninstalled until R4 (read-only aggregated status) is done, so one local install carries R1 and R4. **C:** hold everything for R5.
-2. **State after install.** **A (recommended):** the router ships dark and is enabled for acceptance; the default flips to on in the next cut, once the evidence is in. **B:** on from the first install, as item 6 section 7 says, with the kill switch as the safety.
-3. **Aliases.** **A (recommended):** R1 handles principal ids only; petnames arrive with a registry extension (an `aliases` map, a set and clear command, an audit action) before R3, where guessable names matter. **B:** include the registry extension in R1, which adds a schema change and a command to the first install.
+**Decision log**
+
+- 2026-10-25, decision 1: owner chose A. R1 gets its own v13 install now; R3 and R5 bring v14 when they exist.
+- 2026-10-25, decision 2: owner chose A. The router ships dark and is enabled for acceptance; the default flips to on in the next cut.
+- 2026-10-25, decision 3: owner chose A. R1 handles principal ids only; aliases come with a registry extension before R3.
+- All three are settled. The plan as a whole still awaits the owner's go-ahead to start building, and every production step stays behind the gates in section 6.
+
+1. **Release shape.** Item 6 decision 4 chose one manifest bump for R1 to R5. R3 and R5 (Iroh and MESH adapters) are deferred by the 2026-10-23 priority update, and an explicit file list cannot name modules that do not exist yet, so a literal single bump would hold the first install until the remote slices exist. **A (chosen):** install v13 for R1 now, and let R3 and R5 bring v14 when they exist (each bump costs the section 5.2 changes and a helper install). **B:** keep R1 merged but uninstalled until R4 (read-only aggregated status) is done, so one local install carries R1 and R4. **C:** hold everything for R5.
+2. **State after install.** **A (chosen):** the router ships dark and is enabled for acceptance; the default flips to on in the next cut, once the evidence is in. **B:** on from the first install, as item 6 section 7 says, with the kill switch as the safety.
+3. **Aliases.** **A (chosen):** R1 handles principal ids only; petnames arrive with a registry extension (an `aliases` map, a set and clear command, an audit action) before R3, where guessable names matter. **B:** include the registry extension in R1, which adds a schema change and a command to the first install.
 
 ## 10. After R1
 
