@@ -609,6 +609,8 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   if(command==='send'){
    let to=config.recipients.find(r=>r.profile===options.to||r.instanceId===options.to)?.instanceId;
+   // Principal authorization belongs to the server after registry resolution.
+   if(!to&&/^agent_[a-f0-9]{32}$/.test(options.to||''))to=options.to;
    if(!to&&config.interactive?.enabled&&config.interactive.integrationPath){
     try {
      const claudeIntegration=readPrivateJson(config.interactive.integrationPath);
