@@ -66,7 +66,7 @@ export function renderDoctor(report) {
   if (report.identity) {
     lines.push("Identity (host-local; disk observations, not live authority verification)");
     const reg = report.identity.registry ?? {};
-    const root = report.identityRegistryRoot ?? report.registryRoot ?? report.identity.registryRoot ?? "";
+    const root = report.identityRegistryRoot ?? "";
     lines.push(`Registry:  ${reg.state} · sequence ${reg.sequence ?? 0} · ${root}`);
     if (Array.isArray(report.identity.profiles)) {
       for (const p of report.identity.profiles) {

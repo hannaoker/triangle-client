@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -326,5 +326,35 @@ test("identity status CLI: missing agent-worker modules throws LocalStateError (
     assert.ok(!err[0].includes("/private/"), "stderr must not contain absolute paths");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("identity status CLI: roots default from the custody home, including a relative --home", async () => {
+  const f = setupJoinedFakeFixture();
+  try {
+    // client/ and identity/ sit beside the custody home (the application root layout)
+    const home = path.join(f.app, "v1");
+    const run = async (homeArg) => {
+      const out = [];
+      const code = await main(["status", "--identity", "--home", homeArg, "--json"], {
+        env: {},
+        fetchImpl: f.fake.fetchImpl,
+        io: { stdout: (s) => out.push(s), stderr: () => {} },
+      });
+      assert.equal(code, 0);
+      return JSON.parse(out.join("\n"));
+    };
+
+    const absolute = await run(home);
+    assert.equal(absolute.identityRegistryRoot, f.registry);
+    assert.equal(absolute.identity.summary.notRecorded, 1);
+    assert.equal(existsSync(f.registry), false, "the identity part creates nothing");
+
+    // A relative --home resolves against the working directory before the sibling is taken
+    const relative = await run(path.relative(process.cwd(), home));
+    assert.equal(relative.identityRegistryRoot, f.registry);
+    assert.equal(relative.identity.summary.notRecorded, 1);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
   }
 });

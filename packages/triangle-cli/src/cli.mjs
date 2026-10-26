@@ -418,7 +418,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
         let registryRoot;
         if (flags.identity) {
           allowOnly(flags, ["identity", "client-root", "registry-root"]);
-          clientRoot = flags["client-root"] ?? path.join(path.dirname(home), "client");
+          clientRoot = flags["client-root"] ?? path.join(path.dirname(path.resolve(home)), "client");
           if (!path.isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
           registryRoot = flags["registry-root"] ?? defaultRegistryRoot(clientRoot);
           if (!path.isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
