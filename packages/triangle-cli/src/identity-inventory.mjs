@@ -86,6 +86,9 @@ export function renderIdentityInventory(report) {
     `${summary.faultCount ?? 0} fault(s), ` +
     `${summary.warningCount ?? 0} warning(s)`
   );
+  if (typeof summary.omittedHealthDiagnosticCount === "number" && summary.omittedHealthDiagnosticCount > 0) {
+    lines.push(`Installation-health diagnostics omitted: ${summary.omittedHealthDiagnosticCount} (see triangle-local status).`);
+  }
 
   if (Array.isArray(report.identities) && report.identities.length > 0) {
     lines.push("Identities:");

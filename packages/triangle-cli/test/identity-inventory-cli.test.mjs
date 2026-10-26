@@ -402,3 +402,35 @@ test("identity inventory CLI: network fetch trap is never called", async () => {
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("identity inventory CLI: render omitted health diagnostic count", async () => {
+  const { renderIdentityInventory } = await import("../src/identity-inventory.mjs");
+  const reportWithOmitted = {
+    summary: {
+      identityCount: 1,
+      unmappedProfileCount: 0,
+      faultCount: 0,
+      warningCount: 0,
+      omittedHealthDiagnosticCount: 3,
+    },
+    identities: [],
+  };
+  const textWithOmitted = renderIdentityInventory(reportWithOmitted);
+  assert.match(
+    textWithOmitted,
+    /Installation-health diagnostics omitted: 3 \(see triangle-local status\)\./
+  );
+
+  const reportZeroOmitted = {
+    summary: {
+      identityCount: 1,
+      unmappedProfileCount: 0,
+      faultCount: 0,
+      warningCount: 0,
+      omittedHealthDiagnosticCount: 0,
+    },
+    identities: [],
+  };
+  const textZeroOmitted = renderIdentityInventory(reportZeroOmitted);
+  assert.doesNotMatch(textZeroOmitted, /Installation-health diagnostics omitted:/);
+});

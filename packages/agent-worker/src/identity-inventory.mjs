@@ -101,6 +101,22 @@ export function isValidBareHttpsOrigin(value) {
     && url.origin === value;
 }
 
+const ALLOWED_HEALTH_DIAGNOSTIC_CODES = new Set([
+  "registry_absent",
+  "registry_unreadable",
+  "registry_unsafe",
+  "registry_empty",
+  "registry_stray_file",
+  "registry_entry_invalid",
+  "profile_bindings_unavailable",
+]);
+
+function compareCodeUnits(a, b) {
+  const sa = String(a ?? "");
+  const sb = String(b ?? "");
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+
 /**
  * Deterministic tie-breaker for raw profile entry comparison.
  */
@@ -111,27 +127,27 @@ function compareRawProfileEntries(a, b) {
 
   const profA = typeof a.profile === "string" ? a.profile : "";
   const profB = typeof b.profile === "string" ? b.profile : "";
-  const cmpProf = profA.localeCompare(profB);
+  const cmpProf = compareCodeUnits(profA, profB);
   if (cmpProf !== 0) return cmpProf;
 
   const instA = typeof a.instanceId === "string" ? a.instanceId : "";
   const instB = typeof b.instanceId === "string" ? b.instanceId : "";
-  const cmpInst = instA.localeCompare(instB);
+  const cmpInst = compareCodeUnits(instA, instB);
   if (cmpInst !== 0) return cmpInst;
 
   const laneA = typeof a.lane === "string" ? a.lane : "";
   const laneB = typeof b.lane === "string" ? b.lane : "";
-  const cmpLane = laneA.localeCompare(laneB);
+  const cmpLane = compareCodeUnits(laneA, laneB);
   if (cmpLane !== 0) return cmpLane;
 
   const raA = typeof a.runtimeAdapter === "string" ? a.runtimeAdapter : "";
   const raB = typeof b.runtimeAdapter === "string" ? b.runtimeAdapter : "";
-  const cmpRa = raA.localeCompare(raB);
+  const cmpRa = compareCodeUnits(raA, raB);
   if (cmpRa !== 0) return cmpRa;
 
   const dmA = typeof a.deliveryMode === "string" ? a.deliveryMode : "";
   const dmB = typeof b.deliveryMode === "string" ? b.deliveryMode : "";
-  const cmpDm = dmA.localeCompare(dmB);
+  const cmpDm = compareCodeUnits(dmA, dmB);
   if (cmpDm !== 0) return cmpDm;
 
   const enA = a.enabled ? 1 : 0;
@@ -140,37 +156,37 @@ function compareRawProfileEntries(a, b) {
 
   const stA = typeof a.status === "string" ? a.status : "";
   const stB = typeof b.status === "string" ? b.status : "";
-  const cmpSt = stA.localeCompare(stB);
+  const cmpSt = compareCodeUnits(stA, stB);
   if (cmpSt !== 0) return cmpSt;
 
-  return JSON.stringify(a).localeCompare(JSON.stringify(b));
+  return compareCodeUnits(JSON.stringify(a), JSON.stringify(b));
 }
 
 function compareDiagnostics(a, b) {
-  const cmpCode = String(a?.code ?? "").localeCompare(String(b?.code ?? ""));
+  const cmpCode = compareCodeUnits(a?.code, b?.code);
   if (cmpCode !== 0) return cmpCode;
-  const cmpMsg = String(a?.message ?? "").localeCompare(String(b?.message ?? ""));
+  const cmpMsg = compareCodeUnits(a?.message, b?.message);
   if (cmpMsg !== 0) return cmpMsg;
-  const cmpProf = String(a?.profile ?? "").localeCompare(String(b?.profile ?? ""));
+  const cmpProf = compareCodeUnits(a?.profile, b?.profile);
   if (cmpProf !== 0) return cmpProf;
-  const cmpSev = String(a?.severity ?? "").localeCompare(String(b?.severity ?? ""));
+  const cmpSev = compareCodeUnits(a?.severity, b?.severity);
   if (cmpSev !== 0) return cmpSev;
-  const cmpPrin = String(a?.principalId ?? "").localeCompare(String(b?.principalId ?? ""));
+  const cmpPrin = compareCodeUnits(a?.principalId, b?.principalId);
   if (cmpPrin !== 0) return cmpPrin;
-  return JSON.stringify(a).localeCompare(JSON.stringify(b));
+  return compareCodeUnits(JSON.stringify(a), JSON.stringify(b));
 }
 
 function compareSessions(a, b) {
-  const cmpId = String(a?.sessionId ?? "").localeCompare(String(b?.sessionId ?? ""));
+  const cmpId = compareCodeUnits(a?.sessionId, b?.sessionId);
   if (cmpId !== 0) return cmpId;
-  const cmpProf = String(a?.profile ?? "").localeCompare(String(b?.profile ?? ""));
+  const cmpProf = compareCodeUnits(a?.profile, b?.profile);
   if (cmpProf !== 0) return cmpProf;
-  const cmpScope = String(a?.scope ?? "").localeCompare(String(b?.scope ?? ""));
+  const cmpScope = compareCodeUnits(a?.scope, b?.scope);
   if (cmpScope !== 0) return cmpScope;
   const diskA = a?.observedOnDisk ? 1 : 0;
   const diskB = b?.observedOnDisk ? 1 : 0;
   if (diskA !== diskB) return diskA - diskB;
-  return JSON.stringify(a).localeCompare(JSON.stringify(b));
+  return compareCodeUnits(JSON.stringify(a), JSON.stringify(b));
 }
 
 /**
@@ -188,14 +204,20 @@ export function buildIdentityInventory(installationInventory, options = {}) {
   }
 
   const diagnostics = [];
+  let omittedHealthDiagnosticCount = 0;
 
   // Retain validated bounded code/profile plus fixed diagnostic text (never copy arbitrary messages)
   if (Array.isArray(installationInventory.blockers)) {
     for (const b of installationInventory.blockers) {
       if (!b || typeof b !== "object") continue;
-      const safeCode = typeof b.code === "string" && DIAGNOSTIC_CODE_PATTERN.test(b.code)
-        ? b.code
-        : "underlying_blocker";
+      const isWellFormedCode = typeof b.code === "string" && DIAGNOSTIC_CODE_PATTERN.test(b.code);
+      if (isWellFormedCode) {
+        if (!ALLOWED_HEALTH_DIAGNOSTIC_CODES.has(b.code)) {
+          omittedHealthDiagnosticCount += 1;
+          continue;
+        }
+      }
+      const safeCode = isWellFormedCode ? b.code : "underlying_blocker";
       const hasValidProfile = typeof b.profile === "string" && isValidProfileName(b.profile);
       diagnostics.push({
         code: safeCode,
@@ -211,9 +233,14 @@ export function buildIdentityInventory(installationInventory, options = {}) {
   if (Array.isArray(installationInventory.warnings)) {
     for (const w of installationInventory.warnings) {
       if (!w || typeof w !== "object") continue;
-      const safeCode = typeof w.code === "string" && DIAGNOSTIC_CODE_PATTERN.test(w.code)
-        ? w.code
-        : "underlying_warning";
+      const isWellFormedCode = typeof w.code === "string" && DIAGNOSTIC_CODE_PATTERN.test(w.code);
+      if (isWellFormedCode) {
+        if (!ALLOWED_HEALTH_DIAGNOSTIC_CODES.has(w.code)) {
+          omittedHealthDiagnosticCount += 1;
+          continue;
+        }
+      }
+      const safeCode = isWellFormedCode ? w.code : "underlying_warning";
       const hasValidProfile = typeof w.profile === "string" && isValidProfileName(w.profile);
       diagnostics.push({
         code: safeCode,
@@ -284,7 +311,7 @@ export function buildIdentityInventory(installationInventory, options = {}) {
   }
 
   // Emit duplicate profile diagnostics deterministically
-  for (const [prof, count] of [...profileCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+  for (const [prof, count] of [...profileCounts.entries()].sort((a, b) => compareCodeUnits(a[0], b[0]))) {
     if (count > 1) {
       diagnostics.push({
         code: DIAGNOSTIC_CODES.DUPLICATE_PROFILE,
@@ -296,9 +323,9 @@ export function buildIdentityInventory(installationInventory, options = {}) {
   }
 
   // Emit duplicate instance ID diagnostics deterministically
-  for (const [instId, claimingProfilesSet] of [...instanceClaims.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+  for (const [instId, claimingProfilesSet] of [...instanceClaims.entries()].sort((a, b) => compareCodeUnits(a[0], b[0]))) {
     if (claimingProfilesSet.size > 1) {
-      const sortedClaimants = [...claimingProfilesSet].sort();
+      const sortedClaimants = [...claimingProfilesSet].sort(compareCodeUnits);
       for (const claimant of sortedClaimants) {
         diagnostics.push({
           code: DIAGNOSTIC_CODES.DUPLICATE_INSTANCE,
@@ -556,8 +583,8 @@ export function buildIdentityInventory(installationInventory, options = {}) {
   for (const group of identitiesMap.values()) {
     group.profiles.sort(compareRawProfileEntries);
     const sortedProfiles = group.profiles;
-    const sortedNames = [...new Set(sortedProfiles.map((p) => p.profile))].sort();
-    const uniqueHandles = [...group.handlesSet].sort();
+    const sortedNames = [...new Set(sortedProfiles.map((p) => p.profile))].sort(compareCodeUnits);
+    const uniqueHandles = [...group.handlesSet].sort(compareCodeUnits);
 
     // Preserve all observations:
     // If exactly one handle is observed across all profiles, set handle to that.
@@ -599,11 +626,11 @@ export function buildIdentityInventory(installationInventory, options = {}) {
     }
   }
 
-  const sortedCollidingHandles = [...handleToAgentIds.keys()].sort();
+  const sortedCollidingHandles = [...handleToAgentIds.keys()].sort(compareCodeUnits);
   for (const h of sortedCollidingHandles) {
     const agentIds = handleToAgentIds.get(h);
     if (agentIds.size > 1) {
-      const idList = [...agentIds].sort().join(", ");
+      const idList = [...agentIds].sort(compareCodeUnits).join(", ");
       diagnostics.push({
         code: DIAGNOSTIC_CODES.HANDLE_COLLISION,
         severity: "warning",
@@ -630,11 +657,11 @@ export function buildIdentityInventory(installationInventory, options = {}) {
     agentIdToOrigins.get(ident.principalId).add(ident.authorityOrigin);
   }
 
-  const sortedAgentIds = [...agentIdToOrigins.keys()].sort();
+  const sortedAgentIds = [...agentIdToOrigins.keys()].sort(compareCodeUnits);
   for (const aId of sortedAgentIds) {
     const origins = agentIdToOrigins.get(aId);
     if (origins.size > 1) {
-      const originList = [...origins].sort().join(", ");
+      const originList = [...origins].sort(compareCodeUnits).join(", ");
       diagnostics.push({
         code: DIAGNOSTIC_CODES.ORIGIN_MISMATCH,
         severity: "warning",
@@ -673,9 +700,9 @@ export function buildIdentityInventory(installationInventory, options = {}) {
 
   // Sort identities deterministically by principalId, then authorityOrigin
   const identities = [...identitiesMap.values()].sort((a, b) => {
-    const cmpId = String(a.principalId).localeCompare(String(b.principalId));
+    const cmpId = compareCodeUnits(a.principalId, b.principalId);
     if (cmpId !== 0) return cmpId;
-    return String(a.authorityOrigin).localeCompare(String(b.authorityOrigin));
+    return compareCodeUnits(a.authorityOrigin, b.authorityOrigin);
   });
 
   // Sort profiles and diagnostics within each identity
@@ -705,6 +732,7 @@ export function buildIdentityInventory(installationInventory, options = {}) {
       sessionCount: projectedSessions.length,
       faultCount,
       warningCount,
+      omittedHealthDiagnosticCount,
     },
     identities,
     unmappedProfiles,
