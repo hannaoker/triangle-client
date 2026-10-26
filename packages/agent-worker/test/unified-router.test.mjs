@@ -78,7 +78,7 @@ function createMockSnapshot({
 // ---------------------------------------------------------------------------
 // 1. Disabled mode: zero registry reads, no added fields, raw field stripping
 // ---------------------------------------------------------------------------
-test("Family 1: Disabled mode never reads registry, passes through, and strips raw journal fields", async () => {
+test("Family 1: Disabled mode never reads registry or recipients, passes through, and strips raw journal fields", async () => {
   let snapshotReadCount = 0;
   const throwingSnapshotProvider = {
     get() {
@@ -86,14 +86,22 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
       throw new Error("registry must never be read in disabled mode");
     },
   };
+  let recipientsCallCount = 0;
+  const throwingRecipientsProvider = () => {
+    recipientsCallCount += 1;
+    throw new Error("directory lookup failed");
+  };
 
   const router = createUnifiedRouter({
     enabled: false,
     snapshotProvider: throwingSnapshotProvider,
-    recipients: SAMPLE_RECIPIENTS,
+    recipients: throwingRecipientsProvider,
+    canMessage() {
+      throw new Error("canMessage must never be evaluated in disabled mode");
+    },
   });
 
-  // 1.1 resolveSend passes through without touching snapshotProvider
+  // 1.1 resolveSend passes through without touching snapshotProvider or recipients
   const legacyRes = await router.resolveSend({ senderId: "sender-1", to: "gravity2" });
   assert.equal(legacyRes.ok, true);
   assert.equal(legacyRes.resolvedTo, "gravity2");
@@ -101,14 +109,24 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
   assert.equal(legacyRes.via, null);
   assert.equal(legacyRes.route, null);
   assert.equal(snapshotReadCount, 0, "snapshotProvider must not be accessed");
+  assert.equal(recipientsCallCount, 0, "recipients provider must not be accessed");
 
   const agentRes = await router.resolveSend({ senderId: "sender-1", to: AGENT_ID_1 });
   assert.equal(agentRes.ok, true);
   assert.equal(agentRes.resolvedTo, AGENT_ID_1);
   assert.equal(agentRes.resolved, false);
   assert.equal(snapshotReadCount, 0, "snapshotProvider must not be accessed for agent ID in disabled mode");
+  assert.equal(recipientsCallCount, 0, "recipients provider must not be accessed in disabled mode");
 
-  // 1.2 decorateSend strips raw journal fields, does not add route/state/target
+  // Contract failure 1 repro: throwing recipients provider on legacy-id
+  const reproRes = await router.resolveSend({ to: "legacy-id" });
+  assert.equal(reproRes.ok, true);
+  assert.equal(reproRes.resolvedTo, "legacy-id");
+  assert.equal(reproRes.resolved, false);
+  assert.equal(snapshotReadCount, 0);
+  assert.equal(recipientsCallCount, 0);
+
+  // 1.2 decorateSend strips raw journal fields, does not add route/state/target even with options
   const rawSendResponse = deepFreeze({
     accepted: true,
     messageId: "msg_123",
@@ -119,8 +137,11 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
     resolved_via: "principal",
   });
 
-  const decoratedSend = router.decorateSend(rawSendResponse);
+  const decoratedSend = router.decorateSend(rawSendResponse, {
+    target: { via: "id", privateMetadata: "SHOULD_NOT_BE_PROJECTED" },
+  });
   assert.equal(snapshotReadCount, 0);
+  assert.equal(recipientsCallCount, 0);
   assert.equal("to_principal" in decoratedSend, false);
   assert.equal("resolved_via" in decoratedSend, false);
   assert.equal("route" in decoratedSend, false);
@@ -141,8 +162,11 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
     resolved_via: "principal",
   });
 
-  const decoratedStatus = router.decorateStatus(rawStatusResponse);
+  const decoratedStatus = router.decorateStatus(rawStatusResponse, {
+    target: { via: "principal", principal: AGENT_ID_1 },
+  });
   assert.equal(snapshotReadCount, 0);
+  assert.equal(recipientsCallCount, 0);
   assert.equal("to_principal" in decoratedStatus, false);
   assert.equal("resolved_via" in decoratedStatus, false);
   assert.equal("route" in decoratedStatus, false);
@@ -164,9 +188,11 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
 
   const decoratedReplies = router.decorateReplies(rawReplies);
   assert.equal(snapshotReadCount, 0);
+  assert.equal(recipientsCallCount, 0);
   assert.equal("to_principal" in decoratedReplies.replies[0], false);
   assert.equal("resolved_via" in decoratedReplies.replies[0], false);
   assert.equal("route" in decoratedReplies.replies[0], false);
+  assert.equal(decoratedReplies.replies[0].text, "hello");
 
   // 1.5 decorateSessions strips raw journal fields, does not add principal
   const rawSessions = deepFreeze({
@@ -182,6 +208,7 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
 
   const decoratedSessions = router.decorateSessions(rawSessions);
   assert.equal(snapshotReadCount, 0);
+  assert.equal(recipientsCallCount, 0);
   assert.equal("to_principal" in decoratedSessions.sessions[0], false);
   assert.equal("resolved_via" in decoratedSessions.sessions[0], false);
   assert.equal("principal" in decoratedSessions.sessions[0], false);
@@ -189,6 +216,7 @@ test("Family 1: Disabled mode never reads registry, passes through, and strips r
   // 1.6 statusBlock returns disabled block without touching snapshotProvider
   const status = router.statusBlock();
   assert.equal(snapshotReadCount, 0, "statusBlock must not touch snapshotProvider when disabled");
+  assert.equal(recipientsCallCount, 0);
   assert.deepEqual(status, {
     enabled: false,
     registry: {
@@ -615,6 +643,28 @@ test("Family 5: Native input DTOs are never mutated", async () => {
   const decoratedSessions = router.decorateSessions(rawSessionsContainer);
   assert.equal(rawSessionsContainer.sessions[0].to_principal, AGENT_ID_1);
   assert.equal("to_principal" in decoratedSessions.sessions[0], false);
+
+  // Target overrides are deep-frozen and never mutated
+  const targetOverrideSend = deepFreeze({
+    via: "id",
+    privateMetadata: "SHOULD_NOT_BE_PROJECTED",
+    callerCustomTag: "do-not-mutate",
+  });
+  const decoratedWithTarget = router.decorateSend(sendResponse, { target: targetOverrideSend });
+  assert.equal(targetOverrideSend.privateMetadata, "SHOULD_NOT_BE_PROJECTED");
+  assert.equal(targetOverrideSend.callerCustomTag, "do-not-mutate");
+  assert.equal("privateMetadata" in decoratedWithTarget.target, false);
+  assert.equal("callerCustomTag" in decoratedWithTarget.target, false);
+
+  const targetOverrideStatus = deepFreeze({
+    via: "principal",
+    principal: AGENT_ID_1,
+    profile: "profile-alpha",
+    secretMetadata: "SHOULD_NOT_BE_PROJECTED",
+  });
+  const decoratedStatusWithTarget = router.decorateStatus(statusResponse, { target: targetOverrideStatus });
+  assert.equal(targetOverrideStatus.secretMetadata, "SHOULD_NOT_BE_PROJECTED");
+  assert.equal("secretMetadata" in decoratedStatusWithTarget.target, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1085,4 +1135,72 @@ test("Family 9: Fake server context wiring simulating local-messaging-server", a
   assert.equal("target" in receiptDisabled, false);
   assert.equal("to_principal" in receiptDisabled, false);
   assert.equal("resolved_via" in receiptDisabled, false);
+});
+
+// ---------------------------------------------------------------------------
+// 10. Target override projection, shape validation, and caller payload preservation
+// ---------------------------------------------------------------------------
+test("Family 10: Target override projection, shape validation, and payload preservation", async () => {
+  const router = createUnifiedRouter({
+    enabled: true,
+    snapshotProvider: { get: () => createMockSnapshot({ state: "ok" }) },
+    recipients: SAMPLE_RECIPIENTS,
+  });
+
+  // 10.1 decorateSend strips arbitrary fields and raw journal metadata from target override
+  // Contract failure 2 repro:
+  const sendRepro = router.decorateSend(
+    { accepted: true, customHeader: "preserved", text: "outgoing peer message" },
+    { target: { via: "id", privateMetadata: "SHOULD_NOT_BE_PROJECTED", to_principal: AGENT_ID_1, resolved_via: "principal" } }
+  );
+  assert.equal(sendRepro.accepted, true);
+  assert.equal(sendRepro.customHeader, "preserved");
+  assert.equal(sendRepro.text, "outgoing peer message");
+  assert.equal(sendRepro.route, "local");
+  assert.equal(sendRepro.state, "received");
+  assert.deepEqual(sendRepro.target, { via: "id" });
+  assert.equal("privateMetadata" in sendRepro.target, false);
+  assert.equal("to_principal" in sendRepro.target, false);
+  assert.equal("resolved_via" in sendRepro.target, false);
+
+  // 10.2 decorateStatus strips arbitrary fields from target override
+  const statusRepro = router.decorateStatus(
+    { messageId: "m_status_1", phase: "completed", peerReplyText: "Preserved reply message text" },
+    { target: { via: "principal", principal: AGENT_ID_1, profile: "profile-alpha", privateMetadata: "SHOULD_NOT_BE_PROJECTED", arbitraryLeak: 999 } }
+  );
+  assert.equal(statusRepro.messageId, "m_status_1");
+  assert.equal(statusRepro.peerReplyText, "Preserved reply message text");
+  assert.equal(statusRepro.route, "local");
+  assert.equal(statusRepro.state, "completed");
+  assert.deepEqual(statusRepro.target, {
+    via: "principal",
+    principal: AGENT_ID_1,
+    profile: "profile-alpha",
+  });
+  assert.equal("privateMetadata" in statusRepro.target, false);
+  assert.equal("arbitraryLeak" in statusRepro.target, false);
+
+  // 10.3 Target shape and type validations
+  const invalidTargets = [
+    "not-an-object",
+    null,
+    [1, 2, 3],
+    { via: "invalid" },
+    { via: 123 },
+    { via: "id", principal: 123 },
+    { via: "id", profile: {} },
+  ];
+
+  for (const invalidTarget of invalidTargets) {
+    assert.throws(
+      () => router.decorateSend({ accepted: true }, { target: invalidTarget }),
+      TypeError,
+      `decorateSend should throw TypeError for invalid target: ${JSON.stringify(invalidTarget)}`
+    );
+    assert.throws(
+      () => router.decorateStatus({ phase: "completed" }, { target: invalidTarget }),
+      TypeError,
+      `decorateStatus should throw TypeError for invalid target: ${JSON.stringify(invalidTarget)}`
+    );
+  }
 });

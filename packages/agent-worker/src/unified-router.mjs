@@ -42,6 +42,49 @@ export class RouterResolutionError extends LocalMessagingError {
 }
 
 /**
+ * Projects a target object into the public target projection:
+ * { via: "principal" | "id", principal?, profile? }
+ *
+ * Validates expected types and shapes, allowlists only public target fields,
+ * and strips arbitrary fields and raw journal metadata. Never mutates input.
+ *
+ * @param {object} targetInput Target object or override.
+ * @returns {object} Deep-frozen projected target.
+ */
+function projectTarget(targetInput) {
+  if (targetInput === null || typeof targetInput !== "object" || Array.isArray(targetInput)) {
+    throw new TypeError("target must be an object");
+  }
+
+  const via = targetInput.via ?? (targetInput.principal ? "principal" : "id");
+  if (via !== "principal" && via !== "id") {
+    throw new TypeError("target.via must be 'principal' or 'id'");
+  }
+
+  const projected = { via };
+
+  if (targetInput.principal !== undefined && targetInput.principal !== null) {
+    if (typeof targetInput.principal !== "string") {
+      throw new TypeError("target.principal must be a string");
+    }
+    if (targetInput.principal.length > 0) {
+      projected.principal = targetInput.principal;
+    }
+  }
+
+  if (targetInput.profile !== undefined && targetInput.profile !== null) {
+    if (typeof targetInput.profile !== "string") {
+      throw new TypeError("target.profile must be a string");
+    }
+    if (targetInput.profile.length > 0) {
+      projected.profile = targetInput.profile;
+    }
+  }
+
+  return Object.freeze(projected);
+}
+
+/**
  * Strips raw internal journal columns (to_principal, resolved_via) from DTOs.
  * Never mutates the input object.
  *
@@ -146,11 +189,7 @@ export function createUnifiedRouter({
       throw new TypeError("to must be a string");
     }
 
-    const throwOnError = callOptions.throwOnError !== false;
-    const effectiveCanMessage = callOptions.canMessage ?? canMessage;
-    const effectiveRecipients = callOptions.recipients ?? getRecipients();
-
-    // 1. Router disabled: zero registry reads, pass through untouched
+    // 1. Router disabled: zero registry/recipient reads, pass through untouched
     if (!isEnabled()) {
       return Object.freeze({
         ok: true,
@@ -164,6 +203,10 @@ export function createUnifiedRouter({
         route: null,
       });
     }
+
+    const throwOnError = callOptions.throwOnError !== false;
+    const effectiveCanMessage = callOptions.canMessage ?? canMessage;
+    const effectiveRecipients = callOptions.recipients ?? getRecipients();
 
     const isAgent = AGENT_ID_PATTERN.test(to);
     const isPeer = PEER_ID_PATTERN.test(to);
@@ -354,8 +397,8 @@ export function createUnifiedRouter({
     const state = localState(phase);
 
     let target;
-    if (options.target && typeof options.target === "object") {
-      target = sanitizeDto(options.target);
+    if (options.target !== undefined) {
+      target = projectTarget(options.target);
     } else if (
       options.resolution?.via === "principal" ||
       options.record?.resolved_via === "principal" ||
@@ -363,50 +406,44 @@ export function createUnifiedRouter({
     ) {
       const recipientId = options.resolution?.resolvedTo || options.record?.recipient;
       const profile = options.resolution?.profile || lookupProfile(recipientId);
-      target = {
+      const principal = options.resolution?.principal ?? options.record?.to_principal;
+      target = projectTarget({
         via: "principal",
-        principal: options.resolution?.principal ?? options.record?.to_principal,
+        ...(principal ? { principal } : {}),
         ...(profile ? { profile } : {}),
-      };
+      });
     } else {
-      target = {
-        via: "id",
-      };
-
       const instanceId =
         options.resolution?.resolvedTo || options.record?.recipient || clean.to;
       const profile = options.resolution?.profile || lookupProfile(instanceId);
+      let principal = options.resolution?.principal;
 
-      if (options.resolution?.principal) {
-        target.principal = options.resolution.principal;
-        if (profile) {
-          target.profile = profile;
-        }
-      } else {
-        if (instanceId && snapshotProvider && typeof snapshotProvider.get === "function") {
-          try {
-            const snap = options.snapshot ?? snapshotProvider.get();
-            if (snap?.state === "ok") {
-              const binding = snap.bindingForInstance(instanceId);
-              if (binding?.principal_id) {
-                target.principal = binding.principal_id;
-              }
+      if (!principal && instanceId && snapshotProvider && typeof snapshotProvider.get === "function") {
+        try {
+          const snap = options.snapshot ?? snapshotProvider.get();
+          if (snap?.state === "ok") {
+            const binding = snap.bindingForInstance(instanceId);
+            if (binding?.principal_id) {
+              principal = binding.principal_id;
             }
-          } catch {
-            // Fail closed on registry access, do not fabricate principal
           }
-        }
-        if (profile) {
-          target.profile = profile;
+        } catch {
+          // Fail closed on registry access, do not fabricate principal
         }
       }
+
+      target = projectTarget({
+        via: "id",
+        ...(principal ? { principal } : {}),
+        ...(profile ? { profile } : {}),
+      });
     }
 
     return Object.freeze({
       ...clean,
       route: "local",
       state,
-      target: Object.freeze(target),
+      target,
     });
   }
 
@@ -435,8 +472,8 @@ export function createUnifiedRouter({
     const state = localState(phase);
 
     let target;
-    if (options.target && typeof options.target === "object") {
-      target = sanitizeDto(options.target);
+    if (options.target !== undefined) {
+      target = projectTarget(options.target);
     } else if (
       options.resolution?.via === "principal" ||
       options.record?.resolved_via === "principal" ||
@@ -444,47 +481,43 @@ export function createUnifiedRouter({
     ) {
       const recipientId = options.resolution?.resolvedTo || options.record?.recipient;
       const profile = options.resolution?.profile || lookupProfile(recipientId);
-      target = {
+      const principal = options.resolution?.principal ?? options.record?.to_principal;
+      target = projectTarget({
         via: "principal",
-        principal: options.resolution?.principal ?? options.record?.to_principal,
+        ...(principal ? { principal } : {}),
         ...(profile ? { profile } : {}),
-      };
+      });
     } else {
-      target = {
-        via: "id",
-      };
-
       const recipientId = options.resolution?.resolvedTo || options.record?.recipient;
       const profile = options.resolution?.profile || lookupProfile(recipientId);
+      let principal = options.resolution?.principal;
 
-      if (options.resolution?.principal) {
-        target.principal = options.resolution.principal;
-        if (profile) {
-          target.profile = profile;
-        }
-      } else if (recipientId && snapshotProvider && typeof snapshotProvider.get === "function") {
+      if (!principal && recipientId && snapshotProvider && typeof snapshotProvider.get === "function") {
         try {
           const snap = options.snapshot ?? snapshotProvider.get();
           if (snap?.state === "ok") {
             const binding = snap.bindingForInstance(recipientId);
             if (binding?.principal_id) {
-              target.principal = binding.principal_id;
+              principal = binding.principal_id;
             }
           }
         } catch {
           // Do not fabricate principal
         }
       }
-      if (profile) {
-        target.profile = profile;
-      }
+
+      target = projectTarget({
+        via: "id",
+        ...(principal ? { principal } : {}),
+        ...(profile ? { profile } : {}),
+      });
     }
 
     return Object.freeze({
       ...clean,
       route: "local",
       state,
-      target: Object.freeze(target),
+      target,
     });
   }
 

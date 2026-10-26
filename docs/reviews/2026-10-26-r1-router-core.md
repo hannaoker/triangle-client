@@ -12,7 +12,7 @@ This implementation is strictly bounded to R1.3:
 - **Library-only**: No server, host, dispatcher, CLI, or journal wiring is introduced. Manifest versions, Swift launcher files, and worker installation scripts remain untouched.
 - **Import closure integrity**: No existing module imports `unified-router.mjs`. It imports only leaf or existing modules (`identity-primitives.mjs`, `recipient-resolver.mjs`, `transport-adapter-contract.mjs`, `local-messaging-errors.mjs`), ensuring that manifest v12 bundle closures remain 100% valid.
 - **No overbuilding**: No cancellation framework, deadlines, persistent queues, cryptography, or generic routing abstractions were built.
-- **Strict sanitization**: Raw SQLite journal-only columns (`to_principal`, `resolved_via`) are sanitized and stripped from all public DTOs in **all** modes (enabled or disabled), preventing credential or internal metadata leakage when objects are spread.
+- **Strict sanitization & target projection**: Raw SQLite journal-only columns (`to_principal`, `resolved_via`) are sanitized and stripped from all public DTOs in **all** modes (enabled or disabled). Target overrides in `decorateSend` and `decorateStatus` are projected strictly to allowlisted fields (`via`, `principal`, `profile`) with type validation, stripping arbitrary caller fields. Outside `target`, native DTO fields (such as reply text or custom delivery attributes) are preserved as-is. Note that the router does not claim arbitrary caller payloads are secret-free.
 - **Input immutability**: All native input DTOs and options are treated as read-only and never mutated.
 
 ## 2. Documented Injected API
@@ -53,14 +53,14 @@ When `callOptions.throwOnError === false`, returns an error object `{ ok: false,
 ### 2.3 Public DTO Decorators
 
 - **`decorateSend(sendResponse, options)`**:
-  - In disabled mode: Returns sanitized DTO without added fields.
-  - In enabled mode: Strips raw journal fields, adds `route: "local"`, `state: localState(sendResponse.status)`, and `target: { via: "principal"|"id", principal?, profile? }`.
+  - In disabled mode: Returns sanitized DTO without added fields (no route/state/target decoration). Independent of recipient and registry providers.
+  - In enabled mode: Strips raw journal fields, adds `route: "local"`, `state: localState(sendResponse.status)`, and `target: { via: "principal"|"id", principal?, profile? }`. Accepts target overrides via allowlisted projection, stripping arbitrary metadata. Preserves native DTO fields outside target.
 - **`decorateStatus(statusResponse, options)`**:
-  - In disabled mode: Returns sanitized DTO without added fields.
-  - In enabled mode: Strips raw journal fields, adds `route: "local"`, `state: localState(statusResponse.phase)`, and projected `target`.
+  - In disabled mode: Returns sanitized DTO without added fields. Independent of recipient and registry providers.
+  - In enabled mode: Strips raw journal fields, adds `route: "local"`, `state: localState(statusResponse.phase)`, and projected `target`. Accepts target overrides via allowlisted projection, stripping arbitrary metadata. Preserves native DTO fields outside target.
 - **`decorateReplies(responseOrReplies, options)`**:
   - Supports both `{ replies: [...] }` container and raw `[...]` array.
-  - Strips raw journal fields. Adds `route: "local"` to each reply item when enabled.
+  - Strips raw journal fields. Adds `route: "local"` to each reply item when enabled. Preserves peer reply text.
 - **`decorateSessions(responseOrSessions, options)`**:
   - Supports both `{ sessions: [...] }` container and raw `[...]` array.
   - Strips raw journal fields. Adds `principal: string | null` to each session item when enabled (never fabricating a principal for unbound/revoked instances).
@@ -82,7 +82,7 @@ When `callOptions.throwOnError === false`, returns an error object `{ ok: false,
 ```
 - In disabled mode: Never invokes `snapshotProvider.get()`; reports `state: "disabled"`.
 - In enabled mode: Queries snapshot state and sequence safely, handling provider exceptions as `state: "unreadable"`.
-- Strictly secret-free: No paths, candidate names, or tokens are exposed.
+- Status block hygiene: Internal registry paths, candidate identities, or tokens are never exposed in the status block. (Arbitrary caller payloads elsewhere in messaging DTOs are preserved as-is and are not claimed to be secret-free).
 - Deterministic: Counters can be inspected via `getCounters()` and reset via `resetCounters()`.
 
 ## 3. Ambiguity Filtering Semantics
@@ -116,24 +116,25 @@ R1.4 will wire `unified-router.mjs` into `local-messaging-server.mjs`:
 
 ## 5. Verification Evidence
 
-The test suite in `packages/agent-worker/test/unified-router.test.mjs` covers 9 distinct families:
-- **Family 1**: Disabled mode (zero snapshot reads, pass-through, raw journal field stripping, byte-identical responses).
+The test suite in `packages/agent-worker/test/unified-router.test.mjs` covers 10 distinct families:
+- **Family 1**: Disabled mode (zero snapshot reads, zero recipient lookups, throwing provider independence, pass-through, raw journal field stripping, byte-identical responses).
 - **Family 2**: Principal resolution table (success, absent snapshot, unreadable snapshot, throwing provider, unknown principal, peer ID isolation, non-local binding, ambiguity).
 - **Family 3**: `canMessage` candidate filtering (subset allowed, throwing predicate, all denied, missing predicate fail-closed, single-candidate non-resolution).
 - **Family 4**: Legacy, session, and Grok IDs pass-through and resilience against unreadable registry.
-- **Family 5**: Native input DTO immutability (deep-frozen inputs with leaked fields).
+- **Family 5**: Native input DTO immutability (deep-frozen inputs with leaked fields and frozen target overrides).
 - **Family 6**: Projected field fidelity against section 3.4 (send, status, replies, sessions).
 - **Family 7**: Stale, revoked, or absent binding never fabricates a principal.
 - **Family 8**: Deterministic operational counters and error accounting.
 - **Family 9**: Fake server context simulating `local-messaging-server.mjs` end-to-end.
+- **Family 10**: Target override projection, shape validation, and payload preservation.
 
 Test execution run:
 ```bash
-/Users/zhenyuhou/.local/bin/node --test \
+node --test \
   packages/agent-worker/test/unified-router.test.mjs \
   packages/agent-worker/test/recipient-resolver.test.mjs \
   packages/agent-worker/test/router-registry-snapshot.test.mjs \
   packages/agent-worker/test/transport-adapter-conformance.test.mjs
 ```
-Result: **39 passing tests, 0 failures, duration 143 ms**.
+Result: **40 passing tests, 0 failures**.
 `git diff --check origin/main`: **Clean, zero warnings**.
