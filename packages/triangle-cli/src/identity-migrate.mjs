@@ -1,6 +1,14 @@
 import path from "node:path";
 
 /**
+ * Default registry location (owner decision A4): `identity/` beside `client/` in the
+ * application root, the same root the installation inventory works from.
+ */
+export function defaultRegistryRoot(clientRoot) {
+  return path.join(path.dirname(path.resolve(clientRoot)), "identity");
+}
+
+/**
  * Invokes the identity migration planning or confirmed apply workflow.
  *
  * @param {object} options
@@ -118,6 +126,8 @@ export function renderIdentityMigratePlan(plan, { clientRoot, registryRoot } = {
     lines.push("No plan available.");
     return lines.join("\n");
   }
+
+  if (registryRoot) lines.push(`Registry: ${registryRoot}`);
 
   const s = plan.summary ?? {};
   lines.push(

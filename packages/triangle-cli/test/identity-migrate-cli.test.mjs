@@ -69,10 +69,10 @@ test("identity migrate CLI: usage errors", async () => {
     assert.equal(r.code, 2);
     assert.match(r.err, /requires --client-root/);
 
-    // 2. Missing registry-root
+    // 2. A missing registry-root is allowed: it defaults to identity/ beside the client root
     r = await run(["identity", "migrate", "--client-root", f.client]);
-    assert.equal(r.code, 2);
-    assert.match(r.err, /requires --registry-root/);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(existsSync(path.join(f.app, "identity")), false);
 
     // 3. Relative client-root
     r = await run(["identity", "migrate", "--client-root", "relative/path", "--registry-root", regRoot]);
@@ -390,5 +390,52 @@ test("identity migrate CLI: the printed confirm command survives shell parsing w
     assert.deepEqual(argv, ["--client-root", f.client, "--registry-root", regRoot, "--confirm", planId]);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("identity migrate CLI: the registry defaults to identity/ beside the client root and --registry-root overrides it", async () => {
+  const f = createRealInventoryFixture();
+  const g = createRealInventoryFixture();
+  try {
+    const run = async (args, extra = {}) => {
+      const out = [];
+      const err = [];
+      const code = await main(args, { io: { stdout: (s) => out.push(s), stderr: (s) => err.push(s) }, ...extra });
+      return { code, out: out.join("\n"), err: err.join("\n") };
+    };
+    const expected = path.join(f.app, "identity");
+
+    // Plan mode names the default registry and creates nothing
+    const human = await run(["identity", "migrate", "--client-root", f.client]);
+    assert.equal(human.code, 0, human.err);
+    assert.ok(human.out.split("\n").includes(`Registry: ${expected}`), human.out);
+    assert.equal(existsSync(expected), false);
+
+    // Confirming without --registry-root writes to the default location only
+    const plan = JSON.parse((await run(["identity", "migrate", "--client-root", f.client, "--json"])).out);
+    const applied = await run(
+      ["identity", "migrate", "--client-root", f.client, "--confirm", plan.planId],
+      { identityDependencies: { isTerminal: true } },
+    );
+    assert.equal(applied.code, 0, applied.err);
+    const onDisk = readIdentityRegistry({ root: expected });
+    assert.equal(onDisk.state, "ok");
+    assert.equal(onDisk.registry.sequence, 1);
+    assert.equal(existsSync(path.join(f.root, "registry")), false);
+
+    // An explicit --registry-root wins and leaves the default location alone
+    const elsewhere = path.join(g.root, "elsewhere");
+    const override = await run(["identity", "migrate", "--client-root", g.client, "--registry-root", elsewhere]);
+    assert.equal(override.code, 0, override.err);
+    assert.ok(override.out.split("\n").includes(`Registry: ${elsewhere}`), override.out);
+    assert.equal(existsSync(path.join(g.app, "identity")), false);
+
+    // The filesystem root has no sibling to default to
+    const rootOnly = await run(["identity", "migrate", "--client-root", "/"]);
+    assert.equal(rootOnly.code, 2);
+    assert.match(rootOnly.err, /must not be the filesystem root/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+    rmSync(g.root, { recursive: true, force: true });
   }
 });

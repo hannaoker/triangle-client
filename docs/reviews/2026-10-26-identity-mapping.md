@@ -63,7 +63,7 @@ As specified in the Slice 1b design:
 - **Approval Check**: Approval requires an interactive terminal check plus the exact matching plan ID. The design's OS password re-entry (`sudo -v` / helper sheet) is not applied to mapping in this slice (an owner decision).
 - **No Serverless Principals**: MESH-managed identities (`agent_<32-hex>`) are supported; serverless principals (`peer_<32-hex>`) are deferred to Slice 3a.
 - **No Override or Rebind**: No `--map-profile` manual override, no revocation or rebind flows in this slice.
-- **No Default Registry Location**: Roots must be explicitly supplied as absolute paths.
+- **Registry location**: `--client-root` is required. `--registry-root` is optional and defaults to `identity/` beside the client directory (owner decision A4, 2026-10-25, applied after this change merged); an explicit `--registry-root` overrides it. The library functions still take an explicit root.
 - **No Supervisor or Status Integration**: Does not alter the running supervisor process, runtime bundles, or `triangle status`/`triangle doctor`.
 
 ## 4. Verification Record
@@ -107,7 +107,7 @@ Two client packages were built with `scripts/release/build-client-package.mjs` i
 3. From the CLI a well-formed plan id that differs from the recomputed plan always reports `plan_stale`; `confirmation_mismatch` is only reachable through the library.
 4. The terminal check is not proof of human presence. A process running as the same user that can allocate a pseudo-terminal can run the confirm command, as the probes did with `script`. The plan id ties the confirmation to the exact plan, not to a person. The design's OS re-authentication is not applied to mapping in this slice (owner decision).
 5. `summary` repeats each count under two names (`proposals` and `proposalCount`, and so on). Drop one set the next time the shape is touched.
-6. The default registry location is undecided (assumption A4), so a real run needs an explicit `--registry-root`. Nothing in this change writes to the real application directory.
+6. At the time of this review the registry location was undecided (assumption A4); the owner has since chosen `identity/` beside `client/`, and the CLI defaults to it. Nothing in this change wrote to the real application directory.
 
 ### Commands run
 ```sh

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // triangle — join a MESH, manage this device's agents and their permissions.
 import { realpathSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { addAgent, listAgents, resolveAgent, setAgentState } from "./agents.mjs";
 import { approveDevice, listDevices, renderDevices, revokeDevice } from "./devices.mjs";
 import { identityInventory, renderIdentityInventory } from "./identity-inventory.mjs";
 import {
+  defaultRegistryRoot,
   identityMigrate,
   renderIdentityMigrateApply,
   renderIdentityMigratePartial,
@@ -49,8 +50,9 @@ export const USAGE = `Usage: triangle <command> [options]
   device revoke <fingerprint> [--yes]
   identity inventory --client-root DIR
                               Read-only projection of local identity bindings observed on disk.
-  identity migrate --client-root DIR --registry-root DIR [--confirm PLAN_ID]
+  identity migrate --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
                               Propose or apply owner-confirmed identity mapping records.
+                              The registry defaults to identity/ beside the client directory.
   status | doctor             What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
 
@@ -326,10 +328,11 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           if (rest.length) throw new UsageError("identity migrate takes no positional arguments");
           allowOnly(flags, ["client-root", "registry-root", "confirm"]);
           const clientRoot = flags["client-root"];
-          const registryRoot = flags["registry-root"];
           if (!clientRoot) throw new UsageError("identity migrate requires --client-root ABSOLUTE_PATH");
-          if (!registryRoot) throw new UsageError("identity migrate requires --registry-root ABSOLUTE_PATH");
           if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          if (dirname(resolve(clientRoot)) === resolve(clientRoot)) throw new UsageError("--client-root must not be the filesystem root");
+          // The registry defaults to identity/ beside client/ (owner decision A4); --registry-root overrides it
+          const registryRoot = flags["registry-root"] === undefined ? defaultRegistryRoot(clientRoot) : flags["registry-root"];
           if (typeof registryRoot !== "string" || !isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
 
           const normClient = resolve(clientRoot);
