@@ -123,6 +123,7 @@ export function resolveRecipient(options) {
         (b) =>
           b !== null &&
           typeof b === "object" &&
+          b.principal_id === to &&
           b.revoked_at === null &&
           b.trust_mode === "mesh-managed"
       )

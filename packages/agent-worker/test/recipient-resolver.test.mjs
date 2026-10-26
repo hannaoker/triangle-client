@@ -568,3 +568,25 @@ test("Invalid arguments throw TypeError (table-driven)", () => {
     );
   }
 });
+
+test("Rule 5: a binding that belongs to another principal is ignored even if the snapshot returns it", () => {
+  const foreign = {
+    schema: "local_profile_binding_v1",
+    binding_id: `bind_${"a".repeat(32)}`,
+    trust_mode: "mesh-managed",
+    principal_id: AGENT_ID_2,
+    profile_name: "profile-alpha",
+    profile_instance_id: INSTANCE_A,
+    authority_origin: "https://mesh.example.test",
+    binding_generation: 1,
+    issued_at: "2026-10-25T10:00:00.000Z",
+    revoked_at: null,
+    proof: { kind: "disk_observation", observed_on_disk: true, verified_live_authority: false },
+  };
+  const res = resolveRecipient({
+    to: AGENT_ID_1,
+    recipients: SAMPLE_RECIPIENTS,
+    snapshot: { state: "ok", bindingsFor: () => [foreign] },
+  });
+  assert.deepEqual(res, { kind: "error", code: "recipient_not_found", reason: "no_binding", candidates: [] });
+});
