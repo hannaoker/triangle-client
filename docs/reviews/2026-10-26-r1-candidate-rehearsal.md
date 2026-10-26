@@ -142,3 +142,13 @@ Exercised via `/private/tmp/triangle-r15-rehearsal/rehearsal-runner.mjs` on unix
 - **Gate 2 (Closure & Packaging Rehearsal):** PASSED (Candidate archive built, exact 87/89 closure, scratch staging, commit, and rollback verified).
 - **Gate 3 (Simulated Canary Probes):** PASSED (Isolated socket host proved routeroff, dynamic enable, resolution, denial, immutable retry, kill switch, and restart).
 - **Gate 4 (Installed Live Acceptance):** **NOT PERFORMED / UNVERIFIED** (Requires owner authorization for gates G1-G4).
+
+## Codex verification and finding disposition
+
+Codex independently checked the candidate archive SHA-256 (`26e7fa73a0c203b2b16ad9f261ab339ba8686999d29b46be104fe37d599a32f6`) and ran `validate-runtime` on all four scratch manifests: version 13, supervisor 87 artifacts and each worker 89 artifacts, all exit 0. This checks staged integrity, not live execution or end-to-end operation of the extracted distribution.
+
+- Finding 1 is not a newly established release-spec violation. R1 plan section 3.2 explicitly accepts distinguishing unknown principals from denied principal requests until aliases exist. Authorized candidate labels must still be filtered. Changing that error policy is a separate design choice; the generated integration review note does not override the plan.
+- Finding 2 remains a scope/release-review item. The Hermes interpreter change is separate from principal routing. Its necessity and negative cases must be resolved before merge; successful scratch staging alone does not verify portability.
+- Finding 3's stated many-message overflow is contradicted by production `listInbox`, which caps batches at 180 KiB and preserves cursors. The reviewer did not establish a counterexample to that bound. This is not evidence that every possible oversized single record is safe; that is a narrower boundary requiring its own reproduction if claimed.
+
+The fixture host in `rehearsal-runner.mjs` imports modules from the worktree. Therefore its canaries are source-path evidence, not proof that the extracted package runs end to end. Codex staging used a stub CLI. Installed helper acceptance, full package-path execution, merge approval and G2–G4 remain outstanding. Antigravity's reported Swift results have not been independently rerun by Codex here.
