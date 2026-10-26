@@ -218,3 +218,7 @@ Codex independently verified rebuilt archive SHA-256 `9a9d99c9d38474e04fb8ec3d66
 Codex reran the extracted bundled Node with `/private/tmp/triangle-r15-package-path-verify/package-path-rehearsal.mjs`; exit 0, including extracted CLI, scratch staging and extracted-module socket canaries. Output: `/private/tmp/triangle-r15-package-path-independent.log`. No live installation was changed.
 
 Rollback evidence correction: this script stages Hermes into an initially empty scratch installation and rolls that stage back. Its final Hermes manifest is absent. The script does not validate a restored prior Hermes manifest, despite the earlier task reply claiming that. This proves rollback to absence, not restoration of an existing v12 installation. The previous worktree-source rehearsal is separate evidence. Full phase-by-phase restoration, especially the installed v12 baseline and journal snapshot, remains a release gate before live activation. A bundled-node invocation and explicit extracted imports are verified here; the script's `safeImport` guard checks direct entry paths rather than every transitive import with a loader hook.
+
+### Owner waiver, 2026-10-26
+
+The owner explicitly waived the remaining existing-installation restoration rehearsal: "no need for rehearse restoration. just go for it". The missing rehearsal remains unverified; it is not represented as passed. Proceeding with PR #134 merge under this waiver does not itself install a helper/runtime or enable the router.
