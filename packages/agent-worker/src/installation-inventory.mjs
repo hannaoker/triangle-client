@@ -22,14 +22,17 @@
 import { createHash } from "node:crypto";
 import { accessSync, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import {
+  deriveClientInstanceId,
+  INSTANCE_ID_PATTERN as INSTANCE_ID,
+  isValidProfileName,
+} from "./identity-primitives.mjs";
+
+export { deriveClientInstanceId, isValidProfileName };
 
 export const UNAVAILABLE = "unavailable";
 export const UNSUPPORTED = "unsupported";
 
-const INSTANCE_ID = /^[a-f0-9]{64}$/;
-const PROFILE_MAX_UTF8_BYTES = 64;
-// Swift `CharacterSet.controlCharacters` is Unicode general categories Cc + Cf.
-const PROFILE_CONTROL_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 /** Mirrors Swift `MailboxTransactionIdentifier.maximumFailureCountBeforeStuck`. */
 export const OPEN_TRANSACTION_MAX_FAILURES_BEFORE_STUCK = 5;
 /** Default open-transaction age budget; the doctor passes its `maxOpenTxnAgeMs`. */
@@ -59,34 +62,6 @@ const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 
-/** Mirrors Swift `ClientInstanceID.derive(profile:)`. */
-export function deriveClientInstanceId(profile) {
-  const hash = createHash("sha256");
-  hash.update(Buffer.from("triangle-client-instance-v1", "utf8"));
-  hash.update(Buffer.from([0]));
-  hash.update(Buffer.from(profile, "utf8"));
-  return hash.digest("hex");
-}
-
-/**
- * Persisted profile-name contract. Mirrors Swift `ProfileName.init(_:)`
- * (TriangleMailboxCore/Models.swift), which decodes every registry row:
- * non-empty, at most 64 UTF-8 bytes, no "/" or "\\", no control/format
- * characters. Case, dots, and underscores are preserved; names are never
- * normalized or renamed. The Node runtime validators (helper proxy: non-empty,
- * no NUL/"/"; Cursor ACP drain and progress journal: `[A-Za-z0-9._-]{1,64}`)
- * accept subsets of this contract, so every name they accept is accepted here.
- * Lone surrogates are rejected because they cannot be valid UTF-8 from Swift.
- */
-export function isValidProfileName(value) {
-  return typeof value === "string"
-    && value.length > 0
-    && value.isWellFormed()
-    && Buffer.byteLength(value, "utf8") <= PROFILE_MAX_UTF8_BYTES
-    && !value.includes("/")
-    && !value.includes("\\")
-    && !PROFILE_CONTROL_CHARACTER.test(value);
-}
 
 function sameKeys(value, keys) {
   const present = Object.keys(value);
