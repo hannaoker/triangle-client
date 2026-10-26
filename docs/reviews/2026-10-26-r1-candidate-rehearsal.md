@@ -152,3 +152,61 @@ Codex independently checked the candidate archive SHA-256 (`26e7fa73a0c203b2b16a
 - Finding 3's stated many-message overflow is contradicted by production `listInbox`, which caps batches at 180 KiB and preserves cursors. The reviewer did not establish a counterexample to that bound. This is not evidence that every possible oversized single record is safe; that is a narrower boundary requiring its own reproduction if claimed.
 
 The fixture host in `rehearsal-runner.mjs` imports modules from the worktree. Therefore its canaries are source-path evidence, not proof that the extracted package runs end to end. Codex staging used a stub CLI. Installed helper acceptance, full package-path execution, merge approval and G2–G4 remain outstanding. Antigravity's reported Swift results have not been independently rerun by Codex here.
+
+---
+
+## 7. Package-Path Verification & Finding Resolution (R1.5 Closure)
+
+- **Date:** 2026-10-26
+- **Reviewer:** Antigravity (Gemini 3.8 Flash)
+- **Archive Hashes:**
+  - Prior candidate archive (commit `e134ee0`/`8cd33f3` prior to shebang revert): `26e7fa73a0c203b2b16ad9f261ab339ba8686999d29b46be104fe37d599a32f6`
+  - Rebuilt candidate archive (source commit with shebang revert to baseline `2e07404`): `9a9d99c9d38474e04fb8ec3d660351bb6294e21dbb75b2d2a44a478a69e7bb53`
+  - Installer SHA-256: `be2e6cb95e4274ebeeaa9bf172d7dcc33bc9d96cb9982e861eb59ef730c00de1`
+- **Rebuild Constraints:** Swift helper and client binaries were reused from scratch payloads without recompilation or signing policy alteration; zero installed binaries modified.
+
+### Finding 2 Resolution (Hermes Shebang Parser Revert)
+- **Necessity Analysis:** The modified shebang parser in `scripts/triangle-worker-install.py` lines 357–360 was evaluated against baseline `2e07404`. It is not required for Slice R1.4 / unified-router / v13 closure. Baseline semantics require absolute, whitespace-free interpreter paths, and `managed_hermes_runtime` properly isolates the managed interpreter via `managed[3]`.
+- **Action Taken:** Reverted lines 357–360 of `scripts/triangle-worker-install.py` strictly back to baseline `2e07404`:
+  ```python
+  if not first.startswith("#!/"):
+      fail("Hermes entrypoint lacks an absolute interpreter")
+  interpreter = managed[3] if managed else checked_file(os.path.realpath(first[2:].split()[0]), executable=True, owners={os.getuid(), 0})
+  ```
+- **Verification:** Unit tests `tests/hermes-exec-wrapper.test.mjs`, `packages/agent-worker/test/worker-bundle-closure.test.mjs`, and `packages/agent-worker/test/supervisor-runtime-bundle.test.mjs` all passed (31/31 passed, exit 0). Negative cases with invalid or malformed shebangs fail closed as designed.
+
+### End-to-End Package-Path Execution (Isolated Scratch Roots)
+Rehearsal was executed under `/private/tmp/triangle-r15-package-path-verify/` (rebuilt candidate) and `/private/tmp/triangle-r15-package-path-prior/` (prior candidate) invoking exclusively extracted components:
+- **Bundled Node:** `/private/tmp/triangle-r15-package-path-verify/extracted/bin/node` (v22.22.3)
+- **Anti-Worktree Assertion:** Active runtime guard asserted and verified zero module imports originated from the worktree (`/Users/zhenyuhou/Projects/The Triangle/worktrees/`).
+
+1. **Strict Code Signatures:**
+   - Command: `/usr/bin/codesign --verify --strict <extracted>/bin/triangle-mailbox <extracted>/bin/triangle-client`
+   - Result: Exit 0 (passed strict codesign verification).
+2. **Manifest v13 Closure (87 / 89 Artifacts):**
+   - Verified against `worker-artifacts.json` and disk: supervisor 87, codex 89, hermes 89, antigravity 89. Exit 0.
+3. **Extracted CLI & Synthetic Inventory:**
+   - Command: `extracted/bin/node packages/triangle-cli/src/cli.mjs --help` -> Exit 0.
+   - Command: `extracted/bin/node packages/triangle-cli/src/cli.mjs identity inventory --client-root <scratch-synthetic-root> --json` -> Exit 0 (`schema: identity_inventory_v1`).
+4. **Scratch Runtime Staging & Verification:**
+   - Extracted installer executed with `--project-root <extracted>` and `--node <extracted>/bin/node`.
+   - Supervisor: CLI omitted, 87 artifacts -> Exit 0.
+   - Codex: Synthetic stub executable fixture -> Exit 0 (89 artifacts).
+   - Hermes: Real installed CLI `/Users/zhenyuhou/.local/bin/hermes` -> Exit 0 (89 artifacts).
+   - Antigravity: Real installed CLI `/Users/zhenyuhou/.local/bin/agy` -> Exit 0 (89 artifacts).
+   - `commit-runtime` on supervisor rollback record -> Exit 0.
+   - `rollback-runtime` on hermes rollback record -> Exit 0.
+5. **Disposable Socket Canaries (Exclusively Extracted Modules):**
+   - **Canary 1 (Router OFF):** Initial status `router.enabled: false`. Send to principal failed closed with `recipient_not_allowed`.
+   - **Canary 2 (Dynamic Enablement):** `setupRouter` generated `router.json` (0600); statcache reloaded config on next request without restart.
+   - **Canary 3 (Resolution & Decoration):** Send to principal succeeded (`route: "local"`, `via: "principal"`). Persisted `to_principal` and `resolved_via` into SQLite journal.
+   - **Canary 4 (ACL & Capability Denial):** Turn credential scoped to unrelated recipient failed closed with `recipient_not_allowed`.
+   - **Canary 5 (Deduplication & Conflict):** Exact message retry returned cached receipt with `isDuplicate: true`. Retry with altered target threw `duplicate_id_conflict`.
+   - **Canary 6 (Kill Switch):** Dynamic disablement via `setupRouter` took effect immediately; principal send failed closed with `recipient_not_allowed`.
+   - **Canary 7 (Restart & Work Preservation):** Server restarted against existing journal; status query returned preserved state and sanitized internal columns (`to_principal`, `resolved_via` omitted from public DTO).
+
+### Outstanding Owner Gates
+- **G1 (Branch Merge):** Outstanding owner approval to merge `codex/r1-integration-v13` into `main`.
+- **G2 (Helper Installation):** Outstanding owner authorization for installing compiled `triangle-mailbox` and `triangle-client`.
+- **G3 (Live Service Staging):** Outstanding owner authorization to stage live supervisor/worker runtimes and restart `dev.thetriangle.client` via `launchctl`.
+- **G4 (Router Activation):** Outstanding owner authorization to enable router dynamically in production `router.json`.
