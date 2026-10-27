@@ -31,7 +31,7 @@ test('production host executes via registered runner and preserves replies acros
   const sent=await run(['send','--to','gravity2','--text','inspect','--message-id','host-one','--request-id','host-request','--wait-ms','2000']);
   assert.equal(sent.replies[0].text,'assessment inspect');assert.equal(calls,1);
   assert.equal((await run(['status','--message-id','host-one'])).phase,'completed');
-  const status=await run(['status']);assert.equal(status.journal.completed,1);assert.equal(status.journal.pendingReplies,1);
+  const status=await run(['status']);assert.deepEqual(status.replyIdentity,{enabled:false,scope:'attached-chat-pairs'});assert.equal(status.journal.completed,1);assert.equal(status.journal.pendingReplies,1);
   await host.stop();host=make();await host.start();
   assert.equal((await run(['replies','--request-id','host-request'])).replies[0].inReplyTo,'host-one');
   await run(['send','--to','gravity2','--text','inspect','--message-id','host-one','--request-id','host-request']);

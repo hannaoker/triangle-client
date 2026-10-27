@@ -32,7 +32,7 @@ export async function authenticateAttachedLocalSender({
 
 // Explicit opt-in seam for the server. Only attached-chat pairs are covered in
 // this slice; profile workers and bound desktop identities retain legacy flow.
-export function createAttachedReplyIdentity({ credentialValidator, sessionBroker } = {}) {
+export function createAttachedReplyIdentity({ credentialValidator, sessionBroker, enabled = true } = {}) {
   if (typeof sessionBroker?.describeLocalSession !== "function") {
     throw coded("invalid_sender_verifier", "Live session observations required");
   }
@@ -41,6 +41,7 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
   });
   return Object.freeze({
     async prepareSend({ credential, senderId, recipientId, requestId }) {
+      if (!(typeof enabled === "function" ? enabled() : enabled)) return null;
       if (!SESSION.test(senderId) || !SESSION.test(recipientId)) return null;
       const remote = await authenticate(credential, senderId);
       const local = await sessionBroker.describeLocalSession(recipientId);

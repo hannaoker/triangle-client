@@ -38,7 +38,8 @@ test("native socket admission pins a chat; renewed same-chat reply stays with an
     await journal.attachDiscoveredSession({id,childId:states.get(id).child,generation:1,installationId:'scope',wakeCapable:false});
   }
   const socketPath=path.join(root,'control.sock');
-  const replyIdentity=createAttachedReplyIdentity({credentialValidator:validator,sessionBroker:broker});
+  let enabled=true;
+  const replyIdentity=createAttachedReplyIdentity({credentialValidator:validator,sessionBroker:broker,enabled:()=>enabled});
   const server=createLocalControlServer({socketPath,journal,credentialValidator:validator,interactiveBroker:broker,replyIdentity,
     interactiveRecipients:new Set([a,b]),acl:createOwnerAcl({rules:{[a]:[b],[b]:[a]}}),
     dispatcher:{start:async()=>{},stop:async()=>{},notifyAdmission:async()=>{throw new Error('interactive request must not run a worker');}}});
@@ -50,6 +51,10 @@ test("native socket admission pins a chat; renewed same-chat reply stays with an
   const envelope={to:b,text:'untrusted task',messageId:'native-request',requestId:'native-conversation',metadata:{sender_provenance:{principal:'forged'},senderProvenance:{principal:'forged'}}};
   const receipt=await sender.sendMessage(envelope);assert.equal(receipt.accepted,true);
   const route=await journal.getReplyRouteForMessage('native-request');assert.equal(route.local.address,b);assert.equal(route.remote.address,a);
+  // This exact request was admitted before provenance made its inbox frame too large.
+  await assert.rejects(sender.sendMessage({to:b,text:'x',messageId:'oversize',requestId:'oversize',metadata:{padding:'x'.repeat(261120)}}),{code:'payload_too_large'});
+  assert.equal(await journal.getRecord('oversize'),null);
+  assert.equal(await journal.getReplyRouteForMessage('oversize'),null);
   const inbox=await recipient.listInbox();assert.equal(inbox.length,1);assert.equal(Object.hasOwn(inbox[0],'reply_route_key'),false);
   assert.equal(inbox[0].senderProvenance.via.authenticated_peer,a);
   assert.equal(inbox[0].senderProvenance.principal,null);
@@ -73,11 +78,15 @@ test("native socket admission pins a chat; renewed same-chat reply stays with an
   assert.equal((await journal.getReplyRouteForMessage('native-request')).local.generation,1);
   broker.describeLocalSession=originalDescribe;
   control.prepare('UPDATE local_session_attachments SET child_id=? WHERE id=?').run('new-child-b',b);
+  enabled=false;
+  assert.equal(await replyIdentity.prepareSend({senderId:a,recipientId:b,requestId:"disabled"}),null);
+  // Turning off new admission must not disable verification on an existing pin.
   states.get(a).active=false;
   const reply=await renewed.sendReply({messageId:'native-request',claimToken:claim.claimToken,text:'verified result',replyId:'native-reply'});
   assert.equal(reply.recipient,a);assert.equal((await journal.getReplyRouteForMessage('native-request')).local.generation,2);
   states.get(a).active=true;
   const replies=await sender.listReplies({requestId:'native-conversation'});assert.equal(replies.length,1);assert.equal(replies[0].text,'verified result');assert.equal(replies[0].senderProvenance.via.authenticated_peer,b);assert.equal(replies[0].senderProvenance.sender_binding_generation,2);
   assert.equal((await sender.getMessageStatus({messageId:'native-request'})).senderProvenance.via.authenticated_peer,a);
+  enabled=true;
   assert.equal((await sender.sendMessage(envelope)).isDuplicate,true);
 });

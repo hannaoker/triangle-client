@@ -1,3 +1,5 @@
+import {createLocalReplyRouteStore} from './local-reply-route-store.mjs';
+import {createAttachedReplyIdentity} from './local-sender-authentication.mjs';
 import {randomUUID as cryptoRandomId,createHash} from 'node:crypto';
 import {createDesktopCredentialBroker,readPrivateJson,createSessionDiscoveryBroker} from './local-messaging-auth-broker.mjs';
 import {createOwnerAcl} from './local-messaging-acl.mjs';
@@ -60,7 +62,7 @@ export function loadLocalMessagingConfig(configPath) {
  return config;
 }
 
-export function createInstalledLocalMessagingHost({configPath,runners,gate,logger={},wakeAdapter=null,wakeRunner=null,minIntervalMs=null,timerIntervalMs=null,clock=null}) {
+export function createInstalledLocalMessagingHost({configPath,runners,gate,logger={},wakeAdapter=null,wakeRunner=null,minIntervalMs=null,timerIntervalMs=null,clock=null,replyIdentityEnabled=false}) {
  const config=loadLocalMessagingConfig(configPath);
  for(const r of config.recipients)if(typeof runners.get(r.instanceId)?.run!=='function')throw coded('local_recipient_unavailable',`Recipient runtime unavailable: ${r.profile}`);
  const integration=readPrivateJson(config.integrationPath);
@@ -138,7 +140,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     });
     interactiveRecipients.add(interactiveBroker.senderId);
    }
-   journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger,titles:config.discovery?.titles!==false});
+   journal=createLocalMessagingJournal({stateRoot:config.stateRoot,logger,titles:config.discovery?.titles!==false,replyRouteStoreFactory:createLocalReplyRouteStore});
    if(interactiveIntegration){
     await journal.initInteractiveWakeBinding({
      senderId:interactiveIntegration.senderId,
@@ -217,7 +219,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:replyIdentityEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),replyIdentity:{enabled:!!sessionBroker&&(typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true),scope:'attached-chat-pairs'},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

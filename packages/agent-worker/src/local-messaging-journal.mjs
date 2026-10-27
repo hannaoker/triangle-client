@@ -5,6 +5,7 @@ import path from "node:path";
 import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
 import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
+import { MAX_PAYLOAD_BYTES } from "./local-messaging-protocol.mjs";
 import { sessionAddress } from "./local-messaging-interactive-session.mjs";
 import { sanitizeSessionTitle } from "./local-messaging-auth-broker.mjs";
 
@@ -523,6 +524,11 @@ export function createLocalMessagingJournal({
       `).run(pairKey, messageId, now);
 
       const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+      // Reserve room for the public RPC envelope, worst-case escaped RPC ID
+      // and pagination cursor. Never commit an R2 item that cannot be fetched.
+      if (replyRoute && Buffer.byteLength(JSON.stringify(mapMessageRow(row)), "utf8") > MAX_PAYLOAD_BYTES - 4096) {
+        throw coded("payload_too_large", "Pinned request exceeds retrievable inbox envelope budget");
+      }
       db.exec("COMMIT");
       return { ...mapMessageRow(row), isDuplicate: false };
     } catch (err) {

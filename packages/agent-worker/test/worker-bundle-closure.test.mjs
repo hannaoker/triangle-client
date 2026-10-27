@@ -285,10 +285,10 @@ test("v13 adds the unified router closure (6 files) to every exact artifact set"
     "import importlib.util,json,sys",
     "s=importlib.util.spec_from_file_location('twi',sys.argv[1])",
     "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)",
-    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13]} for a in ['codex','hermes','antigravity','supervisor']}}))",
+    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13,14]} for a in ['codex','hermes','antigravity','supervisor']}}))",
   ].join("\n");
   const contract = JSON.parse(execFileSync(python, ["-c", code, installer], { encoding: "utf8" }));
-  assert.equal(contract.version, 13);
+  assert.equal(contract.version, 14);
   const additions = [
     "unified-router",
     "recipient-resolver",
@@ -301,6 +301,10 @@ test("v13 adds the unified router closure (6 files) to every exact artifact set"
     assert.deepEqual(versions[13].filter((p) => !versions[12].includes(p)).sort(), [...additions].sort(), agent);
     assert.deepEqual(versions[12].filter((p) => !versions[13].includes(p)), [], agent);
     assert.equal(versions[13].length, agent === "supervisor" ? 87 : 89, agent);
+    const r2 = ["local-reply-route-contract", "local-reply-route-store", "local-sender-authentication"].map(name => `packages/agent-worker/src/${name}.mjs`);
+    assert.deepEqual(versions[14].filter(p => !versions[13].includes(p)).sort(), r2.sort(), agent);
+    assert.deepEqual(versions[13].filter(p => !versions[14].includes(p)), [], agent);
+    assert.equal(versions[14].length, agent === "supervisor" ? 90 : 92, agent);
   }
   const swift = readFileSync(path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"), "utf8");
   assert.match(swift, /if manifestVersion >= 13 \{\s*artifacts\.formUnion\(\[/);

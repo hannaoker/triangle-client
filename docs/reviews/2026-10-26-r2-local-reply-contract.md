@@ -1,6 +1,6 @@
 # R2 local reply identity contract — first library slice
 
-This started as a pure library foundation and now includes explicit opt-in server/journal integration, exercised only in disposable tests. The installed host does not enable it. New library modules are not in the runtime import closure yet; no manifest or installed configuration changed. Journal source now includes additive nullable columns and optional reply-pin storage.
+This started as a pure library foundation and now includes explicit opt-in server/journal integration, exercised only in disposable tests. The installed host now constructs the optional verifier and pin store, but new pin admission remains disabled by default. Candidate runtime manifest v14 includes the three new modules; the Mini remains installed on v13 and no installed configuration changed. Journal source now includes additive nullable columns and optional reply-pin storage.
 
 The local router currently accepts both owner-mapped profiles and unbound chat addresses. A null principal is not a stable identity. For local-only reply routes, the proposed host-journal key is `(local-socket, exact authenticated remote address, requestId)`. This is an explicit local extension of the identity design's `(remote principal, requestId)` key, preventing unrelated unbound sessions from colliding. It must not be reused as remote authority or a cross-machine address.
 
@@ -47,3 +47,16 @@ New tests use the actual production journal and socket server with the real HMAC
 - Worker/bound-desktop sender adaptation and mapped session principals remain unsupported rather than fabricated. Remote transports and cross-machine identities remain deferred.
 
 This candidate is not installed; no live journal, mappings, settings or current runtime were changed during R2 implementation.
+
+
+## Host and runtime integration checkpoint
+
+The host constructs the route store on its own SQLite connection and passes a trusted identity factory through the supervisor subsystem, which supplies the actual HMAC validator. With workspace session messaging enabled, the factory uses that host's real workspace-session broker. With no broker, pinned replies fail closed. The trusted host-construction option `replyIdentityEnabled` defaults to false; it is not yet an operator-facing setup command or an enabled product flag. A boolean or callback controls new admission only. Existing pinned replies continue through authentication and journal verification when it is false.
+
+Manifest v14 adds exactly three artifacts to each v13 closure: the reply contract, route store and sender-authentication modules. Supervisor bundles contain 90 artifacts and worker bundles 92. Python staging/validation, Swift launch validation, doctor, and fixtures accept v14 while retaining exact historical artifact sets.
+
+Codex reproduced a request that was accepted with 261120 bytes of metadata padding but became unretrievable when receiver-built provenance enlarged its inbox projection past the protocol limit. Pinned admission now measures its final journal projection with 4096 bytes of framing headroom inside the transaction. Oversized requests roll back the request and route together. The regression uses the real socket, journal and signed credentials.
+
+Gemini 3.8 Flash (Medium) independently reviewed frozen source `7d652e2`, reported no blockers, and ran the 10 then-existing R2 tests. It missed the reproducible bounds issue. That review does not cover this subsequent host/packaging change. Focused wiring/closure tests passed 55 tests. The broader run passed 254 of 257 initially, with three exact packaging fixtures requiring their new v14 file list; all eight tests in that corrected packaging suite subsequently passed. Native helper results are recorded separately after process completion.
+
+Remaining release gates: an operator-facing opt-in and durable minimum-runtime guard; review of this exact head; real attached-workspace canaries and restart acceptance. Do not install or enable this as completed R2 acceptance. Worker/bound-desktop lanes remain legacy; no mapped session principal or remote transport support is implied. v13 must not process pinned work as a rollback path.

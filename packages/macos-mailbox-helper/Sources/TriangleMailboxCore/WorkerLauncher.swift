@@ -165,7 +165,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if (5...13).contains(manifestVersion) {
+        if (5...14).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -261,6 +261,13 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                     "packages/agent-worker/src/identity-registry.mjs",
                     "packages/agent-worker/src/identity-primitives.mjs",
                     "packages/agent-worker/src/transport-adapter-contract.mjs",
+                ])
+            }
+            if manifestVersion >= 14 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/local-reply-route-contract.mjs",
+                    "packages/agent-worker/src/local-reply-route-store.mjs",
+                    "packages/agent-worker/src/local-sender-authentication.mjs",
                 ])
             }
             // The coordinator can run from any worker bundle and imports
@@ -455,7 +462,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
-        guard (8...13).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
+        guard (8...14).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
               manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
         else { throw WorkerLauncherError.invalidManifest }
         let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)
