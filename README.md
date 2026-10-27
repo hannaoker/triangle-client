@@ -114,7 +114,23 @@ npm run test:console
 See [packages/client-console/README.md](packages/client-console/README.md) and
 the [Triangle Client guide](docs/triangle-client/README.md#local-operator-console-scaffold).
 
-## Testing and builds
+## Developer setup and testing
+
+In a fresh worktree or checkout, establish workspace package links before running tests:
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+```
+
+To run test suites across partitioned groups:
+
+```sh
+npm test              # runs all configured test suites
+npm run test:runtime  # runtime and local host suites
+npm run test:gateway  # A2A gateway SDK and agent gateways
+```
+
+To run individual package tests:
 
 ```sh
 cd packages/agent-worker

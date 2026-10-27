@@ -48,20 +48,30 @@ scan; the aggregate covers the client JavaScript packages and native host tests.
   four skipped. One failure was the corrected engine assertion; three were
   forbidden process/temp-directory operations; one was restricted Hermes help.
   CLI suite then stopped progressing. Stopped only that verified test tree.
-- Full normal-access aggregate completed (`/private/tmp/triangle-consistency-normal-tests.log`):
-  12/16 suites passed, 4 failed.
+- Initial normal-access aggregate (`/private/tmp/triangle-consistency-normal-tests.log`):
+  12/16 suites passed, 4 failed on pre-existing environment setup and stale fixture version.
   - Passing suites (12): test runner contracts, packaged installer,
     agent-worker (triangle-client: 1181 passed, 3 skipped, 0 failed),
     triangle-cli (115 passed), linux-runtime (39 passed), client-console (16 passed),
     cutover-headless-supervisor, enable-headless-engagement, hermes-exec-wrapper,
     worker-service-render, macos-mailbox-helper host, peer-proof-hermes.
-  - Failing suites (4, pre-existing environment and untouched test scope):
-    - `triangle-client-service`: asserts `runtime.version === 10` on line 171 of
-      `tests/triangle-client-service.test.mjs`, but base merge b1c8946 bumped
-      `CURRENT_MANIFEST_VERSION` to 14. File is outside allowlisted consistency scope.
-    - `a2a-gateway`, `agents/codex`, `agents/hermes`: fail with `ERR_MODULE_NOT_FOUND`
-      for `@the-triangle/a2a-gateway` due to absence of workspace package symlinks
-      in isolated worktree `node_modules`.
+  - Failing suites (4 initial):
+    - `triangle-client-service`: asserted `runtime.version === 10` on line 171 of
+      `tests/triangle-client-service.test.mjs`, while source was bumped to v14 in merge b1c8946.
+    - `a2a-gateway`, `agents/codex`, `agents/hermes`: failed with `ERR_MODULE_NOT_FOUND`
+      for `@the-triangle/a2a-gateway` due to missing workspace symlinks in fresh worktree.
+- Setup prerequisites & corrective remediation:
+  - Canonical setup check: `npm ci --ignore-scripts --no-audit --no-fund` fails closed in worktrees
+    when workspace package entries diverge (`@the-triangle/linux-runtime@0.1.0` missing from lockfile).
+    Standard `npm install --ignore-scripts --no-audit --no-fund --package-lock=false` safely established
+    the ignored workspace symlinks in `node_modules/@the-triangle` without touching `package-lock.json`.
+  - Fixture alignment: updated `tests/triangle-client-service.test.mjs:171` to assert current manifest version 14.
+  - Corrected test gate run (`/private/tmp/triangle-consistency-correction-tests.log`):
+    - `triangle-client-service`: 27 passed, 0 failed (exit 0).
+    - `packages/a2a-gateway`: 105 passed, 1 skipped, 0 failed (exit 0).
+    - `agents/codex`: 24 passed, 0 failed (exit 0).
+    - `agents/hermes`: 20 passed, 0 failed (exit 0).
+  - Combined verification evidence: 12 prior-pass normal suites + 4 corrected rerun suites (16/16 suites resolved).
 - Gemini direct verification of changed contracts:
   - `tests/test-runner.test.mjs`: 2 passed (exit 0).
   - `packages/agent-worker/test/client-source-contract.test.mjs` + `worker-bundle-closure.test.mjs`:
@@ -71,6 +81,6 @@ scan; the aggregate covers the client JavaScript packages and native host tests.
 
 ## PR Preparation
 
-Review verified no behavioural or authority regressions. The 17 allowlisted
-changes align test coverage, group partitioning, staging probes, engine metadata,
+Review verified no behavioural or authority regressions. The allowlisted changes align
+test coverage, group partitioning, staging probes, engine metadata, workspace setup guidance,
 and platform documentation without modifying live services or credentials.
