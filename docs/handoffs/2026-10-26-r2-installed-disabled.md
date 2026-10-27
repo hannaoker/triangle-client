@@ -27,3 +27,19 @@ The operational runtime floor applies through the updated helper and validator w
 The owner opened a second Claude chat, session-2626b03bf106b80446c258de751c5b008ca861894a5f1fbd03881a05b5cf6a5f (raw session 87abd7c9-effd-4dfe-8250-fa6e34254686, generation 1). Its first status call hit ENOENT while installation had the service stopped. After restart, the real control socket exists and the owner confirmed triangle_get_status succeeds. This is attachment evidence, not pinned execution.
 
 Inspection of the actual permission policy shows both Claude and Codex receiver allowlists currently contain only the bound Codex identity. The attached chat pair is therefore not authorized; do not enable or bypass ACLs to force the canary. Claude-to-Claude senders are not supported by this policy schema. The existing Codex receiver policy can name an exact attached Claude sender, but that is a workspace-wide Codex receiver grant, not an exact target-only grant. A scratch Codex address has been requested; before any grant change, make that scope clear to the owner or use an isolated disposable policy. Source tests cannot substitute for this live gate. R2 admission remains disabled.
+
+## Completed installed canary and cleanup
+
+Gemini 3.8 Flash (Medium) completed review of code commit `98be801` with no blockers. It reported 11 focused R2 tests, 70 packaging/inventory/host tests, and successful Swift host execution. No review result was inferred from its earlier progress-only output.
+
+The owner supplied a scratch Codex attachment, session-321051ea845d1891920a4d32839d589f442c629135067c11655bfeec0344ccab, then explicitly approved a temporary exact Claude sender grant in the workspace Codex receiver policy. Both chats received setup wakes but initially left requests queued; the owner directly authorized the single canary inside both chats before execution. This is not unattended idle-chat execution acceptance.
+
+The installed journal independently proves:
+
+- `r2-pair-canary-20261026-01` was actually sent by Claude session-2626b03bf106b80446c258de751c5b008ca861894a5f1fbd03881a05b5cf6a5f to that attached Codex chat, and completed.
+- Reply `r2-pair-reply-20261026-01` returned exact `R2_ATTACHED_PAIR_OK_20261026` to the original Claude sender, with matching requestId/inReplyTo. Claude consumed it. Request-to-reply time was 19378 ms.
+- Both records contain native receiver-built senderProvenance with correct authenticated peer, generation 1, local-attested/unbound assurance and null principal/authority. The matching native reply-route pin is persisted.
+- Removed the temporary Claude sender grant and verified the original allowlist exactly. Disabled new pin creation through the installed setup command. Restarted the supported service and verified the identical pin, completed message and consumed exact result remain.
+- Claude returned `R2_CLAUDE_PAIR_CONFIRMED` to the bound Codex setup request. Consumed only the two exact setup reports. Original 14 pending replies and two held tasks remain; all 65 pre-install message phase/updated_at tuples remain unchanged.
+
+The candidate is installed and running, with new admission disabled and no temporary grant. PR #137 remains draft. Live duplicate retry after restart was not run; it remains source-test evidence, separate from proven live persistence. A permanent grant/default activation decision and unattended acceptance remain outside this one-canary authorization.
