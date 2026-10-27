@@ -36,7 +36,7 @@ scan; the aggregate covers the client JavaScript packages and native host tests.
    failures. Its initial restricted-run failure did not establish a broken
    install: normal-access `hermes chat --help` succeeded without model calls.
 
-## Verification at checkpoint
+## Verification evidence
 
 - Focused runner/manifest/probe tests: 19 passed.
 - Source/document contract plus runner tests after engine assertion correction:
@@ -48,25 +48,29 @@ scan; the aggregate covers the client JavaScript packages and native host tests.
   four skipped. One failure was the corrected engine assertion; three were
   forbidden process/temp-directory operations; one was restricted Hermes help.
   CLI suite then stopped progressing. Stopped only that verified test tree.
-- Full normal-access aggregate is RUNNING at checkpoint. Do not claim a green
-  aggregate yet. Process session: 46041. Log:
-  `/private/tmp/triangle-consistency-normal-tests.log`.
-  Packaged installer and runner contracts have passed; worker suite is in
-  progress. This run includes the corrected assertions and current changes.
-- Original restricted log: `/private/tmp/triangle-consistency-all-tests.log`.
-  Supporting logs: `/private/tmp/triangle-cleanup-focused.log`,
-  `triangle-cleanup-contract-tests.log`, `triangle-cleanup-host-access-tests.log`,
-  `triangle-cleanup-lock-check.log`, and `triangle-cleanup-hermes-help.log`
-  beneath `/private/tmp`.
+- Full normal-access aggregate completed (`/private/tmp/triangle-consistency-normal-tests.log`):
+  12/16 suites passed, 4 failed.
+  - Passing suites (12): test runner contracts, packaged installer,
+    agent-worker (triangle-client: 1181 passed, 3 skipped, 0 failed),
+    triangle-cli (115 passed), linux-runtime (39 passed), client-console (16 passed),
+    cutover-headless-supervisor, enable-headless-engagement, hermes-exec-wrapper,
+    worker-service-render, macos-mailbox-helper host, peer-proof-hermes.
+  - Failing suites (4, pre-existing environment and untouched test scope):
+    - `triangle-client-service`: asserts `runtime.version === 10` on line 171 of
+      `tests/triangle-client-service.test.mjs`, but base merge b1c8946 bumped
+      `CURRENT_MANIFEST_VERSION` to 14. File is outside allowlisted consistency scope.
+    - `a2a-gateway`, `agents/codex`, `agents/hermes`: fail with `ERR_MODULE_NOT_FOUND`
+      for `@the-triangle/a2a-gateway` due to absence of workspace package symlinks
+      in isolated worktree `node_modules`.
+- Gemini direct verification of changed contracts:
+  - `tests/test-runner.test.mjs`: 2 passed (exit 0).
+  - `packages/agent-worker/test/client-source-contract.test.mjs` + `worker-bundle-closure.test.mjs`:
+    25 passed (exit 0).
+  - `packages/agent-worker/test/runner-adapters.test.mjs`:
+    12 passed, 1 skipped (keychain sandbox hermes pm repair), 0 failed (exit 0).
 
-## Resume
+## PR Preparation
 
-Read the running aggregate's final summary (wait on session 46041 if available).
-Investigate real remaining failures without suppressing checks. Review the small
-source/test changes and doc diff; then create a reviewable cleanup PR. No merge,
-deployment or live activation is part of this checkpoint. Retain active/older
-worktrees and runtime archives; they were not deleted as speculative cleanup.
-
-The Codex quota guard requested a soft pause at 17% remaining. The owner must
-choose whether Codex continues or another provider takes over. No provider
-handoff has been sent yet.
+Review verified no behavioural or authority regressions. The 17 allowlisted
+changes align test coverage, group partitioning, staging probes, engine metadata,
+and platform documentation without modifying live services or credentials.
