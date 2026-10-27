@@ -84,3 +84,8 @@ scan; the aggregate covers the client JavaScript packages and native host tests.
 Review verified no behavioural or authority regressions. The allowlisted changes align
 test coverage, group partitioning, staging probes, engine metadata, workspace setup guidance,
 and platform documentation without modifying live services or credentials.
+
+
+## Final verification correction
+
+Codex's final review caught that the new README recommended npm ci while the lockfile lacked both Linux workspace records. Added only packages/linux-runtime metadata and its node_modules workspace-link record; no dependency versions changed. `npm ci --dry-run --ignore-scripts --no-audit --no-fund` now exits 0, superseding the earlier lockfile-divergence limitation. The gateway reruns above used standard npm install with package-lock=false before this metadata repair; this is recorded rather than presented as a successful npm ci installation. Codex independently reran the 19 runner/manifest checks (all passed), inspected the correction diff and four exit-0 rerun logs, and confirmed git diff --check is clean. No deployment or live permissions changed.
