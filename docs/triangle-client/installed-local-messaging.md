@@ -1,5 +1,13 @@
 # Installed local messaging
 
+Current additions: the local principal router and optional attached-chat reply
+identity are implemented. Runtime v14 includes the latter's full import closure;
+new pin creation remains disabled by default. Existing pins continue to be
+verified when it is disabled. See the [R1 acceptance](../handoffs/2026-10-26-r1-installed-acceptance.md)
+and [R2 acceptance and limits](../handoffs/2026-10-26-r2-installed-disabled.md).
+Local socket traffic is journaled on this device, not on the MESH server.
+Grok remains owner-paired and pull-only, with no automatic Grok wake.
+
 The existing Triangle supervisor hosts the local control socket, production SQLite journal and recoverable dispatcher. It reuses registered profile runners and serializes their local and MESH turns through one shared reasoner gate. Same-host delivery does not use Iroh or MESH. Harness inference can still use its provider's network connection.
 
 ## Install and bind

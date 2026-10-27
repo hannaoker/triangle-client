@@ -1,6 +1,6 @@
 # R2 local attached-chat acceptance — 2026-10-26
 
-Status: tested local attached-chat slice accepted; candidate installed and running. New pin admission is disabled and all temporary sender grants are removed. PR #137 is ready for review, not merged. Permanent activation and broader grants were not authorized by the canaries.
+Status: tested local attached-chat slice accepted; candidate installed and running. New pin admission is disabled and all temporary sender grants are removed. PR #137 merged as `b1c894696ae929dc742a432c0b6762f025a09872`. Installed code was verified equivalent to the merge. Permanent activation and broader grants were not authorized by the canaries.
 
 Runtime code: `9547620`. Native helper code is unchanged from reviewed `98be801` (installed from documentation head `14c891b`). Later commits update evidence only.
 

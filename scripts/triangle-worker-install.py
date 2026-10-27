@@ -185,14 +185,14 @@ def sha256(path):
 def validate_node_compatibility(node):
     try:
         compatibility = subprocess.run(
-            [node, "--input-type=module", "--eval", "import {globSync} from 'node:fs'; const m=Number(process.versions.node.split('.')[0]); if(m<22||typeof globSync!=='function') process.exit(64); process.stdout.write('triangle-node-ok\\n')"],
+            [node, "--input-type=module", "--eval", "import {globSync} from 'node:fs'; import {DatabaseSync} from 'node:sqlite'; const [major,minor]=process.versions.node.split('.').map(Number); if(major<22||(major===22&&minor<13)||typeof globSync!=='function') process.exit(64); const db=new DatabaseSync(':memory:'); const ready=db.prepare('SELECT 1 AS ready').get().ready; db.close(); if(ready!==1)process.exit(64); process.stdout.write('triangle-node-ok\\n')"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env={}, timeout=5, check=False, text=True,
         )
     except (OSError, subprocess.SubprocessError):
-        fail("Node 22.0.0 or newer with node:fs globSync is required")
+        fail("Node 22.13.0 or newer with node:fs globSync and unflagged node:sqlite is required")
     if compatibility.returncode != 0 or compatibility.stdout != "triangle-node-ok\n":
-        fail("Node 22.0.0 or newer with node:fs globSync is required")
+        fail("Node 22.13.0 or newer with node:fs globSync and unflagged node:sqlite is required")
 
 
 def fsync_dir(path):

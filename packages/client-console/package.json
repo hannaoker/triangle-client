@@ -6,7 +6,7 @@
   "description": "Local operator console for Triangle Client: secret-free install/bind/watch/worker status via the signed helper.",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "bin": {
     "triangle-client-console": "./src/cli.mjs"
