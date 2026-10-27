@@ -300,6 +300,8 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await codexReceiversFor(c,id)]})};
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
+  async describeLocalSession(id){const {r}=await current(id);
+   return Object.freeze({address:id,generation:r.generation,principal:null,authorityOrigin:null,bindingGeneration:null});},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!(r.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},

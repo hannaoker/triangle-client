@@ -494,11 +494,12 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
+ if(command==='setup-reply-identity'){output.write(JSON.stringify(setupReplyIdentity(options,env))+'\n');return 0;}
  if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -868,6 +869,21 @@ export function disableDesktopInbox(options,env=process.env){
  let policyCleanupRequired=false;
  if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});}catch{policyCleanupRequired=true;}}
  return {inboxEnabled:false,policyCleanupRequired,requiresServiceRestart:true};
+}
+
+// Keeping this policy file, even disabled, records the v14 runtime floor.
+export function setupReplyIdentity(options={},env=process.env){
+ const enable=options.enable===true,disable=options.disable===true;
+ if(enable===disable)throw coded('invalid_arguments','Specify exactly one of --enable or --disable');
+ const configPath=options.config||defaultLocalConfigPath(env);
+ const config=readPrivateJson(configPath);
+ if(config.version!==1||config.enabled!==true)throw coded('invalid_local_config','Enabled local messaging required');
+ const applicationRoot=path.dirname(path.dirname(configPath));
+ const manifest=readPrivateJson(path.join(applicationRoot,'worker-runtime','supervisor.manifest.json'));
+ if(!Number.isSafeInteger(manifest.version)||manifest.version<14)throw coded('runtime_upgrade_required','Reply identity requires runtime v14 or later');
+ const policyPath=path.join(path.dirname(configPath),'reply-identity.json');
+ writePrivateJson(policyPath,{version:1,enabled:enable});
+ return {replyIdentityEnabled:enable,minimumRuntime:14,policyPath};
 }
 
 export function setupRouter(options={},env=process.env){

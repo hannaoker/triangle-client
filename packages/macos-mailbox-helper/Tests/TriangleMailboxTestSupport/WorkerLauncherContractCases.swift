@@ -283,13 +283,29 @@ public enum WorkerLauncherContractCases {
 
     public static func standaloneSupervisorResolvesCursorAndRejectsCorruption() throws {
         let cursor = try ClientInstance(profile: ProfileName("cursor-only"), runtimeAdapter: .cursorAcp)
-        for version in [8, 9, 10, 11, 12, 13] {
+        for version in [8, 9, 10, 11, 12, 13, 14] {
         let fixture = try ResolverFixture(manifestVersion: version, supervisor: true); defer { fixture.cleanup() }
         let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
         let coordinator = try resolver.resolveCoordinator(for: [cursor])
         let drain = try resolver.resolveCursorAcpDrain(for: cursor)
         try expect(coordinator.executable == drain.executable, "cursor did not use the standalone supervisor")
         try expect(Set(coordinator.environment.keys) == Set(["PATH", "LANG", "LC_ALL"]), "standalone supervisor leaked harness environment")
+        if version == 13 || version == 14 {
+            let client = fixture.applicationRoot.appendingPathComponent("client")
+            try FileManager.default.createDirectory(at: client, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let policy = client.appendingPathComponent("reply-identity.json")
+            try Data("{\"version\":1,\"enabled\":false}".utf8).write(to: policy)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: policy.path)
+            if version == 13 {
+                do {
+                    _ = try resolver.resolveCoordinator(for: [cursor])
+                    throw WorkerContractFailure("disabled reply identity policy allowed runtime downgrade")
+                } catch is WorkerLauncherError {}
+            } else {
+                _ = try resolver.resolveCoordinator(for: [cursor])
+            }
+            try FileManager.default.removeItem(at: policy)
+        }
         try fixture.withManifestMutation("nodeSHA256", value: String(repeating: "0", count: 64))
         do {
             _ = try resolver.resolveCoordinator(for: [cursor])
@@ -545,7 +561,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -561,7 +577,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -596,12 +612,12 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 {
+        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 {
+        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",
@@ -657,6 +673,9 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/identity-primitives.mjs",
                 "packages/agent-worker/src/transport-adapter-contract.mjs",
             ]
+        }
+        if manifestVersion >= 14 {
+            artifactNames += ["packages/agent-worker/src/local-reply-route-contract.mjs", "packages/agent-worker/src/local-reply-route-store.mjs", "packages/agent-worker/src/local-sender-authentication.mjs"]
         }
         if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]

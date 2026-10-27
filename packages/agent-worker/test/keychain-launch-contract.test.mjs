@@ -22,6 +22,9 @@ const WORKLOAD_CORE_RELATIVES = [
   "packages/triangle-cli/src/workload.mjs",
 ];
 const LOCAL_MESSAGING_RELATIVES = [
+  "packages/agent-worker/src/local-reply-route-contract.mjs",
+  "packages/agent-worker/src/local-reply-route-store.mjs",
+  "packages/agent-worker/src/local-sender-authentication.mjs",
   "packages/agent-worker/src/unified-router.mjs",
   "packages/agent-worker/src/recipient-resolver.mjs",
   "packages/agent-worker/src/router-registry-snapshot.mjs",
@@ -153,7 +156,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 13);
+  assert.equal(manifest.version, 14);
   for (const relative of WORKLOAD_CORE_RELATIVES) assert.ok(manifest.artifacts[relative], relative);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
@@ -292,6 +295,14 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
   const rendered = spawnSync("/bin/bash", [servicePath, "render", "codex"], { encoding: "utf8", env: fixture.env });
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.match(rendered.stdout, /dev\.thetriangle\.codex\.worker/);
+  const clientDir=path.join(fixture.applicationRoot,"client");
+  fs.mkdirSync(clientDir,{mode:0o700});
+  const policy=path.join(clientDir,"reply-identity.json");
+  fs.writeFileSync(policy,JSON.stringify({version:1,enabled:false}),{mode:0o600});
+  const downgraded=spawnSync("/bin/bash",[servicePath,"render","codex"],{encoding:"utf8",env:fixture.env});
+  assert.notEqual(downgraded.status,0);
+  assert.match(downgraded.stderr,/requires runtime v14/);
+
 });
 
 test("LaunchAgent install is atomic and restores runtime and loaded prior service on bootstrap failure", { skip: darwinOnly }, (t) => {
@@ -347,7 +358,7 @@ test("LaunchAgent install rejects an existing symlink target without touching it
   assert.equal(fs.readFileSync(destination, "utf8"), "outside\n");
 });
 
-test("prepare-runtime upgrades to manifest v12 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
+test("prepare-runtime upgrades to manifest v14 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const installer = path.join(root, "scripts/triangle-worker-install.py");
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
@@ -357,7 +368,7 @@ test("prepare-runtime upgrades to manifest v12 while v6 without ownership or wor
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v7.version, 13);
+  assert.equal(v7.version, 14);
   assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
@@ -415,7 +426,7 @@ test("prepare-runtime upgrades to manifest v12 while v6 without ownership or wor
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 13);
+  assert.equal(after.version, 14);
   for (const relative of ownershipRelatives) {
     assert.ok(after.artifacts[relative]);
   }
