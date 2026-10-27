@@ -34,9 +34,10 @@ test("real SQLite restart preserves pins; rejected/failed replies cannot advance
   assert.equal(called, false);
   store.withReply({ key: route.key, local: renewed, remote, writeReply(conn) { conn.prepare("INSERT INTO replies VALUES(?,?)").run("ok", "reply"); } });
   assert.equal(store.read(route.key).local.generation, 2);
+  assert.equal(store.pin({ requestId: "r", local: { ...renewed, generation: 3 }, remote }).local.generation, 3);
   assert.equal(db.prepare("SELECT text FROM replies WHERE id='ok'").get().text, "reply");
   assert.throws(() => store.withReply({ key: route.key, local, remote, writeReply() {} }), { code: "reply_generation_regressed" });
-  assert.throws(() => store.pin({ requestId: "r", local: { ...renewed, generation: 3 }, remote }), { code: "reply_route_conflict" });
+  assert.throws(() => store.pin({ requestId: "r", local: { ...renewed, address: `session-${"d".repeat(64)}` }, remote }), { code: "reply_route_conflict" });
   assert.throws(() => store.withReply({ key: "unknown", local, remote, writeReply() {} }), { code: "reply_route_missing" });
   assert.throws(() => store.withReply({ key: route.key, local: renewed, remote, writeReply: async () => {} }), { code: "invalid_reply_writer" });
 });

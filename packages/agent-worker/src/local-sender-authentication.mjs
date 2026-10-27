@@ -1,3 +1,4 @@
+import { createLocalReplyRoute, createLocalSenderProvenance } from "./local-reply-route-contract.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
 const SESSION = /^session-[a-f0-9]{64}$/;
@@ -27,4 +28,35 @@ export async function authenticateAttachedLocalSender({
   await sessionBroker.validateRequest({ claims, senderId: expectedSenderId });
   return Object.freeze({ address: expectedSenderId, generation: claims.generation,
     principal: null, authorityOrigin: null, bindingGeneration: null });
+}
+
+// Explicit opt-in seam for the server. Only attached-chat pairs are covered in
+// this slice; profile workers and bound desktop identities retain legacy flow.
+export function createAttachedReplyIdentity({ credentialValidator, sessionBroker } = {}) {
+  if (typeof sessionBroker?.describeLocalSession !== "function") {
+    throw coded("invalid_sender_verifier", "Live session observations required");
+  }
+  const authenticate = (credential, senderId) => authenticateAttachedLocalSender({
+    credential, expectedSenderId: senderId, credentialValidator, sessionBroker,
+  });
+  return Object.freeze({
+    async prepareSend({ credential, senderId, recipientId, requestId }) {
+      if (!SESSION.test(senderId) || !SESSION.test(recipientId)) return null;
+      const remote = await authenticate(credential, senderId);
+      const local = await sessionBroker.describeLocalSession(recipientId);
+      return { replyRoute: createLocalReplyRoute({ requestId, local, remote }),
+        senderProvenance: createLocalSenderProvenance({ requestId, sender: remote, recipient: local }) };
+    },
+    async prepareReply({ credential, senderId, route }) {
+      const local = await authenticate(credential, senderId);
+      let remote;
+      try { remote = await sessionBroker.describeLocalSession(route.remote.address); }
+      catch (error) {
+        // A reply may wait for its ORIGINAL offline chat; never reroute it.
+        if (error.code !== "session_offline" || route.remote.principal !== null) throw error;
+        remote = route.remote;
+      }
+      return { local, remote, senderProvenance: createLocalSenderProvenance({ requestId: route.requestId, sender: local, recipient: remote }) };
+    },
+  });
 }

@@ -1,6 +1,6 @@
 # R2 local reply identity contract — first library slice
 
-This is a pure library foundation, not a deployed R2 implementation. No production entrypoint imports it; no manifest, credential, registry, journal or installed configuration changes occur.
+This started as a pure library foundation and now includes explicit opt-in server/journal integration, exercised only in disposable tests. The installed host does not enable it. New library modules are not in the runtime import closure yet; no manifest or installed configuration changed. Journal source now includes additive nullable columns and optional reply-pin storage.
 
 The local router currently accepts both owner-mapped profiles and unbound chat addresses. A null principal is not a stable identity. For local-only reply routes, the proposed host-journal key is `(local-socket, exact authenticated remote address, requestId)`. This is an explicit local extension of the identity design's `(remote principal, requestId)` key, preventing unrelated unbound sessions from colliding. It must not be reused as remote authority or a cross-machine address.
 
@@ -28,3 +28,22 @@ Remote Iroh/MESH provenance, peer principals, cross-mode transfers, new-session 
 New tests use a real file-backed SQLite database, reopen it, verify generation persistence, reject cross-session replies before the write callback, and verify rollback after a controlled write failure. Credential tests use the real issuer/validator for signature, sender, expiry and generation rejection, with a controlled broker fixture for active-session fencing. That fixture does not prove real policy/lease integration; existing broker tests and new end-to-end integration must cover it before release.
 
 Nothing here is imported by production entrypoints. Runtime closure/version changes, actual message-journal transaction integration, schema rollback compatibility and live Codex/Claude acceptance remain outstanding. No installation or current runtime change occurred.
+
+## Native server/journal integration checkpoint
+
+The server accepts an internal `replyIdentity` dependency; the journal accepts `replyRouteStoreFactory`. Both default to absent, and the installed host passes neither. `createAttachedReplyIdentity` authenticates the native credential and live broker state for attached-chat pairs, obtains the recipient's live broker observation, and constructs route/provenance itself. Other lanes remain legacy in this slice; no worker or bound-desktop principal association is guessed.
+
+The native message journal now creates request+pin in its existing admission transaction. Its reply transaction verifies the original pin and current attachment rows, commits the reply and generation advances together, and preserves the original claim token/session. Same-session generations may advance after broker verification; old children, cross-session owners and regressions fail. Native attachment/discovery rows are rechecked under the journal transaction so a lease/child change between asynchronous broker verification and commit is rejected. A reply may remain queued for its original offline sender, with no fallback. Same-identity pin generations can also advance with new request admission in that conversation; identity reassignment remains forbidden.
+
+Receiver-built provenance is persisted separately from message metadata and returned as an optional `senderProvenance` field. Reserved peer-supplied provenance keys are removed from metadata only for the new pinned flow; the authenticated factory determines the stored record. Existing unpinned DTOs and authentication behavior remain unchanged. Internal reply-route keys are not added to public message projections.
+
+New tests use the actual production journal and socket server with the real HMAC issuer/validator. They cover atomic pin/request rollback, reply-insert failure rollback, database reopen, native claim token preservation, same-chat renewal, an old child, a simulated attachment change after broker validation, original-sender offline queueing and receiver-built provenance despite forged metadata. The socket test uses a controlled policy-broker fixture plus real discovery/attachment tables; existing workspace-broker tests remain distinct evidence. The broader local-message/R1/packaging run passes 217 tests.
+
+### Remaining before release
+
+- Independent review of the source candidate and its exact supported-lane boundary.
+- Actual installed-host construction/configuration of the optional dependencies, with the runtime closure/version update in that same change. No hidden dynamic imports or incomplete staged bundle.
+- Real workspace-policy integration canaries, reserved-field/bounds audit and schema downgrade policy. The old v13 module ignores new columns and cannot enforce pins: rollback of pinned work to that module is a security downgrade, not a safe strict-mode rollback. Draining/holding pinned work and owner acceptance must be explicit before any deployment.
+- Worker/bound-desktop sender adaptation and mapped session principals remain unsupported rather than fabricated. Remote transports and cross-machine identities remain deferred.
+
+This candidate is not installed; no live journal, mappings, settings or current runtime were changed during R2 implementation.

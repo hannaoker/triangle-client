@@ -158,6 +158,7 @@ function mapMessageRow(row) {
   const loopDepth = metadata?._loopDepth ?? undefined;
   return {
     messageId: row.message_id,
+    ...(row.sender_provenance_json ? { senderProvenance: JSON.parse(row.sender_provenance_json) } : {}),
     sender: row.sender,
     recipient: row.recipient,
     recipientType: row.recipient_type ?? "runner",
@@ -187,6 +188,7 @@ function mapReplyRow(row) {
   const loopDepth = metadata?._loopDepth ?? undefined;
   return {
     messageId: row.message_id,
+    ...(row.sender_provenance_json ? { senderProvenance: JSON.parse(row.sender_provenance_json) } : {}),
     sender: row.sender,
     recipient: row.recipient,
     requestId: row.request_id,
@@ -208,6 +210,8 @@ export function createLocalMessagingJournal({
   // Owner choice (`discovery.titles`): when false, conversation titles are neither stored nor shown, including
   // ones stored earlier, which stay in the file only until their entry ages out.
   titles = true,
+  // Internal opt-in dependency. Default runtime does not activate R2.
+  replyRouteStoreFactory = null,
 } = {}) {
   adoptLegacyJournalFiles(stateRoot, logger);
   const deliveryJournal = openDeliveryJournal({
@@ -258,7 +262,8 @@ export function createLocalMessagingJournal({
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       to_principal TEXT,
-      resolved_via TEXT
+      resolved_via TEXT,
+      reply_route_key TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_local_messages_phase ON local_messages(phase);
     CREATE INDEX IF NOT EXISTS idx_local_messages_req ON local_messages(request_id);
@@ -364,6 +369,12 @@ export function createLocalMessagingJournal({
   if (!messageColumns.includes("resolved_via")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN resolved_via TEXT");
   }
+  if (!messageColumns.includes("reply_route_key")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN reply_route_key TEXT");
+  }
+  if (!messageColumns.includes("sender_provenance_json")) db.exec("ALTER TABLE local_messages ADD COLUMN sender_provenance_json TEXT");
+  const replyColumns = db.prepare("PRAGMA table_info(local_replies)").all().map(c => c.name);
+  if (!replyColumns.includes("sender_provenance_json")) db.exec("ALTER TABLE local_replies ADD COLUMN sender_provenance_json TEXT");
   const wakeColumns = db.prepare("PRAGMA table_info(local_wake_bindings)").all().map((c) => c.name);
   if (!wakeColumns.includes("auth_binding_id")) {
     db.exec("ALTER TABLE local_wake_bindings ADD COLUMN auth_binding_id TEXT");
@@ -410,6 +421,32 @@ export function createLocalMessagingJournal({
     throw error;
   }
 
+  let replyRouteStore = null;
+  try {
+    if (replyRouteStoreFactory) replyRouteStore = replyRouteStoreFactory({ db });
+  } catch (error) { deliveryJournal.close(); throw error; }
+
+  async function getReplyRouteForMessage(messageId) {
+    assertNotClosed();
+    const row = db.prepare("SELECT reply_route_key FROM local_messages WHERE message_id=?").get(messageId);
+    if (!row?.reply_route_key) return null;
+    if (!replyRouteStore) throw coded("reply_route_unavailable", "Pinned routes require the identity store");
+    const route = replyRouteStore.read(row.reply_route_key);
+    if (!route) throw coded("reply_route_missing", "Pinned route record is missing");
+    return route;
+  }
+
+  function checkAttachedIdentity(address, generation, now, bindingId = null) {
+    const row = db.prepare(`SELECT d.lifecycle,d.generation AS discovered_generation,
+      a.generation,a.child_id,a.expires_at FROM local_discovered_sessions d
+      LEFT JOIN local_session_attachments a ON a.id=d.id WHERE d.id=?`).get(address);
+    if (!row || row.lifecycle === "ended" || row.discovered_generation !== generation ||
+        row.generation !== generation || row.expires_at <= now ||
+        (bindingId !== null && row.child_id !== bindingId)) {
+      throw coded("session_fenced", "Pinned session attachment changed before journal commit");
+    }
+  }
+
   async function recordSend(envelope, options = {}) {
     assertNotClosed();
     if (!envelope || typeof envelope !== "object") {
@@ -422,6 +459,12 @@ export function createLocalMessagingJournal({
     const to_principal = envelope.to_principal ?? options.to_principal ?? null;
     const resolved_via = envelope.resolved_via ?? options.resolved_via ?? null;
 
+    const replyRoute = options.replyRoute ?? null;
+    if (replyRoute && (!replyRouteStore || replyRoute.requestId !== requestId ||
+        replyRoute.local?.address !== recipient || replyRoute.remote?.address !== sender ||
+        (envelope.recipientType ?? options.recipientType) !== "interactive")) {
+      throw coded("invalid_reply_route", "Reply pin must match the interactive request identities");
+    }
     const recipientType = envelope.recipientType ?? options.recipientType ?? "runner";
     const hash = computeEnvelopeHash(envelope);
 
@@ -432,7 +475,8 @@ export function createLocalMessagingJournal({
         if (
           existing.canonical_hash === hash &&
           (existing.recipient_type ?? "runner") === recipientType &&
-          isRouteIntentMatch(existing, to_principal, resolved_via)
+          isRouteIntentMatch(existing, to_principal, resolved_via) &&
+          (existing.reply_route_key ?? null) === (replyRoute?.key ?? null)
         ) {
           db.exec("COMMIT");
           return { ...mapMessageRow(existing), isDuplicate: true };
@@ -464,6 +508,14 @@ export function createLocalMessagingJournal({
           message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at, to_principal, resolved_via
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?, ?, ?)
       `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now, to_principal, resolved_via);
+
+      if (replyRoute) {
+        if (typeof options.replySenderBindingId !== "string" || !options.replySenderBindingId) throw coded("session_fenced", "Authenticated sender child required");
+        checkAttachedIdentity(replyRoute.local.address, replyRoute.local.generation, now);
+        checkAttachedIdentity(replyRoute.remote.address, replyRoute.remote.generation, now, options.replySenderBindingId);
+        const pinned = replyRouteStore.pinInTransaction(replyRoute);
+        db.prepare("UPDATE local_messages SET reply_route_key=?,sender_provenance_json=? WHERE message_id=?").run(pinned.key, options.senderProvenance ? JSON.stringify(options.senderProvenance) : null, messageId);
+      }
 
       db.prepare(`
         INSERT INTO local_pair_admissions (pair_key, message_id, created_at)
@@ -1494,7 +1546,7 @@ export function createLocalMessagingJournal({
     };
   }
 
-  async function recordInteractiveReply({ messageId, claimToken, sessionId, generation, requester, text, replyId, metadata = {}, now = Date.now } = {}) {
+  async function recordInteractiveReply({ messageId, claimToken, sessionId, generation, requester, text, replyId, metadata = {}, now = Date.now, replyIdentity = null } = {}) {
     assertNotClosed();
     if (!messageId || !claimToken || typeof text !== "string" || !requester || !sessionId || typeof generation !== "number") {
       throw coded("invalid_params", "messageId, claimToken, requester, sessionId, generation, and text are required");
@@ -1515,6 +1567,25 @@ export function createLocalMessagingJournal({
         throw coded("invalid_reply_recipient", "Not an interactive message");
       }
 
+      let pinAdvance = null;
+      if (orig.reply_route_key) {
+        if (!replyRouteStore || !replyIdentity) throw coded("reply_route_unavailable", "Authenticated reply identity required");
+        if (typeof replyIdentity.bindingId !== "string" || !replyIdentity.bindingId) throw coded("session_fenced", "Authenticated reply child required");
+        checkAttachedIdentity(requester, generation, currentTime, replyIdentity.bindingId);
+        if (replyIdentity.local?.generation !== generation) throw coded("generation_fenced", "Authenticated generation differs from reply generation");
+        pinAdvance = replyRouteStore.verifyInTransaction({ key: orig.reply_route_key, ...replyIdentity });
+        if (pinAdvance.local.address !== requester || pinAdvance.remote.address !== orig.sender) {
+          throw coded("reply_session_mismatch", "Reply pin differs from message identities");
+        }
+      }
+      function commitAcceptedReply() {
+        if (pinAdvance) {
+          replyRouteStore.advanceInTransaction({ key: orig.reply_route_key, local: pinAdvance.local, remote: pinAdvance.remote });
+          db.prepare("UPDATE local_messages SET claim_generation=? WHERE message_id=?").run(generation, messageId);
+        }
+        db.exec("COMMIT");
+      }
+
       // Claim tuple validation MUST happen BEFORE ANY duplicate acceptance or mutation/late evidence
       if (!orig.claim_token || !orig.claim_session_id || typeof orig.claim_generation !== "number") {
         throw coded("claim_failed", "Message is not claimed");
@@ -1522,7 +1593,7 @@ export function createLocalMessagingJournal({
       if (orig.claim_session_id !== sessionId) {
         throw coded("session_fenced", "Claim session mismatch");
       }
-      if (orig.claim_generation !== generation) {
+      if (orig.claim_generation !== generation && !(pinAdvance && generation > orig.claim_generation && pinAdvance.local.generation === generation)) {
         throw coded("generation_fenced", "Claim generation mismatch");
       }
       if (orig.claim_token !== claimToken) {
@@ -1559,7 +1630,7 @@ export function createLocalMessagingJournal({
           existingReply.text === text &&
           existingReply.canonical_hash === candidateHash
         ) {
-          db.exec("COMMIT");
+          commitAcceptedReply();
           return { ...mapReplyRow(existingReply), isDuplicate: true };
         }
         throw coded("duplicate_id_conflict", "Conflicting reply content or metadata for already completed message");
@@ -1608,7 +1679,7 @@ export function createLocalMessagingJournal({
       const existingWithId = db.prepare("SELECT * FROM local_replies WHERE message_id = ?").get(effectiveReplyId);
       if (existingWithId) {
         if (existingWithId.canonical_hash === replyHash) {
-          db.exec("COMMIT");
+          commitAcceptedReply();
           return { ...mapReplyRow(existingWithId), isDuplicate: true };
         }
         throw coded("duplicate_id_conflict", `Conflicting reply ID: ${effectiveReplyId}`);
@@ -1624,8 +1695,11 @@ export function createLocalMessagingJournal({
         "UPDATE local_messages SET phase = 'completed', updated_at = ? WHERE message_id = ?"
       ).run(currentTime, messageId);
 
+      if (pinAdvance && replyIdentity.senderProvenance) {
+        db.prepare("UPDATE local_replies SET sender_provenance_json=? WHERE message_id=?").run(JSON.stringify(replyIdentity.senderProvenance), effectiveReplyId);
+      }
       const row = db.prepare("SELECT * FROM local_replies WHERE message_id = ?").get(effectiveReplyId);
-      db.exec("COMMIT");
+      commitAcceptedReply();
       return { ...mapReplyRow(row), isDuplicate: false };
     } catch (err) {
       try {
@@ -1800,6 +1874,7 @@ export function createLocalMessagingJournal({
     listInbox,
     claimInboxMessage,
     recordInteractiveReply,
+    getReplyRouteForMessage,
     getInteractiveInboxCounts,
     compact,
     initWakeBinding,

@@ -34,35 +34,48 @@ export function createLocalReplyRouteStore({ db } = {}) {
       throw error;
     }
   }
-  function pin(input) {
+  function requireTransaction() {
+    if (db.isTransaction !== true) throw coded("reply_transaction_required", "Journal transaction required");
+  }
+  function pinInTransaction(input) {
+    requireTransaction();
     const route = createLocalReplyRoute(input);
-    return transaction(() => {
-      const old = read(route.key);
-      // Pin admission is immutable; generation advancement belongs to the
-      // authenticated reply transaction, not a repeated request admission.
-      if (old) {
-        if (JSON.stringify(old) !== JSON.stringify(route)) {
-          throw coded("reply_route_conflict", "Conversation already has a different reply pin");
-        }
-        return old;
-      }
-      db.prepare("INSERT INTO local_reply_routes(route_key,route_json) VALUES(?,?)").run(route.key, JSON.stringify(route));
-      return route;
-    });
+    const old = read(route.key);
+    if (old) {
+      let next;
+      try { next = verifyLocalReplyRoute(old, { local: route.local, remote: route.remote }); }
+      catch { throw coded("reply_route_conflict", "Conversation already has a different or newer reply pin"); }
+      db.prepare("UPDATE local_reply_routes SET route_json=? WHERE route_key=?").run(JSON.stringify(next), route.key);
+      return next;
+    }
+    db.prepare("INSERT INTO local_reply_routes(route_key,route_json) VALUES(?,?)").run(route.key, JSON.stringify(route));
+    return route;
+  }
+  function verifyInTransaction({ key, local, remote }) {
+    requireTransaction();
+    const old = read(key);
+    if (!old) throw coded("reply_route_missing", "No pinned reply route");
+    return verifyLocalReplyRoute(old, { local, remote });
+  }
+  function advanceInTransaction(input) {
+    const next = verifyInTransaction(input);
+    db.prepare("UPDATE local_reply_routes SET route_json=? WHERE route_key=?").run(JSON.stringify(next), input.key);
+    return next;
+  }
+  function pin(input) {
+    return transaction(() => pinInTransaction(input));
   }
   function withReply({ key, local, remote, writeReply } = {}) {
     if (typeof writeReply !== "function" || writeReply.constructor.name === "AsyncFunction") {
       throw coded("invalid_reply_writer", "Synchronous same-connection reply writer required");
     }
     return transaction(() => {
-      const old = read(key);
-      if (!old) throw coded("reply_route_missing", "No pinned reply route");
-      const next = verifyLocalReplyRoute(old, { local, remote });
+      const next = verifyInTransaction({ key, local, remote });
       const result = writeReply(db);
       if (result && typeof result.then === "function") throw coded("async_reply_transaction", "Reply writes must be synchronous");
       db.prepare("UPDATE local_reply_routes SET route_json=? WHERE route_key=?").run(JSON.stringify(next), key);
       return Object.freeze({ route: next, result });
     });
   }
-  return Object.freeze({ read, pin, withReply });
+  return Object.freeze({ read, pin, withReply, pinInTransaction, verifyInTransaction, advanceInTransaction });
 }

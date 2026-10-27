@@ -33,6 +33,11 @@ function identifier(value, name, { optional = false } = {}) {
   return value;
 }
 
+function withoutPayloadProvenance(metadata) {
+  const { sender_provenance, senderProvenance, ...rest } = metadata || {};
+  return rest;
+}
+
 export function loadRouterConfig(stateRoot) {
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot) || stateRoot.includes("\0")) {
     return { enabled: false, registryRoot: null, error: "unsafe_router_config" };
@@ -185,6 +190,7 @@ export function createLocalControlServer({
   logger = { info() {}, warn() {}, error() {} },
   stateRoot = null,
   router = null,
+  replyIdentity = null, // Internal opt-in; installed host does not enable R2 yet.
 } = {}) {
   if (!socketPath || typeof socketPath !== "string") {
     throw coded("invalid_options", "socketPath is required");
@@ -549,6 +555,10 @@ export function createLocalControlServer({
               ? "interactive"
               : "runner";
 
+            const replyContext = replyIdentity ? await replyIdentity.prepareSend({
+              credential, senderId, recipientId: effectiveTo, requestId: effectiveRequestId,
+            }) : null;
+            const replyRoute = replyContext?.replyRoute ?? null;
             const record = await journal.recordSend({
               sender: senderId,
               recipient: effectiveTo,
@@ -558,12 +568,12 @@ export function createLocalControlServer({
               inReplyTo,
               text,
               metadata: {
-                ...(metadata || {}),
+                ...(replyRoute ? withoutPayloadProvenance(metadata) : (metadata || {})),
                 _loopDepth: calculatedDepth,
               },
               to_principal: resolution.resolved ? resolution.principal : null,
               resolved_via: resolution.resolved ? resolution.via : (resolution.via ?? null),
-            });
+            }, replyRoute ? { replyRoute, replySenderBindingId: claims.bindingId, senderProvenance: replyContext.senderProvenance } : {});
 
             // 6. Limits committed only AFTER successful admission
             if (rateReservation) {
@@ -629,6 +639,7 @@ export function createLocalControlServer({
               requestId: record.requestId,
               status: record.phase || "queued_local",
               isDuplicate: record.isDuplicate || false,
+              ...(record.senderProvenance ? { senderProvenance: record.senderProvenance } : {}),
               to_principal: record.to_principal,
               resolved_via: record.resolved_via,
             };
@@ -677,6 +688,7 @@ export function createLocalControlServer({
 
           const rawStatus = {
             messageId: record.messageId,
+            ...(record.senderProvenance ? { senderProvenance: record.senderProvenance } : {}),
             phase: record.phase,
             reason: record.reason || null,
             runtimeError: safeRuntimeError,
@@ -923,15 +935,20 @@ export function createLocalControlServer({
           if (!claims?.sessionId || typeof claims?.generation !== "number") {
             throw coded("unauthorized", "Interactive session credential required");
           }
+          const route = typeof journal.getReplyRouteForMessage === "function"
+            ? await journal.getReplyRouteForMessage(messageId) : null;
+          if (route && !replyIdentity) throw coded("reply_route_unavailable", "Pinned work requires R2 verification");
+          const verifiedReplyIdentity = route ? await replyIdentity.prepareReply({ credential, senderId, route }) : null;
           const outcome = await journal.recordInteractiveReply({
             messageId,
+            replyIdentity: verifiedReplyIdentity ? { ...verifiedReplyIdentity, bindingId: claims.bindingId } : null,
             claimToken,
             sessionId: claims.sessionId,
             generation: claims.generation,
             requester: senderId,
             text,
             replyId,
-            metadata,
+            metadata: route ? withoutPayloadProvenance(metadata) : metadata,
           });
           notifier?.notifyObligationChange?.();
           const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
