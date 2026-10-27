@@ -555,8 +555,12 @@ export function createLocalControlServer({
               ? "interactive"
               : "runner";
 
-            const replyContext = replyIdentity ? await replyIdentity.prepareSend({
-              credential, senderId, recipientId: effectiveTo, requestId: effectiveRequestId,
+            const existingRoute = existingRecord && typeof journal.getReplyRouteForMessage === "function"
+              ? await journal.getReplyRouteForMessage(messageId) : null;
+            if (existingRoute && !replyIdentity) throw coded("reply_route_unavailable", "Pinned retries require authenticated identity verification");
+            // Never promote an admitted legacy message into pinned work on retry.
+            const replyContext = replyIdentity && (!existingRecord || existingRoute) ? await replyIdentity.prepareSend({
+              credential, senderId, recipientId: effectiveTo, requestId: effectiveRequestId, existingRoute,
             }) : null;
             const replyRoute = replyContext?.replyRoute ?? null;
             const record = await journal.recordSend({

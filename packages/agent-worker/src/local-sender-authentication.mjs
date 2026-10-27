@@ -1,4 +1,4 @@
-import { createLocalReplyRoute, createLocalSenderProvenance } from "./local-reply-route-contract.mjs";
+import { createLocalReplyRoute, createLocalSenderProvenance, verifyLocalReplyRoute } from "./local-reply-route-contract.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
 const SESSION = /^session-[a-f0-9]{64}$/;
@@ -40,11 +40,13 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
     credential, expectedSenderId: senderId, credentialValidator, sessionBroker,
   });
   return Object.freeze({
-    async prepareSend({ credential, senderId, recipientId, requestId }) {
-      if (!(typeof enabled === "function" ? enabled() : enabled)) return null;
+    async prepareSend({ credential, senderId, recipientId, requestId, existingRoute = null }) {
+      // The switch controls new pins, not authentication of existing pinned retries.
+      if (!existingRoute && !(typeof enabled === "function" ? enabled() : enabled)) return null;
       if (!SESSION.test(senderId) || !SESSION.test(recipientId)) return null;
       const remote = await authenticate(credential, senderId);
       const local = await sessionBroker.describeLocalSession(recipientId);
+      if (existingRoute) verifyLocalReplyRoute(existingRoute, { local, remote });
       return { replyRoute: createLocalReplyRoute({ requestId, local, remote }),
         senderProvenance: createLocalSenderProvenance({ requestId, sender: remote, recipient: local }) };
     },

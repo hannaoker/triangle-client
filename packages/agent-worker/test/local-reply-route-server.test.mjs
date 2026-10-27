@@ -80,6 +80,9 @@ test("native socket admission pins a chat; renewed same-chat reply stays with an
   control.prepare('UPDATE local_session_attachments SET child_id=? WHERE id=?').run('new-child-b',b);
   enabled=false;
   assert.equal(await replyIdentity.prepareSend({senderId:a,recipientId:b,requestId:"disabled"}),null);
+  const legacy={to:b,text:'legacy while disabled',messageId:'disabled-legacy',requestId:'disabled-legacy'};
+  await sender.sendMessage(legacy);
+  assert.equal(await journal.getReplyRouteForMessage(legacy.messageId),null);
   // Turning off new admission must not disable verification on an existing pin.
   states.get(a).active=false;
   const reply=await renewed.sendReply({messageId:'native-request',claimToken:claim.claimToken,text:'verified result',replyId:'native-reply'});
@@ -87,6 +90,10 @@ test("native socket admission pins a chat; renewed same-chat reply stays with an
   states.get(a).active=true;
   const replies=await sender.listReplies({requestId:'native-conversation'});assert.equal(replies.length,1);assert.equal(replies[0].text,'verified result');assert.equal(replies[0].senderProvenance.via.authenticated_peer,b);assert.equal(replies[0].senderProvenance.sender_binding_generation,2);
   assert.equal((await sender.getMessageStatus({messageId:'native-request'})).senderProvenance.via.authenticated_peer,a);
-  enabled=true;
+  // A disabled admission switch must not break exact retries of pinned work.
   assert.equal((await sender.sendMessage(envelope)).isDuplicate,true);
+  enabled=true;
+  assert.equal((await sender.sendMessage(legacy)).isDuplicate,true);
+  assert.equal(await journal.getReplyRouteForMessage(legacy.messageId),null);
+  assert.equal((await journal.getReplyRouteForMessage('native-request')).local.generation,2);
 });
