@@ -21,3 +21,9 @@ Machine evidence: `~/Library/Application Support/The Triangle/releases/r2-instal
 4. Record results, resolve review findings, and only then merge/promote. Mapped session principals, worker/bound-desktop R2 provenance and remote transports remain unsupported.
 
 The operational runtime floor applies through the updated helper and validator while the policy path exists, even disabled. It does not protect deliberate owner deletion of policy or replacement of both validators and runtime. Never roll pinned work back to an old reader that ignores pins.
+
+## Live acceptance preparation correction
+
+The owner opened a second Claude chat, session-2626b03bf106b80446c258de751c5b008ca861894a5f1fbd03881a05b5cf6a5f (raw session 87abd7c9-effd-4dfe-8250-fa6e34254686, generation 1). Its first status call hit ENOENT while installation had the service stopped. After restart, the real control socket exists and the owner confirmed triangle_get_status succeeds. This is attachment evidence, not pinned execution.
+
+Inspection of the actual permission policy shows both Claude and Codex receiver allowlists currently contain only the bound Codex identity. The attached chat pair is therefore not authorized; do not enable or bypass ACLs to force the canary. Claude-to-Claude senders are not supported by this policy schema. The existing Codex receiver policy can name an exact attached Claude sender, but that is a workspace-wide Codex receiver grant, not an exact target-only grant. A scratch Codex address has been requested; before any grant change, make that scope clear to the owner or use an isolated disposable policy. Source tests cannot substitute for this live gate. R2 admission remains disabled.
