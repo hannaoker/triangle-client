@@ -1,5 +1,11 @@
 # Shared Codex App Server — operator runbook
 
+> Desktop chat warning: the shared-host procedure below is historical for
+> desktop-owned conversations. Do not start another App Server to resume one.
+> Use [installed local messaging](installed-local-messaging.md), which keeps
+> the owning desktop's wake path. Dedicated headless worker App Servers are
+> a separate supported runtime path.
+
 macOS-only checklist to **start, verify, rebind, and restart** the durable Shared
 Codex App Server used for interactive Codex MESH wake (`appServerWake`).
 

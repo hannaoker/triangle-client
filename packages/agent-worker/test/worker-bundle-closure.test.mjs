@@ -309,3 +309,16 @@ test("v13 adds the unified router closure (6 files) to every exact artifact set"
   const swift = readFileSync(path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"), "utf8");
   assert.match(swift, /if manifestVersion >= 13 \{\s*artifacts\.formUnion\(\[/);
 });
+
+test('runtime staging refuses Node with glob support but unavailable unflagged SQLite', () => {
+  const root=realpathSync(mkdtempSync(path.join(tmpdir(),'triangle-node-sqlite-')));
+  try {
+    const fake=path.join(root,'node');
+    writeFileSync(fake, "#!/bin/sh\ncase \"$3\" in *node:sqlite*) exit 64;; *) printf 'triangle-node-ok\\n';; esac\n",{mode:0o700});
+    const code=["import importlib.util,sys", "s=importlib.util.spec_from_file_location('twi',sys.argv[1])", "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)", "m.validate_node_compatibility(sys.argv[2])"].join('\n');
+    assert.throws(()=>execFileSync(python,['-c',code,installer,fake],{encoding:'utf8',stdio:['ignore','pipe','pipe']}),error=>{
+      assert.match(error.stderr,/unflagged node:sqlite/);return true;
+    });
+    assert.doesNotThrow(()=>execFileSync(python,['-c',code,installer,process.execPath],{encoding:'utf8'}));
+  } finally {rmSync(root,{recursive:true,force:true});}
+});

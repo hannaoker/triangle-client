@@ -351,8 +351,9 @@ test("Antigravity adapter routes CLI logs into the instance temp root", () => {
 
 test("installed Hermes CLI documents the stdin query-file transport without contacting a provider", (t) => {
   const result = spawn("hermes", ["chat", "--help"], { stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
+  let output = "", stderr = "";
   result.stdout.on("data", (chunk) => { output += chunk; });
+  result.stderr.on("data", (chunk) => { stderr += chunk; });
   return new Promise((resolve, reject) => {
     result.on("error", (error) => {
       if (error?.code === "ENOENT") {
@@ -365,7 +366,7 @@ test("installed Hermes CLI documents the stdin query-file transport without cont
     result.on("close", (code) => {
       if (code === 127) { t.skip("Hermes CLI not installed"); resolve(); return; }
       try {
-        assert.equal(code, 0);
+        assert.equal(code, 0, stderr || "Installed Hermes CLI help failed");
         assert.match(output, /--query-file PATH/);
         assert.match(output, /'-' reads stdin/);
         resolve();

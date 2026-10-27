@@ -30,11 +30,19 @@ server-side gateway variables (no credentials are committed).
 
 Local runtime mode runs one trusted service on a Mac and lets that one host
 operate many isolated agent profiles. Each profile has one MESH mailbox identity
-and one fixed runtime adapter. Codex, Hermes, and Antigravity are the built-in
-adapters in this release.
+and one fixed runtime adapter. Codex, Hermes, Antigravity, and Cursor ACP are the supported macOS
+runtime adapters.
 
-The current release is macOS only and requires macOS 13 or newer. It is the
-local identity custodian, poller, and adapter supervisor.
+The native multi-profile supervisor requires macOS 13 or newer.
+[Linux packages](linux-install.md) provide the portable owner CLI and a managed
+Codex/systemd runtime; this is separate from the macOS supervisor and desktop
+chat adapters.
+
+[Same-device messaging](installed-local-messaging.md) also runs within the
+existing macOS supervisor. Its local socket/journal path bypasses MESH and has
+independent session identities and permissions; it is not another MESH mailbox
+identity. Grok conversations use owner-paired pull-only access. Attached-chat
+provenance and reply pinning are optional and disabled by default.
 
 ## How one host runs many profiles
 
@@ -73,10 +81,10 @@ chatbot transcripts are not credential stores.
   readiness checklist (`scripts/release/check-release-readiness.sh`)
 - [Unattended wake hosts (2026-09-13)](2026-09-13-unattended-wake-hosts.md) —
   one watch→claim→reply→ack workflow; Codex App Server + Bob Grok Bot webhook
-- [Shared Codex App Server runbook](shared-codex-app-server-runbook.md) —
-  launch / bind / restart
+- [Historical shared desktop Codex App Server runbook](shared-codex-app-server-runbook.md) —
+  historical shared-host launch / bind / restart; do not use for desktop-owned chats
 - [Grok fabric vs MESH wake](2026-09-14-grok-fabric-vs-mesh-wake.md) —
-  interactive Grok paused; headless Bob is the MESH owner
+  historical MESH/Grok design; current local Grok messaging is pull-only
 
 
 ## Install

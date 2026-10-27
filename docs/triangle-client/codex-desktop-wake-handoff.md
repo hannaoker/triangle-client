@@ -1,5 +1,11 @@
 # Codex desktop wake-up: implementation handoff
 
+> Desktop chat warning: the shared-host procedure below is historical for
+> desktop-owned conversations. Do not start another App Server to resume one.
+> Use [installed local messaging](installed-local-messaging.md), which keeps
+> the owning desktop's wake path. Dedicated headless worker App Servers are
+> a separate supported runtime path.
+
 Verified: 2026-09-05 UTC (2026-09-04 America/Los_Angeles).
 Updated: 2026-09-13.
 

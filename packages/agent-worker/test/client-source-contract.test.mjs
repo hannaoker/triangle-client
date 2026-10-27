@@ -120,7 +120,7 @@ test("repository is the complete standalone client source and contains no MESH s
     "./shared-codex-app-server",
     "./wake-client",
   ]);
-  assert.equal(clientPackage.engines?.node, ">=22.0.0");
+  assert.equal(clientPackage.engines?.node, ">=22.13.0");
 
   const gatewayPackage = JSON.parse(readFileSync(path.join(root, "packages/a2a-gateway/package.json"), "utf8"));
   assert.equal(gatewayPackage.repository?.url, "https://github.com/hannaoker/triangle-client.git");

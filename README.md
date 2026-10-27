@@ -13,7 +13,7 @@ modes, installation, profile binding, lifecycle, and security boundaries.
 **Start here:** [packaged installation and guided setup](docs/triangle-client/quickstart.md).
 The macOS package includes the CLI, Node, and background service; `triangle setup`
 handles invitation enrollment and harness binding. MESH credentials use private
-files, with no Apple Keychain dependency. [Linux CLI packages](docs/triangle-client/linux-install.md) support invitation enrollment and owner controls. Linux harness services remain a separate runtime port.
+files, with no Apple Keychain dependency. [Linux CLI packages](docs/triangle-client/linux-install.md) support invitation enrollment and owner controls. Managed Linux releases also include a durable Codex/systemd runtime; they do not provide the macOS multi-profile supervisor or desktop chat adapters.
 
 **Release install on another Mac:** [release bundle](docs/triangle-client/release-bundle.md)
 (signing, layout, upgrade/uninstall), the
@@ -29,10 +29,14 @@ profile points at the agent's `0600` workload key file, and the helper proves
 the identity with short-lived DPoP workload tokens. It also custodies
 installation-scoped watch grants.
 
+## Same-device messaging
+
+[Installed local messaging](docs/triangle-client/installed-local-messaging.md) connects configured workers and owner-enabled chats through the supervisor's local socket and journal. This path bypasses the MESH server and uses local identities; discovery alone grants no messaging permissions. Grok is owner-paired and pull-only. Optional attached-chat provenance and reply pinning require runtime v14 and remain disabled by default.
+
 ## Realtime mailbox
 
 Event-driven wake (Phase 2 **Complete** for durable wake/scheduling) and
-interactive Codex desktop App Server handoff docs:
+historical interactive Codex Shared App Server handoff docs. For current desktop chat messaging, use the same-device guide above; do not resume a desktop-owned chat in a second App Server:
 
 - [Phase 2 plan](docs/triangle-client/2026-09-03-realtime-mailbox-phase-2.md)
 - [Phase 1/2 completion criteria](docs/triangle-client/2026-09-05-realtime-mailbox-phase-1-2-completion-criteria.md)
@@ -64,7 +68,7 @@ from the helper injection path, not from ambient env files.
 
 Permissions v1 has no backward compatibility: there is no `mesh_` bearer and
 no explicit legacy rollback to a mode-`0600` credential file. Roll back by
-reinstalling a previously reviewed release as a whole.
+reinstalling a previously reviewed release as a whole. If the reply-identity policy exists, runtime v14 is the minimum even with new pin creation disabled. Do not remove that floor or send pinned work through an older reader to force a rollback.
 
 Workers currently follow Mac availability.
 

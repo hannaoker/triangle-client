@@ -1,82 +1,107 @@
-# R2 local reply identity contract — first library slice
+# R2 local reply identity contract
 
-This started as a pure library foundation and now includes explicit opt-in server/journal integration, exercised only in disposable tests. The installed host now constructs the optional verifier and pin store, but new pin admission remains disabled by default. Candidate runtime manifest v14 includes the three new modules; the Mini remains installed on v13 and no installed configuration changed. Journal source now includes additive nullable columns and optional reply-pin storage.
+Status: PR #137 merged as `b1c8946`. The local attached-chat slice is implemented,
+installed and accepted on the Mini. New pin creation is disabled by default;
+permanent activation and grants were not authorized by the canaries. Current
+installation, review and live evidence is in
+[the acceptance handoff](../handoffs/2026-10-26-r2-installed-disabled.md).
 
-The local router currently accepts both owner-mapped profiles and unbound chat addresses. A null principal is not a stable identity. For local-only reply routes, the proposed host-journal key is `(local-socket, exact authenticated remote address, requestId)`. This is an explicit local extension of the identity design's `(remote principal, requestId)` key, preventing unrelated unbound sessions from colliding. It must not be reused as remote authority or a cross-machine address.
+## Identity and route contract
 
-`createLocalReplyRoute` pins an interactive local session address, authenticated remote address, their nullable principal+authority-origin associations, session generations, and principal-binding generations. `verifyLocalReplyRoute` permits generation advances for the same exact identities, rejects regression and cross-session/principal/origin reassignment, and returns a new route. The caller must durably compare/update this route transactionally with reply admission. Offline/missing identity observations fail rather than select another active chat. No migration/owner-transfer mechanism is implemented.
+`createLocalReplyRoute` pins the exact interactive local session address,
+authenticated remote address, their nullable principal/authority associations,
+session generations and principal-binding generations. Local route keys are
+`(local-socket, exact authenticated remote address, requestId)`. A null principal
+is not a stable identity; this host-journal key must not become a remote authority
+or cross-machine address.
 
-`createLocalSenderProvenance` projects only explicit receiver-supplied authenticated observations. It does **not authenticate them**. Future server integration must verify credential HMAC, expiry, active attachment/generation and current registry binding before calling it; never construct these inputs from message metadata. Local assurance remains local-attested, with mapped principal association labeled owner-mapped-disk-observation. No live MESH verification, signatures or remote trust mode is implied. Unbound principal/authority/binding generation stay null, while the sender session generation remains explicit.
+`verifyLocalReplyRoute` permits generation advances for those same identities,
+rejects regression and identity/principal/origin reassignment, and returns a new
+route. There is no automatic session transfer or selection of a replacement chat.
+Contract support for mapped observations does not mean the installed chat broker
+has mapped session principals: its principal/authority/binding values remain null.
 
-Tests cover distinct unbound senders with equal request IDs, same-session generation renewal through JSON serialization, cross-session/principal/origin denial, missing/offline observations, transport/key mismatch, malformed identity, input immutability and exclusion of arbitrary payload metadata. Serialization is not durable journal/restart acceptance. The installed v13 product is unchanged.
+`createLocalSenderProvenance` is a projection, not an authenticator. The installed
+factory validates native HMAC/expiry and exact interactive sender claims, then
+uses the real workspace-session broker to recheck policy, discovery, lease,
+child and generation. It constructs provenance from those observations, never
+message metadata. Assurance is local-attested/unbound, not live MESH verification
+or a remote signature.
 
-## Next integration slice
+Only attached session-to-session requests use this slice. Worker profiles and the
+bound desktop identity retain legacy flow. Iroh/MESH provenance, peer principals,
+new-session launching and explicit session transfer remain deferred.
 
-1. Receiver-side construction from actual authenticated broker/registry state; validate claimed bindings without upgrading disk observations into server verification.
-2. Additive durable reply-route storage and atomic generation advancement with reply admission; duplicates and crash recovery must preserve original route identity.
-3. Filter reserved provenance fields at every public/native boundary and expose receiver-built provenance through an explicit DTO contract.
-4. Actual old/new journal compatibility, revoked/stale-binding denial and live Codex/Claude canaries. Decide manifest closure/version changes together with production wiring, never land an incomplete bundle.
+## Durable admission and reply
 
-Remote Iroh/MESH provenance, peer principals, cross-mode transfers, new-session launching and explicit session transfer remain deferred. No R2 installed or end-to-end claim follows from this library.
+The route store uses the journal's SQLite connection. New request insertion,
+route pin, receiver-built provenance and admission accounting commit atomically.
+Replies verify the existing pin and current native attachment rows within their
+transaction; same-session renewal retains the original claim token/session while
+old children, cross-session owners and regressions fail. Reply and pin advancement
+commit together, or neither does. Duplicate admission returns the original record
+without re-pinning.
 
-## Second library slice: authenticated chat adapter and durable pin operations
+An original unbound sender may be offline when its reply commits: the reply waits
+at that exact original address. Other observation errors fail closed. No route
+fallback is implied.
 
-`authenticateAttachedLocalSender` uses the existing HMAC credential validator, requires the exact expected session address and interactive claims, then calls the existing live session broker's validateRequest. That broker is responsible for current owner policy, discovery, lease, child and generation checks. This helper is not yet called by the production server. Attached chats remain principal-null because the current registry has no session-to-profile binding contract; a similarly named profile or injected principal cannot fill that gap. Legacy bound desktop identities and worker-profile sender adaptation remain integration work.
+Native provenance is stored separately and exposed as optional senderProvenance.
+Pinned sends strip reserved peer-supplied provenance metadata. Internal route keys
+are not added to public DTOs. Legacy metadata behavior remains unchanged.
 
-`createLocalReplyRouteStore` receives an existing caller-owned SQLite connection and creates only the additive local_reply_routes table. It does not open another journal or own the database lifecycle. Pin creation is immutable/idempotent. `withReply` verifies current identities, calls a synchronous reply writer on the same connection, and advances generations in one BEGIN IMMEDIATE transaction; exceptions roll everything back. It must replace/refactor the journal's existing reply transaction during integration, not wrap that transaction and nest BEGIN statements. Request admission and initial pin creation are not yet one combined transaction; production wiring must make them atomic as well. Caller-supplied callbacks are trusted server code, never peer input, and may not start asynchronous or external side effects.
+Pinned admission measures the final inbox projection with 4096 bytes of framing
+headroom. This fixes a reproduced case where a 261120-byte metadata value was
+admitted but its receiver-built provenance made the inbox frame unretrievable.
+Oversized requests roll back the request and pin together.
 
-New tests use a real file-backed SQLite database, reopen it, verify generation persistence, reject cross-session replies before the write callback, and verify rollback after a controlled write failure. Credential tests use the real issuer/validator for signature, sender, expiry and generation rejection, with a controlled broker fixture for active-session fencing. That fixture does not prove real policy/lease integration; existing broker tests and new end-to-end integration must cover it before release.
+## Admission control and retries
 
-Nothing here is imported by production entrypoints. Runtime closure/version changes, actual message-journal transaction integration, schema rollback compatibility and live Codex/Claude acceptance remain outstanding. No installation or current runtime change occurred.
+The host constructs the optional verifier with its actual session broker and
+HMAC validator, and constructs the route store on its own SQLite connection.
+Missing verification dependencies fail closed for pinned work.
 
-## Native server/journal integration checkpoint
+triangle-local setup-reply-identity --enable/--disable controls new pin creation
+through private client/reply-identity.json. Missing policy disables new pins;
+malformed policy disables them and exposes a fixed status error. Disabling does
+not disable verification of existing pins or break their exact retries. Existing
+legacy messages also remain unpinned on retry after enablement.
 
-The server accepts an internal `replyIdentity` dependency; the journal accepts `replyRouteStoreFactory`. Both default to absent, and the installed host passes neither. `createAttachedReplyIdentity` authenticates the native credential and live broker state for attached-chat pairs, obtains the recipient's live broker observation, and constructs route/provenance itself. Other lanes remain legacy in this slice; no worker or bound-desktop principal association is guessed.
+Correction 9547620 reproduced and fixed duplicate_id_conflict on a pinned retry
+while admission was disabled. Existing-route context comes only from the server's
+journal lookup; client parameters cannot supply it. Both switch directions are
+covered by the real socket/HMAC/journal regression.
 
-The native message journal now creates request+pin in its existing admission transaction. Its reply transaction verifies the original pin and current attachment rows, commits the reply and generation advances together, and preserves the original claim token/session. Same-session generations may advance after broker verification; old children, cross-session owners and regressions fail. Native attachment/discovery rows are rechecked under the journal transaction so a lease/child change between asynchronous broker verification and commit is rejected. A reply may remain queued for its original offline sender, with no fallback. Same-identity pin generations can also advance with new request admission in that conversation; identity reassignment remains forbidden.
+## Runtime and downgrade boundary
 
-Receiver-built provenance is persisted separately from message metadata and returned as an optional `senderProvenance` field. Reserved peer-supplied provenance keys are removed from metadata only for the new pinned flow; the authenticated factory determines the stored record. Existing unpinned DTOs and authentication behavior remain unchanged. Internal reply-route keys are not added to public message projections.
+Manifest v14 adds the contract, store and authentication modules to every exact
+v13 closure: 90 supervisor artifacts and 92 per worker. Python staging/validation,
+Swift launching and doctor agree on the version. Node must support the runtime's
+unflagged SQLite API.
 
-New tests use the actual production journal and socket server with the real HMAC issuer/validator. They cover atomic pin/request rollback, reply-insert failure rollback, database reopen, native claim token preservation, same-chat renewal, an old child, a simulated attachment change after broker validation, original-sender offline queueing and receiver-built provenance despite forged metadata. The socket test uses a controlled policy-broker fixture plus real discovery/attachment tables; existing workspace-broker tests remain distinct evidence. The broader local-message/R1/packaging run passes 217 tests.
+The policy path persists when disabled. Updated native and Python validators
+reject a pre-v14 runtime whenever it exists, including disabled/malformed policy.
+Install the new helper and refresh the frozen wrapper before enabling; the setup
+command checks manifest version, not helper binary identity. This operational
+floor does not protect deliberate owner deletion of policy or replacement of
+both validators/helper and runtime. v13 cannot enforce pins and is not a safe
+rollback reader for pinned work.
 
-### Remaining before release
+## Verification and practical limits
 
-- Independent review of the source candidate and its exact supported-lane boundary.
-- Actual installed-host construction/configuration of the optional dependencies, with the runtime closure/version update in that same change. No hidden dynamic imports or incomplete staged bundle.
-- Real workspace-policy integration canaries, reserved-field/bounds audit and schema downgrade policy. The old v13 module ignores new columns and cannot enforce pins: rollback of pinned work to that module is a security downgrade, not a safe strict-mode rollback. Draining/holding pinned work and owner acceptance must be explicit before any deployment.
-- Worker/bound-desktop sender adaptation and mapped session principals remain unsupported rather than fabricated. Remote transports and cross-machine identities remain deferred.
+All 258 relevant source tests passed after correction 9547620, including actual
+SQLite reopen/rollback, socket admission, bounds, stale claims and attachment
+races. Native host tests passed. Gemini independently reviewed 98be801 and the
+9547620 correction with no blockers. An earlier review of 7d652e2 missed the
+bounds failure; that earlier no-blocker result is not used as sole evidence.
 
-This candidate is not installed; no live journal, mappings, settings or current runtime were changed during R2 implementation.
+Installed owner-approved Claude-to-Codex-to-Claude acceptance returned the exact
+token in 19378 ms. Native provenance, consumed result and pin survived restart
+with new admission disabled. Claude reported an accepted completed duplicate
+receipt on the same IDs/text; an independent snapshot proved the original
+message, sole consumed reply and pin unchanged. Temporary grants were removed,
+test reports consumed and the original backlog preserved.
 
-
-## Host and runtime integration checkpoint
-
-The host constructs the route store on its own SQLite connection and passes a trusted identity factory through the supervisor subsystem, which supplies the actual HMAC validator. With workspace session messaging enabled, the factory uses that host's real workspace-session broker. With no broker, pinned replies fail closed. The trusted host-construction override `replyIdentityEnabled` otherwise reads the private `client/reply-identity.json` policy, absent by default. A boolean or callback controls new admission only. Existing pinned replies continue through authentication and journal verification when it is false.
-
-Manifest v14 adds exactly three artifacts to each v13 closure: the reply contract, route store and sender-authentication modules. Supervisor bundles contain 90 artifacts and worker bundles 92. Python staging/validation, Swift launch validation, doctor, and fixtures accept v14 while retaining exact historical artifact sets.
-
-Codex reproduced a request that was accepted with 261120 bytes of metadata padding but became unretrievable when receiver-built provenance enlarged its inbox projection past the protocol limit. Pinned admission now measures its final journal projection with 4096 bytes of framing headroom inside the transaction. Oversized requests roll back the request and route together. The regression uses the real socket, journal and signed credentials.
-
-Gemini 3.8 Flash (Medium) independently reviewed frozen source `7d652e2`, reported no blockers, and ran the 10 then-existing R2 tests. It missed the reproducible bounds issue. That review does not cover this subsequent host/packaging change. Focused wiring/closure tests passed 55 tests. The broader run passed 254 of 257 initially, with three exact packaging fixtures requiring their new v14 file list; all eight tests in that corrected packaging suite subsequently passed. The Swift native host suite also completed successfully (exit 0), including the v14 standalone-supervisor artifact fixture.
-
-Remaining release gates: review of this exact head; install the new helper and runtime together; real attached-workspace canaries and restart acceptance. Do not install or enable this as completed R2 acceptance. Worker/bound-desktop lanes remain legacy; no mapped session principal or remote transport support is implied. v13 must not process pinned work as a rollback path.
-
-
-## Activation and operational downgrade floor
-
-`triangle-local setup-reply-identity --enable` requires an enabled local configuration and an installed supervisor manifest with version at least 14. It atomically writes private `client/reply-identity.json` containing `{version:1,enabled:true}`. `--disable` writes false and retains the file. Neither command changes pairings, grants or the session-messaging policy. The host reloads this tiny policy per admission; absent policy disables new pins, and malformed policy disables admission with a fixed error in status. Existing pins still require the verifier.
-
-The updated native helper and Python manifest validator reject runtime versions below 14 whenever this policy path exists, including disabled/malformed policy and symlinks. Both the supervisor and fallback worker native resolution paths apply the floor. Install the new helper and refresh the frozen validator wrapper before enabling; the setup command's manifest check does not attest the helper binary version. This is protection against ordinary runtime-only downgrade, not deliberate owner deletion of policy or replacement of both validator/helper and runtime. Never describe old v13 binaries as enforcing this new guard.
-
-Disposable tests prove setup rejects v13 before policy creation; enable and disable preserve a 0600 policy and minimum-runtime result; malformed policy is disabled with a status error; the Python renderer refuses a valid legacy runtime after disabled policy creation; and native supervisor resolution refuses v13 but accepts v14 with disabled policy. The 23-test focused activation run and 12-test guard rerun passed. The Swift host suite completed successfully after the new guard and native fixture were added. The Mini's live install and configuration remain untouched.
-
-
-## Disabled-admission retry correction — 9547620
-
-A follow-up regression reproduced `duplicate_id_conflict` when the exact original pinned request was retried with new pin admission disabled. The server had discarded identity context when the switch was off, changing the route key and reserved-metadata projection used for duplicate matching. The retry factory now receives an existing route only from the server's trusted journal lookup, still validates credentials/live identities and verifies pinned associations/generations, and retains the original pinned canonical projection. Disabling controls new pins only. Conversely, retrying an existing unpinned legacy message after enablement bypasses pin creation, preserving its original semantics.
-
-The existing native socket regression now exercises both switch directions with the real signed-credential server/journal. It failed before the fix and passes after it; all 258 relevant tests pass. Gemini 3.8 Flash (Medium) independently reviewed only commit `9547620`, ran the focused socket test, and reported no blockers. It confirmed incoming client parameters cannot supply existingRoute and no pin mutation occurs on duplicate admission. Native Swift code was unchanged and was not needlessly rebuilt for this correction.
-
-## Installed acceptance closure
-
-The installed attached Claude-to-Codex canary returned the exact token in 19378 ms; native request/reply provenance, consumed result and original-sender pin were independently verified and survived restart with new admission disabled. After explicit owner approval in Claude, the original canary was retried with the same IDs/text under the bounded temporary sender grant. Claude returned an accepted completed duplicate receipt; a separate native snapshot proved the original message, its sole consumed reply and its pin were unchanged. The grant was removed immediately, test reports consumed, original allowlist restored, and original 14 pending replies/two held tasks preserved. See `docs/handoffs/2026-10-26-r2-installed-disabled.md` for exact evidence and scope. This is owner-approved interactive acceptance, not unattended execution proof or permanent activation.
+The chats required direct owner approval before executing peer instructions.
+Wake acceptance was not counted as execution. This is not unattended execution
+acceptance, permanent activation, all-agent coverage or remote transport proof.
