@@ -320,6 +320,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let manifest: WorkerInstallManifest
         do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: data) }
         catch { throw WorkerLauncherError.invalidManifest }
+        try enforceReplyIdentityRuntimeFloor(manifest.version)
         let requiredReleaseEnvironment: Set<String> = [
             "PATH", "LANG", "LC_ALL", "TRIANGLE_PROJECT_ROOT", "TRIANGLE_RUNTIME_ROOTS",
             worker == .codex ? "CODEX_CLI" : (worker == .hermes ? "HERMES_CLI" : "ANTIGRAVITY_CLI"),
@@ -459,6 +460,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let manifest: WorkerInstallManifest
         do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
         catch { throw WorkerLauncherError.invalidManifest }
+        try enforceReplyIdentityRuntimeFloor(manifest.version)
         let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
@@ -561,6 +563,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let manifest: WorkerInstallManifest
             do { manifest = try JSONDecoder().decode(WorkerInstallManifest.self, from: boundedRead(manifestURL, maximum: 32 * 1024)) }
             catch { throw WorkerLauncherError.invalidManifest }
+        try enforceReplyIdentityRuntimeFloor(manifest.version)
             guard manifest.version >= 4 else { continue }
             let script = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
             try checkedFile(script, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
@@ -605,6 +608,18 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         // A concurrent creator is accepted only after the same complete
         // nonsymlink, owner and mode checks as a newly created directory.
         return try checkedDirectory(url, exactMode: exactMode)
+    }
+
+    // Existence persists the runtime floor even when admission is disabled.
+    private func enforceReplyIdentityRuntimeFloor(_ version: Int) throws {
+        let policy = applicationRoot.appendingPathComponent("client/reply-identity.json")
+        var metadata = stat()
+        let result = lstat(policy.path, &metadata)
+        if result == 0 {
+            guard version >= 14 else { throw WorkerLauncherError.invalidManifest }
+        } else if errno != ENOENT {
+            throw WorkerLauncherError.unsafeInstallation
+        }
     }
 
     private func checkedDirectory(_ url: URL, exactMode: mode_t?) throws -> URL {

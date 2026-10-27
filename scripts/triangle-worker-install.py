@@ -409,6 +409,11 @@ def strict_manifest(path, agent):
     if len(raw) > 32768:
         fail("manifest too large")
     value = json.loads(raw)
+    # Policy existence is a persistent operational floor, including disabled or
+    # malformed policy. Never silently downgrade pinned work to a v13 reader.
+    policy = os.path.join(os.path.dirname(os.path.dirname(path)), "client", "reply-identity.json")
+    if os.path.lexists(policy) and value.get("version", 0) < 14:
+        fail("reply identity requires runtime v14 or later")
     if set(value) != {"version", "nodeSHA256", "projectRoot", "environment", "artifacts"}:
         fail("manifest schema mismatch")
     expected_environment = {

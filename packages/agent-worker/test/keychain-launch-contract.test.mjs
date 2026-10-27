@@ -295,6 +295,14 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
   const rendered = spawnSync("/bin/bash", [servicePath, "render", "codex"], { encoding: "utf8", env: fixture.env });
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.match(rendered.stdout, /dev\.thetriangle\.codex\.worker/);
+  const clientDir=path.join(fixture.applicationRoot,"client");
+  fs.mkdirSync(clientDir,{mode:0o700});
+  const policy=path.join(clientDir,"reply-identity.json");
+  fs.writeFileSync(policy,JSON.stringify({version:1,enabled:false}),{mode:0o600});
+  const downgraded=spawnSync("/bin/bash",[servicePath,"render","codex"],{encoding:"utf8",env:fixture.env});
+  assert.notEqual(downgraded.status,0);
+  assert.match(downgraded.stderr,/requires runtime v14/);
+
 });
 
 test("LaunchAgent install is atomic and restores runtime and loaded prior service on bootstrap failure", { skip: darwinOnly }, (t) => {

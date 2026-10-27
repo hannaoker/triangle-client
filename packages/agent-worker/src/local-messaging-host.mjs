@@ -1,3 +1,5 @@
+import path from 'node:path';
+import fs from 'node:fs';
 import {createLocalReplyRouteStore} from './local-reply-route-store.mjs';
 import {createAttachedReplyIdentity} from './local-sender-authentication.mjs';
 import {randomUUID as cryptoRandomId,createHash} from 'node:crypto';
@@ -62,8 +64,20 @@ export function loadLocalMessagingConfig(configPath) {
  return config;
 }
 
-export function createInstalledLocalMessagingHost({configPath,runners,gate,logger={},wakeAdapter=null,wakeRunner=null,minIntervalMs=null,timerIntervalMs=null,clock=null,replyIdentityEnabled=false}) {
+export function createInstalledLocalMessagingHost({configPath,runners,gate,logger={},wakeAdapter=null,wakeRunner=null,minIntervalMs=null,timerIntervalMs=null,clock=null,replyIdentityEnabled=null}) {
  const config=loadLocalMessagingConfig(configPath);
+ const replyPolicyPath=path.join(path.dirname(configPath),'reply-identity.json');
+ const replyPolicy=()=>{
+  try {
+   const metadata=fs.lstatSync(replyPolicyPath);
+   if(!metadata.isFile()||metadata.nlink!==1||metadata.size>4096)throw new Error('invalid policy');
+   const policy=readPrivateJson(replyPolicyPath);
+   if(policy.version!==1||typeof policy.enabled!=='boolean'||Object.keys(policy).sort().join(',')!=='enabled,version')throw new Error('invalid policy');
+   return {enabled:policy.enabled,minimumRuntime:14};
+  }catch(error){return {enabled:false,...(error.code==='ENOENT'?{}:{error:'invalid_reply_identity_policy',minimumRuntime:14})};}
+ };
+ const admissionEnabled=replyIdentityEnabled??(()=>replyPolicy().enabled);
+
  for(const r of config.recipients)if(typeof runners.get(r.instanceId)?.run!=='function')throw coded('local_recipient_unavailable',`Recipient runtime unavailable: ${r.profile}`);
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
@@ -219,7 +233,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:replyIdentityEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),replyIdentity:{enabled:!!sessionBroker&&(typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true),scope:'attached-chat-pairs'},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),replyIdentity:{enabled:!!sessionBroker&&(typeof admissionEnabled==='function'?!!admissionEnabled():admissionEnabled===true),scope:'attached-chat-pairs',...(replyPolicy().error?{error:replyPolicy().error}:{} )},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

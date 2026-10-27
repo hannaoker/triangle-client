@@ -290,6 +290,22 @@ public enum WorkerLauncherContractCases {
         let drain = try resolver.resolveCursorAcpDrain(for: cursor)
         try expect(coordinator.executable == drain.executable, "cursor did not use the standalone supervisor")
         try expect(Set(coordinator.environment.keys) == Set(["PATH", "LANG", "LC_ALL"]), "standalone supervisor leaked harness environment")
+        if version == 13 || version == 14 {
+            let client = fixture.applicationRoot.appendingPathComponent("client")
+            try FileManager.default.createDirectory(at: client, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let policy = client.appendingPathComponent("reply-identity.json")
+            try Data("{\"version\":1,\"enabled\":false}".utf8).write(to: policy)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: policy.path)
+            if version == 13 {
+                do {
+                    _ = try resolver.resolveCoordinator(for: [cursor])
+                    throw WorkerContractFailure("disabled reply identity policy allowed runtime downgrade")
+                } catch is WorkerLauncherError {}
+            } else {
+                _ = try resolver.resolveCoordinator(for: [cursor])
+            }
+            try FileManager.default.removeItem(at: policy)
+        }
         try fixture.withManifestMutation("nodeSHA256", value: String(repeating: "0", count: 64))
         do {
             _ = try resolver.resolveCoordinator(for: [cursor])
