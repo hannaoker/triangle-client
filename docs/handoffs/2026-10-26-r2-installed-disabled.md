@@ -1,6 +1,6 @@
 # R2 installed with admission disabled — 2026-10-26
 
-Candidate code: `98be801`; installed source/documentation head: `14c891b` on draft PR #137. This is candidate installation, not merged or completed R2 acceptance.
+Candidate code: `98be801`; installed source/documentation head: `14c891b` on draft PR #137. Candidate installed and exercised with an owner-authorized attached-chat canary. PR #137 is not merged; permanent activation is not authorized. See the final acceptance sections below for current state.
 
 ## Verified installation
 
@@ -13,7 +13,7 @@ Candidate code: `98be801`; installed source/documentation head: `14c891b` on dra
 
 Machine evidence: `~/Library/Application Support/The Triangle/releases/r2-install-verification.json`. Private backup: `archive/r2-install-20261027T041803Z` beneath the same root. Earlier snapshot attempts failed before a usable SQLite backup because the shell's old Python lacked backup support; the completed snapshot uses `/usr/bin/python3`. The service stop command returned its known "did not stop" error, but launchctl confirmed the job was absent before installation. Restoration rehearsal remains owner-waived.
 
-## Still required
+## Original installation gates (historical; completed below)
 
 1. Obtain a usable current-code independent review. The restricted Gemini run stalled on denied writes to its own session files and was stopped. A normal-access retry is running; its only output so far says it is waiting for a background test. This is not a completed review or no-blocker finding.
 2. The owner has been asked to open a second Claude Code chat in The Triangle workspace and call triangle_get_status. Only one attached chat was reachable at preparation time. Do not impersonate the bound Codex desktop identity as an attached session.
@@ -22,7 +22,7 @@ Machine evidence: `~/Library/Application Support/The Triangle/releases/r2-instal
 
 The operational runtime floor applies through the updated helper and validator while the policy path exists, even disabled. It does not protect deliberate owner deletion of policy or replacement of both validators and runtime. Never roll pinned work back to an old reader that ignores pins.
 
-## Live acceptance preparation correction
+## Live acceptance preparation and permission boundary
 
 The owner opened a second Claude chat, session-2626b03bf106b80446c258de751c5b008ca861894a5f1fbd03881a05b5cf6a5f (raw session 87abd7c9-effd-4dfe-8250-fa6e34254686, generation 1). Its first status call hit ENOENT while installation had the service stopped. After restart, the real control socket exists and the owner confirmed triangle_get_status succeeds. This is attachment evidence, not pinned execution.
 
@@ -43,3 +43,13 @@ The installed journal independently proves:
 - Claude returned `R2_CLAUDE_PAIR_CONFIRMED` to the bound Codex setup request. Consumed only the two exact setup reports. Original 14 pending replies and two held tasks remain; all 65 pre-install message phase/updated_at tuples remain unchanged.
 
 The candidate is installed and running, with new admission disabled and no temporary grant. PR #137 remains draft. Live duplicate retry after restart was not run; it remains source-test evidence, separate from proven live persistence. A permanent grant/default activation decision and unattended acceptance remain outside this one-canary authorization.
+
+## Retry correction installed — 9547620
+
+A stronger regression found an exact pinned resend fails with duplicate_id_conflict while admission is disabled. Fixed in `9547620`: existing pinned retries keep trusted server-fetched route context and still authenticate/verify identities. Legacy unpinned retries remain unpinned when admission turns on. Both directions are covered by the native socket test; all 258 relevant tests pass. Gemini independently reviewed this small commit with no blockers and ran the focused test successfully.
+
+Staged this correction into all four v14 bundles, refreshed the wrapper and restarted. All installed source hashes for the changed modules match `9547620`; no native Swift changes were needed. The pre-update v14 backup, including the completed pin, is `archive/r2-install-20261027T043620Z`. The stop script's immediate launchd query briefly reported SIGTERMed; waited for actual removal before staging.
+
+One bounded live retry check reused the owner-approved temporary sender grant for only the existing canary IDs, with admission disabled. Its setup request `r2-retry-setup-20261026-01` was accepted but remained queued; no Claude result arrived within 120 seconds. The check removed the grant automatically and proved the original canary message, sole consumed reply and pin remained byte-for-byte/state identical. This does not prove a duplicate resend occurred or passed. Do not count the no-response outcome as a protocol regression, either.
+
+Final verified state: service running, new pin admission disabled, original allowlist restored, original 65 message states unchanged, original 14 pending replies/two held tasks untouched. The one new retry setup instruction remains queued; do not claim it using another session or silently delete it. Source regression and installed hash proof cover the correction; actual live retry completion remains an explicit open gate. PR #137 stays draft.
