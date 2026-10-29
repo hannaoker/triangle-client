@@ -168,7 +168,7 @@ Disposable journals and state roots only; nothing reads installed state.
 
 ## 8. Owner decisions
 
-Recommendations, none settled.
+Approved 2026-10-29: the owner instructed Codex to proceed with the recommended design and review/merge this stack. The seven recommendations below are adopted. Installation, live scratch acceptance and any action on the existing backlog remain separate gates.
 
 1. **Offline first (recommended)** or an online owner channel. Offline costs a service stop per reconciliation, which also pauses the MESH, headless and ACP lanes, and any open (the reconcile call or the restart) holds in-flight interactive claims as `crash_recovery`: check that `triangle-local status` shows `executing: 0` before stopping, or accept that those chats' later replies become late results. Online needs a credential distinct from every turn credential and does not isolate same-user processes.
 2. **Actions:** `mark-failed`, `mark-completed` and `accept-late-result` only (recommended); replay stays excluded.
