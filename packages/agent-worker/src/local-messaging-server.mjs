@@ -255,6 +255,15 @@ export function createLocalControlServer({
     }
   }
 
+  // The caller's own inbox view: address, generation and queue counts, nothing about the host.
+  const ownSessionStatus = async (senderId, claims, generation = claims.generation) => ({
+    route: "same-device",
+    senderId,
+    sessionId: claims.sessionId,
+    generation,
+    inbox: await journal.getInteractiveInboxCounts?.(senderId) ?? { queued: 0, executing: 0, held: 0 },
+  });
+
   // Owner-configured labels are display metadata, never routing or authority.
   if (!Array.isArray(recipientDirectory) || recipientDirectory.length > 256) {
     throw coded("invalid_options", "Recipient directory must be a bounded array");
@@ -376,7 +385,7 @@ export function createLocalControlServer({
         }
       }
 
-      if(claims?.senderType==='desktop-inbox'||(inboxBroker?.isDesktopSender(senderId)&&['list_inbox','claim_inbox_message','send_reply'].includes(method))){
+      if(claims?.senderType==='desktop-inbox'||(inboxBroker?.isDesktopSender(senderId)&&['list_inbox','claim_inbox_message','send_reply','session_status'].includes(method))){
         if(!inboxBroker)throw coded('unauthorized','Desktop inbox is not supported');
         await inboxBroker.validateRequest({claims,senderId});
       }
@@ -397,15 +406,7 @@ export function createLocalControlServer({
         }
         case "local_status": {
           if (claims?.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
-            const inbox = await journal.getInteractiveInboxCounts?.(senderId) ?? { queued: 0, executing: 0, held: 0 };
-            const statusRes = {
-              route: "same-device",
-              senderId,
-              sessionId: claims.sessionId,
-              generation: claims.generation,
-              inbox,
-            };
-            socket.write(encodeFrame(createSuccessResponse(id, statusRes)));
+            socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims))));
             break;
           }
           if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
@@ -418,6 +419,20 @@ export function createLocalControlServer({
             router: baseStatus.router ?? routerBlock,
           };
           socket.write(encodeFrame(createSuccessResponse(id, decoratedStatus)));
+          break;
+        }
+        case "session_status": {
+          // Only interactive senders (attached chats, the paired Claude session, Grok pairings) and the bound conversation
+          // have an own inbox view to report. local_status cannot be narrowed by sender type because the owner CLI shares
+          // the bound conversation's credential and needs the host view.
+          const interactive = claims?.senderType === "interactive"
+            || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId));
+          // The bound conversation must hold a current desktop-inbox claim; the inbox validation above has already checked it.
+          const bound = !interactive && claims?.senderType === "desktop-inbox" && inboxBroker?.isDesktopSender(senderId);
+          if (!interactive && !bound) throw coded("unsupported", "Session status is available to interactive and bound conversations");
+          // Acknowledgments check the wake binding's generation, which moves on a rebind; the inbox claim's stays 1.
+          const generation = bound ? (await journal.getWakeBinding?.(senderId))?.generation ?? claims.generation : claims.generation;
+          socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims, generation))));
           break;
         }
         case "exchange_session": {

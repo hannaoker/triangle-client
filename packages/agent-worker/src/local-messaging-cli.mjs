@@ -629,7 +629,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    await runMcpStdioSession({input,output,handler:createLocalMessagingMcpHandler({client,turnCredentialProvider:credential})});return 0;
   }
   const rpcOptions={credential:await credential()};let result;
-  if(command==='status')result=options['message-id'] ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);
+  if(command==='status')result=options['message-id']!==undefined ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);
   if(command==='inbox'){const rows=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpcOptions);result={items:[...rows],nextCursor:rows.nextCursor??null};}
   if(command==='claim'){
    if(!options['message-id']||!options['claim-id'])throw coded('invalid_arguments','Stable message-id and claim-id required');

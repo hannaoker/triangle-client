@@ -627,3 +627,37 @@ session may lack authorization; an attached route does not prove execution.
 Directory explanations are optional and omitted as a group if they would push an
 otherwise valid directory response over the existing protocol limit. Entries,
 capabilities and authorization filtering are preserved.
+
+## One status verb on every surface (source change, not installed)
+
+On every agent-facing surface, `status` with a message ID is that message's status
+and without one is the caller's own view. The owner CLI keeps the host view.
+
+| Surface | No argument | With a message ID |
+| --- | --- | --- |
+| `triangle-local status` (owner CLI) | Host status: journal, dispatcher, wake, discovery, router | `--message-id ID` |
+| `triangle_get_status` on the bound Codex MCP (`triangle-local mcp`) | This conversation's own view | `messageId` |
+| `triangle_get_status` on attached Claude and Codex chats | This chat's own view | `messageId` |
+| `triangle-local grok status` | This pairing's own view | `--message-id ID` (earlier builds accepted the flag and ignored it) |
+
+The own view is `{route, senderId, sessionId, generation, inbox: {queued, executing,
+held}}` and never contains host status. The owner CLI and the bound MCP adapter share
+one credential, so `local_status` cannot be narrowed by sender: it is unchanged, and the
+bound adapter asks the new `session_status` method instead. That method answers
+interactive senders (attached chats, the paired Claude session, Grok pairings) and the
+bound conversation only (`unsupported` for any other sender). For the bound conversation
+it follows the inbox rules: a disabled desktop inbox fails with `inbox_disabled` and a
+stale binding with `binding_changed`; its `generation` is the wake binding's, which
+acknowledgments check and a rebind moves. The MCP tool never returning host status is
+a tool-contract property, not an isolation boundary: the bound thread can still run
+`triangle-local status` through the same credential. Only an absent message ID asks for
+the own view; an empty one is refused (`invalid_request`). A supervisor that predates
+`session_status` fails the call visibly rather than answering with its host status.
+Loaded sessions keep their old tool schema until restarted; the old schema still
+requires `messageId`, which keeps working. Message status keeps its sender-or-recipient
+rule (`foreign_access_denied`).
+
+`local-messaging-tool-parity.test.mjs` pins the tool names, argument names and required
+fields of the three MCP surfaces and lists each intended difference: the bound-only `triangle_cancel_message`, the
+Codex-only `triangle_attach_session`, and the bound adapter's required `claimId`,
+`replyId` and `generation`, which attached chats generate or default.

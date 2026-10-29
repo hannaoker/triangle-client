@@ -174,6 +174,8 @@ export function createLocalControlClient({
       activeTurnCredential = cred;
     },
     async localStatus(options = {}) { return callRpc("local_status", {}, options); },
+    // The caller's own inbox view only. localStatus gives non-interactive callers (the owner CLI) the host status.
+    async sessionStatus(options = {}) { return callRpc("session_status", {}, options); },
     async exchangeTurnBinding(binding) {
       const grant = await callRpc("issue_turn", binding);
       if (grant?.credential) {
