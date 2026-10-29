@@ -182,7 +182,7 @@ Recommendations, none settled.
 
 - The dispatcher stores a runner's reply and completes the record in two separate writes. A crash between them is what produces the stored-reply case above; writing both in one transaction would remove the cause. It is outside this design and was not changed.
 - Whether a read-only listing could run beside a live supervisor under `journal_mode=DELETE`; the offline design avoids the question and it was not tested.
-- How the notifier behaves at its next start after a reconciliation, end to end (the removal of a held item is treated as covered, checked against `wakeSnapshotCovered`; a new wake after `accept-late-result` is expected, not exercised).
+- The notifier after a reconciliation was exercised on a disposable host with a stub wake adapter (`local-messaging-reconcile-lifecycle.test.mjs`: a real stop, list, reconcile and restart). `accept-late-result` woke the sender at the next start with the reply and no held item; `mark-failed` sent no wake and the status read `closed_by_owner`. `mark-completed` removes a held item the same way and was not run separately. The installed Codex wake path itself was not exercised.
 - Whether any other process opens this journal besides the supervisor, `reconcile-wake`, `held` and `reconcile-message`; only those were checked.
 - How an owner-authored reply could advance a reply route pin, if decision 4 goes the other way.
 - Whether the owner accepts a service stop per reconciliation, or wants slice O3 earlier.
