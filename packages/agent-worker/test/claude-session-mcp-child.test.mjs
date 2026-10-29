@@ -622,8 +622,10 @@ test("Issue 3 [P2]: Claude MCP child exposes authorized bidirectional tools tria
       params: { name: "triangle_list_sessions", arguments: {} },
     });
     assert.equal(directoryResult.result.isError, false);
-    assert.deepEqual(JSON.parse(directoryResult.result.content[0].text).sessions,
+    const directory=JSON.parse(directoryResult.result.content[0].text).sessions;
+    assert.deepEqual(directory.map(({delivery,...legacy})=>legacy),
       [{ id: env.codexId, label: env.codexId, kind: "unknown", presence: "unknown" }]);
+    assert.equal(directory[0].delivery.state,'availability_unknown');
 
 
     // 2. Claude sends initial request to runner

@@ -37,7 +37,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "triangle_get_status",
-    description: "Inspect the delivery and processing status of a message.",
+    description: "Inspect a message phase plus delivery explanation and next action. Notification acceptance is not execution; approval state may be unknown.",
     inputSchema: {
       type: "object",
       properties: {

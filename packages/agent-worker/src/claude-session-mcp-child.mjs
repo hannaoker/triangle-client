@@ -124,7 +124,7 @@ export const CLAUDE_MCP_TOOLS = [
   },
   {
     name: "triangle_get_status",
-    description: "Get status of an interactive session or sent message.",
+    description: "Get this session or a sent message status. Message delivery includes a verified state, explanation and next action; notification acceptance is not execution or approval.",
     inputSchema: {
       type: "object",
       properties: {

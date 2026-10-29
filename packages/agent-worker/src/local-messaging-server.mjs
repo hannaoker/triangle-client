@@ -15,10 +15,39 @@ import {
   boundRepliesToEnvelope,
   PROTOCOL_VERSION,
   MAX_FIELD_STRING_LENGTH,
+  MAX_PAYLOAD_BYTES,
 } from "./local-messaging-protocol.mjs";
 import { coded, sanitizeError } from "./local-messaging-errors.mjs";
 import { createUnifiedRouter } from "./unified-router.mjs";
 import { createRegistrySnapshotProvider } from "./router-registry-snapshot.mjs";
+
+// Presentation only. Journal phases and authorization remain authoritative.
+export function describeMessageDelivery(record,{notification='unknown',recipientAvailable=null,pullOnly=false,now=Date.now()}={}){
+ const view=(state,summary,nextAction)=>({state,summary,nextAction});
+ if(record.phase==='completed')return view('completed','Completed in the local journal.','Retrieve the correlated reply if one was produced; verify its contents independently.');
+ if(record.phase==='held')return view('held',record.hasLateResult?'Work is held; a late result is retained for owner review.':'Work is held; completion is uncertain.','Ask the owner to reconcile this request before starting another execution.');
+ if(record.phase==='reply_failed')return view('failed','Execution or reply failed; successful completion is not recorded.','Inspect the failure and ask the owner to reconcile execution and reply custody before retrying.');
+ if(record.phase==='executing'){
+  if(record.recipientType==='interactive'&&Number.isFinite(record.leaseExpiresAt)&&record.leaseExpiresAt<=now)return view('lease_expired','The claim lease has expired; completion is unverified.','Ask the owner to reconcile the request; do not start duplicate work.');
+  return view('executing','Execution was claimed or started; active model progress is not observed here.','Wait for the correlated result or inspect the recipient runtime; do not start duplicate work.');
+ }
+ if(record.phase==='queued_local'){
+  if(recipientAvailable===false)return view('waiting_for_recipient','Stored locally; the recipient has no currently usable delivery route.','Open or reload the recipient chat and check its Triangle attachment and messaging settings.');
+  if(pullOnly)return view('waiting_for_poll','Stored locally for a pull-only recipient; automatic wake is unavailable.','Ask the recipient to check its Triangle inbox in a user-initiated turn.');
+  if(notification==='accepted'||notification==='acknowledged')return {...view('notified_unclaimed','A notification covering this request was accepted; the request has not been claimed.','Check the recipient chat for owner authorization, tool approval, or a busy turn.'),approval:'unknown'};
+  return view('queued','Stored locally; notification and execution are not confirmed.','Check recipient availability and notification delivery; keep the same IDs if retrying an uncertain send.');
+ }
+ return view('unknown','The recorded state is not recognized by this reader.','Inspect the request with a compatible runtime before retrying.');
+}
+export function describeRecipientDelivery(row){
+ const view=(state,summary,nextAction)=>({state,summary,nextAction});
+ if(row.capabilities?.pullInbox&&row.capabilities?.queueable)return view('pull_only','Requests can be queued; the recipient checks them on a user-initiated turn.','Send only if authorized, then ask the recipient to check its inbox.');
+ if(row.capabilities?.reachable)return view('ready_to_queue','A delivery route is attached; this does not prove execution.','Send a request, then inspect its message status and correlated reply.');
+ if(row.attachment==='ended'||row.lifecycle==='ended')return view('session_ended','The session has ended.','Reopen the same session or ask the owner to select a new target; do not silently substitute another chat.');
+ if(row.attachment==='not-attached')return view('not_attached','The chat has no current Triangle attachment.','Open or reload that chat and call triangle_get_status.');
+ if(row.capabilities?.visible)return view('visible_only','Listed by discovery; delivery authorization or attachment is not established.','Ask the owner to check exact grants and session attachment. Discovery alone grants no delivery permission.');
+ return view('availability_unknown','The recipient is configured; live delivery availability is not established.','Send only if authorized and check the resulting message status.');
+}
 
 const MAX_INFLIGHT_PER_SOCKET = 50;
 const MAX_REQUEST_ID_LENGTH = 128;
@@ -438,7 +467,11 @@ export function createLocalControlServer({
           }
           const rawSessions = interactiveBroker?.filterDirectory ? interactiveBroker.filterDirectory(senderId, sessions) : sessions;
           const decoratedSessions = activeRouter.decorateSessions({ sessions: rawSessions });
-          socket.write(encodeFrame(createSuccessResponse(id, decoratedSessions, PROTOCOL_VERSION)));
+          const hintedSessions={...decoratedSessions,sessions:decoratedSessions.sessions.map(row=>({...row,delivery:describeRecipientDelivery(row)}))};
+          const hintedResponse=createSuccessResponse(id,hintedSessions,PROTOCOL_VERSION);
+          // Optional explanations must never make an otherwise valid directory unreadable.
+          const response=Buffer.byteLength(JSON.stringify(hintedResponse),'utf8')<=MAX_PAYLOAD_BYTES?hintedResponse:createSuccessResponse(id,decoratedSessions,PROTOCOL_VERSION);
+          socket.write(encodeFrame(response));
           break;
         }
         case "discover_recipients": {
@@ -639,6 +672,7 @@ export function createLocalControlServer({
             // 8. Return custody receipt promptly carrying original stored requestId
             const rawReceipt = {
               accepted: true,
+              delivery: describeMessageDelivery(record),
               messageId: record.messageId,
               requestId: record.requestId,
               status: record.phase || "queued_local",
@@ -690,7 +724,14 @@ export function createLocalControlServer({
             safeRuntimeError = "Execution failure occurred";
           }
 
+          let recipientAvailable=null;
+          if(record.phase==='queued_local'&&record.recipientType==='interactive'&&record.recipient.startsWith('session-')&&sessionBroker){
+            try{await sessionBroker.describeLocalSession(record.recipient);recipientAvailable=true;}
+            catch(error){if(['session_offline','session_disabled'].includes(error.code))recipientAvailable=false;}
+          }
+          const notification=record.phase==='queued_local'&&journal.getMessageWakeEvidence?await journal.getMessageWakeEvidence(record.messageId):'unknown';
           const rawStatus = {
+            delivery:describeMessageDelivery(record,{notification,recipientAvailable,pullOnly:directory.get(record.recipient)?.capabilities?.pullInbox===true}),
             messageId: record.messageId,
             ...(record.senderProvenance ? { senderProvenance: record.senderProvenance } : {}),
             phase: record.phase,
