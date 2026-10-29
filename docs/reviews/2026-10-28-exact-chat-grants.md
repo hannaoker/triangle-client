@@ -1,7 +1,7 @@
 # Exact chat grants implementation verification
 
 Candidate branch: `codex/exact-chat-grants`, based on main `71b83c1`.
-Not installed or activated. Existing live permissions were not modified.
+Candidate code `80bdf06` installed on the Mini. Installed scratch-chat acceptance passed; all temporary exact grants were removed. Existing workspace-wide sender lists were preserved.
 
 ## Behavior
 
@@ -44,11 +44,32 @@ listing. Follow-up review found no remaining authorization blocker. A final empt
 pair-list preservation edge was fixed and regression tested. The initially chosen
 DeepSeek reviewer was unavailable for this account and supplied no review.
 
-## Remaining release gate
+## Installed acceptance (2026-10-28)
+
+The owner supplied three fresh attached Claude chats (A, B, C). A temporary
+exact A→B grant allowed the fixed-token request and its correlated B→A reply.
+A reported `recipient_not_allowed` for C; the denied ID has no journal admission.
+After grant revocation, A reported the same denial for a new B request, also
+absent from the journal. The original accepted request could still be answered
+after revocation, and A consumed that exact reply.
+
+No temporary pair remains; policy stays v2 with the prior broad lists intact.
+All 74 original message rows, 71 original reply rows and one original reply-route
+row match the pre-install snapshot byte-for-field. The 14 older pending replies,
+two held tasks and original queued request are untouched. Fixed-token setup
+reports were consumed and this chat’s corresponding wakes acknowledged.
+
+Denial errors are peer reports corroborated by absent admissions, not a captured
+raw tool transcript. Rejection using an earlier credential is covered by source
+tests; the live heartbeat may have refreshed credentials. Machine evidence:
+`releases/pr139-install-verification.json` and `releases/pr139-chat-acceptance.json`
+under the application root. Supervisor has 90 verified artifacts; each worker has
+92. Existing older session MCP processes may need reload to read v2 policy.
+
+## Upgrade and rollback boundary
 
 Install a matching supervisor, CLI and session MCP runtime before first creating
 v2 policy; reload old MCP children. Older readers reject v2. Revoke retains v2,
 so rollback requires a compatible private policy and runtime together, or disabling
-messaging. Real scratch-chat acceptance must separately prove exact target access,
-sibling denial, immediate revoke, and grant cleanup. No such installed acceptance
-is claimed here. No live backlog or held task was consumed by this work.
+messaging. Installed scratch-chat acceptance above covers exact target access, sibling denial,
+revocation and cleanup. No live backlog or held task was consumed by this work.

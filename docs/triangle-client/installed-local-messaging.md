@@ -495,7 +495,7 @@ wake until explicit reauthorization. No second App Server or reasoning launcher
 owns the inbox. Existing claim leases/retention still apply; this adds no automatic
 task-expiry, lease-extension or cancellation contract.
 
-## Exact chat grants (candidate; not yet installed)
+## Exact chat grants (candidate installed on Mini 2026-10-28)
 
 A directional exact grant permits one authenticated sender address to initiate
 requests to one attached chat address. It never authorizes execution of peer
