@@ -37,7 +37,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "triangle_get_status",
-    description: STATUS_TOOL_DESCRIPTION,
+    description: `${STATUS_TOOL_DESCRIPTION} Without messageId this needs the desktop inbox to be enabled.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -240,7 +240,8 @@ export function createLocalMessagingMcpHandler({
 
               case "triangle_get_status": {
                 // No argument is this conversation's own view, never the host status the owner CLI gets.
-                resultData = args.messageId
+                // Only an absent ID asks for the own view; anything else, even an empty string, is validated by the server.
+                resultData = args.messageId !== undefined && args.messageId !== null
                   ? await client.getMessageStatus({ messageId: args.messageId }, rpcOptions)
                   : await client.sessionStatus(rpcOptions);
                 break;

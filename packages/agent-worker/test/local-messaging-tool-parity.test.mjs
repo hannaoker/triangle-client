@@ -6,7 +6,8 @@ import { STATUS_TOOL_DESCRIPTION } from "../src/local-messaging-protocol.mjs";
 
 // The agent-facing tools exist on three MCP surfaces: the Desktop-bound Codex adapter (BOUND), attached Claude chats
 // (CLAUDE) and attached Codex chats (CODEX). They keep one contract. Every intended difference is listed below;
-// any other drift, or a listed difference that stops being true, fails this test.
+// any other difference in tool names, argument names or required fields, or a listed difference that stops being
+// true, fails this test. Argument types, descriptions (except the status tool's) and additionalProperties are not compared.
 const BOUND_ONLY_TOOLS = ["triangle_cancel_message"];
 const CODEX_ONLY_TOOLS = ["triangle_attach_session"];
 // Attached chats generate idempotency IDs and default the generation; the bound adapter keeps requiring them.

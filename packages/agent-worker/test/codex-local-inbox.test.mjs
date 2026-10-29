@@ -114,7 +114,10 @@ test('bound Codex triangle_get_status: no argument is the conversation\'s own in
   assert.deepEqual((await mcp('triangle_get_status')).inbox,{queued:0,executing:1,held:0});
   await mcp('triangle_reply_message',{messageId:'status-in',claimToken:claim.claimToken,replyId:'status-reply',text:'done'});
   const own=await mcp('triangle_get_status');assert.deepEqual(own.inbox,{queued:0,executing:0,held:0});
-  for(const key of ['journal','dispatcher','wake','router','discovery','replyIdentity'])assert.equal(key in own,false,'the MCP tool never exposes host status: '+key);
+  assert.deepEqual(Object.keys(own).sort(),['generation','inbox','route','senderId','sessionId'],'exactly the own view, nothing from the host status');
+  const emptyId=await call('triangle_get_status',{messageId:''});
+  assert.equal(emptyId.result.isError,true);assert.match(emptyId.result.content[0].text,/invalid_request/,'an empty ID is refused, not turned into the own view');
+  await assert.rejects(tool(a,'triangle_get_status',{messageId:''}),/invalid_request/);
 
   const host=await f.cli(['status']);assert.ok(host.journal&&host.dispatcher&&host.router,'owner CLI keeps the host view');
   assert.equal((await mcp('triangle_get_status',{messageId:'status-in'})).phase,'completed');

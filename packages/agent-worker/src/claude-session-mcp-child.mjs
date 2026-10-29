@@ -193,7 +193,7 @@ async function runSessionTool({ client, credential, name, args, generation }) {
     case "triangle_consume_reply":
       return await client.consumeReply({ messageId: args.messageId }, { credential });
     case "triangle_get_status":
-      return args.messageId
+      return args.messageId !== undefined && args.messageId !== null
         ? await client.getMessageStatus({ messageId: args.messageId }, { credential })
         : await client.localStatus({ credential });
     default:

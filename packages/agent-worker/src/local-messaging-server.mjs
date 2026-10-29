@@ -255,11 +255,11 @@ export function createLocalControlServer({
   }
 
   // The caller's own inbox view: address, generation and queue counts, nothing about the host.
-  const ownSessionStatus = async (senderId, claims) => ({
+  const ownSessionStatus = async (senderId, claims, generation = claims.generation) => ({
     route: "same-device",
     senderId,
     sessionId: claims.sessionId,
-    generation: claims.generation,
+    generation,
     inbox: await journal.getInteractiveInboxCounts?.(senderId) ?? { queued: 0, executing: 0, held: 0 },
   });
 
@@ -421,13 +421,17 @@ export function createLocalControlServer({
           break;
         }
         case "session_status": {
-          // Only attached chats and the bound conversation have an own inbox view to report. local_status cannot be
-          // narrowed by sender type because the owner CLI shares the bound conversation's credential and needs the host view.
-          const hasOwnInbox = claims?.senderType === "interactive"
-            || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))
-            || inboxBroker?.isDesktopSender(senderId);
-          if (!hasOwnInbox) throw coded("unsupported", "Session status is available to attached and bound conversations");
-          socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims))));
+          // Only interactive senders (attached chats, the paired Claude session, Grok pairings) and the bound conversation
+          // have an own inbox view to report. local_status cannot be narrowed by sender type because the owner CLI shares
+          // the bound conversation's credential and needs the host view.
+          const interactive = claims?.senderType === "interactive"
+            || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId));
+          // The bound conversation must hold a current desktop-inbox claim; the inbox validation above has already checked it.
+          const bound = !interactive && claims?.senderType === "desktop-inbox" && inboxBroker?.isDesktopSender(senderId);
+          if (!interactive && !bound) throw coded("unsupported", "Session status is available to interactive and bound conversations");
+          // Acknowledgments check the wake binding's generation, which moves on a rebind; the inbox claim's stays 1.
+          const generation = bound ? (await journal.getWakeBinding?.(senderId))?.generation ?? claims.generation : claims.generation;
+          socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims, generation))));
           break;
         }
         case "exchange_session": {

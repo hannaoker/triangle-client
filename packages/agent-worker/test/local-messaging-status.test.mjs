@@ -126,6 +126,8 @@ test('session_status answers only the caller\'s own inbox view for attached and 
   assert.deepEqual(boundView,{route:'same-device',senderId:bound,sessionId:'binding-1',generation:1,inbox:{queued:2,executing:0,held:0}});
   assert.equal(JSON.stringify(boundView).includes('PRIVATE_BODY'),false);
   for(const key of ['journal','dispatcher','wake','router'])assert.equal(key in boundView,false,key);
+  await j.initWakeBinding({targetIdentity:bound,threadId:'bound-thread',generation:2});
+  assert.equal((await boundClient.sessionStatus()).generation,2,'the bound view reports the wake binding generation, which acknowledgments check and a rebind moves');
   const host=await boundClient.localStatus();assert.equal(host.journal.held,7,'local_status still gives the bound identity (owner CLI) the host view');assert.ok(host.router);
 
   await assert.rejects(client(bound).sessionStatus(),{code:'binding_changed'});

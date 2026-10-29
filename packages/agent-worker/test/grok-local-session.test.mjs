@@ -235,5 +235,6 @@ test('grok status --message-id returns that message\'s status for its sender or 
   assert.equal((await f.run(ctxB,['grok','status','--message-id','status-one'])).messageId,'status-one','the recipient may read it too');
   await errorCode(f.run(ctxC,['grok','status','--message-id','status-one']),'foreign_access_denied');
   await errorCode(f.run(ctxA,['grok','status','--message-id','missing-one']),'not_found');
+  await errorCode(f.run(ctxA,['grok','status','--message-id','']),'invalid_request');
  }finally{await f.close();}
 });

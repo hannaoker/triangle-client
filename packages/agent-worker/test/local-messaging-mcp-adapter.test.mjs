@@ -361,6 +361,8 @@ test("triangle_get_status takes an optional messageId: none asks only for this c
     ["sessionStatus", { credential: "mock-token" }],
     ["getMessageStatus", { messageId: "msg-1" }, { credential: "mock-token" }],
   ]);
+  await request(4, "tools/call", { name: "triangle_get_status", arguments: { messageId: "" } });
+  assert.deepEqual(calls[2], ["getMessageStatus", { messageId: "" }, { credential: "mock-token" }], "an empty ID goes to the server to be refused, not to the own view");
 });
 
 test("an older server without session_status makes the no-argument status fail visibly instead of answering with host status", async () => {
