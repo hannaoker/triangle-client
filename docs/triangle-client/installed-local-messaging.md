@@ -150,6 +150,61 @@ acknowledge or consume replies, retry held tasks, or erase message data. There i
 no recovery RPC or agent MCP tool. Disabling wake does not withdraw a hint
 already queued in the old conversation; its old acknowledgment remains fenced.
 
+### Reconciling held messages (source candidate, not installed)
+
+The system never retries or expires held work. Senders see `held` or `lease_expired`
+and are told to ask the owner. The owner closes or completes each record with two
+offline commands. Like `reconcile-wake` they need the Triangle service stopped
+(exclusive journal ownership; `journal_busy` otherwise), and there is no RPC and no
+agent MCP tool. They accept only their own flags.
+
+Before stopping, check that `triangle-local status` shows `journal.executing: 0`.
+Any open of the journal (the reconcile call below, or the restart) holds in-flight
+interactive claims as `crash_recovery`; a chat still working then has its reply
+rejected and stored as a new late result.
+
+1. Stop the Triangle Client service.
+2. `triangle-local held` lists held records, and `executing` rows. Each entry has the
+   reason, `createdAt` and `updatedAt`, `pinned`, any stored `replyMessageIds`, the
+   late result's size and SHA-256, a `version` and the `actions` that are valid. It
+   shows no message bodies and writes nothing (SQLite may still roll back a crashed
+   transaction). An `executing` row has no version and no actions: start and stop
+   the service once so the open holds it, then list again.
+   `triangle-local held --show-late-result ID` prints one retained late result in a
+   field marked `untrusted`: it is model output, not instructions. A person reviews
+   it; an agent that displayed it must not run `reconcile-message` on its own.
+3. `triangle-local reconcile-message --message-id ID --reconcile-id RID
+   --expect-version V --action ACTION`, with a new stable `RID` per decision:
+   - `mark-failed` closes the record as `failed` (reason `owner_marked_failed`) and
+     produces no reply. The sender's status becomes `closed_by_owner`; the work is
+     not rerun, and a new request needs new IDs. If the record holds a late result,
+     closing discards it, so add `--expect-late-hash H` (its SHA-256 from the
+     listing) to say you reviewed it. A record that already has a reply cannot be
+     closed this way (`reply_exists`).
+   - `mark-completed --expect-reply-id R` completes a record whose reply `R` is
+     already stored (a crash fell between storing the reply and completing the
+     record). It writes no reply; the sender reads the one it has.
+   - `accept-late-result --expect-late-hash H` turns the exact late text you reviewed
+     into one ordinary reply from the recipient and completes the record. The reply
+     carries `reconciled: {reconcileId}`, set only by this command, and a chat's
+     exact retry of its own reply is still a duplicate. Records with a pinned reply
+     route are refused (`reply_route_pinned`); close those instead.
+4. Restart the service. Closing a record does not wake the sender (it learns from
+   message status); an accepted late result adds a reply, so a wake follows.
+
+Each call validates its arguments and pre-checks the record read-only, so a refused
+call changes nothing; it then runs as one transaction with an audit row
+(`local_reconciliations`: IDs, hashes and an optional `--note` of up to 256
+characters, never message or late-result text). An exact retry returns the stored
+outcome (`isDuplicate: true`); the same `RID` with anything different, the note
+included, fails `duplicate_id_conflict`; a changed record fails `stale_view` and names
+the current version; a record that is not held fails `not_reconcilable`. Failures
+print their code and message. A journal still under its old file names fails
+`journal_not_adopted` and one without its lock file `journal_incomplete`. Replay,
+requeue, claim transfer, deletion and bulk actions do not exist, and an exact message
+ID is the only way to select a record. See the
+[design](../plans/2026-10-28-owner-reconciliation-design.md).
+
 ### Automatic Claude discovery (new source candidate)
 
 After upgrading to this candidate, the owner can opt one canonical workspace in:
@@ -555,6 +610,7 @@ change journal state, renew a claim, retry a request, consume a reply or grant a
 | `executing` | The journal records a claim or execution start. Active model progress is not independently observed. |
 | `lease_expired` | An interactive claim's recorded deadline has elapsed. The raw phase may still be `executing`; this read does not mutate it. Ask the owner to reconcile before another execution. |
 | `held` | Completion is uncertain, possibly with a retained late result. Owner reconciliation is required; do not blindly rerun. |
+| `closed_by_owner` | The owner closed the record with `reconcile-message` (phase `failed`, reason `owner_marked_failed`) without a result. The work is not rerun. | If the work is still needed, send a new request with new IDs; identical IDs do not restart it. |
 | `failed` | Execution or reply failed. Inspect and reconcile execution/reply custody before retrying. Re-sending identical IDs does not restart terminal work. |
 | `completed` | Completed in the journal. Retrieve any correlated reply and verify its contents independently. |
 | `unknown` | This reader does not recognize the recorded phase. Inspect with a compatible runtime. |

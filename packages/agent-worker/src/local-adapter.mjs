@@ -41,7 +41,7 @@ export function createLocalAdapter({ client, getCredential } = {}) {
     describe() {
       return { route: "local", experimental: true, automaticRetry: false,
         deliveryDeadlines: false, waiting: false, maxTextLength: MAX_FIELD_STRING_LENGTH,
-        states: ["received", "executing", "held", "completed", "unknown"],
+        states: ["received", "executing", "held", "completed", "closed_by_owner", "unknown"],
         retention: "Native journal policy; missing history is not delivery expiry",
         ordering: "Native dispatcher ordering; no additional guarantee" };
     },

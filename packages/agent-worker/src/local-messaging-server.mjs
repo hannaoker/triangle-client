@@ -26,6 +26,7 @@ export function describeMessageDelivery(record,{notification='unknown',recipient
  const view=(state,summary,nextAction)=>({state,summary,nextAction});
  if(record.phase==='completed')return view('completed','Completed in the local journal.','Retrieve the correlated reply if one was produced; verify its contents independently.');
  if(record.phase==='held')return view('held',record.hasLateResult?'Work is held; a late result is retained for owner review.':'Work is held; completion is uncertain.','Ask the owner to reconcile this request before starting another execution.');
+ if(record.phase==='failed')return record.reason==='owner_marked_failed'?view('closed_by_owner','Closed by the owner without a result.','If the work is still needed, the sender should send a new request with new IDs; re-sending identical IDs does not restart it.'):view('unknown','The recorded state is not recognized by this reader.','Inspect the request with a compatible runtime before retrying.');
  if(record.phase==='reply_failed')return view('failed','Execution or reply failed; successful completion is not recorded.','Inspect the failure and ask the owner to reconcile execution and reply custody before retrying.');
  if(record.phase==='executing'){
   if(record.recipientType==='interactive'&&Number.isFinite(record.leaseExpiresAt)&&record.leaseExpiresAt<=now)return view('lease_expired','The claim lease has expired; completion is unverified.','Ask the owner to reconcile the request; do not start duplicate work.');

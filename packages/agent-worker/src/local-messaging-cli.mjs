@@ -20,7 +20,7 @@ export function defaultLocalConfigPath(env=process.env){return path.join(env.HOM
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
- const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root']);
+ const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result']);
  while(args.length){const flag=args.shift();if(flag==='--exact-only'){if(options.exactOnly!==undefined)throw coded('invalid_arguments','Duplicate argument');options.exactOnly=true;continue;}if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -231,6 +231,46 @@ export function revokeInteractiveSession({ integrationPath }) {
  };
  writePrivateJson(integrationPath, updated);
  return updated;
+}
+// Owner-only and offline, like reconcile-wake: no RPC and no MCP tool, because the owner CLI and the bound
+// conversation share one credential. The Triangle service must be stopped so the journal's owner lock is free.
+function offlineJournalConfig(options,env){
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
+ return config;
+}
+function onlyOptions(options,allowed){
+ if(Object.keys(options).some(key=>!allowed.includes(key)))throw coded('invalid_arguments','Argument is not valid for this command');
+}
+export async function heldOffline(options,env=process.env){
+ onlyOptions(options,['config','show-late-result']);
+ const config=offlineJournalConfig(options,env);
+ const {listHeldRecords,readHeldLateResult}=await import('./local-messaging-journal.mjs');
+ try {
+  if(options['show-late-result'])return {lateResult:readHeldLateResult({stateRoot:config.stateRoot,messageId:options['show-late-result']})};
+  return {items:listHeldRecords({stateRoot:config.stateRoot})};
+ } catch(error){
+  if(error?.code==='journal_busy'||error?.code==='drain_busy')throw coded('journal_busy','Stop the Triangle service before listing held work');
+  throw error;
+ }
+}
+export async function reconcileMessageOffline(options,env=process.env){
+ onlyOptions(options,['config','message-id','reconcile-id','expect-version','action','expect-late-hash','expect-reply-id','note']);
+ const config=offlineJournalConfig(options,env);
+ if(['message-id','reconcile-id','expect-version','action'].some(key=>!options[key]))throw coded('invalid_arguments','message-id, reconcile-id, expect-version and action are required');
+ const {createLocalMessagingJournal,precheckReconcile,validateReconcileRequest}=await import('./local-messaging-journal.mjs');
+ const request={messageId:options['message-id'],reconcileId:options['reconcile-id'],action:options.action,expectVersion:options['expect-version'],expectLateHash:options['expect-late-hash'],expectReplyId:options['expect-reply-id'],note:options.note};
+ let journal;
+ try {
+  try {validateReconcileRequest(request);} catch(error){throw error?.code==='invalid_params'?coded('invalid_arguments',error.message):error;}
+  // Refuse what will fail before anything is opened: an open migrates the schema and holds every executing row.
+  precheckReconcile({stateRoot:config.stateRoot,...request});
+  journal=createLocalMessagingJournal({stateRoot:config.stateRoot,reconcileRequest:request});
+  return await journal.reconcileMessage(request);
+ } catch(error){
+  if(error?.code==='journal_busy'||error?.code==='drain_busy')throw coded('journal_busy','Stop the Triangle service before reconciling held work');
+  throw error;
+ } finally {await journal?.close();}
 }
 export async function reconcileWakeOffline(options,env=process.env){
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
@@ -494,13 +534,15 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
+ // Flags of the owner reconciliation commands mean nothing elsewhere; a typo must fail instead of being ignored.
+ if(!['held','reconcile-message'].includes(command)&&['reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  if(['grant-session','revoke-session','list-session-grants'].includes(command)){output.write(JSON.stringify(editSessionGrant(command,options,env))+'\n');return 0;}
  if(command==='setup-reply-identity'){output.write(JSON.stringify(setupReplyIdentity(options,env))+'\n');return 0;}
  if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -508,6 +550,8 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='setup-discovery'){output.write(JSON.stringify(setupSessionDiscovery(options,env))+'\n');return 0;}
  if(command==='discovery-hook')return runSessionDiscoveryHook({configPath:options.config||defaultLocalConfigPath(env),input,harness:options.harness||'claude',env});
  if(command==='disable-discovery'){output.write(JSON.stringify(disableSessionDiscovery(options,env))+'\n');return 0;}
+ if(command==='held'){output.write(JSON.stringify(await heldOffline(options,env))+'\n');return 0;}
+ if(command==='reconcile-message'){output.write(JSON.stringify(await reconcileMessageOffline(options,env))+'\n');return 0;}
  if(command==='reconcile-wake'){
   output.write(JSON.stringify(await reconcileWakeOffline(options,env))+'\n');return 0;
  }
@@ -948,7 +992,10 @@ export function setupRouter(options={},env=process.env){
 // The entry point runs last: everything above, including the module-level constants the setup commands use, must be
 // initialized before the CLI starts when this file is the program (importing it, as the tests do, hides the order).
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
+ try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){
+ // The owner reconciliation commands report what failed (IDs, phases and codes only); other commands keep the fixed text.
+ const detailed=['held','reconcile-message'].includes(process.argv[2])&&typeof error?.code==='string'&&typeof error.message==='string';
+ process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:detailed?error.message.slice(0,300):'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
 }
 
 // Owner-only local policy editing. No messaging capability is exposed by these commands.
