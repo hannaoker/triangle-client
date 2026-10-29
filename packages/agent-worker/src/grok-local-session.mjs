@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash, randomBytes, randomUUID} from 'node:crypto';
-import {readPrivateJson, writePrivateJson} from './local-messaging-auth-broker.mjs';
+import {readPrivateJson, writePrivateJson, withPrivateFileLock} from './local-messaging-auth-broker.mjs';
 import {createInteractiveSessionBroker, readSessionMessagingPolicy, HEX64_PATTERN, UUID_PATTERN} from './local-messaging-interactive-session.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
@@ -49,6 +49,10 @@ export function grokBindings(config) {
   return entries;
 }
 export function setupGrok(options, configPath, env = process.env) {
+ const config=readPrivateJson(configPath);
+ return config.sessionMessaging?.enabled?withPrivateFileLock(config.sessionMessaging.integrationPath,()=>setupGrokLocked(options,configPath,env)):setupGrokLocked(options,configPath,env);
+}
+function setupGrokLocked(options, configPath, env = process.env) {
   const config = readPrivateJson(configPath), entries = grokBindings(config);
   if (config.version !== 1 || config.enabled !== true) throw coded('local_disabled','Enable local messaging first');
   if (!ALIAS.test(options.alias || '') || entries.some(b=>b.alias === options.alias) || entries.length >= 32) throw coded('invalid_grok_alias','Use a new distinct alias');

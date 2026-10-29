@@ -494,3 +494,46 @@ released, redirected or rerun. Thread rebinding disables the inbox and automatic
 wake until explicit reauthorization. No second App Server or reasoning launcher
 owns the inbox. Existing claim leases/retention still apply; this adds no automatic
 task-expiry, lease-extension or cancellation contract.
+
+## Exact chat grants (candidate; not yet installed)
+
+A directional exact grant permits one authenticated sender address to initiate
+requests to one attached chat address. It never authorizes execution of peer
+content. Discovery visibility alone remains insufficient to deliver a message.
+Replies use existing claim custody and need no reverse initiation grant.
+
+After installing the updated supervisor, CLI and session MCP children, owners can
+use `triangle-local grant-session --sender EXACT_SENDER --to session-EXACT_TARGET`,
+`revoke-session` with the same arguments, and `list-session-grants`. The list shows
+both exact pairs and existing workspace-wide sender lists. Revoking a pair does
+not remove a separate workspace-wide grant. Grok's own directional pairing ACLs
+still apply in addition to session policy.
+
+To opt a harness into messaging without workspace-wide inbound senders, use
+`setup-session-messaging --harness codex --workspace WORKSPACE --exact-only` (or
+`--harness claude`). This explicitly clears only that harness's workspace-wide
+sender list; existing exact pairs and the other harness's grants are preserved.
+It retains the normal setup/trust/reload requirements. Do not apply it to a live
+workspace without owner approval for the intended permission change.
+
+Grant creation migrates the private session policy to version 2, preserving the
+existing lists. Older readers reject version 2, so install the matching runtime
+and reload existing MCP children before creating grants. Revoke does not downgrade
+the policy. To roll back, restore a privately saved compatible policy together
+with its matching runtime, or disable messaging; do not hand-remove the version
+field or exact grants to make an old reader accept it.
+
+Send-time policy is authoritative: revocation blocks a new request even when a
+caller still holds an earlier credential. Adding access may need the next MCP
+heartbeat/credential renewal (normally five seconds); a cached credential never
+widens itself. The same session address keeps its grant across reattachment;
+a new replacement chat does not inherit it. Grant lists are scoped by the
+installation/workspace and the existing generation/child fencing still applies.
+Accepted requests and their valid replies are not canceled by initiation revocation.
+
+Owner policy edits serialize on a private adjacent `session-messaging.json.lock`
+file. Concurrent writers fail with `policy_busy` and may retry after completion.
+A crash can leave a lock: stop owner configuration commands, verify no such edit
+process remains, then remove only that stale lock before retrying. Never steal an
+active lock or remove the policy itself. Reads and message processing do not
+acquire this owner-edit lock.

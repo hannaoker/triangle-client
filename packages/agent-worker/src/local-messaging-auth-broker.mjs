@@ -201,3 +201,13 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
   },
  };
 }
+
+// Serialize owner policy read/modify/write transactions. A stale lock fails closed;
+// it is never stolen on a timer while another process might still be editing.
+export function withPrivateFileLock(file,operation){
+ validatePrivateDirectory(path.dirname(file));
+ const lock=file+'.lock';let fd;
+ try{fd=fs.openSync(lock,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);}
+ catch(error){if(error.code==='EEXIST')throw coded('policy_busy','Another owner policy edit is in progress; retry after it finishes');throw error;}
+ try{return operation();}finally{fs.closeSync(fd);fs.unlinkSync(lock);}
+}
