@@ -150,11 +150,21 @@ function waitPlan(options) {
 // The local broker has no watch/long-poll RPC, so this is a bounded backoff poll.
 export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms))} = {}) {
   const started = now(), deadline = started + plan.timeoutMs;
-  let rpc = await grant(), refreshAt = now() + WAIT_GRANT_REFRESH_MS, interval = WAIT_FIRST_INTERVAL_MS, polls = 0;
+  // Every broker call (connect + RPC can each use the timeout) is bounded by the
+  // remaining budget, so a call never runs much past the deadline: the whole
+  // wait ends within about timeout + 1s, under the 780s foreground-call limit.
+  const budget = () => Math.min(5000, Math.max(500, Math.floor((deadline - now()) / 2)));
+  const timedOut = polls => ({state:'timeout',ids:[],more:false,waitedMs:Math.max(0, now() - started),polls});
+  let rpc = await grant({timeout:budget()}), refreshAt = now() + WAIT_GRANT_REFRESH_MS, interval = WAIT_FIRST_INTERVAL_MS, polls = 0;
   for (;;) {
+    // Check before every call after the first poll; never start one past the deadline.
+    if (polls > 0 && now() >= deadline) return timedOut(polls);
     // Grants live 300s; refresh well before a long wait outlives one.
-    if (now() >= refreshAt) {rpc = await grant(); refreshAt = now() + WAIT_GRANT_REFRESH_MS;}
-    const timeout = Math.min(10000, Math.max(1000, deadline - now()));
+    if (now() >= refreshAt) {
+      rpc = await grant({timeout:budget()}); refreshAt = now() + WAIT_GRANT_REFRESH_MS;
+      if (now() >= deadline) return timedOut(polls);
+    }
+    const timeout = budget();
     polls++;
     let ids, more;
     if (plan.mode === 'request') {
@@ -167,7 +177,7 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
     const waitedMs = Math.max(0, now() - started);
     if (ids.length) return {state:'ready',ids,more,waitedMs,polls};
     const remaining = deadline - now();
-    if (remaining <= 0) return {state:'timeout',ids:[],more:false,waitedMs,polls};
+    if (remaining <= 0) return timedOut(polls);
     await sleep(Math.min(interval, remaining));
     interval = Math.min(WAIT_MAX_INTERVAL_MS, Math.round(interval * 1.5));
   }
@@ -221,8 +231,8 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
     if (!text.trim() || Buffer.byteLength(text)>128*1024) throw coded('invalid_message','Bounded nonempty text required');
     return text;
   };
-  const exchange = async () => {
-    const grant = await client.exchangeInteractiveSession({bindingId:b.bindingId,sessionId:b.sessionId,generation:b.generation,secret:b.secret,contextHash:b.contextHash});
+  const exchange = async (rpcOptions = {}) => {
+    const grant = await client.exchangeInteractiveSession({bindingId:b.bindingId,sessionId:b.sessionId,generation:b.generation,secret:b.secret,contextHash:b.contextHash},rpcOptions);
     if (grant.senderId!==b.senderId || grant.bindingId!==b.bindingId || grant.generation!==b.generation || grant.sessionId!==b.sessionId) throw coded('binding_changed','Unexpected Grok grant');
     return {credential:grant.credential};
   };

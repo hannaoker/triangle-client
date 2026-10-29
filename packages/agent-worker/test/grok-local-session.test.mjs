@@ -364,3 +364,17 @@ test('grok wait only ever calls the read-only list RPCs and re-exchanges its gra
  assert.equal(grants,4,'initial grant plus refreshes at 240s, 480s and 720s (grants live 300s)');
  assert.ok(inboxCalls>=375&&inboxCalls<=380,'about one poll per 2s once backoff saturates');
 });
+
+test('grok wait bounds slow grant renewals and list calls by the remaining budget so it ends near its timeout',async()=>{
+ // Review finding: renewals kept the 30s client default and could push a 760s wait past a 780s tool call.
+ let t=0,grants=0;const timeouts=[];
+ const slowGrant=async({timeout})=>{grants++;timeouts.push(timeout);t+=grants===1?0:timeout;return {credential:'c'};};
+ const slowList={listReplies:async(_,{timeout})=>{timeouts.push(timeout);t+=Math.min(timeout,700);return [];}};
+ const out=await waitForMatch({mode:'request',requestId:'r',timeoutMs:760000},slowList,slowGrant,{now:()=>t,sleep:async ms=>{t+=ms;}});
+ assert.equal(out.state,'timeout');
+ assert.ok(t<=761000,`ended at ${t}ms`);
+ assert.ok(timeouts.every(ms=>ms>=500&&ms<=5000),'every call has a bounded timeout');
+ // A tiny timeout still polls once and returns promptly even when the first call is slow.
+ let u=0;const once=await waitForMatch({mode:'inbox',requestId:null,timeoutMs:100},{listInbox:async(_,{timeout})=>{u+=timeout;const i=[];i.nextCursor=null;return i;}},async()=>({credential:'c'}),{now:()=>u,sleep:async ms=>{u+=ms;}});
+ assert.equal(once.state,'timeout');assert.equal(once.polls,1);assert.ok(u<=1000);
+});

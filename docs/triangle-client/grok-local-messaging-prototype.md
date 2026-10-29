@@ -132,7 +132,9 @@ node packages/agent-worker/src/local-messaging-cli.mjs grok wait \
   as before, so crash and replay semantics are unchanged.
 - The local broker has no watch or long-poll RPC, so `wait` polls with bounded
   backoff: 250ms rising by 1.5x to 2s. It re-exchanges its short-lived (300s)
-  grant every 240s. No MESH or other network calls.
+  grant every 240s. Every broker call is bounded by the remaining budget and none
+  starts after the deadline, so a call returns within about the timeout plus 1s.
+  No MESH or other network calls.
 - `--timeout` is in seconds (up to three decimals): default 750, maximum 760, so
   one call fits under a 13-minute (780s) tool call with margin.
 - Exit codes: **0** a match is ready; **3** the timeout passed with no match;
