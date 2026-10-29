@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { createLocalMessagingJournal, listHeldRecords, precheckReconcile, readHeldLateResult } from "../src/local-messaging-journal.mjs";
 import { describeMessageDelivery } from "../src/local-messaging-server.mjs";
 import { localState } from "../src/transport-adapter-contract.mjs";
-import { setupLocalMessaging, runLocalMessagingCLI } from "../src/local-messaging-cli.mjs";
+import { setupLocalMessaging, runLocalMessagingCLI, reconcileMessageOffline } from "../src/local-messaging-cli.mjs";
 import { readPrivateJson, writePrivateJson } from "../src/local-messaging-auth-broker.mjs";
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
@@ -596,4 +596,53 @@ test("the owner commands print what failed, while other commands keep the fixed 
     const other = await run(["status", "--message-id", "held-one"]);
     assert.equal(other.message, "Triangle local command failed; check binding, service status and arguments");
   } finally { c.cleanup(); }
+});
+
+
+test("every business refusal is read-only even when another execution awaits crash recovery", async () => {
+  const cases = [
+    {label:'wrong late hash',action:'accept-late-result',hash:'0'.repeat(64),code:'late_result_mismatch'},
+    {label:'unacknowledged discard',action:'mark-failed',code:'late_result_mismatch'},
+    {label:'missing stored reply',action:'mark-completed',hash:sha('LATE_TEXT'),reply:'missing',code:'reply_missing'},
+    {label:'missing late result',id:'crash',action:'accept-late-result',hash:sha('LATE_TEXT'),code:'late_result_missing'},
+    {label:'pinned result',action:'accept-late-result',hash:sha('LATE_TEXT'),pin:true,code:'reply_route_pinned'},
+    {label:'stored reply',action:'mark-failed',hash:sha('LATE_TEXT'),stored:true,code:'reply_exists'},
+    {label:'conflicting reconcile ID',action:'accept-late-result',hash:sha('LATE_TEXT'),prior:true,code:'duplicate_id_conflict'},
+    {label:'generated reply ID collision',action:'accept-late-result',hash:sha('LATE_TEXT'),collision:true,code:'duplicate_id_conflict'},
+  ];
+  for (const c of cases) {
+    const f=fixture();
+    try {
+      await seed(f);
+      if(c.pin)f.raw("UPDATE local_messages SET reply_route_key='pin-key' WHERE message_id='late'");
+      if(c.stored||c.collision)await f.j.recordReply({sender:'worker',recipient:'alice',messageId:c.collision?'rep-rc-rc-refusal':'stored',requestId:c.stored?'late-req':'crash-req',inReplyTo:c.stored?'late':'crash',text:'data'});
+      if(c.prior){const view=await f.j.getHeldView('crash');await f.j.reconcileMessage({messageId:'crash',reconcileId:'rc-refusal',action:'mark-failed',expectVersion:view.version});}
+      await f.j.recordSend({sender:'alice',recipient:'worker',messageId:'running',requestId:'running',text:'data'});
+      await f.j.claimExecution('running');await f.close();
+      const item=listHeldRecords({stateRoot:f.root}).find(r=>r.messageId===(c.id??'late'));
+      const config=path.join(f.root,'local.json');writePrivateJson(config,{version:1,enabled:true,stateRoot:f.root});
+      const file=path.join(f.root,DB_FILE),before=fs.readFileSync(file);
+      await assert.rejects(reconcileMessageOffline({config,'message-id':item.messageId,'reconcile-id':'rc-refusal','expect-version':item.version,action:c.action,...(c.hash?{'expect-late-hash':c.hash}:{}),...(c.reply?{'expect-reply-id':c.reply}:{})}),{code:c.code},c.label);
+      assert.deepEqual(fs.readFileSync(file),before,c.label+' must not trigger recovery of another executing row');
+    } finally {await f.close();f.cleanup();}
+  }
+});
+
+
+test("eligibility changed after precheck is refused under the new owner lock before recovery",async()=>{
+  const f=fixture();
+  try{
+    await seed(f);const view=await f.j.getHeldView('late');await f.close();
+    const request={messageId:'late',reconcileId:'rc-raced',action:'accept-late-result',expectVersion:view.version,expectLateHash:sha('LATE_TEXT')};
+    precheckReconcile({stateRoot:f.root,...request});
+    // A different legitimate owner holds the lock between the two opens.
+    const other=createLocalMessagingJournal({stateRoot:f.root});
+    await other.holdExecution('late','runner_timeout',{lateResultText:'REPLACED'});
+    await other.recordSend({sender:'alice',recipient:'worker',messageId:'raced-running',requestId:'raced-running',text:'data'});
+    await other.claimExecution('raced-running');await other.close();
+    const file=path.join(f.root,DB_FILE),before=fs.readFileSync(file);
+    assert.throws(()=>createLocalMessagingJournal({stateRoot:f.root,reconcileRequest:request}),{code:'stale_view'});
+    assert.deepEqual(fs.readFileSync(file),before,'locked pre-initialization refusal leaves unrelated executing record untouched');
+    assert.equal(listHeldRecords({stateRoot:f.root}).find(r=>r.messageId==='raced-running').phase,'executing','rejected open released its owner lock');
+  }finally{await f.close();f.cleanup();}
 });

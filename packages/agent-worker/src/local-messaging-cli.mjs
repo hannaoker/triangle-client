@@ -265,7 +265,7 @@ export async function reconcileMessageOffline(options,env=process.env){
   try {validateReconcileRequest(request);} catch(error){throw error?.code==='invalid_params'?coded('invalid_arguments',error.message):error;}
   // Refuse what will fail before anything is opened: an open migrates the schema and holds every executing row.
   precheckReconcile({stateRoot:config.stateRoot,...request});
-  journal=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  journal=createLocalMessagingJournal({stateRoot:config.stateRoot,reconcileRequest:request});
   return await journal.reconcileMessage(request);
  } catch(error){
   if(error?.code==='journal_busy'||error?.code==='drain_busy')throw coded('journal_busy','Stop the Triangle service before reconciling held work');

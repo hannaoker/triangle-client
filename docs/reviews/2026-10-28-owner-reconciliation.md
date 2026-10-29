@@ -38,3 +38,23 @@ The design's section 8 recommendations were applied because the owner asked for 
 ## Gates still open
 
 Merge, install and live acceptance on the Mini (fresh scratch records, service stop, before and after row comparison, rollback rehearsal) need new exact owner authorization. The older backlog stays untouched until the owner names exact IDs.
+
+## Codex review follow-up (2026-10-29)
+
+A new disposable reproduction found that a valid-version command with the wrong
+late-result hash could pass the old precheck, open the writable journal, and turn
+an unrelated `executing` row into `held` before refusing the command. The same gap
+applied to other business refusals and conflicting reconcile IDs.
+
+Eligibility and retry checks are now shared by the read-only precheck and the
+transaction. The writable constructor also repeats that precheck under its newly
+acquired owner lock, in query-only mode and before schema/recovery. This closes
+the gap if another owner changes the record between the initial check and open.
+Refusal uses the existing constructor cleanup to release ownership.
+
+Eight CLI refusal variants verify a byte-identical journal with another task
+still executing. A further race regression changes eligibility between opens and
+verifies both byte-identical refusal and released ownership. The reconciliation
+and stop/start notifier suites pass 22/22. Independent follow-up review found no
+blocker and independently ran the race regression. Only disposable data was used;
+no live installation or reconciliation was performed.
