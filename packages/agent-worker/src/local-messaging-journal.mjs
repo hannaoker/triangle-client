@@ -123,7 +123,7 @@ function computeEnvelopeHash(envelope) {
   return createHash("sha256").update(canonicalJson(norm), "utf8").digest("hex");
 }
 
-const RECONCILE_ACTIONS = ["mark-failed", "accept-late-result"];
+const RECONCILE_ACTIONS = ["mark-failed", "mark-completed", "accept-late-result"];
 const RECONCILE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const RECONCILE_MESSAGE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -131,8 +131,8 @@ const MAX_RECONCILE_NOTE = 256;
 
 const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
-// Changes whenever the record, its lease or its late text changes, so a stale listing cannot act on a newer record.
-function reconcileVersion(row) {
+// Changes whenever the record, its lease, its late text or its replies change, so a stale listing cannot act on a newer record.
+function reconcileVersion(row, replyIds = []) {
   return sha256Hex(JSON.stringify([
     row.message_id,
     row.phase,
@@ -141,16 +141,46 @@ function reconcileVersion(row) {
     row.lease_expires_at ?? null,
     row.claim_operation_id ?? null,
     row.late_result_text ? sha256Hex(row.late_result_text) : null,
+    replyIds,
   ]));
 }
 
+// Why a record cannot be reconciled, naming the earlier reconciliation when there was one.
+function notReconcilableMessage(db, row) {
+  const closedBy = db.prepare("SELECT reconcile_id, action FROM local_reconciliations WHERE message_id = ? ORDER BY created_at DESC LIMIT 1").get(row.message_id);
+  return `Message is in phase ${row.phase}${closedBy ? `; already reconciled by ${closedBy.reconcile_id} (${closedBy.action})` : ""}`;
+}
+
+// Shared by the CLI (before anything is opened) and reconcileMessage, so a malformed request never reaches the journal.
+export function validateReconcileRequest({ messageId, reconcileId, action, expectVersion, expectLateHash = null, expectReplyId = null, note = null } = {}) {
+  if (typeof messageId !== "string" || !RECONCILE_MESSAGE_ID_PATTERN.test(messageId)) throw coded("invalid_params", "A valid messageId is required");
+  if (typeof reconcileId !== "string" || !RECONCILE_ID_PATTERN.test(reconcileId)) throw coded("invalid_params", "reconcileId must be 1 to 128 identifier characters");
+  if (!RECONCILE_ACTIONS.includes(action)) throw coded("invalid_params", `action must be one of ${RECONCILE_ACTIONS.join(", ")}`);
+  if (typeof expectVersion !== "string" || !SHA256_HEX.test(expectVersion)) throw coded("invalid_params", "expectVersion must be the version shown by held");
+  const lateHash = expectLateHash ?? null;
+  if (lateHash !== null && !(typeof lateHash === "string" && SHA256_HEX.test(lateHash))) throw coded("invalid_params", "expectLateHash must be the SHA-256 shown by held");
+  if (action === "accept-late-result" && lateHash === null) throw coded("invalid_params", "expectLateHash is required to accept a late result");
+  const replyId = expectReplyId ?? null;
+  if (action === "mark-completed" && !(typeof replyId === "string" && RECONCILE_MESSAGE_ID_PATTERN.test(replyId))) {
+    throw coded("invalid_params", "expectReplyId is required to complete a record that already has a reply");
+  }
+  if (action !== "mark-completed" && replyId !== null) throw coded("invalid_params", "expectReplyId applies only to mark-completed");
+  if (note !== null && note !== undefined && (typeof note !== "string" || note.length > MAX_RECONCILE_NOTE)) {
+    throw coded("invalid_params", `note must be text of at most ${MAX_RECONCILE_NOTE} characters`);
+  }
+  return { messageId, reconcileId, action, expectVersion, expectLateHash: lateHash, expectReplyId: replyId, note: note ?? null };
+}
+
 // Owner view of one held (or executing) record: metadata, sizes and a hash, never bodies, late text or claim secrets.
-function heldView(row) {
+function heldView(row, replyIds = []) {
   const held = row.phase === "held";
   const pinned = Boolean(row.reply_route_key);
   const late = row.late_result_text ?? null;
   const actions = [];
-  if (held) {
+  if (held && replyIds.length > 0) {
+    // The reply is already stored (a crash fell between storing it and completing the record), so only completing is safe.
+    actions.push("mark-completed");
+  } else if (held) {
     actions.push("mark-failed");
     if (late && !pinned) actions.push("accept-late-result");
   }
@@ -171,7 +201,9 @@ function heldView(row) {
     hasLateResult: Boolean(late),
     lateResultBytes: late ? Buffer.byteLength(late, "utf8") : 0,
     lateResultSha256: late ? sha256Hex(late) : null,
-    version: reconcileVersion(row),
+    replyMessageIds: replyIds,
+    // An in-flight row has no usable version: it becomes reconcilable only after a normal open holds it.
+    version: held ? reconcileVersion(row, replyIds) : null,
     actions,
   };
 }
@@ -180,9 +212,29 @@ function heldView(row) {
 // open is avoided because it runs crash recovery, which would change rows just by looking at them.
 function withReadOnlyJournal(stateRoot, read) {
   if (!stateRoot || typeof stateRoot !== "string") throw coded("invalid_params", "stateRoot is required");
-  if (lstatSync(path.join(stateRoot, DB_NAME), { throwIfNoEntry: false }) === undefined) return null;
+  if (lstatSync(path.join(stateRoot, DB_NAME), { throwIfNoEntry: false }) === undefined) {
+    // A journal that still has its pre-adoption file names is adopted by the normal open, which this look must not run.
+    const legacy = path.join(stateRoot, LEGACY_DB_NAME);
+    if (lstatSync(legacy, { throwIfNoEntry: false }) !== undefined) {
+      const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+      const probe = new DatabaseSync(legacy, { readOnly: true });
+      try {
+        if (probe.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_messages'").get() !== undefined) {
+          throw coded("journal_not_adopted", "The journal still has its old file names; start the service once on this version so they are renamed, then stop it and retry");
+        }
+      } finally {
+        probe.close();
+      }
+    }
+    return null;
+  }
+  // Opening would create a missing lock database; a journal without one is incomplete, not empty.
+  if (lstatSync(path.join(stateRoot, OWNER_DB_NAME), { throwIfNoEntry: false }) === undefined) {
+    throw coded("journal_incomplete", "The journal lock file is missing; start the service once so it is recreated, then stop it and retry");
+  }
   const opened = openDeliveryJournal({ stateRoot, dbName: DB_NAME, ownerDbName: OWNER_DB_NAME, busyCode: "journal_busy" });
   try {
+    opened.db.exec("PRAGMA query_only = ON");
     const hasMessages = opened.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_messages'").get() !== undefined;
     return hasMessages ? read(opened.db) : null;
   } finally {
@@ -190,17 +242,43 @@ function withReadOnlyJournal(stateRoot, read) {
   }
 }
 
+const replyIdsFor = (db, messageId) => db.prepare("SELECT message_id FROM local_replies WHERE in_reply_to = ? ORDER BY message_id ASC").all(messageId).map((r) => r.message_id);
+
 export function listHeldRecords({ stateRoot } = {}) {
   const rows = withReadOnlyJournal(stateRoot, (db) => db.prepare(
     "SELECT * FROM local_messages WHERE phase IN ('held', 'executing') ORDER BY created_at ASC, message_id ASC",
-  ).all());
-  return (rows ?? []).map(heldView);
+  ).all().map((row) => heldView(row, replyIdsFor(db, row.message_id))));
+  return rows ?? [];
+}
+
+// Read-only refusal before the normal open. An open migrates the schema and holds every executing row, so a request
+// that is going to be refused must not get that far; the transaction in reconcileMessage stays authoritative.
+export function precheckReconcile({ stateRoot, ...request } = {}) {
+  const { messageId, reconcileId, expectVersion } = validateReconcileRequest(request);
+  const checked = withReadOnlyJournal(stateRoot, (db) => {
+    const hasAudit = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_reconciliations'").get() !== undefined;
+    // An exact retry, or a reuse of the ID, is decided inside the transaction.
+    if (hasAudit && db.prepare("SELECT 1 FROM local_reconciliations WHERE reconcile_id = ?").get(reconcileId)) return true;
+    const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+    if (!row) throw coded("not_found", `Message ${messageId} not found`);
+    if (row.phase === "executing") {
+      throw coded("not_reconcilable", "The record is still executing; a normal open holds it. Start and stop the service once, then list it again");
+    }
+    if (row.phase !== "held") {
+      const closedBy = hasAudit ? db.prepare("SELECT reconcile_id, action FROM local_reconciliations WHERE message_id = ? ORDER BY created_at DESC LIMIT 1").get(messageId) : undefined;
+      throw coded("not_reconcilable", `Message is in phase ${row.phase}${closedBy ? `; already reconciled by ${closedBy.reconcile_id} (${closedBy.action})` : ""}`);
+    }
+    const current = reconcileVersion(row, replyIdsFor(db, messageId));
+    if (current !== expectVersion) throw coded("stale_view", `The record changed since it was listed; list it again (current version ${current})`);
+    return true;
+  });
+  if (!checked) throw coded("not_found", `Message ${messageId} not found`);
 }
 
 // The retained late text is untrusted model output; it is returned only when the owner asks for one record.
 export function readHeldLateResult({ stateRoot, messageId } = {}) {
   if (typeof messageId !== "string" || !RECONCILE_MESSAGE_ID_PATTERN.test(messageId)) throw coded("invalid_params", "A valid messageId is required");
-  const row = withReadOnlyJournal(stateRoot, (db) => db.prepare("SELECT message_id, late_result_text FROM local_messages WHERE message_id = ?").get(messageId));
+  const row = withReadOnlyJournal(stateRoot, (db) => db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId));
   if (!row) throw coded("not_found", `Message ${messageId} not found`);
   if (!row.late_result_text) throw coded("late_result_missing", "The record has no late result");
   return {
@@ -866,24 +944,16 @@ export function createLocalMessagingJournal({
   async function getHeldView(messageId) {
     assertNotClosed();
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ? AND phase IN ('held', 'executing')").get(messageId);
-    return row ? heldView(row) : null;
+    return row ? heldView(row, replyIdsFor(db, messageId)) : null;
   }
 
-  // Owner reconciliation of one held record, offline and exact. It never replays work: the record is closed as failed,
-  // or its retained late result becomes one ordinary reply. The audit row, the record change and any reply commit together.
-  async function reconcileMessage({ messageId, reconcileId, action, expectVersion, expectLateHash = null, note = null, now = Date.now } = {}) {
+  // Owner reconciliation of one held record, offline and exact. It never replays work. The record is closed as failed,
+  // completed with the reply it already has, or completed with its retained late result as one ordinary reply. The audit
+  // row, the record change and any reply commit together.
+  async function reconcileMessage(request = {}) {
     assertNotClosed();
-    if (typeof messageId !== "string" || !RECONCILE_MESSAGE_ID_PATTERN.test(messageId)) throw coded("invalid_params", "A valid messageId is required");
-    if (typeof reconcileId !== "string" || !RECONCILE_ID_PATTERN.test(reconcileId)) throw coded("invalid_params", "reconcileId must be 1 to 128 identifier characters");
-    if (!RECONCILE_ACTIONS.includes(action)) throw coded("invalid_params", `action must be one of ${RECONCILE_ACTIONS.join(", ")}`);
-    if (typeof expectVersion !== "string" || !SHA256_HEX.test(expectVersion)) throw coded("invalid_params", "expectVersion must be the version shown by held");
-    if (action === "accept-late-result" && !(typeof expectLateHash === "string" && SHA256_HEX.test(expectLateHash))) {
-      throw coded("invalid_params", "expectLateHash is required to accept a late result");
-    }
-    if (note !== null && note !== undefined && (typeof note !== "string" || note.length > MAX_RECONCILE_NOTE)) {
-      throw coded("invalid_params", `note must be text of at most ${MAX_RECONCILE_NOTE} characters`);
-    }
-    const lateHash = action === "accept-late-result" ? expectLateHash : null;
+    const { messageId, reconcileId, action, expectVersion, expectLateHash, expectReplyId, note } = validateReconcileRequest(request);
+    const now = request.now ?? Date.now;
     const at = typeof now === "function" ? now() : now;
 
     db.exec("BEGIN IMMEDIATE");
@@ -891,7 +961,8 @@ export function createLocalMessagingJournal({
       const prior = db.prepare("SELECT * FROM local_reconciliations WHERE reconcile_id = ?").get(reconcileId);
       if (prior) {
         const same = prior.message_id === messageId && prior.action === action
-          && prior.expected_version === expectVersion && (prior.late_result_sha256 ?? null) === lateHash;
+          && prior.expected_version === expectVersion && (prior.late_result_sha256 ?? null) === expectLateHash
+          && (prior.note ?? null) === note && (action !== "mark-completed" || prior.reply_message_id === expectReplyId);
         if (!same) throw coded("duplicate_id_conflict", `reconcileId ${reconcileId} was already used for a different request`);
         db.exec("COMMIT");
         return {
@@ -900,22 +971,20 @@ export function createLocalMessagingJournal({
       }
       const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
       if (!row) throw coded("not_found", `Message ${messageId} not found`);
-      if (row.phase !== "held") {
-        const closedBy = db.prepare("SELECT reconcile_id, action FROM local_reconciliations WHERE message_id = ? ORDER BY created_at DESC LIMIT 1").get(messageId);
-        throw coded("not_reconcilable", `Message is in phase ${row.phase}${closedBy ? `; already reconciled by ${closedBy.reconcile_id} (${closedBy.action})` : ""}`);
-      }
-      if (reconcileVersion(row) !== expectVersion) throw coded("stale_view", "The record changed since it was listed; list it again");
+      if (row.phase !== "held") throw coded("not_reconcilable", notReconcilableMessage(db, row));
+      const replyIds = replyIdsFor(db, messageId);
+      const current = reconcileVersion(row, replyIds);
+      if (current !== expectVersion) throw coded("stale_view", `The record changed since it was listed; list it again (current version ${current})`);
 
+      const lateText = row.late_result_text ?? null;
       let replyMessageId = null;
       let outcomePhase;
-      if (action === "mark-failed") {
-        db.prepare("UPDATE local_messages SET phase = 'failed', reason = 'owner_marked_failed', late_result_text = NULL, updated_at = ? WHERE message_id = ? AND phase = 'held'").run(at, messageId);
-        outcomePhase = "failed";
-      } else {
-        if (!row.late_result_text) throw coded("late_result_missing", "The record has no late result to accept");
-        if (sha256Hex(row.late_result_text) !== expectLateHash) throw coded("late_result_mismatch", "The late result differs from the one that was reviewed");
+      let reason;
+      if (action === "accept-late-result") {
+        if (replyIds.length > 0) throw coded("reply_exists", "A reply to this message exists; complete the record with mark-completed instead");
+        if (!lateText) throw coded("late_result_missing", "The record has no late result to accept");
+        if (sha256Hex(lateText) !== expectLateHash) throw coded("late_result_mismatch", "The late result differs from the one that was reviewed");
         if (row.reply_route_key) throw coded("reply_route_pinned", "A pinned reply route needs the attached chat; close the record instead");
-        if (db.prepare("SELECT 1 FROM local_replies WHERE in_reply_to = ?").get(messageId)) throw coded("not_reconcilable", "A reply to this message already exists");
         replyMessageId = `rep-rc-${reconcileId}`;
         if (db.prepare("SELECT 1 FROM local_replies WHERE message_id = ?").get(replyMessageId)) throw coded("duplicate_id_conflict", `Reply ID ${replyMessageId} already exists`);
         const parentMetadata = row.metadata_json ? JSON.parse(row.metadata_json) : null;
@@ -926,7 +995,7 @@ export function createLocalMessagingJournal({
           messageId: replyMessageId,
           requestId: row.request_id,
           inReplyTo: messageId,
-          text: row.late_result_text,
+          text: lateText,
           metadata,
         };
         db.prepare(`
@@ -934,14 +1003,32 @@ export function createLocalMessagingJournal({
             message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, consumed, created_at, updated_at, reconcile_id
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         `).run(replyMessageId, envelope.sender, envelope.recipient, envelope.requestId, messageId, envelope.text, JSON.stringify(metadata), computeEnvelopeHash(envelope), at, at, reconcileId);
-        db.prepare("UPDATE local_messages SET phase = 'completed', late_result_text = NULL, updated_at = ? WHERE message_id = ? AND phase = 'held'").run(at, messageId);
         outcomePhase = "completed";
+        reason = "owner_accepted_late_result";
+      } else {
+        // Closing discards any retained late text, so the owner must name the text that was reviewed.
+        if (lateText ? sha256Hex(lateText) !== expectLateHash : expectLateHash !== null) {
+          throw coded("late_result_mismatch", lateText
+            ? "Closing discards the retained late result; pass the hash of the text you reviewed"
+            : "The record has no late result to acknowledge");
+        }
+        if (action === "mark-failed") {
+          if (replyIds.length > 0) throw coded("reply_exists", "A reply to this message exists; complete the record with mark-completed instead");
+          outcomePhase = "failed";
+          reason = "owner_marked_failed";
+        } else {
+          if (!replyIds.includes(expectReplyId)) throw coded("reply_missing", `No reply ${expectReplyId} to this message exists`);
+          replyMessageId = expectReplyId;
+          outcomePhase = "completed";
+          reason = "owner_marked_completed";
+        }
       }
+      db.prepare("UPDATE local_messages SET phase = ?, reason = ?, late_result_text = NULL, updated_at = ? WHERE message_id = ? AND phase = 'held'").run(outcomePhase, reason, at, messageId);
       db.prepare(`
         INSERT INTO local_reconciliations (
           reconcile_id, message_id, action, from_phase, from_reason, expected_version, late_result_sha256, reply_message_id, outcome_phase, note, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(reconcileId, messageId, action, row.phase, row.reason ?? null, expectVersion, lateHash, replyMessageId, outcomePhase, note ?? null, at);
+      `).run(reconcileId, messageId, action, row.phase, row.reason ?? null, expectVersion, expectLateHash, replyMessageId, outcomePhase, note, at);
       db.exec("COMMIT");
       return { reconcileId, messageId, action, outcomePhase, replyMessageId, isDuplicate: false };
     } catch (err) {
@@ -1847,7 +1934,9 @@ export function createLocalMessagingJournal({
         if (!existingReply) {
           throw coded("reply_not_accepted", "Completed message has no recorded reply");
         }
-        if (replyId && replyId !== existingReply.message_id) {
+        // A reply the owner accepted from the late result has its own ID, so the chat's exact retry (which names its
+        // own reply ID) is judged on its content, like any other duplicate.
+        if (replyId && replyId !== existingReply.message_id && !existingReply.reconcile_id) {
           throw coded("duplicate_id_conflict", `Reply ID ${replyId} does not match existing reply ID ${existingReply.message_id}`);
         }
         const parentMetadata = orig.metadata_json ? JSON.parse(orig.metadata_json) : null;
