@@ -8,7 +8,7 @@ import {execFile} from 'node:child_process';
 import {Readable} from 'node:stream';
 import {fileURLToPath} from 'node:url';
 import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,setupDesktopInbox,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
-import {setupGrok,readGrokBinding,disableGrok,runGrokCommand} from '../src/grok-local-session.mjs';
+import {setupGrok,readGrokBinding,disableGrok,runGrokCommand,GROK_WAIT_TIMEOUT_EXIT,waitForMatch} from '../src/grok-local-session.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
 import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
@@ -237,4 +237,144 @@ test('grok status --message-id returns that message\'s status for its sender or 
   await errorCode(f.run(ctxA,['grok','status','--message-id','missing-one']),'not_found');
   await errorCode(f.run(ctxA,['grok','status','--message-id','']),'invalid_request');
  }finally{await f.close();}
+});
+
+
+// grok wait: a read-only blocking call a waiter subagent can sit on (#144).
+async function runRaw(f,context,args){
+ const env={...process.env};delete env.CURSOR_CONVERSATION_ID;if(context!==undefined)env.CURSOR_CONVERSATION_ID=context;
+ try{const res=await exec(process.execPath,[cli,...args,'--config',f.configPath],{env});return {code:0,stdout:res.stdout,stderr:res.stderr};}
+ catch(error){if(typeof error.code!=='number')throw error;return {code:error.code,stdout:error.stdout,stderr:error.stderr};}
+}
+
+test('grok wait returns 0 at once when a reply already exists, prints ids only, and never consumes it',async()=>{
+ const f=fixture();try{
+  f.pair('alice',ctxA,[],[f.worker]);await f.start();
+  await f.run(ctxA,['grok','send','--to',f.worker,'--message-id','wait-task','--request-id','wait-req'],'review');
+  const reply=(await untilReply(f,ctxA,'wait-req')).replies[0];
+  const started=Date.now();
+  const res=await runRaw(f,ctxA,['grok','wait','--request-id','wait-req','--timeout','5','--json']);
+  assert.equal(res.code,0);assert.ok(Date.now()-started<4000,'returns without waiting out the timeout');
+  assert.equal(res.stdout.trim().split('\n').length,1,'single summary line');
+  const summary=JSON.parse(res.stdout);
+  assert.deepEqual({...summary,waitedMs:undefined,polls:undefined},{operation:'wait',mode:'request',state:'ready',requestId:'wait-req',replyIds:[reply.messageId],count:1,more:false,waitedMs:undefined,polls:undefined,timeoutSeconds:5});
+  assert.equal(summary.polls,1);
+  assert.equal(res.stdout.includes('worker reply'),false,'never prints message bodies');
+  // Plain mode is one human line, also without bodies.
+  const plain=await runRaw(f,ctxA,['grok','wait','--request-id','wait-req','--timeout','5']);
+  assert.equal(plain.code,0);assert.match(plain.stdout,/^grok wait: ready; 1 reply for request "wait-req": /);assert.equal(plain.stdout.includes('worker reply'),false);
+  // No consume side effect: the reply is still pending until an explicit consume.
+  assert.deepEqual((await f.run(ctxA,['grok','replies','--request-id','wait-req'])).replies.map(r=>r.messageId),[reply.messageId]);
+  await f.run(ctxA,['grok','consume','--message-id',reply.messageId]);
+  const after=await runRaw(f,ctxA,['grok','wait','--request-id','wait-req','--timeout','0.3','--json']);
+  assert.equal(after.code,GROK_WAIT_TIMEOUT_EXIT,'consumed replies no longer match');
+ }finally{await f.close();}
+});
+
+test('grok wait exits with the distinct timeout code when nothing arrives',async()=>{
+ const f=fixture();try{
+  f.pair('alice',ctxA,[],[f.worker]);await f.start();
+  assert.equal(GROK_WAIT_TIMEOUT_EXIT,3);
+  const started=Date.now();
+  const res=await runRaw(f,ctxA,['grok','wait','--request-id','never-sent','--timeout','0.4','--json']);
+  assert.equal(res.code,3);assert.ok(Date.now()-started>=400);
+  const summary=JSON.parse(res.stdout);
+  assert.equal(summary.state,'timeout');assert.equal(summary.count,0);assert.deepEqual(summary.replyIds,[]);assert.ok(summary.polls>=2,'polls again before giving up');
+  const inbox=await runRaw(f,ctxA,['grok','wait','--inbox','--timeout','0.3']);
+  assert.equal(inbox.code,3);assert.match(inbox.stdout,/^grok wait: timeout after 0\.3s; no unclaimed inbox message/);
+ }finally{await f.close();}
+});
+
+test('grok wait --inbox wakes when a message lands, without claiming it',async()=>{
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[]);await f.start();
+  const waiting=runRaw(f,ctxB,['grok','wait','--inbox','--timeout','20','--json']);
+  await new Promise(r=>setTimeout(r,600));
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','wake-me','--request-id','wake-req'],'secret body text');
+  const res=await waiting;
+  assert.equal(res.code,0);const summary=JSON.parse(res.stdout);
+  assert.deepEqual(summary.messageIds,['wake-me']);assert.equal(summary.count,1);assert.equal(summary.mode,'inbox');
+  assert.equal(res.stdout.includes('secret body text'),false);
+  // Still unclaimed: inbox lists it and a normal claim succeeds afterwards.
+  assert.deepEqual((await f.run(ctxB,['grok','inbox'])).items.map(i=>i.messageId),['wake-me']);
+  const claim=await f.run(ctxB,['grok','claim','--message-id','wake-me','--claim-id','after-wait','--claim-file',path.join(f.root,'after-wait.json')]);
+  assert.equal(claim.claimed,true);
+  assert.equal((await runRaw(f,ctxB,['grok','wait','--inbox','--timeout','0.3'])).code,3,'claimed messages no longer match');
+ }finally{await f.close();}
+});
+
+test('grok wait fails closed on context mismatch and rejects bad arguments before touching the broker',async()=>{
+ const f=fixture();try{
+  f.pair('alice',ctxA,[],[f.worker]);f.pair('bob',ctxB);
+  // Host deliberately not started: every one of these must fail before any socket call.
+  for(const [ctx,args,code] of [
+   [ctxB,['grok','wait','--request-id','r','--alias','alice'],'grok_context_mismatch'],
+   [undefined,['grok','wait','--request-id','r'],'grok_context_mismatch'],
+   [undefined,['grok','wait','--inbox','--alias','alice'],'grok_context_mismatch'],
+   ['33333333-3333-4333-8333-333333333333',['grok','wait','--inbox'],'grok_context_mismatch'],
+   [ctxA,['grok','wait'],'invalid_arguments'],
+   [ctxA,['grok','wait','--inbox','--request-id','r'],'invalid_arguments'],
+   [ctxA,['grok','wait','--request-id','r','--timeout','761'],'invalid_arguments'],
+   [ctxA,['grok','wait','--request-id','r','--timeout','0'],'invalid_arguments'],
+   [ctxA,['grok','wait','--request-id','r','--timeout','-1'],'invalid_arguments'],
+   [ctxA,['grok','wait','--request-id','r','--timeout','1e3'],'invalid_arguments'],
+   [ctxA,['grok','wait','--request-id','r','--in-reply-to','m'],'invalid_arguments'],
+   [ctxA,['grok','wait','--inbox','--inbox'],'invalid_arguments'],
+   [ctxA,['grok','replies','--request-id','r','--json'],'invalid_arguments'],
+   [ctxA,['grok','inbox','--timeout','5'],'invalid_arguments'],
+   [undefined,['status','--inbox'],'invalid_arguments'],
+  ]){
+   const res=await runRaw(f,ctx,args);
+   assert.equal(res.code,1,args.join(' '));assert.equal(JSON.parse(res.stderr).error,code,args.join(' '));assert.equal(res.stdout,'');
+  }
+  // The maximum itself is accepted (fails later only because no host is running).
+  const max=await runRaw(f,ctxA,['grok','wait','--request-id','r','--timeout','760']);
+  assert.equal(max.code,1);assert.notEqual(JSON.parse(max.stderr).error,'invalid_arguments');
+ }finally{await f.close();}
+});
+
+test('grok wait refreshes its short-lived grant during a long wait and keeps the default/max timeouts',async()=>{
+ const f=fixture();try{
+  f.pair('alice',ctxA,[],[f.worker]);await f.start();
+  // Virtual clock: a 750s default wait completes instantly but must re-exchange the 300s grant.
+  let t=0,out='';const sleeps=[];
+  const code=await runGrokCommand('wait',{'request-id':'clock-req',json:true},{configPath:f.configPath,env:{CURSOR_CONVERSATION_ID:ctxA},input:Readable.from([]),output:{write:s=>out+=s},
+   waitClock:{now:()=>t,sleep:async ms=>{sleeps.push(ms);t+=ms;}}});
+  assert.equal(code,3);const summary=JSON.parse(out);
+  assert.equal(summary.timeoutSeconds,750);assert.equal(summary.state,'timeout');
+  assert.equal(sleeps[0],250);assert.equal(Math.max(...sleeps),2000,'backoff is bounded at 2s');
+  assert.ok(sleeps.slice(0,5).every((ms,i,a)=>i===0||ms>=a[i-1]),'backoff rises');
+  assert.equal(sleeps.reduce((a,b)=>a+b,0),750000);
+ }finally{await f.close();}
+});
+
+test('grok wait only ever calls the read-only list RPCs and re-exchanges its grant before it expires',async()=>{
+ // Any client method other than the list call for the chosen mode fails the test (no consume/claim/ack/send).
+ const strict=(allowed,impl)=>new Proxy({},{get:(_,name)=>{if(name!==allowed)throw Error('unexpected client call '+String(name));return impl;}});
+ let t=0,grants=0,calls=0;const clock={now:()=>t,sleep:async ms=>{t+=ms;}};const grant=async()=>{grants++;return {credential:'c'+grants};};
+ const seen=[];
+ const replies=strict('listReplies',async(args,rpc)=>{calls++;seen.push({...args,credential:rpc.credential});return calls>=3?[{messageId:'r1',text:'body'}]:[];});
+ const ready=await waitForMatch({mode:'request',requestId:'q',timeoutMs:750000},replies,grant,clock);
+ assert.deepEqual({state:ready.state,ids:ready.ids,polls:ready.polls},{state:'ready',ids:['r1'],polls:3});
+ assert.ok(seen.every(c=>c.requestId==='q'&&c.limit===50&&c.inReplyTo===undefined));
+ t=0;grants=0;let inboxCalls=0;
+ const inbox=strict('listInbox',async(args,rpc)=>{inboxCalls++;assert.equal(rpc.credential,'c'+grants);const items=[];items.nextCursor=null;return items;});
+ const timedOut=await waitForMatch({mode:'inbox',requestId:null,timeoutMs:750000},inbox,grant,clock);
+ assert.equal(timedOut.state,'timeout');assert.equal(t,750000);
+ assert.equal(grants,4,'initial grant plus refreshes at 240s, 480s and 720s (grants live 300s)');
+ assert.ok(inboxCalls>=375&&inboxCalls<=380,'about one poll per 2s once backoff saturates');
+});
+
+test('grok wait bounds slow grant renewals and list calls by the remaining budget so it ends near its timeout',async()=>{
+ // Review finding: renewals kept the 30s client default and could push a 760s wait past a 780s tool call.
+ let t=0,grants=0;const timeouts=[];
+ const slowGrant=async({timeout})=>{grants++;timeouts.push(timeout);t+=grants===1?0:timeout;return {credential:'c'};};
+ const slowList={listReplies:async(_,{timeout})=>{timeouts.push(timeout);t+=Math.min(timeout,700);return [];}};
+ const out=await waitForMatch({mode:'request',requestId:'r',timeoutMs:760000},slowList,slowGrant,{now:()=>t,sleep:async ms=>{t+=ms;}});
+ assert.equal(out.state,'timeout');
+ assert.ok(t<=761000,`ended at ${t}ms`);
+ assert.ok(timeouts.every(ms=>ms>=500&&ms<=5000),'every call has a bounded timeout');
+ // A tiny timeout still polls once and returns promptly even when the first call is slow.
+ let u=0;const once=await waitForMatch({mode:'inbox',requestId:null,timeoutMs:100},{listInbox:async(_,{timeout})=>{u+=timeout;const i=[];i.nextCursor=null;return i;}},async()=>({credential:'c'}),{now:()=>u,sleep:async ms=>{u+=ms;}});
+ assert.equal(once.state,'timeout');assert.equal(once.polls,1);assert.ok(u<=1000);
 });
