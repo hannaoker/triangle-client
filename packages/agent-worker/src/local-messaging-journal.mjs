@@ -9,6 +9,8 @@ import { MAX_PAYLOAD_BYTES } from "./local-messaging-protocol.mjs";
 import { sessionAddress } from "./local-messaging-interactive-session.mjs";
 import { sanitizeSessionTitle } from "./local-messaging-auth-broker.mjs";
 
+const wakeItemHash=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
 const DB_NAME = "local-messaging.sqlite";
 const OWNER_DB_NAME = "local-messaging-owner.sqlite";
 // Installed journals still carry the peer drain's file names, which this journal used to borrow.
@@ -846,11 +848,10 @@ export function createLocalMessagingJournal({
       ).all(targetIdentity);
     }
 
-    const itemHash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
     const items = [
-      ...unreadReplies.map(r => itemHash(["reply", r.message_id, r.created_at])),
-      ...heldMessages.map(m => itemHash(["held", m.message_id, m.updated_at || m.created_at, Boolean(m.late_result_text)])),
-      ...queuedMessages.map(m => itemHash(["queued", m.message_id, m.updated_at || m.created_at])),
+      ...unreadReplies.map(r => wakeItemHash(["reply", r.message_id, r.created_at])),
+      ...heldMessages.map(m => wakeItemHash(["held", m.message_id, m.updated_at || m.created_at, Boolean(m.late_result_text)])),
+      ...queuedMessages.map(m => wakeItemHash(["queued", m.message_id, m.updated_at || m.created_at])),
     ].sort();
     const fingerprint = JSON.stringify({ v: 2, items });
 
@@ -861,6 +862,20 @@ export function createLocalMessagingJournal({
       hasLateResult,
       snapshotFingerprint: fingerprint,
     };
+  }
+
+  // Return evidence only for this exact queued obligation; never infer it from
+  // another request's notification, a count, or a submission timestamp.
+  async function getMessageWakeEvidence(messageId){
+    assertNotClosed();
+    const m=db.prepare("SELECT message_id, recipient, recipient_type, phase, created_at, updated_at FROM local_messages WHERE message_id = ?").get(messageId);
+    if(!m||m.phase!=='queued_local'||m.recipient_type!=='interactive')return 'unknown';
+    const b=await getWakeBinding(m.recipient);if(!b)return 'unknown';
+    const item=wakeItemHash(['queued',m.message_id,m.updated_at||m.created_at]);
+    const includes=fingerprint=>{try{const f=JSON.parse(fingerprint);return f?.v===2&&Array.isArray(f.items)&&f.items.includes(item);}catch{return false;}};
+    if(b.deliveryState==='accepted_awaiting_ack'&&includes(b.activeFingerprint))return 'accepted';
+    if(includes(b.lastAcknowledgedFingerprint))return 'acknowledged';
+    return 'unknown';
   }
 
   async function getWakeObligations(targetIdentity, options = {}) {
@@ -1886,6 +1901,7 @@ export function createLocalMessagingJournal({
     initWakeBinding,
     getWakeBinding,
     getWakeObligations,
+    getMessageWakeEvidence,
     setWakeSubmitting,
     setWakeAccepted,
     setWakeUncertain,

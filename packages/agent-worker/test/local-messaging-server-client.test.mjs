@@ -1016,9 +1016,11 @@ test("readable directory preserves ACL and capability scope without changing leg
       socketPath: env.socketPath, senderId: "desktop-codex",
       turnCredential: env.issuer.issue({ senderId: "desktop-codex" }),
     });
-    assert.deepEqual(await client.listSessions(), [
+    const rows=await client.listSessions();
+    assert.deepEqual(rows.map(({delivery,...legacy})=>legacy), [
       { id: "gravity2", label: "Antigravity worker", kind: "worker", presence: "unknown" },
     ]);
+    assert.equal(rows[0].delivery.state,'availability_unknown');
     assert.deepEqual(await client.discoverRecipients(), ["gravity2"]);
     const restricted = env.issuer.issue({ senderId: "desktop-codex", allowedRecipients: [] });
     assert.deepEqual(await client.listSessions({ credential: restricted }), []);

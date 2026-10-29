@@ -537,3 +537,37 @@ A crash can leave a lock: stop owner configuration commands, verify no such edit
 process remains, then remove only that stale lock before retrying. Never steal an
 active lock or remove the policy itself. Reads and message processing do not
 acquire this owner-edit lock.
+
+## Delivery explanations (candidate; not yet installed)
+
+`triangle-local status --message-id ID` and `triangle_get_status({messageId: ID})`
+add a `delivery` object with `state`, `summary` and `nextAction`. Existing `phase`,
+route and error fields retain their meaning. Send receipts include an admission-time
+explanation; use message status for a later observation. These explanations never
+change journal state, renew a claim, retry a request, consume a reply or grant access.
+
+| Delivery state | Evidence and next step |
+| --- | --- |
+| `queued` | Stored locally; notification and execution are unconfirmed. Check recipient availability. |
+| `waiting_for_recipient` | An attached-chat delivery route is currently unusable. Check the chat's attachment and messaging settings; this does not prove the physical machine is offline. |
+| `waiting_for_poll` | A pull-only recipient such as Grok must check its inbox in a user-initiated turn. |
+| `notified_unclaimed` | The exact request was covered by an accepted or acknowledged notification, but has not been claimed. Approval is explicitly `unknown`; inspect the recipient chat for an approval prompt, owner authorization or a busy turn. |
+| `executing` | The journal records a claim or execution start. Active model progress is not independently observed. |
+| `lease_expired` | An interactive claim's recorded deadline has elapsed. The raw phase may still be `executing`; this read does not mutate it. Ask the owner to reconcile before another execution. |
+| `held` | Completion is uncertain, possibly with a retained late result. Owner reconciliation is required; do not blindly rerun. |
+| `failed` | Execution or reply failed. Inspect and reconcile execution/reply custody before retrying. Re-sending identical IDs does not restart terminal work. |
+| `completed` | Completed in the journal. Retrieve any correlated reply and verify its contents independently. |
+| `unknown` | This reader does not recognize the recorded phase. Inspect with a compatible runtime. |
+
+A notification is matched against this request's item in a version-2 wake
+fingerprint. A count, timestamp, unrelated wake, uncertain submission, or legacy
+hash-only fingerprint cannot establish per-request notification acceptance.
+No wake ID, claim token, peer body or private error is included in the explanation.
+Status remains restricted to the original sender or recipient.
+
+Session lists also add `delivery` explanations: `visible_only`, `not_attached`,
+`session_ended`, `ready_to_queue`, `pull_only` or `availability_unknown`. A listed
+session may lack authorization; an attached route does not prove execution.
+Directory explanations are optional and omitted as a group if they would push an
+otherwise valid directory response over the existing protocol limit. Entries,
+capabilities and authorization filtering are preserved.
