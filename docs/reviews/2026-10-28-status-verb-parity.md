@@ -64,6 +64,16 @@ migration and no new permission.
   `discovery` or `replyIdentity` reaches the MCP tool.
 - Not verified: an installed runtime, a live Desktop MCP model turn, a real Grok session.
 
+## Remaining differences and why they stay
+
+`local-messaging-tool-parity.test.mjs` pins each of these, so none is drift.
+
+- The bound adapter requires `claimId`, `replyId` and `generation`, which attached chats generate or default. The bound conversation is the owner's own thread and its stable IDs are supplied by the model on purpose; relaxing them is a product decision, not a consistency fix.
+- `triangle_cancel_message` exists only on the bound adapter and is documented as unsupported on the local route. `triangle_attach_session` exists only for Codex chats because attachment is a lifecycle hook.
+- Tool descriptions still say "local recipient on this host". Rewording belongs with the router work, once non-local routes exist (unified messaging design, section 4.11).
+- `triangle-local grok` has `sessions` but no `discover` or `ack-wake`: Grok is pull-only and has no wake to acknowledge.
+- `triangle-local status` without an ID keeps the host view for the owner, while the MCP tools give the own view. The two share one credential, which is why the MCP tool asks `session_status`.
+
 ## Upgrade and rollback boundary
 
 Install a matching supervisor and bound MCP runtime together. A new bound adapter against
