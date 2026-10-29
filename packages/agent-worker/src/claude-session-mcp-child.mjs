@@ -20,7 +20,7 @@ import {
 } from "./local-messaging-interactive-session.mjs";
 import { notify as codexQueueNotify } from "./codex-wake-adapter.mjs";
 import { sanitizeError, coded } from "./local-messaging-errors.mjs";
-import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH } from "./local-messaging-protocol.mjs";
+import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH, STATUS_TOOL_DESCRIPTION } from "./local-messaging-protocol.mjs";
 
 export const CLAUDE_MCP_TOOLS = [
   {
@@ -124,7 +124,7 @@ export const CLAUDE_MCP_TOOLS = [
   },
   {
     name: "triangle_get_status",
-    description: "Get this session or a sent message status. Message delivery includes a verified state, explanation and next action; notification acceptance is not execution or approval.",
+    description: STATUS_TOOL_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
@@ -645,7 +645,7 @@ export const CODEX_MCP_TOOLS = [{
 }, ...CLAUDE_MCP_TOOLS.map((tool) => (tool.name === "triangle_get_status"
   ? {
     ...tool,
-    description: "Show this chat's Triangle address and inbox counts, or the status of a sent message. When automatic lifecycle attachment is enabled, this chat attaches without a model tool call. Otherwise call this once to make the chat reachable by other agents.",
+    description: `${STATUS_TOOL_DESCRIPTION} When automatic lifecycle attachment is enabled, this chat attaches without a model tool call. Otherwise call this once to make the chat reachable by other agents.`,
   }
   : tool))];
 const MAX_CODEX_CHATS_PER_PROCESS = 16;

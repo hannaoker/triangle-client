@@ -92,3 +92,31 @@ test('executable claude-session-mcp selects workspace attachment rather than the
   const frames=result.trim().split('\n').map(JSON.parse),response=frames.find(r=>r.id===2);assert.equal(response.result.isError,false,response.result.content[0].text);assert.match(JSON.parse(response.result.content[0].text).senderId,/^session-[a-f0-9]{64}$/);
  }finally{await f.close();}
 });
+
+test('bound Codex triangle_get_status: no argument is the conversation\'s own inbox view, the owner CLI keeps the host view, a disabled inbox says so',async()=>{
+ const f=await fixture();try{
+  const a=await f.child(),aId=(await tool(a,'triangle_get_status')).senderId;
+  const makeHandler=()=>createLocalMessagingMcpHandler({client:f.owner,turnCredentialProvider:f.grant});
+  let handler=makeHandler();// rebuilt after a restart, which replaces the owner client
+  const call=(name,args={})=>handler.handleRequest({jsonrpc:'2.0',id:randomUUID(),method:'tools/call',params:{name,arguments:args}});
+  const mcp=async(name,args={})=>{const response=await call(name,args);assert.equal(response.result.isError,false,response.result.content[0].text);return JSON.parse(response.result.content[0].text);};
+  const disabled=await call('triangle_get_status');
+  assert.equal(disabled.result.isError,true);assert.match(disabled.result.content[0].text,/inbox_disabled/,'same fail-closed code as the inbox tools');
+  assert.ok((await f.cli(['status'])).journal,'owner CLI status is unchanged while the inbox is disabled');
+
+  setupDesktopInbox({config:f.configPath,senders:[aId]});await f.restart();handler=makeHandler();
+  const empty=await mcp('triangle_get_status');
+  assert.equal(empty.route,'same-device');assert.equal(empty.senderId,f.desktop.senderId);assert.equal(empty.generation,1);assert.equal(typeof empty.sessionId,'string');
+  assert.deepEqual(empty.inbox,{queued:0,executing:0,held:0});
+  await tool(a,'triangle_send_message',{to:f.desktop.senderId,text:'hello Codex',messageId:'status-in',requestId:'status-req'});
+  assert.deepEqual((await mcp('triangle_get_status')).inbox,{queued:1,executing:0,held:0});
+  const claim=await mcp('triangle_claim_message',{messageId:'status-in',claimId:'status-claim'});
+  assert.deepEqual((await mcp('triangle_get_status')).inbox,{queued:0,executing:1,held:0});
+  await mcp('triangle_reply_message',{messageId:'status-in',claimToken:claim.claimToken,replyId:'status-reply',text:'done'});
+  const own=await mcp('triangle_get_status');assert.deepEqual(own.inbox,{queued:0,executing:0,held:0});
+  for(const key of ['journal','dispatcher','wake','router','discovery','replyIdentity'])assert.equal(key in own,false,'the MCP tool never exposes host status: '+key);
+
+  const host=await f.cli(['status']);assert.ok(host.journal&&host.dispatcher&&host.router,'owner CLI keeps the host view');
+  assert.equal((await mcp('triangle_get_status',{messageId:'status-in'})).phase,'completed');
+ }finally{await f.close();}
+});

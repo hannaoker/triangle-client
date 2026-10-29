@@ -101,3 +101,35 @@ test('uncertain, legacy and malformed wake records cannot establish notification
   }
  }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('session_status answers only the caller\'s own inbox view for attached and bound conversations; local_status keeps its host view',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-session-status-');let j,server;const clients=[];
+ try{
+  j=createLocalMessagingJournal({stateRoot:root});const socketPath=root+'/control.sock',secret='test-session-status-secret-1234567890';
+  const issuer=createTurnCapabilityIssuer({secret}),validator=createTurnCapabilityValidator({secret});
+  const chat='session-'+'c'.repeat(64),bound='b'.repeat(64);
+  await j.recordSend({sender:'sender',recipient:chat,messageId:'chat-1',requestId:'chat-1',text:'PRIVATE_BODY',recipientType:'interactive'});
+  for(const n of [1,2])await j.recordSend({sender:'sender',recipient:bound,messageId:'bound-'+n,requestId:'bound-'+n,text:'PRIVATE_BODY',recipientType:'interactive'});
+  const hostView={journal:{held:7},dispatcher:{running:true},wake:{enabled:true}};
+  server=createLocalControlServer({socketPath,journal:j,acl:{checkAllowed(){},listAuthorizedRecipients(){return[];}},credentialValidator:validator,dispatcher:{start:async()=>{},stop:async()=>{},notifyAdmission:async()=>{}},statusProvider:async()=>hostView,
+   interactiveBroker:{isInteractiveSender:id=>id===chat,validateRequest:async()=>{}},
+   inboxBroker:{isDesktopSender:id=>id===bound,validateRequest:async({claims})=>{if(claims.senderType!=='desktop-inbox')throw Object.assign(new Error('Desktop inbox binding changed'),{code:'binding_changed'});}}});await server.start();
+  const client=(id,claims={})=>{const c=createLocalControlClient({socketPath,senderId:id,turnCredential:issuer.issue({senderId:id,...claims})});clients.push(c);return c;};
+  const chatClient=client(chat,{senderType:'interactive',sessionId:'chat-session',generation:2,bindingId:'child-1'});
+  const boundClient=client(bound,{senderType:'desktop-inbox',sessionId:'binding-1',generation:1,bindingId:'epoch-1'});
+
+  const chatView=await chatClient.sessionStatus();
+  assert.deepEqual(chatView,{route:'same-device',senderId:chat,sessionId:'chat-session',generation:2,inbox:{queued:1,executing:0,held:0}});
+  assert.deepEqual(await chatClient.localStatus(),chatView,'attached chats see the same own view from local_status as before');
+
+  const boundView=await boundClient.sessionStatus();
+  assert.deepEqual(boundView,{route:'same-device',senderId:bound,sessionId:'binding-1',generation:1,inbox:{queued:2,executing:0,held:0}});
+  assert.equal(JSON.stringify(boundView).includes('PRIVATE_BODY'),false);
+  for(const key of ['journal','dispatcher','wake','router'])assert.equal(key in boundView,false,key);
+  const host=await boundClient.localStatus();assert.equal(host.journal.held,7,'local_status still gives the bound identity (owner CLI) the host view');assert.ok(host.router);
+
+  await assert.rejects(client(bound).sessionStatus(),{code:'binding_changed'});
+  await assert.rejects(client('sender').sessionStatus(),{code:'unsupported'});
+  await assert.rejects(client('sender',{senderType:'desktop-inbox'}).sessionStatus(),{code:'unsupported'});
+ }finally{for(const c of clients)await c.close();await server?.close();await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});

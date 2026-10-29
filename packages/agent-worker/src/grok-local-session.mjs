@@ -164,7 +164,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
     const grant = await client.exchangeInteractiveSession({bindingId:b.bindingId,sessionId:b.sessionId,generation:b.generation,secret:b.secret,contextHash:b.contextHash});
     if (grant.senderId!==b.senderId || grant.bindingId!==b.bindingId || grant.generation!==b.generation || grant.sessionId!==b.sessionId) throw coded('binding_changed','Unexpected Grok grant');
     const rpc = {credential:grant.credential}; let result;
-    if (operation==='status') result = await client.localStatus(rpc);
+    if (operation==='status') result = options['message-id'] ? await client.getMessageStatus({messageId:options['message-id']},rpc) : await client.localStatus(rpc);
     if (operation==='sessions') result = {sessions:await client.listSessions(rpc)};
     if (operation==='inbox') {const items=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpc);result={items:[...items],nextCursor:items.nextCursor};}
     if (operation==='send') {
