@@ -222,3 +222,19 @@ test('pairing at the workspace permission ceiling fails before changing any owne
   assert.deepEqual(fs.readFileSync(policyFile),fullSenders);assert.deepEqual(fs.readFileSync(f.configPath),priorConfig);
  }finally{await f.close();}
 });
+
+test('grok status --message-id returns that message\'s status for its sender or recipient, never the session view, and refuses foreign callers',async()=>{
+ const f=fixture();const ctxC='33333333-3333-4333-8333-333333333333';try{
+  const a=f.pair('alice',ctxA,[grokId(ctxB)],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[a.senderId]);f.pair('carol',ctxC,[],[]);
+  await f.start();
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','status-one','--request-id','status-req'],'request');
+  const own=await f.run(ctxA,['grok','status']);assert.equal(own.senderId,a.senderId);assert.equal(own.messageId,undefined,'no argument is the session view');
+  const sent=await f.run(ctxA,['grok','status','--message-id','status-one']);
+  assert.equal(sent.messageId,'status-one');assert.equal(sent.phase,'queued_local');assert.equal(sent.delivery.state,'waiting_for_poll');
+  assert.equal(sent.senderId,undefined,'a message id never falls back to the session view');
+  assert.equal((await f.run(ctxB,['grok','status','--message-id','status-one'])).messageId,'status-one','the recipient may read it too');
+  await errorCode(f.run(ctxC,['grok','status','--message-id','status-one']),'foreign_access_denied');
+  await errorCode(f.run(ctxA,['grok','status','--message-id','missing-one']),'not_found');
+  await errorCode(f.run(ctxA,['grok','status','--message-id','']),'invalid_request');
+ }finally{await f.close();}
+});

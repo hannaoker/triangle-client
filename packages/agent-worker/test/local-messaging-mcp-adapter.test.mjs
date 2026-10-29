@@ -330,3 +330,50 @@ test("directory tool forwards the active credential and fails visibly on an olde
   });
   assert.equal((await older.handleRequest(request)).result.isError, true);
 });
+
+test("triangle_get_status takes an optional messageId: none asks only for this conversation's own view, never the host status", async () => {
+  const calls = [];
+  const client = {
+    sessionStatus: async (options) => {
+      calls.push(["sessionStatus", options]);
+      return { route: "same-device", senderId: "desktop-codex", inbox: { queued: 1, executing: 0, held: 0 } };
+    },
+    getMessageStatus: async (params, options) => {
+      calls.push(["getMessageStatus", params, options]);
+      return { messageId: params.messageId, phase: "queued_local" };
+    },
+    localStatus: async () => { throw new Error("the MCP tool must never ask for the host status"); },
+  };
+  const handler = createLocalMessagingMcpHandler({ client, turnCredential: "mock-token" });
+  const request = (id, method, params) => handler.handleRequest({ jsonrpc: "2.0", id, method, params });
+
+  const listed = await request(1, "tools/list", {});
+  const status = listed.result.tools.find((tool) => tool.name === "triangle_get_status");
+  assert.equal(status.inputSchema.required, undefined, "messageId is optional");
+  assert.equal(status.inputSchema.properties.messageId.type, "string");
+
+  const own = await request(2, "tools/call", { name: "triangle_get_status", arguments: {} });
+  assert.equal(own.result.isError, false, JSON.stringify(own));
+  assert.deepEqual(JSON.parse(own.result.content[0].text).inbox, { queued: 1, executing: 0, held: 0 });
+  const message = await request(3, "tools/call", { name: "triangle_get_status", arguments: { messageId: "msg-1" } });
+  assert.deepEqual(JSON.parse(message.result.content[0].text), { messageId: "msg-1", phase: "queued_local" });
+  assert.deepEqual(calls, [
+    ["sessionStatus", { credential: "mock-token" }],
+    ["getMessageStatus", { messageId: "msg-1" }, { credential: "mock-token" }],
+  ]);
+  await request(4, "tools/call", { name: "triangle_get_status", arguments: { messageId: "" } });
+  assert.deepEqual(calls[2], ["getMessageStatus", { messageId: "" }, { credential: "mock-token" }], "an empty ID goes to the server to be refused, not to the own view");
+});
+
+test("an older server without session_status makes the no-argument status fail visibly instead of answering with host status", async () => {
+  const handler = createLocalMessagingMcpHandler({
+    client: {
+      sessionStatus: async () => { throw Object.assign(new Error("Unsupported method"), { code: "method_not_found" }); },
+      localStatus: async () => ({ journal: { held: 7 } }),
+    },
+    turnCredential: "credential",
+  });
+  const res = await handler.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "triangle_get_status", arguments: {} } });
+  assert.equal(res.result.isError, true);
+  assert.doesNotMatch(res.result.content[0].text, /journal/);
+});

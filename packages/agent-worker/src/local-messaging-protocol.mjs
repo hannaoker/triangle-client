@@ -5,6 +5,9 @@ export const MAX_PAYLOAD_BYTES = 256 * 1024; // 256 KB
 export const MAX_FRAME_BYTES = 320 * 1024; // 320 KB
 export const MAX_FIELD_STRING_LENGTH = 128 * 1024; // 128 KB for text field
 
+// One description for triangle_get_status on every MCP surface (the bound adapter and attached chats).
+export const STATUS_TOOL_DESCRIPTION = "Show this conversation's Triangle address and inbox counts, or pass messageId for the status of a message you sent or received: its phase plus a delivery state, explanation and next action. Notification acceptance is not execution or approval, and approval state may be unknown.";
+
 export function encodeFrame(message) {
   if (!message || typeof message !== "object") {
     throw coded("invalid_message", "Message must be an object");
