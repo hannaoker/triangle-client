@@ -538,7 +538,7 @@ process remains, then remove only that stale lock before retrying. Never steal a
 active lock or remove the policy itself. Reads and message processing do not
 acquire this owner-edit lock.
 
-## Delivery explanations (candidate; not yet installed)
+## Delivery explanations (candidate installed on Mini 2026-10-28)
 
 `triangle-local status --message-id ID` and `triangle_get_status({messageId: ID})`
 add a `delivery` object with `state`, `summary` and `nextAction`. Existing `phase`,
