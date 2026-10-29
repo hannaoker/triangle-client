@@ -191,7 +191,7 @@ function resolvedWorkspace(workspace) {
 export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
  // `codex` is the optional second harness: its own receiver policy (exact senders, hex principals or session addresses).
- if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||c.version!==1||typeof c.enabled!=='boolean'||
+ if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex'&&k!=='exactPairs').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||![1,2].includes(c.version)||typeof c.enabled!=='boolean'||
    !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
@@ -199,6 +199,13 @@ export function readSessionMessagingPolicy(file) {
   const x=c.codex;
   if(!x||typeof x!=='object'||Array.isArray(x)||Object.keys(x).sort().join(',')!=='allowedSenders,enabled'||typeof x.enabled!=='boolean'||!Array.isArray(x.allowedSenders)||
     x.allowedSenders.length>64||new Set(x.allowedSenders).size!==x.allowedSenders.length||x.allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
+ }
+ if(c.version===1&&c.exactPairs!==undefined)throw coded('invalid_session_policy','Exact pairs require policy version 2');
+ if(c.version===2){
+  const pairs=c.exactPairs;
+  if(!Array.isArray(pairs)||pairs.length>128||pairs.some(p=>!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).sort().join(',')!=='recipient,sender'||
+   typeof p.sender!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(p.sender)||typeof p.recipient!=='string'||!/^session-[a-f0-9]{64}$/.test(p.recipient)||p.sender===p.recipient)||
+   new Set(pairs.map(p=>p.sender+'\0'+p.recipient)).size!==pairs.length)throw coded('invalid_session_policy','Invalid exact session pairs');
  }
  return c;
 }
@@ -249,6 +256,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   return {...c,claudeOn,codexOn,boundSessionId:boundThread?sessionAddress(c.installationId,c.workspace,sessionAddressKey('codex',boundThread)):null,
    allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
    codexSenders:liveCodexSenders?codexSenders.filter(id=>id.startsWith('session-')||liveCodexSenders.has(id)):codexSenders,
+   exactPairs:(c.exactPairs??[]).filter(p=>p.sender.startsWith('session-')||liveSenders===null||liveSenders.has(p.sender)||liveCodexSenders?.has(p.sender)),
    allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
  // Why a session cannot be reached right now, judged from data already loaded (no I/O); null when it can be.
  const offlineReason=(c,r,a,scope=policyScope(c))=>!r||r.lifecycle==='ended'?'Session has ended or is not discovered'
@@ -277,11 +285,12 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  };
  // Reachable Codex chats a given sender may message, for its credential's recipient claim. Only senders the owner
  // listed for Codex pay for the scan.
- async function codexReceiversFor(c,sender){
-  if(!c.codexOn||!c.codexSenders.includes(sender))return [];
+ const mayReceive=(c,sender,row)=>(row.harness==='codex'?c.codexOn:c.claudeOn)&&((row.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender)||c.exactPairs.some(p=>p.sender===sender&&p.recipient===row.id));
+ async function sessionReceiversFor(c,sender){
+  if(!c.allowedSenders.includes(sender)&&!c.codexSenders.includes(sender)&&!c.exactPairs.some(p=>p.sender===sender))return [];
   const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
   return (await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace}))
-   .filter(row=>row.harness==='codex'&&offlineReason(c,row,attachments.get(row.id),scope)===null).map(row=>row.id);
+   .filter(row=>mayReceive(c,sender,row)&&offlineReason(c,row,attachments.get(row.id),scope)===null).map(row=>row.id);
  }
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
@@ -297,22 +306,22 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    await journal.attachDiscoveredSession({id,childId:request.childId,generation:r.generation,installationId:policyScope(c),wakeCapable:request.wakeCapable===true,now:clock()});
    await journal.bindAttachedSessionWake({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
-    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await codexReceiversFor(c,id)]})};
+    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await sessionReceiversFor(c,id)]})};
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async describeLocalSession(id){const {r}=await current(id);
    return Object.freeze({address:id,generation:r.generation,principal:null,authorityOrigin:null,bindingGeneration:null});},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
-  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!(r.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
+  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!mayReceive(c,sender,r))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
   // One policy read, one directory listing and one attachment listing however many sessions there are.
   async listFor(reader){let result=[];try{
     const c=policy();
     // A reader outside a harness's sender list is simply shown nothing of that harness.
     const claudeReader=c.claudeOn&&c.allowedSenders.includes(reader),codexReader=c.codexOn&&c.codexSenders.includes(reader);
-    if(claudeReader||codexReader){
+    if(claudeReader||codexReader||c.exactPairs.some(p=>p.sender===reader)){
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
-     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>row.harness==='codex'?codexReader:claudeReader);
+     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>mayReceive(c,reader,row));
      const up=new Map(rows.map(row=>[row.id,offlineReason(c,row,attachments.get(row.id),scope)===null]));
      // A session without a live lease is not offline: only an end event or a vanished host process says that.
      const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});

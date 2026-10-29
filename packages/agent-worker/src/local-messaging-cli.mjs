@@ -7,11 +7,11 @@ import {createRequire} from 'node:module';
 import {ancestors} from './delivery-private-path.mjs';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {readPrivateJson,writePrivateJson,sanitizeSessionTitle} from './local-messaging-auth-broker.mjs';
+import {readPrivateJson,writePrivateJson,withPrivateFileLock,sanitizeSessionTitle} from './local-messaging-auth-broker.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
 import {createLocalControlClient} from './local-messaging-client.mjs';
 import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messaging-mcp-adapter.mjs';
-import {validateInteractiveIntegration,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
+import {readSessionMessagingPolicy,validateInteractiveIntegration,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
 import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
 import {setupGrok,disableGrok,runGrokCommand} from './grok-local-session.mjs';
@@ -21,7 +21,7 @@ function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
  const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root']);
- while(args.length){const flag=args.shift();if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ while(args.length){const flag=args.shift();if(flag==='--exact-only'){if(options.exactOnly!==undefined)throw coded('invalid_arguments','Duplicate argument');options.exactOnly=true;continue;}if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -48,9 +48,9 @@ export function setupLocalMessaging(options,env=process.env){
  const profiles=options.recipients||['gravity2'];
  if(profiles.length>32||new Set(profiles).size!==profiles.length||profiles.some(p=>!/^[A-Za-z0-9._-]{1,64}$/.test(p)))throw coded('invalid_recipient','Invalid recipient profiles');
  const recipients=profiles.map(profile=>({profile,instanceId:createHash('sha256').update('triangle-client-instance-v1\0'+profile).digest('hex')}));
- let secret=randomBytes(32).toString('hex'),bindingChanged=true;
+ let secret=randomBytes(32).toString('hex'),bindingChanged=true,previousSenderId=null;
  if(fs.existsSync(integrationPath)){
-  const existing=readPrivateJson(integrationPath);
+  const existing=readPrivateJson(integrationPath);previousSenderId=existing.senderId;
   // The desktop thread lives only in the integration file; moving it is an explicit owner action that rotates the capability.
   if(existing.threadId!==threadId&&!options.rebind)throw coded('binding_changed','Explicit --rebind-thread is required to change the desktop thread');
   bindingChanged=existing.senderId!==senderId||existing.threadId!==threadId;
@@ -67,7 +67,7 @@ export function setupLocalMessaging(options,env=process.env){
  let sessionMessagingDisabled=false,mcpCleanupRequired=false;
  if(optional.sessionMessaging){
   let authorized=false;
-  try{authorized=readPrivateJson(optional.sessionMessaging.integrationPath).allowedSenders?.includes(senderId)===true;}catch{}
+  try{const p=readSessionMessagingPolicy(optional.sessionMessaging.integrationPath);authorized=previousSenderId===senderId||p.allowedSenders.includes(senderId)||p.codex?.allowedSenders.includes(senderId)||p.exactPairs?.some(pair=>pair.sender===senderId); }catch{}
   if(!authorized){
    // Fail closed: the new config omits the key, and the old capability is fenced and its managed MCP entry removed when possible.
    delete optional.sessionMessaging;sessionMessagingDisabled=true;
@@ -494,12 +494,13 @@ export async function runSessionDiscoveryHook({configPath,input,harness='claude'
 
 export async function runLocalMessagingCLI(argv,{env=process.env,input=process.stdin,output=process.stdout}={}){
  const {command,options}=parse(argv);
+ if(['grant-session','revoke-session','list-session-grants'].includes(command)){output.write(JSON.stringify(editSessionGrant(command,options,env))+'\n');return 0;}
  if(command==='setup-reply-identity'){output.write(JSON.stringify(setupReplyIdentity(options,env))+'\n');return 0;}
  if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, mcp, claude-session-mcp, codex-session-mcp\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -753,6 +754,11 @@ function planCodexAutoAttach(workspace,enabled){
 // workspace .codex/config.toml; it needs Codex discovery and at least one exact --sender, because who may message a
 // Codex chat is never granted by default. Both share the one workspace policy file and capability.
 export function setupWorkspaceMessaging(options,env=process.env){
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
+ return withPrivateFileLock(file,()=>setupWorkspaceMessagingLocked(options,env));
+}
+function setupWorkspaceMessagingLocked(options,env=process.env){
  const harness=options.harness??'claude';
  if(!['claude','codex'].includes(harness))throw coded('invalid_arguments','Messaging harness must be claude or codex');
  if(options.autoAttach!==undefined&&harness!=='codex')throw coded('invalid_arguments','Automatic attachment is a Codex messaging option');
@@ -763,8 +769,9 @@ export function setupWorkspaceMessaging(options,env=process.env){
  if(!(d.harnesses||['claude']).includes(harness))throw coded(`${harness}_discovery_required`,`Enable ${harness} discovery with setup-discovery --harness ${harness} before attaching ${harness} messaging`);
  let senders;
  if(harness==='codex'){
-  senders=options.senders;
-  if(!Array.isArray(senders)||!senders.length||senders.length>64||new Set(senders).size!==senders.length||senders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_arguments','Choose explicit distinct sender IDs with --sender; nobody may message a Codex chat by default');
+  if(options.exactOnly&&options.senders?.length)throw coded('invalid_arguments','Use exact-only or workspace sender grants, not both');
+  senders=options.exactOnly?[]:options.senders;
+  if(!Array.isArray(senders)||(!senders.length&&!options.exactOnly)||senders.length>64||new Set(senders).size!==senders.length||senders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_arguments','Choose explicit distinct sender IDs with --sender; nobody may message a Codex chat by default');
  }
  const wrapper=options['local-cli']||path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/bin/triangle-local');
  const st=fs.lstatSync(wrapper);
@@ -773,8 +780,8 @@ export function setupWorkspaceMessaging(options,env=process.env){
  const old=fs.existsSync(integrationPath)?readPrivateJson(integrationPath):null;
  const desktopSender=readPrivateJson(config.integrationPath).senderId;
  const kept=old?.enabled===true&&old?.installationId===d.installationId;
- const policy={version:1,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:kept?old.secret:randomBytes(32).toString('hex'),
-  allowedSenders:harness==='claude'?[desktopSender]:(kept?old.allowedSenders:[]),
+ const policy={version:kept?(old.version??1):1,...(kept&&old.exactPairs?{exactPairs:old.exactPairs}:{}),enabled:true,workspace:d.workspace,installationId:d.installationId,secret:kept?old.secret:randomBytes(32).toString('hex'),
+  allowedSenders:harness==='claude'?(options.exactOnly?[]:[desktopSender]):(kept?old.allowedSenders:[]),
   allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[desktopSender]:[])],
   ...(harness==='codex'?{codex:{enabled:true,allowedSenders:senders}}:old?.codex?{codex:old.codex}:{})};
  const autoAttach=harness==='codex'?planCodexAutoAttach(d.workspace,options.autoAttach):null;
@@ -807,6 +814,11 @@ export function setupWorkspaceMessaging(options,env=process.env){
    wakeConfigured:config.wake?.enabled===true&&typeof config.wake.codexPath==='string'&&typeof config.wake.codexHome==='string',requiresProjectTrust:true}:{})};
 }
 export function disableWorkspaceMessaging(options,env=process.env){
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
+ return withPrivateFileLock(file,()=>disableWorkspaceMessagingLocked(options,env));
+}
+function disableWorkspaceMessagingLocked(options,env=process.env){
  const configPath=options.config||defaultLocalConfigPath(env),config=readPrivateJson(configPath);
  const file=config.sessionMessaging?.integrationPath||path.join(config.stateRoot,'session-messaging.json');
  // Fence the capability first. A missing or unreadable policy cannot admit anyone (the broker and the MCP
@@ -858,7 +870,7 @@ export function setupDesktopInbox(options,env=process.env){
  const allowedSenders=options.senders;
  if(!Array.isArray(allowedSenders)||!allowedSenders.length||allowedSenders.length>64||new Set(allowedSenders).size!==allowedSenders.length||allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)||id===desktop.senderId))throw coded('invalid_arguments','Choose explicit distinct sender IDs with --sender');
  // Workspace participation remains its own capability ceiling; add only the receiver destination.
- if(config.sessionMessaging?.enabled){const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:[...new Set([...policy.allowedRecipients,desktop.senderId])]});}
+ if(config.sessionMessaging?.enabled){const file=config.sessionMessaging.integrationPath;withPrivateFileLock(file,()=>{const policy=readSessionMessagingPolicy(file);writePrivateJson(file,{...policy,allowedRecipients:[...new Set([...policy.allowedRecipients,desktop.senderId])]});});}
  writePrivateJson(configPath,{...config,inbox:{enabled:true,bindingId:randomUUID(),allowedSenders}});
  return {inboxEnabled:true,senderId:desktop.senderId,allowedSenders,automaticWake:config.wake?.enabled===true,requiresServiceRestart:true};
 }
@@ -867,7 +879,7 @@ export function disableDesktopInbox(options,env=process.env){
  // Revoke receiver authority first. A missing workspace policy cannot preserve inbox permission.
  const {inbox,...rest}=config;writePrivateJson(configPath,rest);
  let policyCleanupRequired=false;
- if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath,policy=readPrivateJson(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});}catch{policyCleanupRequired=true;}}
+ if(config.sessionMessaging?.enabled){try{const file=config.sessionMessaging.integrationPath;withPrivateFileLock(file,()=>{const policy=readSessionMessagingPolicy(file);writePrivateJson(file,{...policy,allowedRecipients:policy.allowedRecipients.filter(id=>id!==desktop.senderId)});});}catch{policyCleanupRequired=true;}}
  return {inboxEnabled:false,policyCleanupRequired,requiresServiceRestart:true};
 }
 
@@ -937,4 +949,31 @@ export function setupRouter(options={},env=process.env){
 // initialized before the CLI starts when this file is the program (importing it, as the tests do, hides the order).
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
+}
+
+// Owner-only local policy editing. No messaging capability is exposed by these commands.
+export function editSessionGrant(command,options,env=process.env){
+ if(!['grant-session','revoke-session','list-session-grants'].includes(command))throw coded('invalid_arguments','Unknown session grant command');
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ if(!config.enabled||!config.sessionMessaging?.enabled)throw coded('session_disabled','Enable workspace messaging first');
+ if(command==='list-session-grants')return editSessionGrantLocked(command,options,env);
+ return withPrivateFileLock(config.sessionMessaging.integrationPath,()=>editSessionGrantLocked(command,options,env));
+}
+function editSessionGrantLocked(command,options,env=process.env){
+ const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
+ if(!config.enabled||!config.sessionMessaging?.enabled)throw coded('session_disabled','Enable workspace messaging first');
+ const file=config.sessionMessaging.integrationPath,c=readSessionMessagingPolicy(file);
+ const d=readPrivateJson(config.discovery.integrationPath);
+ if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace policy does not match discovery');
+ const summary=policy=>({version:policy.version,exactPairs:policy.exactPairs??[],workspaceWide:{claude:policy.allowedSenders,codex:policy.codex?.allowedSenders??[]},requiresServiceRestart:false});
+ if(command==='list-session-grants')return summary(c);
+ const sender=options.senders?.length===1?options.senders[0]:null,recipient=options.to;
+ if(typeof sender!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(sender)||typeof recipient!=='string'||!/^session-[a-f0-9]{64}$/.test(recipient)||sender===recipient)throw coded('invalid_arguments','Choose one exact --sender and --to session address');
+ const pairs=c.exactPairs??[],exists=pairs.some(p=>p.sender===sender&&p.recipient===recipient);
+ if(command==='revoke-session'&&!exists)return {...summary(c),changed:false};
+ if(command==='grant-session'&&exists)return {...summary(c),changed:false};
+ if(command==='grant-session'&&pairs.length>=128)throw coded('session_grant_capacity','Exact session grant capacity reached');
+ const next={...c,version:2,exactPairs:command==='grant-session'?[...pairs,{sender,recipient}]:pairs.filter(p=>p.sender!==sender||p.recipient!==recipient)};
+ writePrivateJson(file,next);
+ return {...summary(next),changed:true,minimumPolicyReaderVersion:2};
 }

@@ -479,3 +479,167 @@ test('automatic attachment waits for a concurrent discovery hook, but never inve
   await assert.rejects(call(child,uuid(),'triangle_attach_session'),/session_offline/,'no lifecycle report still fails closed after the bounded wait');
  }finally{await f.close();}
 });
+
+test('exact session grants restrict directory, credentials and send-time access; revoke fences an issued credential',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=await fixture();try{
+  const threads=[uuid(),uuid()];for(const t of threads)await f.lifecycle(t,'SessionStart');
+  const children=threads.map(()=>f.codexChild());for(let i=0;i<2;i++)await call(children[i],threads[i],'triangle_get_status');
+  const file=f.config.sessionMessaging.integrationPath;
+  writePrivateJson(file,{...readPrivateJson(file),codex:{enabled:true,allowedSenders:[]}});
+  const to=f.address(threads[0]),other=f.address(threads[1]),options={config:f.configPath,senders:[f.desktopSender],to};
+  assert.equal((await f.listed()).filter(r=>r.capabilities.reachable).length,0);
+  const added=editSessionGrant('grant-session',options);assert.equal(added.version,2);assert.equal(added.changed,true);
+  assert.equal(editSessionGrant('grant-session',options).changed,false);
+  assert.deepEqual((await f.listed()).filter(r=>r.capabilities.reachable).map(r=>r.id),[to]);
+  const credential=await f.grant();
+  await assert.rejects(f.owner.sendMessage({to:other,text:'denied',messageId:'pair-wrong',requestId:'pair-wrong'},{credential}),{code:'recipient_not_allowed'});
+  await f.owner.sendMessage({to,text:'allowed',messageId:'pair-good',requestId:'pair-good'},{credential});
+  const claim=await call(children[0],threads[0],'triangle_claim_message',{messageId:'pair-good',claimId:'pair-claim'});
+  // Replies use claim custody; no reverse request grant is needed.
+  await call(children[0],threads[0],'triangle_reply_message',{messageId:'pair-good',claimToken:claim.claimToken,replyId:'pair-reply',text:'answer'});
+  assert.equal((await f.owner.listReplies({requestId:'pair-good'},{credential})).length,1);
+  assert.equal(editSessionGrant('revoke-session',options).changed,true);
+  await assert.rejects(f.owner.sendMessage({to,text:'revoked',messageId:'pair-revoked',requestId:'pair-revoked'},{credential}),{code:'recipient_not_allowed'});
+  assert.equal((await f.listed()).filter(r=>r.capabilities.reachable).length,0);
+  assert.equal(editSessionGrant('revoke-session',options).changed,false);
+  const listing=editSessionGrant('list-session-grants',{config:f.configPath});
+  assert.deepEqual(listing.workspaceWide.codex,[]);assert.equal('secret' in listing,false);
+  // Existing broad grants retain their semantics and are shown explicitly.
+  writePrivateJson(file,{...readPrivateJson(file),codex:{enabled:true,allowedSenders:[f.desktopSender]}});
+  assert.equal((await f.listed()).length,2);
+  assert.deepEqual(editSessionGrant('list-session-grants',{config:f.configPath}).workspaceWide.codex,[f.desktopSender]);
+ }finally{await f.close();}
+});
+
+test('attached session pairs work in both harnesses without reverse initiation or replacement inheritance',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=await fixture({claude:true});try{
+  const source=uuid(),target=uuid(),replacement=uuid();
+  await f.lifecycle(source,'SessionStart','claude');await f.lifecycle(target,'SessionStart');await f.lifecycle(replacement,'SessionStart');
+  const policy=readPrivateJson(f.config.sessionMessaging.integrationPath);
+  const transport=f.client();const sourceGrant=await transport.attachSession({harness:'claude',sessionId:source,childId:uuid(),secret:policy.secret,installationId:policy.installationId});
+  const sender=sourceGrant.senderId,to=f.address(target),other=f.address(replacement);
+  const children=[f.codexChild(),f.codexChild()];await call(children[0],target,'triangle_get_status');await call(children[1],replacement,'triangle_get_status');
+  const options={config:f.configPath,senders:[sender],to};editSessionGrant('grant-session',options);
+  // Refresh the session's credential after the owner grant, through the actual broker.
+  const childId=uuid(); // use a distinct source session for direct credential capture below
+  const source2=uuid();await f.lifecycle(source2,'SessionStart','claude');
+  const source2Address=sessionAddress(policy.installationId,policy.workspace,source2);
+  editSessionGrant('grant-session',{...options,senders:[source2Address]});
+  const grant=await transport.attachSession({harness:'claude',sessionId:source2,childId,secret:policy.secret,installationId:policy.installationId});
+  const client=f.client(grant.senderId);
+  assert.deepEqual((await client.listSessions({credential:grant.credential})).filter(r=>r.harness==='codex').map(r=>r.id),[to]);
+  await client.sendMessage({to,text:'exact',messageId:'session-pair',requestId:'session-pair'},{credential:grant.credential});
+  await assert.rejects(client.sendMessage({to:other,text:'wrong',messageId:'session-wrong',requestId:'session-wrong'},{credential:grant.credential}),{code:'recipient_not_allowed'});
+  await assert.rejects(call(children[0],target,'triangle_send_message',{to:source2Address,text:'reverse',messageId:'reverse',requestId:'reverse'}),/recipient_not_allowed/);
+  const claim=await call(children[0],target,'triangle_claim_message',{messageId:'session-pair',claimId:'session-pair-claim'});
+  await call(children[0],target,'triangle_reply_message',{messageId:'session-pair',claimToken:claim.claimToken,text:'pair reply',replyId:'session-pair-reply'});
+  assert.equal((await client.listReplies({requestId:'session-pair'},{credential:grant.credential})).length,1);
+  editSessionGrant('revoke-session',{...options,senders:[source2Address]});
+  await assert.rejects(client.sendMessage({to,text:'revoked',messageId:'session-revoked',requestId:'session-revoked'},{credential:grant.credential}),{code:'recipient_not_allowed'});
+  // Grant to Claude works too; this used to only populate Codex credential recipients.
+  editSessionGrant('grant-session',{config:f.configPath,senders:[to],to:source2Address});
+  await children[0].heartbeat();
+  await call(children[0],target,'triangle_send_message',{to:source2Address,text:'Claude target',messageId:'to-claude',requestId:'to-claude'});
+  // Reattachment of the same target preserves the exact address; no grant to a replacement chat.
+  await children[0].close();const reopened=f.codexChild();await call(reopened,target,'triangle_get_status');
+  assert.equal((await call(reopened,target,'triangle_get_status')).senderId,to);
+ }finally{await f.close();}
+});
+
+test('exact grant policy rejects malformed, duplicate and over-capacity input without changing private policy',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=ownerFiles();try{
+  const config=readPrivateJson(f.configPath),file=config.sessionMessaging.integrationPath,old=readPrivateJson(file);
+  const pair={sender:f.desktopSender,recipient:'session-'+'b'.repeat(64)};
+  for(const exactPairs of [[pair,pair],[{...pair,extra:true}],[{...pair,recipient:'label'}],Array.from({length:129},(_,i)=>({...pair,recipient:'session-'+i.toString(16).padStart(64,'0')}))]){
+   writePrivateJson(file,{...old,version:2,exactPairs});assert.throws(()=>readSessionMessagingPolicy(file),{code:'invalid_session_policy'});
+  }
+  writePrivateJson(file,{...old,exactPairs:[]});assert.throws(()=>readSessionMessagingPolicy(file),{code:'invalid_session_policy'});
+  writePrivateJson(file,old);
+  const before=fs.readFileSync(file,'utf8');
+  assert.throws(()=>editSessionGrant('grant-session',{config:f.configPath,senders:[f.desktopSender],to:'pretty title'}),{code:'invalid_arguments'});
+  assert.equal(fs.readFileSync(file,'utf8'),before);
+  editSessionGrant('grant-session',{config:f.configPath,senders:[f.desktopSender],to:pair.recipient});
+  assert.equal(fs.statSync(file).mode&0o777,0o600);
+  setupWorkspaceMessaging(f.codexOptions);assert.equal(readSessionMessagingPolicy(file).exactPairs.length,1,'setup preserves exact grants');
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('exact-only setup is explicit and preserves same-owner pairs on ordinary setup',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=ownerFiles();try{
+  setupWorkspaceMessaging({...f.codexOptions,senders:undefined,exactOnly:true});
+  const config=readPrivateJson(f.configPath),file=config.sessionMessaging.integrationPath;
+  assert.deepEqual(readSessionMessagingPolicy(file).codex.allowedSenders,[]);
+  editSessionGrant('grant-session',{config:f.configPath,senders:[f.desktopSender],to:'session-'+'c'.repeat(64)});
+  const before=readSessionMessagingPolicy(file);
+  setupLocalMessaging({config:f.configPath,'desktop-binding':config.bindingPath,'thread-id':'11111111-2222-4333-8444-555555555555',recipients:['gravity2']});
+  assert.equal(readPrivateJson(f.configPath).sessionMessaging.enabled,true);
+  assert.deepEqual(readSessionMessagingPolicy(file),before);
+  editSessionGrant('revoke-session',{config:f.configPath,senders:[f.desktopSender],to:'session-'+'c'.repeat(64)});
+  setupLocalMessaging({config:f.configPath,'desktop-binding':config.bindingPath,'thread-id':'11111111-2222-4333-8444-555555555555',recipients:['gravity2']});
+  assert.equal(readPrivateJson(f.configPath).sessionMessaging.enabled,true,'empty exact-only policy survives ordinary setup');
+  assert.throws(()=>setupWorkspaceMessaging({...f.codexOptions,exactOnly:true}),{code:'invalid_arguments'});
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('owner policy writers fail closed under contention and concurrent revoke cannot be lost',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const {withPrivateFileLock}=await import('../src/local-messaging-auth-broker.mjs');
+ const f=ownerFiles();try{
+  const file=readPrivateJson(f.configPath).sessionMessaging.integrationPath;
+  const options={config:f.configPath,senders:[f.desktopSender],to:'session-'+'d'.repeat(64)};
+  editSessionGrant('grant-session',options);
+  withPrivateFileLock(file,()=>{
+   assert.throws(()=>editSessionGrant('revoke-session',options),{code:'policy_busy'});
+   assert.throws(()=>setupWorkspaceMessaging(f.codexOptions),{code:'policy_busy'});
+   assert.throws(()=>disableWorkspaceMessaging({config:f.configPath}),{code:'policy_busy'});
+  });
+  assert.equal(fs.existsSync(file+'.lock'),false);
+  const moduleUrl=new URL('../src/local-messaging-cli.mjs',import.meta.url).href;
+  const run=(command,opts)=>new Promise((resolve,reject)=>{
+   const code=`import {editSessionGrant} from ${JSON.stringify(moduleUrl)}; const [command,opts]=JSON.parse(process.argv[1]); for(let i=0;;i++){try{editSessionGrant(command,opts);break;}catch(e){if(e.code!=='policy_busy'||i>=100)throw e;await new Promise(r=>setTimeout(r,5));}}`;
+   const child=spawn(process.execPath,['--input-type=module','-e',code,JSON.stringify([command,opts])],{stdio:['ignore','ignore','pipe']});let errors='';child.stderr.on('data',b=>errors+=b);child.once('error',reject);child.once('exit',code=>code===0?resolve():reject(new Error(errors)));
+  });
+  const other={...options,to:'session-'+'e'.repeat(64)};
+  await Promise.all([run('revoke-session',options),run('grant-session',other)]);
+  assert.deepEqual(readSessionMessagingPolicy(file).exactPairs,[{sender:f.desktopSender,recipient:other.to}]);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('disabled harness and removed owner principal cannot retain exact-pair delivery',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const {createWorkspaceSessionBroker}=await import('../src/local-messaging-interactive-session.mjs');
+ const f=await fixture({claude:true});try{
+  const thread=uuid();await f.lifecycle(thread,'SessionStart');const child=f.codexChild();await call(child,thread,'triangle_get_status');
+  const file=f.config.sessionMessaging.integrationPath,to=f.address(thread);
+  writePrivateJson(file,{...readPrivateJson(file),codex:{enabled:true,allowedSenders:[]}});
+  editSessionGrant('grant-session',{config:f.configPath,senders:[f.desktopSender],to});
+  const credential=await f.grant();
+  writePrivateJson(file,{...readPrivateJson(file),codex:{enabled:false,allowedSenders:[]}});
+  assert.equal((await f.listed()).some(r=>r.capabilities.reachable),false);
+  await assert.rejects(f.owner.sendMessage({to,text:'disabled',messageId:'disabled-pair',requestId:'disabled-pair'},{credential}),{code:'session_offline'});
+  // Exact pairs for an unconfigured 64-hex principal do not confer sender authority.
+  const unknown='f'.repeat(64);
+  editSessionGrant('grant-session',{config:f.configPath,senders:[unknown],to});
+  writePrivateJson(file,{...readPrivateJson(file),codex:{enabled:true,allowedSenders:[]}});
+  await assert.rejects(f.client(unknown).listSessions({credential}),{code:'unauthorized'});
+  const broker=createWorkspaceSessionBroker({policyPath:file,discoveryPath:f.config.discovery.integrationPath,journal:{},issue(){},ownerSenderId:f.desktopSender,codexSenderPrincipals:[f.desktopSender]});
+  assert.deepEqual(await broker.listFor(unknown),[],'unconfigured principal exact pairs are filtered before any journal access');
+ }finally{await f.close();}
+});
+
+
+test('CLI program creates and revokes v2 exact grants without exposing secrets',async()=>{
+ const f=ownerFiles();try{
+  const setup=await runProgram(['setup-session-messaging','--config',f.configPath,'--harness','codex','--workspace',f.workspace,'--local-cli',f.wrapper,'--exact-only']);
+  assert.equal(setup.code,0,setup.stderr);assert.deepEqual(JSON.parse(setup.stdout).allowedSenders,[]);
+  const args=['--config',f.configPath,'--sender',f.desktopSender,'--to','session-'+'b'.repeat(64)];
+  const grant=await runProgram(['grant-session',...args]);assert.equal(grant.code,0,grant.stderr);
+  const added=JSON.parse(grant.stdout);assert.equal(added.version,2);assert.equal(added.changed,true);assert.equal('secret' in added,false);
+  const listing=await runProgram(['list-session-grants','--config',f.configPath]);assert.equal(JSON.parse(listing.stdout).exactPairs.length,1);
+  const revoke=await runProgram(['revoke-session',...args]);assert.equal(revoke.code,0,revoke.stderr);assert.deepEqual(JSON.parse(revoke.stdout).exactPairs,[]);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});

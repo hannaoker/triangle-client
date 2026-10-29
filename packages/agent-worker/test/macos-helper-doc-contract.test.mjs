@@ -199,7 +199,7 @@ test("operator documentation defines the permissions v1 binding lifecycle", () =
   const top = text("README.md");
   assert.match(top, /macOS mailbox credential helper/i);
   assert.match(top, /triangle-mailbox"? mcp --profile/);
-  const workerSection = top.match(/### Model-free agent workers[\s\S]*?(?=\n## Testing and builds)/)?.[0];
+  const workerSection = top.match(/### Model-free agent workers[\s\S]*?(?=\n## )/)?.[0];
   assert.ok(workerSection, "top-level worker quickstart is missing");
   assert.doesNotMatch(workerSection, /TRIANGLE_CREDENTIAL_FILE|set -a;\s*\.\s*"?\$TRIANGLE_CREDENTIAL_FILE|credentials\/(?:codex|hermes)\.env|enroll|admission/);
   for (const pattern of [
