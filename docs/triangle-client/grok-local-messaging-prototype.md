@@ -96,7 +96,7 @@ node packages/agent-worker/src/local-messaging-cli.mjs grok reply \
 
 `--text-file` is an alternative to stdin. `--text` is intentionally unavailable
 on the Grok surface. Runtime supports status, sessions, send, inbox, claim, reply,
-replies and consume. Explicit-alias mode adds `--alias researcher` to each call.
+replies, consume and wait. Explicit-alias mode adds `--alias researcher` to each call.
 Claim tokens go directly to the private file, never stdout. Claim-file reuse for
 another operation and symlinks are refused before claiming the new message.
 
@@ -104,6 +104,54 @@ Keep the same message/request IDs and body when retrying an ambiguous send.
 Explicit authorization denials return `rejected`; transport uncertainty returns
 `send_outcome_unknown`. Neither means the receiver executed. Replies are retrieved
 by correlation and consumed separately. Never reply merely to acknowledge a reply.
+
+## Wait for a reply without polling (`grok wait`)
+
+Grok is pull-only (`wakeCapable: false`), so nothing tells a Grok bot that a reply
+arrived. `grok wait` is one blocking, read-only call that a low-effort waiter
+subagent can sit on in a foreground tool call (#144):
+
+```bash
+node packages/agent-worker/src/local-messaging-cli.mjs grok wait \
+  --config CONFIG --request-id STABLE_REQUEST_ID [--timeout 750] [--json]
+node packages/agent-worker/src/local-messaging-cli.mjs grok wait \
+  --config CONFIG --inbox [--timeout 750] [--json]
+```
+
+- Exactly one of `--request-id` (an unconsumed reply correlated to that request)
+  or `--inbox` (any unclaimed inbound message) is required.
+- Identity and context binding are the same as every other `grok` operation: the
+  inherited `CURSOR_CONVERSATION_ID` (or the owner-assigned `--alias` for an
+  explicit-alias pairing), no override flags, and `grok_context_mismatch` fails
+  closed before any broker call. Argument errors are also reported before any
+  broker call.
+- Read-only: it only makes the `list_replies` / `list_inbox` calls that
+  `grok replies` / `grok inbox` already make, on the same local socket. It never
+  consumes, claims or acks; `list_inbox` keeps its existing expired-lease reaping.
+  Afterwards run `grok replies` + `grok consume` (or `grok inbox` + `grok claim`)
+  as before, so crash and replay semantics are unchanged.
+- The local broker has no watch or long-poll RPC, so `wait` polls with bounded
+  backoff: 250ms rising by 1.5x to 2s. It re-exchanges its short-lived (300s)
+  grant every 240s. No MESH or other network calls.
+- `--timeout` is in seconds (up to three decimals): default 750, maximum 760, so
+  one call fits under a 13-minute (780s) tool call with margin.
+- Exit codes: **0** a match is ready; **3** the timeout passed with no match;
+  **1** any error (unchanged CLI behavior: one JSON line on stderr with the code,
+  for example `grok_context_mismatch`, `session_disabled`, `invalid_arguments`, or
+  a socket error if the service is not running). Errors are not retried inside
+  `wait`; a waiter decides whether to call again.
+- Output is one line. Default: a short human summary. `--json`: one JSON object
+  `{operation, mode, state, requestId, replyIds | messageIds, count, more,
+  waitedMs, polls, timeoutSeconds}`. IDs and counts only, never message bodies,
+  claim tokens or credentials. `more: true` means at least 50 matches (the list
+  page size).
+
+Waiter pattern: send with `grok send` and keep the request ID; start one
+low-effort subagent whose only job is to loop `grok wait --request-id ID
+--timeout 750` in foreground calls until exit 0 or an agreed deadline, then
+report; end the main turn. The subagent's completion wakes the main bot, which
+then runs `grok replies` and `grok consume`. One waiter per outstanding request;
+the waiter never consumes or claims and never prints claim files or tokens.
 
 ## Restart, long tasks and rollback
 
