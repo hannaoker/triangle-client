@@ -58,3 +58,8 @@ verifies both byte-identical refusal and released ownership. The reconciliation
 and stop/start notifier suites pass 22/22. Independent follow-up review found no
 blocker and independently ran the race regression. Only disposable data was used;
 no live installation or reconciliation was performed.
+
+After integrating merged #141 and #142 with the refusal fixes, the full worker
+suite passed in one invocation: 1228 tests, 1225 passed, 3 skipped, 0 failed.
+`git diff --check` passed. Installation and real Codex-wake acceptance remain
+separate gates; this review did not access or modify the installed journal.
