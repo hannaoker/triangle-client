@@ -1,6 +1,6 @@
 # Owner reconciliation of held and expired local work (item 2 design)
 
-Status: design draft, 2026-10-28, against main `451eb44`. Design only: no code, no production change, not owner-approved. It authorizes no install, grant or permission change, and no action on the two existing held tasks, the 14 pending replies, the queued request or the older backlog. Facts marked "checked" were read in the code at `451eb44`; names marked "proposed" do not exist. It answers the second remaining item of the 2026-10-28 Codex handoff: specify custody, idempotency and late-result behavior before any reconciliation operation is built. Scope is the local journal (`local-messaging-journal.mjs`); the Iroh peer lane and MESH keep their own states. It builds on [messaging status explanations](../reviews/2026-10-28-messaging-status-ux.md) and the offline `reconcile-wake` precedent in [installed local messaging](../triangle-client/installed-local-messaging.md).
+Status: design draft, 2026-10-28, against main `451eb44`. Slices O0 to O2 are implemented in source on `claude/owner-reconcile-o0-o2` with the owner decisions in section 8 applied at their recommended answers; the design is not owner-approved and nothing is installed. It authorizes no install, grant or permission change, and no action on the two existing held tasks, the 14 pending replies, the queued request or the older backlog. Facts marked "checked" were read in the code at `451eb44`; names marked "proposed" do not exist. It answers the second remaining item of the 2026-10-28 Codex handoff: specify custody, idempotency and late-result behavior before any reconciliation operation is built. Scope is the local journal (`local-messaging-journal.mjs`); the Iroh peer lane and MESH keep their own states. It builds on [messaging status explanations](../reviews/2026-10-28-messaging-status-ux.md) and the offline `reconcile-wake` precedent in [installed local messaging](../triangle-client/installed-local-messaging.md).
 
 ## 1. Summary
 
@@ -53,7 +53,7 @@ How a record becomes `held`:
 
 Both refuse while the supervisor runs (`journal_busy`), require valid private owner configuration and take the journal's exclusive owner lock. There is no RPC method and no MCP tool, and no tool description or `delivery.nextAction` names the command: senders are models and are told only to ask the owner.
 
-`held` opens the database read-only under the owner lock and never runs recovery; `executing` rows appear as "held on next open (`crash_recovery`)". `reconcile-message` uses the normal open and so sees exactly what the next restart would.
+`held` takes the owner lock and only reads: it never runs recovery and writes nothing (a test compares the database bytes before and after); `executing` rows appear as "held on next open (`crash_recovery`)". `reconcile-message` uses the normal open and so sees exactly what the next restart would.
 
 Listed fields: `messageId`, `requestId`, `sender`, `recipient`, `recipientType`, `phase`, `reason`, `createdAt`, `updatedAt`, `leaseExpiresAt`, `pinned` (a reply route key exists), `hasLateResult`, `lateResultBytes`, `lateResultSha256`, `version`, `actions`. No message bodies, late text or runtime error text by default; claim tokens and wake IDs are never printed.
 
@@ -85,7 +85,7 @@ Excluded, with reasons: **requeue or replay** (breaks "an exact retry never runs
 ### 4.5 Late-result behavior
 
 1. A late result is untrusted model output retained as evidence. It is never delivered by itself (current behavior, unchanged).
-2. Visibility: senders see `hasLateResult` only. The owner listing shows size and SHA-256. The text is printed only by `held --show-late-result ID`, between fixed delimiters, with a warning that terminal output read by a model becomes model input. The audit keeps the hash, never the text.
+2. Visibility: senders see `hasLateResult` only. The owner listing shows size and SHA-256. The text is printed only by `held --show-late-result ID`, in a JSON field marked `untrusted: true`; terminal output read by a model becomes model input, so it is never included in the listing. The audit keeps the hash, never the text.
 3. Decision: accept it as the reply, or close the record. Doing nothing leaves it held.
 4. Replacement: a later reply replaces the stored text (checked). The listing always shows the hash of the current text; accepting with an older hash fails `late_result_mismatch`.
 5. After the fact: a chat replying after `mark-failed` gets `reply_not_accepted` (phase `failed`) and no text is stored, because only held or expired-executing records retain it (checked). After `accept-late-result`, the chat's own later reply with its claim token reaches the completed-message path: identical content is a duplicate, anything else fails `duplicate_id_conflict`.
@@ -110,6 +110,7 @@ The offline tool pushes nothing. The supervisor's notifier recomputes obligation
 | Stale listing | `stale_view` with the current version; nothing written |
 | No late text / hash differs | `late_result_missing` / `late_result_mismatch` |
 | Pinned record on accept | `reply_route_pinned`; `mark-failed` stays available |
+| Malformed argument | `invalid_params` (`invalid_arguments` for missing CLI flags) |
 | Same ID, different parameters | `duplicate_id_conflict` |
 | Exact retry | stored outcome, `isDuplicate: true` |
 | Crash mid-operation | nothing written; retry |

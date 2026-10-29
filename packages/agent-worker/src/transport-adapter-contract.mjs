@@ -21,6 +21,7 @@ export function localState(phase) {
     case "executing": return "executing"; // Native claim, not proof the model started.
     case "held": return "held";
     case "completed": return "completed"; // Query replies separately.
+    case "failed": return "failed"; // Closed by the owner without a result.
     default: return "unknown";
   }
 }

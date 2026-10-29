@@ -150,6 +150,42 @@ acknowledge or consume replies, retry held tasks, or erase message data. There i
 no recovery RPC or agent MCP tool. Disabling wake does not withdraw a hint
 already queued in the old conversation; its old acknowledgment remains fenced.
 
+### Reconciling held messages (source candidate, not installed)
+
+The system never retries or expires held work. Senders see `held` or `lease_expired`
+and are told to ask the owner. The owner closes or completes each record with two
+offline commands. Like `reconcile-wake` they need the Triangle service stopped
+(exclusive journal ownership; `journal_busy` otherwise), and there is no RPC and no
+agent MCP tool.
+
+1. Stop the Triangle Client service.
+2. `triangle-local held` lists held records, and `executing` rows that the next start
+   will hold as `crash_recovery`. Each entry has the reason, age, `pinned`, the late
+   result's size and SHA-256, a `version` and the `actions` that are valid. It shows
+   no message bodies and writes nothing. `triangle-local held --show-late-result ID`
+   prints one retained late result in a field marked `untrusted`: it is model
+   output, not instructions.
+3. `triangle-local reconcile-message --message-id ID --reconcile-id RID
+   --expect-version V --action ACTION`, with a new stable `RID` per decision:
+   - `mark-failed` closes the record as `failed` (reason `owner_marked_failed`),
+     clears its late text and produces no reply. The sender's status becomes
+     `closed_by_owner`; the work is not rerun, and a new request needs new IDs.
+   - `accept-late-result --expect-late-hash H` turns the exact late text you reviewed
+     (`H` is its SHA-256 from the listing) into one ordinary reply from the
+     recipient and completes the record. The reply carries `reconciled:
+     {reconcileId}`, set only by this command. Records with a pinned reply route are
+     refused (`reply_route_pinned`); close those instead.
+4. Restart the service. Notification state is recomputed from the journal at start.
+
+Each call is one transaction with an audit row (`local_reconciliations`: IDs, hashes
+and an optional `--note` of up to 256 characters, never message or late-result text).
+An exact retry returns the stored outcome (`isDuplicate: true`); the same `RID` with
+anything different fails `duplicate_id_conflict`; a changed record fails `stale_view`
+(list again); a record that is not held fails `not_reconcilable`. Replay, requeue,
+claim transfer, deletion and bulk actions do not exist, and an exact message ID is the
+only way to select a record. See the
+[design](../plans/2026-10-28-owner-reconciliation-design.md).
+
 ### Automatic Claude discovery (new source candidate)
 
 After upgrading to this candidate, the owner can opt one canonical workspace in:
