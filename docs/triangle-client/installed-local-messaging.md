@@ -69,7 +69,15 @@ conversation labels come from owner configuration, not transcript scans. Labels
 are untrusted display text; use the exact `id` for routing. The directory lists
 only the intersection of the existing owner ACL and credential recipient scope.
 It neither grants access nor proves that a recipient is online or can wake.
-Legacy `discover` and `triangle_list_recipients` keep their ID-only output.
+Legacy `discover` and `triangle_list_recipients` keep their `recipients` ID list
+unchanged. While the owner has enabled principal routing they also carry `entries`:
+one `{id, principal}` per authorized recipient, where `principal` is an `agent_` id
+that `send` accepts in place of the id, or `null` when none is known right now (an
+unmapped recipient, or a registry that is absent or unreadable; null does not prove
+the recipient has no identity). Without principal routing, or from an older host,
+there is no `entries` field, which means the metadata is unavailable. The client
+passes on only `id` and `principal` of recipients the host listed. Loaded MCP tool
+descriptions refresh only when the harness reloads its tools.
 
 This is a directory for existing registrations, not automatic discovery of all
 open chats. Automatic registration, liveness evidence and conversation titles come

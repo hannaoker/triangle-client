@@ -22,8 +22,12 @@ import {
 import { createPerSenderRateLimiter, createConversationLoopTracker } from "../src/local-messaging-rate-limiter.mjs";
 import { writePrivateJson } from "../src/local-messaging-auth-broker.mjs";
 import { createInteractiveSessionBroker } from "../src/local-messaging-interactive-session.mjs";
+import { setupRouter } from "../src/local-messaging-cli.mjs";
+import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
+import { initIdentityRegistry, bindProfileInRegistry } from "./local-messaging-identity-fixtures.mjs";
 
-function setupChildTestEnv() {
+// codexProfile gives the peer a derived instance id, so a registry binding can name it.
+function setupChildTestEnv({ codexProfile = null } = {}) {
   const baseTmp = fs.existsSync("/private/tmp") ? "/private/tmp" : (fs.existsSync("/tmp") ? "/tmp" : os.tmpdir());
   const tmpDir = fs.mkdtempSync(path.join(baseTmp, "tri-child-test-"));
   fs.chmodSync(tmpDir, 0o700);
@@ -35,7 +39,7 @@ function setupChildTestEnv() {
   const issuer = createTurnCapabilityIssuer({ secret });
   const validator = createTurnCapabilityValidator({ secret });
 
-  const codexId = crypto.randomBytes(32).toString("hex");
+  const codexId = codexProfile ? deriveClientInstanceId(codexProfile) : crypto.randomBytes(32).toString("hex");
   const claudeId = crypto.randomBytes(32).toString("hex");
 
   const integrationPath = path.join(stateRoot, "claude-integration.json");
@@ -587,6 +591,41 @@ test("Issue 2 [P1]: Mutation outcomes preserve exact IDs on transport loss with 
   }
 });
 
+test("attached chats get each recipient's principal beside the recipients list while the router is enabled", async () => {
+  const env = setupChildTestEnv({ codexProfile: "codex-peer" });
+  let child;
+  try {
+    const identityRoot = path.join(env.tmpDir, "identity");
+    fs.mkdirSync(identityRoot, { mode: 0o700 });
+    initIdentityRegistry(identityRoot);
+    const binding = bindProfileInRegistry(identityRoot, "codex-peer", 1);
+    setupRouter({ enable: true, registryRoot: identityRoot, stateRoot: env.stateRoot });
+    await env.server.start();
+
+    child = createClaudeSessionMcpChild({
+      configPath: env.configPath,
+      integrationPath: env.integrationPath,
+      expectedVersion: SUPPORTED_CLAUDE_VERSION,
+      env: { CLAUDE_CODE_SESSION_ID: env.interactiveSessionId },
+      wakeIntervalMs: 0,
+    });
+    const response = await child.handleRequest({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "triangle_list_recipients", arguments: {} },
+    });
+    assert.equal(response.result.isError, false, JSON.stringify(response));
+    assert.deepEqual(JSON.parse(response.result.content[0].text), {
+      recipients: [env.codexId],
+      entries: [{ id: env.codexId, principal: binding.principal_id }],
+    });
+  } finally {
+    await child?.close();
+    await env.cleanup();
+  }
+});
+
 test("Issue 3 [P2]: Claude MCP child exposes authorized bidirectional tools triangle_list_recipients, triangle_get_replies, triangle_consume_reply", async () => {
   const env = setupChildTestEnv();
   let child;
@@ -617,6 +656,7 @@ test("Issue 3 [P2]: Claude MCP child exposes authorized bidirectional tools tria
     assert.equal(recipsRes.result.isError, false);
     const recipsData = JSON.parse(recipsRes.result.content[0].text);
     assert.deepEqual(recipsData.recipients, [env.codexId]);
+    assert.equal(Object.hasOwn(recipsData, "entries"), false, "no entries while the router is off");
     const directoryResult = await child.handleRequest({
       jsonrpc: "2.0", id: "directory", method: "tools/call",
       params: { name: "triangle_list_sessions", arguments: {} },

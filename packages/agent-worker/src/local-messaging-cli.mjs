@@ -645,7 +645,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text},rpcOptions);
   }
   if(command==='sessions')result={sessions:await client.listSessions(rpcOptions)};
-  if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,recipients:await client.discoverRecipients(rpcOptions)};
+  if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,...await client.discoverRecipientDetails(rpcOptions)};
   if(command==='replies')result={senderId:binding.senderId,replies:await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to']},rpcOptions)};
   if(command==='consume')result=await client.consumeReply({messageId:options['message-id']},rpcOptions);
   if(command==='ack-wake'){

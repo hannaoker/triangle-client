@@ -7,6 +7,24 @@ import {
 } from "./local-messaging-protocol.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
+// Keeps only the { id, principal } of entries that name a listed recipient. Anything else the host sent, a repeated id
+// and malformed entries are dropped. Returns undefined, not an empty list, when entries were absent or none were usable.
+function projectRecipientEntries(recipients, entries) {
+  if (!Array.isArray(entries)) return undefined;
+  const listed = new Set(recipients);
+  const seen = new Set();
+  const projected = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { id, principal } = entry;
+    if (typeof id !== "string" || !listed.has(id) || seen.has(id)) continue;
+    if (principal !== null && (typeof principal !== "string" || principal === "")) continue;
+    seen.add(id);
+    projected.push({ id, principal });
+  }
+  return projected.length === 0 && recipients.length > 0 ? undefined : projected;
+}
+
 export function createLocalControlClient({
   socketPath,
   turnCredential,
@@ -243,6 +261,15 @@ export function createLocalControlClient({
     async discoverRecipients(options = {}) {
       const res = await callRpc("discover_recipients", {}, options);
       return res.recipients || [];
+    },
+    // The same call with the router's per-recipient metadata, for agent-facing surfaces. `entries` ({ id, principal })
+    // exists only while the host's identity router is enabled, and each one is checked against `recipients`, so an agent
+    // never sees an id or a field the host did not list as authorized. No `entries` means the metadata is unavailable.
+    async discoverRecipientDetails(options = {}) {
+      const res = await callRpc("discover_recipients", {}, options);
+      const recipients = Array.isArray(res?.recipients) ? res.recipients : [];
+      const entries = projectRecipientEntries(recipients, res?.entries);
+      return entries === undefined ? { recipients } : { recipients, entries };
     },
 
     async sendMessage({

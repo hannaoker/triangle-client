@@ -20,7 +20,14 @@ import {
 } from "./local-messaging-interactive-session.mjs";
 import { notify as codexQueueNotify } from "./codex-wake-adapter.mjs";
 import { sanitizeError, coded } from "./local-messaging-errors.mjs";
-import { MAX_FRAME_BYTES, MAX_FIELD_STRING_LENGTH, STATUS_TOOL_DESCRIPTION } from "./local-messaging-protocol.mjs";
+import {
+  MAX_FRAME_BYTES,
+  MAX_FIELD_STRING_LENGTH,
+  STATUS_TOOL_DESCRIPTION,
+  LIST_RECIPIENTS_TOOL_DESCRIPTION,
+  SEND_TOOL_DESCRIPTION,
+  SEND_TOOL_ARGUMENT_DESCRIPTIONS,
+} from "./local-messaging-protocol.mjs";
 
 export const CLAUDE_MCP_TOOLS = [
   {
@@ -79,22 +86,22 @@ export const CLAUDE_MCP_TOOLS = [
   },
   {
     name: "triangle_send_message",
-    description: "Send a message to an authorized recipient agent.",
+    description: SEND_TOOL_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
-        to: { type: "string", description: "Recipient agent ID" },
-        text: { type: "string", description: "Message text" },
-        messageId: { type: "string", description: "Optional stable message ID" },
-        requestId: { type: "string", description: "Optional correlation request ID" },
-        inReplyTo: { type: "string", description: "Message ID being replied to" },
+        to: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.to },
+        text: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.text },
+        messageId: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.messageId },
+        requestId: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.requestId },
+        inReplyTo: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.inReplyTo },
       },
       required: ["to", "text"],
     },
   },
   {
     name: "triangle_list_recipients",
-    description: "Discover authorized local agent recipients on this host.",
+    description: LIST_RECIPIENTS_TOOL_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {},
@@ -187,7 +194,7 @@ async function runSessionTool({ client, credential, name, args, generation }) {
     case "triangle_list_sessions":
       return { sessions: await client.listSessions({ credential }) };
     case "triangle_list_recipients":
-      return { recipients: await client.discoverRecipients({ credential }) };
+      return await client.discoverRecipientDetails({ credential });
     case "triangle_get_replies":
       return { replies: await client.listReplies({ requestId: args.requestId, inReplyTo: args.inReplyTo }, { credential }) };
     case "triangle_consume_reply":

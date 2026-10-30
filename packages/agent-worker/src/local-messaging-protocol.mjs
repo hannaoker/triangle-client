@@ -8,6 +8,18 @@ export const MAX_FIELD_STRING_LENGTH = 128 * 1024; // 128 KB for text field
 // One description for triangle_get_status on every MCP surface (the bound adapter and attached chats).
 export const STATUS_TOOL_DESCRIPTION = "Show this conversation's Triangle address and inbox counts, or pass messageId for the status of a message you sent or received: its phase plus a delivery state, explanation and next action. Notification acceptance is not execution or approval, and approval state may be unknown.";
 
+// One text for triangle_list_recipients and triangle_send_message on every MCP surface. Labels are never routing keys;
+// `entries` exists only while the owner has enabled principal routing, and a null principal means none is known right now.
+export const LIST_RECIPIENTS_TOOL_DESCRIPTION = "Discover authorized local agent recipients on this host: recipients lists the exact ids you may send to. When the owner has enabled principal routing, entries also pairs each id with its principal (an agent_ id you may send to instead of the id), or null when none is known right now; null does not mean the recipient has no identity. Presence and reachability come from triangle_list_sessions.";
+export const SEND_TOOL_DESCRIPTION = "Send a message to an authorized local recipient agent on this host. The result, and any error, carries messageId and requestId. If a call fails or times out the message may already be admitted: retry with the SAME messageId and requestId so it is recognised as a duplicate instead of running the task twice. Never send a new message just to retry.";
+export const SEND_TOOL_ARGUMENT_DESCRIPTIONS = Object.freeze({
+  to: "Exact recipient id from triangle_list_recipients or triangle_list_sessions, never a label. When triangle_list_recipients lists a principal (an agent_ id) for a recipient you may send to that instead. peer_ addresses are not supported.",
+  text: "Message body text",
+  messageId: "Stable message ID for idempotency. Optional on the first call (one is generated and returned); on a retry always pass the messageId returned by the earlier attempt.",
+  requestId: "Correlation request ID. Optional on the first call (one is generated and returned); on a retry always pass the requestId returned by the earlier attempt.",
+  inReplyTo: "Message ID being replied to",
+});
+
 export function encodeFrame(message) {
   if (!message || typeof message !== "object") {
     throw coded("invalid_message", "Message must be an object");

@@ -161,6 +161,14 @@ Pass criteria:
   Loaded tool descriptions require normal harness reload; do not claim additive
   result compatibility means already-loaded schemas/descriptions refresh live.
 
+Status, 2026-10-29: implemented on branch `claude/u1-discovery-metadata`
+(`discoverRecipientDetails`, CLI `discover`, both MCP adapters, shared descriptions in
+`local-messaging-protocol.mjs`, extended parity test, runbook note). Source tests: the
+full agent-worker suite passes (1251 tests, 3 skipped, 0 failures) and the root
+runner-contract and packaged-installer tests pass (11). Not done: independent review,
+merge, installed read-only discovery checks, and the harness reload that refreshes
+loaded tool descriptions.
+
 ### U2 — Coherent local route and reachability explanations (second PR)
 
 Outcome: discovery explains who a visible entry is, whether this caller may send,
