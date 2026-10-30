@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {randomUUID} from 'node:crypto';
-import {describeMessageDelivery,describeRecipientDelivery,createLocalControlServer} from '../src/local-messaging-server.mjs';
+import {describeMessageDelivery,describeRecipientDelivery,describeReplyIdentity,describeChatBinding,createLocalControlServer} from '../src/local-messaging-server.mjs';
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
 import {createLocalControlClient} from '../src/local-messaging-client.mjs';
 import {createTurnCapabilityIssuer,createTurnCapabilityValidator} from '../src/local-messaging-credentials.mjs';
@@ -31,6 +31,28 @@ test('recipient descriptions separate discovery, attachment and pull-only delive
  assert.equal(describeRecipientDelivery({capabilities:{reachable:true}}).state,'ready_to_queue');
  assert.equal(describeRecipientDelivery({capabilities:{queueable:true,pullInbox:true,wakeCapable:false}}).state,'pull_only');
  assert.equal(describeRecipientDelivery({kind:'worker'}).state,'availability_unknown');
+});
+test('a delivery route the caller may not use is never presented as ready to queue',()=>{
+ const refused={permitted:false,addressKinds:[]};
+ for(const route of [{reachable:true,visible:true},{queueable:true,pullInbox:true,wakeCapable:false}]){
+  const view=describeRecipientDelivery({capabilities:route,send:refused});
+  assert.equal(view.state,'not_permitted');assert.match(view.nextAction,/do not send/i);
+ }
+ assert.equal(describeRecipientDelivery({capabilities:{reachable:true},send:{permitted:true,addressKinds:['id']}}).state,'ready_to_queue');
+ assert.equal(describeRecipientDelivery({capabilities:{reachable:true}}).state,'ready_to_queue','no stated answer keeps the previous explanation');
+ assert.equal(describeRecipientDelivery({attachment:'not-attached',capabilities:{visible:true,reachable:false},send:refused}).state,'not_attached','a missing attachment is still the first limit reported');
+ assert.equal(describeRecipientDelivery({capabilities:{visible:true,reachable:false},send:refused}).state,'visible_only');
+});
+test('reply identity is explained from the policy state, never guessed, and an unrecognised state is not called absent',()=>{
+ const state=(policy,extra={})=>describeReplyIdentity({attachedChats:true,policy:{state:policy},pinning:false,...extra});
+ assert.deepEqual([state('absent').state,state('absent').reason],['disabled','policy_absent']);
+ assert.deepEqual([state('disabled').state,state('disabled').reason],['disabled','policy_disabled']);
+ assert.deepEqual([state('invalid').state,state('invalid').reason],['disabled','policy_invalid']);
+ assert.deepEqual([state('enabled',{pinning:true}).state,state('enabled',{pinning:true}).reason],['enabled','policy_enabled']);
+ assert.deepEqual([state('absent',{attachedChats:false}).state,state('absent',{attachedChats:false}).reason],['not_applicable','attached_chats_not_enabled'],'no attached chats means nothing to pin, whatever the policy says');
+ for(const odd of ['enabled','surprise',undefined]){assert.equal(state(odd).reason,'policy_unknown',String(odd));assert.equal(state(odd).state,'disabled');}
+ for(const view of [state('absent'),state('invalid'),state('disabled'),describeChatBinding()])assert.ok(view.summary&&view.nextAction);
+ assert.equal(describeChatBinding().binding,'unbound');
 });
 test('wake evidence matches the exact queued request rather than an unrelated or older wake',async()=>{
  const root=fs.mkdtempSync('/private/tmp/tri-status-');let j;

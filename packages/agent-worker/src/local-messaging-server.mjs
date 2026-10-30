@@ -42,12 +42,32 @@ export function describeMessageDelivery(record,{notification='unknown',recipient
 }
 export function describeRecipientDelivery(row){
  const view=(state,summary,nextAction)=>({state,summary,nextAction});
+ // A route that exists but that this caller may not use must not read as ready; `send` is the router's answer for this caller.
+ if(row.send?.permitted===false&&(row.capabilities?.reachable||(row.capabilities?.pullInbox&&row.capabilities?.queueable)))return view('not_permitted','A delivery route exists, but this caller\'s current credential does not cover it, so a send would be refused.','Do not send with this credential. Look again after the credential renews; if the entry stays not permitted, only the owner can change that.');
  if(row.capabilities?.pullInbox&&row.capabilities?.queueable)return view('pull_only','Requests can be queued; the recipient checks them on a user-initiated turn.','Send only if authorized, then ask the recipient to check its inbox.');
  if(row.capabilities?.reachable)return view('ready_to_queue','A delivery route is attached; this does not prove execution.','Send a request, then inspect its message status and correlated reply.');
  if(row.attachment==='ended'||row.lifecycle==='ended')return view('session_ended','The session has ended.','Reopen the same session or ask the owner to select a new target; do not silently substitute another chat.');
  if(row.attachment==='not-attached')return view('not_attached','The chat has no current Triangle attachment.','Open or reload that chat and call triangle_get_status.');
  if(row.capabilities?.visible)return view('visible_only','Listed by discovery; delivery authorization or attachment is not established.','Ask the owner to check exact grants and session attachment. Discovery alone grants no delivery permission.');
  return view('availability_unknown','The recipient is configured; live delivery availability is not established.','Send only if authorized and check the resulting message status.');
+}
+
+// Owner-facing explanation of reply identity (R2 pins between attached chats), from facts the host already holds.
+// Presentation only: it reads policy state, never changes it, and repeats no path, secret or binding value.
+export function describeReplyIdentity({attachedChats=false,policy={},pinning=false}={}){
+ const view=(state,reason,summary,nextAction)=>({state,reason,summary,nextAction});
+ const original='Requests already pinned still verify, and their replies still go to the original sender.';
+ const turnOn='Turning it on is an owner decision (triangle-local setup-reply-identity --enable, runtime v14 or later); status and discovery never change it.';
+ if(!attachedChats)return view('not_applicable','attached_chats_not_enabled','Reply identity pins requests between attached chats, and workspace messaging is not enabled, so there are no attached chats to pin.','Nothing to do unless the owner enables workspace messaging for chats.');
+ if(pinning)return view('enabled','policy_enabled','New requests between attached chats are pinned to their authenticated sender, and replies go back to that original sender.','Nothing to do. Turning it off later stops new pins only; existing pins keep verifying.');
+ if(policy.state==='absent')return view('disabled','policy_absent',`Reply identity is off, with no reply-identity policy installed: new requests between attached chats are not pinned to their sender. ${original}`,turnOn);
+ if(policy.state==='invalid')return view('disabled','policy_invalid',`The reply-identity policy file is invalid, so new pins stay off (fail closed). ${original}`,'Rewrite the policy with triangle-local setup-reply-identity (an owner decision); do not edit it by hand.');
+ if(policy.state==='disabled')return view('disabled','policy_disabled',`Reply identity is turned off by the owner policy: new requests between attached chats are not pinned to their sender. ${original}`,turnOn);
+ return view('disabled','policy_unknown',`The reply-identity policy state is not recognised by this reader, so new pins stay off. ${original}`,'Check the policy with a compatible runtime before changing it.');
+}
+// Attached chats have no principal binding in this release; discovery shows their principal as null.
+export function describeChatBinding(){
+ return {binding:'unbound',summary:'Attached chats are identified only by their local session address. No principal, authority or binding generation is recorded for a chat, so its requests carry local-attested provenance and discovery shows principal null for it.',nextAction:'Nothing is needed for local messaging. Giving a chat a principal is a separate owner decision that no status or discovery call makes.'};
 }
 
 const MAX_INFLIGHT_PER_SOCKET = 50;
@@ -463,18 +483,25 @@ export function createLocalControlServer({
         }
 
         case "list_sessions": {
-          let ids = await acl.listAuthorizedRecipients(senderId);
-          if (claims?.allowedRecipients) {
-            const allowed = new Set(claims.allowedRecipients);
-            ids = ids.filter(id => allowed.has(id));
-          }
+          const authorizedIds = await acl.listAuthorizedRecipients(senderId);
+          const scope = claims?.allowedRecipients ? new Set(claims.allowedRecipients) : null;
+          const inScope = id => scope === null || scope.has(id);
           // Filter before looking up metadata, so hidden names never leak.
+          const ids = authorizedIds.filter(inScope);
           const sessions = ids.map(id => directory.get(id) ?? {
             id, label: id, kind: "unknown", presence: "unknown",
           });
+          // Whom the owner's policy lets this caller message, liveness aside: the ACL's list plus the attached-session
+          // rows, which the receiver policy has already filtered for this reader. Merely being listed is not in this set.
+          const policyIds = new Set(authorizedIds);
+          const unreachableSessions = new Set();
           if(sessionBroker){
             const attached=await sessionBroker.listFor(senderId);
-            for(const entry of attached){const index=sessions.findIndex(row=>row.id===entry.id);if(index>=0)sessions[index]=entry;else sessions.push(entry);}
+            for(const entry of attached){
+              policyIds.add(entry.id);
+              if(entry.capabilities?.reachable!==true)unreachableSessions.add(entry.id);
+              const index=sessions.findIndex(row=>row.id===entry.id);if(index>=0)sessions[index]=entry;else sessions.push(entry);
+            }
           }
           if(discoveryBroker){
             const discovered=await discoveryBroker.listFor(senderId);
@@ -483,7 +510,23 @@ export function createLocalControlServer({
           }
           const rawSessions = interactiveBroker?.filterDirectory ? interactiveBroker.filterDirectory(senderId, sessions) : sessions;
           const decoratedSessions = activeRouter.decorateSessions({ sessions: rawSessions });
-          const hintedSessions={...decoratedSessions,sessions:decoratedSessions.sessions.map(row=>({...row,delivery:describeRecipientDelivery(row)}))};
+          // The caller-relative explanation, by the same gate as send_message: the owner's policy, then the credential's
+          // scope. The bound conversation and attached chats hold a scope issued from the live ACL, which cannot yet
+          // contain a chat that was down, so for them a chat without a route is judged by the receiver policy alone and
+          // the scope applies once it is attached. Any other reader (the paired Claude, Grok) holds a fixed scope, so its
+          // scope decides at all times. Whether the route is up is the row's own attachment evidence, not this answer.
+          // Optional: it must never make an otherwise valid directory unreadable.
+          const aclDerivedScope = inboxBroker?.isDesktopSender?.(senderId) === true || sessionBroker?.isInteractiveSender?.(senderId) === true;
+          let explanations = null;
+          try {
+            const explained = activeRouter.describeAddresses?.(decoratedSessions.sessions.map(row => row.id), { permitted: id => policyIds.has(id) && (inScope(id) || (aclDerivedScope && unreachableSessions.has(id))) });
+            if (explained) explanations = new Map(explained.map(entry => [entry.id, entry]));
+          } catch {}
+          const explainedSessions = explanations === null ? decoratedSessions.sessions : decoratedSessions.sessions.map(row => {
+            const entry = explanations.get(row.id);
+            return entry ? { ...row, principal: entry.principal, principalState: entry.principalState, route: entry.route, ...(entry.send ? { send: entry.send } : {}) } : row;
+          });
+          const hintedSessions={...decoratedSessions,sessions:explainedSessions.map(row=>({...row,delivery:describeRecipientDelivery(row)}))};
           const hintedResponse=createSuccessResponse(id,hintedSessions,PROTOCOL_VERSION);
           // Optional explanations must never make an otherwise valid directory unreadable.
           const response=Buffer.byteLength(JSON.stringify(hintedResponse),'utf8')<=MAX_PAYLOAD_BYTES?hintedResponse:createSuccessResponse(id,decoratedSessions,PROTOCOL_VERSION);
@@ -496,22 +539,15 @@ export function createLocalControlServer({
             const allowedSet = new Set(claims.allowedRecipients);
             recipients = recipients.filter((r) => allowedSet.has(r));
           }
-          const routerConf = routerStatCache.get();
           const payload = { recipients };
-          if (routerConf.enabled) {
-            let snap = null;
-            try {
-              snap = getSnapshotProvider().get();
-            } catch {}
-            payload.entries = recipients.map((rId) => {
-              let principal = null;
-              if (snap?.state === "ok") {
-                const binding = snap.bindingForInstance(rId);
-                if (binding?.principal_id) principal = binding.principal_id;
-              }
-              return { id: rId, principal };
-            });
-          }
+          // Every listed id passed the send gate above (owner policy, then credential scope), so each is permitted.
+          // Entries exist only while the router is enabled; without them the metadata is unavailable.
+          try {
+            const explained = activeRouter.describeAddresses?.(recipients, { permitted: () => true });
+            if (explained) {
+              payload.entries = explained.map(({ id: rId, principal, principalState, route, send }) => ({ id: rId, principal, principalState, route, send }));
+            }
+          } catch {}
           const resp = createSuccessResponse(id, payload, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;

@@ -4,6 +4,8 @@ import { MCP_TOOLS as BOUND } from "../src/local-messaging-mcp-adapter.mjs";
 import { CLAUDE_MCP_TOOLS as CLAUDE, CODEX_MCP_TOOLS as CODEX } from "../src/claude-session-mcp-child.mjs";
 import {
   STATUS_TOOL_DESCRIPTION,
+  STATUS_SEMANTICS,
+  LIST_SESSIONS_TOOL_DESCRIPTION,
   LIST_RECIPIENTS_TOOL_DESCRIPTION,
   SEND_TOOL_DESCRIPTION,
   SEND_TOOL_ARGUMENT_DESCRIPTIONS,
@@ -159,4 +161,45 @@ test("discovery and send share one contract text that names principals and the u
   assert.match(SEND_TOOL_ARGUMENT_DESCRIPTIONS.to, /agent_/);
   assert.match(SEND_TOOL_ARGUMENT_DESCRIPTIONS.to, /peer_/);
   assert.match(SEND_TOOL_DESCRIPTION, /SAME messageId and requestId/);
+});
+
+test("triangle_list_sessions has one text on every surface and explains the per-entry send answer", () => {
+  for (const [label, tools] of [["bound", BOUND], ["claude", CLAUDE], ["codex", CODEX]]) {
+    assert.equal(index(tools).get("triangle_list_sessions").description, LIST_SESSIONS_TOOL_DESCRIPTION, label);
+  }
+  // The text keeps its earlier promises and names each field that explains an entry.
+  for (const phrase of [/reachable is false/, /exact id, never the label/, /untrusted display metadata/, /presenceEvidence/, /attachment/]) {
+    assert.match(LIST_SESSIONS_TOOL_DESCRIPTION, phrase);
+  }
+  for (const field of ["route", "principalState", "send", "permitted", "addressKinds"]) {
+    assert.ok(LIST_SESSIONS_TOOL_DESCRIPTION.includes(field), `names ${field}`);
+  }
+  assert.match(LIST_SESSIONS_TOOL_DESCRIPTION, /permitted is authorization, not reachability/);
+});
+
+test("the principal caveat travels as data: the texts point at send.addressKinds instead of describing a failure", () => {
+  assert.match(SEND_TOOL_ARGUMENT_DESCRIPTIONS.to, /addressKinds/);
+  assert.match(LIST_RECIPIENTS_TOOL_DESCRIPTION, /addressKinds/);
+  // The U1 wording made the caller reason about candidates it cannot see; the listing now answers per entry.
+  for (const text of [SEND_TOOL_ARGUMENT_DESCRIPTIONS.to, LIST_RECIPIENTS_TOOL_DESCRIPTION, LIST_SESSIONS_TOOL_DESCRIPTION]) {
+    assert.ok(!/names exactly one local recipient/.test(text), "the old caveat is gone");
+  }
+  // The fallback after a refusal stays, and the explanation fields are said to exist only with principal routing.
+  assert.match(SEND_TOOL_ARGUMENT_DESCRIPTIONS.to, /recipient_ambiguous/);
+  assert.match(LIST_RECIPIENTS_TOOL_DESCRIPTION, /enabled principal routing/);
+  assert.match(LIST_SESSIONS_TOOL_DESCRIPTION, /enabled principal routing/);
+});
+
+test("status is defined once: every surface's text is built from the same definition", () => {
+  for (const piece of [STATUS_SEMANTICS.ownSession, STATUS_SEMANTICS.messageId, STATUS_SEMANTICS.notification]) {
+    assert.ok(STATUS_TOOL_DESCRIPTION.includes(piece), piece);
+  }
+  for (const [label, tools] of [["bound", BOUND], ["claude", CLAUDE], ["codex", CODEX]]) {
+    const status = index(tools).get("triangle_get_status");
+    assert.ok(status.description.startsWith(STATUS_TOOL_DESCRIPTION), label);
+    // Agents are never told they can get the host view; that is the owner CLI's.
+    assert.ok(!/host/i.test(status.description.replace(STATUS_TOOL_DESCRIPTION, "")), `${label} adds no host-view promise`);
+    assert.deepEqual(properties(status), ["messageId"], label);
+  }
+  assert.ok(!/host/i.test(STATUS_TOOL_DESCRIPTION), "the shared agent text does not offer host status");
 });

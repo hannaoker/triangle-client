@@ -72,17 +72,41 @@ It neither grants access nor proves that a recipient is online or can wake.
 Legacy `discover` and `triangle_list_recipients` keep their `recipients` ID list
 unchanged. While the owner has enabled principal routing (`triangle-local
 setup-router --enable`, which writes `router.json` in the state directory) they also
-carry `entries`: exactly one `{id, principal}` per authorized recipient, in the order
-of `recipients`. `principal` is an `agent_` id, or `null` when none is known right now
-(an unmapped recipient, or a registry that is absent or unreadable; null does not
-prove the recipient has no identity). `send` accepts a listed principal in place of
-the id only when the registry maps it to exactly one local recipient. A principal
-bound to several recipients is refused as `recipient_ambiguous`, even when the caller
-may message only one of them, and the exact id still works. Without principal
-routing, or from an older host, there is no `entries` field, which means the metadata
-is unavailable; the client also omits `entries` when the host's list is not exactly
-one well-formed entry per listed recipient. Loaded MCP tool descriptions refresh only
-when the harness reloads its tools.
+carry `entries`, exactly one per authorized recipient in the order of `recipients`, and
+every `sessions` row carries the same four fields (unless the optional explanation layer
+is dropped for size, see "Delivery explanations"). The router answers them read-only
+for the calling credential (no send is resolved, no counter moves, nothing is enrolled):
+
+| Field | Meaning |
+| --- | --- |
+| `principal` | An `agent_` id, or `null` when none is known right now. |
+| `principalState` | `bound` (a principal is listed), `unbound` (the registry was read, or does not exist yet, and holds no binding; a chat has no binding in this release) or `unknown` (the registry could not be read, for every entry including chats, so `null` is not proof of "no identity"). |
+| `route` | `local`, the only route in this release. |
+| `send.permitted` | Whether the owner's policy and this credential's scope allow this caller to message this exact id. It is authorization, not reachability and not a promise that the entry can receive: for the bound conversation and attached chats, whose credential scope is issued from the live ACL and so cannot yet contain a chat that was down, a chat the receiver policy allows but that has no MCP child is `true` here and says `attachment: "not-attached"` in its own fields. Any other reader (the legacy paired Claude, Grok) holds a fixed credential scope, which decides at all times. The bound Codex thread's own chat row can read `true` although that address never receives (its hint says to use the existing identity and inbox). |
+| `send.addressKinds` | The address forms that name exactly this entry: `id`, and `principal` only when the registry maps that principal to exactly this one local recipient. Empty when `permitted` is false. Whether the route is up is in `capabilities`, `attachment` and `delivery`. |
+
+`send` accepts a listed principal in place of the id only when the registry maps it to
+exactly one local recipient. A principal bound to several local recipients is refused
+as `recipient_ambiguous`, even when the caller may message only one of them; the entry
+now says so without naming the others (`addressKinds` lacks `principal`), and the exact
+id still works. These fields exist only while principal routing is enabled: with it off
+(the default) `sessions` and `discover` keep exactly their previous shapes, and so does
+the `not_permitted` delivery state, which needs `send`. An older host sends `principal`
+on `sessions` rows once routing is enabled but none of the other fields. Absence means
+the metadata is unavailable. The client omits `entries` when the host's list is not
+exactly one well-formed entry per listed recipient, and drops an `entries` explanation
+field that is malformed or contradicts the entry's principal; `sessions` rows are passed
+through as the host sent them, as before. Loaded MCP tool descriptions refresh only when
+the harness reloads its tools.
+
+What each surface publishes, reviewed together (U2): agents see the fields above plus the
+existing presence, attachment, capability and delivery explanations. They never see the
+owner identity inventory or view (profile mapping state, binding ids and generations,
+authority origins, registry sequence or audit), host process ids, secrets or tokens.
+`sessions` lists some chats only because lifecycle discovery made them visible; those
+rows say `permitted: false` and `visible_only`. A listed row is visibility, not delivery
+permission. Where the host cannot know a route fact (configured workers have no
+session-style reachability), the field is absent rather than guessed.
 
 This is a directory for existing registrations, not automatic discovery of all
 open chats. Automatic registration, liveness evidence and conversation titles come
@@ -635,8 +659,12 @@ No wake ID, claim token, peer body or private error is included in the explanati
 Status remains restricted to the original sender or recipient.
 
 Session lists also add `delivery` explanations: `visible_only`, `not_attached`,
-`session_ended`, `ready_to_queue`, `pull_only` or `availability_unknown`. A listed
-session may lack authorization; an attached route does not prove execution.
+`session_ended`, `ready_to_queue`, `pull_only`, `not_permitted` or `availability_unknown`.
+A listed session may lack authorization; an attached route does not prove execution.
+`not_permitted` is a route that exists but that this caller's `send.permitted` rules out
+(a credential that does not cover it, for example one issued before the chat attached, or a
+fixed-scope reader); it is never shown as ready, and exists only while principal routing is
+enabled.
 Directory explanations are optional and omitted as a group if they would push an
 otherwise valid directory response over the existing protocol limit. Entries,
 capabilities and authorization filtering are preserved.
@@ -644,7 +672,12 @@ capabilities and authorization filtering are preserved.
 ## One status verb on every surface (source change, not installed)
 
 On every agent-facing surface, `status` with a message ID is that message's status
-and without one is the caller's own view. The owner CLI keeps the host view.
+and without one is the caller's own view. The owner CLI keeps the host view. The
+definition lives once in `STATUS_SEMANTICS` (`local-messaging-protocol.mjs`); every MCP
+tool text is built from it, and `local-messaging-route-explanations-host.test.mjs`
+exercises the three meanings over a real host: no ID on an MCP surface gives the
+caller's own session view (never host keys), no ID on the owner CLI gives the host view,
+and a message ID gives that message's delivery observations to its sender or recipient.
 
 | Surface | No argument | With a message ID |
 | --- | --- | --- |
@@ -674,6 +707,27 @@ rule (`foreign_access_denied`).
 fields of the three MCP surfaces and lists each intended difference: the bound-only `triangle_cancel_message`, the
 Codex-only `triangle_attach_session`, and the bound adapter's required `claimId`,
 `replyId` and `generation`, which attached chats generate or default.
+
+## Owner view of reply identity and unbound chats (source change, not installed)
+
+The owner `triangle-local status` (host view only; no MCP tool returns it) gains an
+`identity` block beside the unchanged `replyIdentity: {enabled, scope}`. It explains, in
+`state`, `reason`, `summary` and `nextAction`, why attached-chat pins are what they are:
+
+| `identity.replyIdentity` | When | Meaning |
+| --- | --- | --- |
+| `enabled` / `policy_enabled` | `reply-identity.json` enables it and workspace messaging is on | New requests between attached chats are pinned to their sender. |
+| `disabled` / `policy_absent` | No policy file (the default) | New requests are not pinned; existing pins still verify and replies still go to the original sender. |
+| `disabled` / `policy_disabled` | Owner policy says disabled | The same, by the owner's policy. |
+| `disabled` / `policy_invalid` | The file is invalid | Fails closed: new pins stay off. |
+| `not_applicable` / `attached_chats_not_enabled` | Workspace messaging is off | There are no attached chats to pin. |
+
+`identity.chats` is `binding: "unbound"`: a chat is identified only by its session address,
+has no principal, authority or binding generation, carries local-attested provenance, and
+shows `principal: null` in discovery. Both explanations only read. Turning reply identity on
+(`triangle-local setup-reply-identity --enable`, runtime v14 or later) and giving a chat a
+principal are separate owner decisions that no status or discovery call makes; the block
+repeats no path, secret or binding value.
 
 ## Atomic runner completion (candidate; not yet installed)
 

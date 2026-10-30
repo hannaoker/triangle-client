@@ -10,6 +10,7 @@ import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.m
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
 import {grokBindings,createGrokBroker} from './grok-local-session.mjs';
+import {describeReplyIdentity,describeChatBinding} from './local-messaging-server.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
@@ -73,8 +74,8 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    if(!metadata.isFile()||metadata.nlink!==1||metadata.size>4096)throw new Error('invalid policy');
    const policy=readPrivateJson(replyPolicyPath);
    if(policy.version!==1||typeof policy.enabled!=='boolean'||Object.keys(policy).sort().join(',')!=='enabled,version')throw new Error('invalid policy');
-   return {enabled:policy.enabled,minimumRuntime:14};
-  }catch(error){return {enabled:false,...(error.code==='ENOENT'?{}:{error:'invalid_reply_identity_policy',minimumRuntime:14})};}
+   return {enabled:policy.enabled,state:policy.enabled?'enabled':'disabled',minimumRuntime:14};
+  }catch(error){return {enabled:false,state:error.code==='ENOENT'?'absent':'invalid',...(error.code==='ENOENT'?{}:{error:'invalid_reply_identity_policy',minimumRuntime:14})};}
  };
  const admissionEnabled=replyIdentityEnabled??(()=>replyPolicy().enabled);
 
@@ -233,7 +234,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>({...baseStatus(),replyIdentity:{enabled:!!sessionBroker&&(typeof admissionEnabled==='function'?!!admissionEnabled():admissionEnabled===true),scope:'attached-chat-pairs',...(replyPolicy().error?{error:replyPolicy().error}:{} )},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null}),credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>{const policy=replyPolicy(),pinning=!!sessionBroker&&(replyIdentityEnabled===null?policy.enabled===true:typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true);return {...baseStatus(),replyIdentity:{enabled:pinning,scope:'attached-chat-pairs',...(policy.error?{error:policy.error}:{} )},identity:{replyIdentity:describeReplyIdentity({attachedChats:!!sessionBroker,policy,pinning}),chats:describeChatBinding()},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null};},credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');
