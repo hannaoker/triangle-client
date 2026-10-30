@@ -270,7 +270,8 @@ wait_for_recorded_supervisor_exit() {
 }
 
 wait_for_readiness() {
-  local started_ms=$1 timeout_ms=${TRIANGLE_READY_TIMEOUT_MS:-10000} stability_ms=500 deadline stable_deadline now output pid stable_output stable_pid
+  # A launchd reload can exceed ten seconds before a healthy coordinator is ready.
+  local started_ms=$1 timeout_ms=${TRIANGLE_READY_TIMEOUT_MS:-30000} stability_ms=500 deadline stable_deadline now output pid stable_output stable_pid
   if [[ "${TRIANGLE_TEST_MODE:-}" == "1" ]]; then stability_ms=${TRIANGLE_READY_STABILITY_MS:-500}; fi
   [[ "$timeout_ms" =~ ^[0-9]+$ && $timeout_ms -ge 20 && $timeout_ms -le 60000 ]] || { echo "invalid readiness timeout" >&2; return 1; }
   [[ "$stability_ms" =~ ^[0-9]+$ && $stability_ms -ge 20 && $stability_ms -le 5000 ]] || { echo "invalid readiness stability interval" >&2; return 1; }
