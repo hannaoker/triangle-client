@@ -981,7 +981,7 @@ export function createLocalMessagingJournal({
     assertNotClosed();
     const now = Date.now();
     db.prepare(
-      "UPDATE local_messages SET phase = 'held', reason = ?, runtime_error = ?, updated_at = ? WHERE message_id = ?"
+      "UPDATE local_messages SET phase = 'held', reason = ?, runtime_error = ?, updated_at = ? WHERE message_id = ? AND phase IN ('queued_local', 'executing')"
     ).run(reason, runtimeError ? String(runtimeError) : null, now, messageId);
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
     return row ? mapMessageRow(row) : null;

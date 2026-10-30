@@ -75,3 +75,36 @@ test('dispatcher rejects a non-atomic backend instead of falling back to separat
  const root=temporary();const j=createLocalMessagingJournal({stateRoot:root});
  try{const d=createLocalMessagingDispatcher({journal:j,runRecipient:async()=>{}});await assert.rejects(d.start({journal:{}}),{code:'invalid_dispatcher_options'});}finally{await j.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+for (const state of ['pinned', 'failed', 'queued_local', 'completed']) test('atomic completion refuses '+state+' request without changing it', async()=>{
+ const root=temporary();let j;
+ try {
+  j=createLocalMessagingJournal({stateRoot:root});await j.recordSend(request);
+  const db=new DatabaseSync(path.join(root,'local-messaging.sqlite'));
+  if(state==='pinned') db.prepare("UPDATE local_messages SET phase='executing', reply_route_key='test-pin' WHERE message_id='task'").run();
+  else db.prepare("UPDATE local_messages SET phase=? WHERE message_id='task'").run(state);
+  db.close();
+  const before=await j.getRecord('task');
+  await assert.rejects(j.completeExecutionWithReply(reply),{code:state==='pinned'?'invalid_recipient_type':'execution_not_active'});
+  assert.deepEqual(await j.getRecord('task'),before);
+  assert.equal((await j.listReplies({requester:'owner'})).length,0);
+ }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('a stale execution failure cannot overwrite completed or held state',async()=>{
+ const root=temporary();let j;
+ try {
+  j=createLocalMessagingJournal({stateRoot:root});await j.recordSend(request);await j.claimExecution('task');
+  await j.completeExecutionWithReply(reply);
+  const completed=await j.getRecord('task');
+  await j.recordExecutionFailure({messageId:'task',reason:'persistence_failure'});
+  assert.deepEqual(await j.getRecord('task'),completed);
+  await j.recordSend({...request,messageId:'admission-task'});
+  await j.recordExecutionFailure({messageId:'admission-task',reason:'admission_failure'});
+  assert.equal((await j.getRecord('admission-task')).phase,'held');
+  await j.recordSend({...request,messageId:'held-task'});await j.claimExecution('held-task');
+  await j.holdExecution('held-task','runner_timeout');const held=await j.getRecord('held-task');
+  await j.recordExecutionFailure({messageId:'held-task',reason:'persistence_failure'});
+  assert.deepEqual(await j.getRecord('held-task'),held);
+ }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
+});

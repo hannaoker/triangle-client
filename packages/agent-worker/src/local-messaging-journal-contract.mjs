@@ -32,15 +32,16 @@ import { coded } from "./local-messaging-errors.mjs";
  *     held, closed and interactive requests must not be completed through it.
  *     There is no fallback to separate recordReply/completeExecution calls.
  * - completeExecution(messageId): Legacy/helper transition. Do not use it with a
- *     separate recordReply call for new runner completions. Mark finished work 'completed' so it is never re-run
- *     after a restart.
+ *     separate recordReply call for new runner completions. Mark finished work
+ *     'completed' so it is never re-run after a restart.
  * - holdExecution(messageId, reason): Mark work 'held' (uncertain or refused); a held
  *     record is never automatically replayed.
  * - recoverQueued(): On start, hold every record still 'executing' (its outcome is
  *     unknown) with reason 'crash_recovery' and return { toRun, uncertain }: the
  *     'queued_local' records to run and the held uncertain ones.
  * - recordExecutionFailure({ messageId, reason, runtimeError }): Record runtime failure
- *     separately from prompt custody receipt.
+ *     separately from prompt custody receipt. Only queued or executing work may
+ *     transition; preserve completed, owner-closed and already-held records.
  *
  * - close(): Safely flush and release journal resources.
  */
