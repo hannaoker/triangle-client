@@ -1360,6 +1360,11 @@ function assertMutationMatchesAction(current, oldBindings, nextBindings, action,
       ) {
         throw codedError("invalid_registry", "mutation_does_not_match_action");
       }
+      // A plain bind renews the same identity; moving principal or authority needs
+      // a separate owner-confirmed operation, including after revocation.
+      if (nextB.principal_id !== oldB.principal_id || nextB.authority_origin !== oldB.authority_origin) {
+        throw codedError("binding_conflict", "identity_change_requires_move");
+      }
     }
     return nextB.binding_id;
   }

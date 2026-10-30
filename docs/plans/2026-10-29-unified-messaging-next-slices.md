@@ -335,3 +335,27 @@ Relevant sources: `2026-10-25-unified-messaging-interface-design.md`,
 `../handoffs/2026-10-26-r1-installed-acceptance.md`,
 `../handoffs/2026-10-26-r2-installed-disabled.md`, current local messaging runbook,
 and the implementation files named above.
+
+
+## Release checkpoint — 2026-10-30
+
+PRs #148 (U1), #149 (U2) and #150 (U3) merged in order; main reached
+`d16ad24`. U1/U2 bundles were installed on the Mini and every artifact hash
+verified. Read-only CLI acceptance preserved metadata for 8 authorized recipients
+and route explanations for 46 session entries. All 83 original message records,
+79 replies and one reply pin remained unchanged; old queued and held work was
+not processed. Reply pin admission stayed disabled. Record:
+`~/Library/Application Support/The Triangle/releases/pr148-150-install-verification.json`.
+Existing harness chats still need a restart to refresh loaded tool descriptions;
+that reload was not performed on owner chats. The independent focused review
+passed 101 tests; this does not replace installed MCP acceptance after reload.
+
+U3 decisions D1–D6 were approved with the Codex review corrections: a plain bind
+must protect authority origin as well as principal, and stronger approval also
+covers revocation. This supersedes the historical “not owner-approved” and open
+decision status above. Remote work remains deferred.
+
+The next source slice implements D2 only: refuse principal/authority changes on
+plain `bind`, including a revoked record, while retaining same-identity renewal.
+No move command, schema migration, registry rewrite, new binding or installation
+is included. D3 uniqueness and D5 approval mechanisms remain separate work.
