@@ -17,6 +17,10 @@ export function createLocalMessagingDispatcher({
     throw coded("invalid_dispatcher_options", "runRecipient must be a function");
   }
 
+  const requireAtomicJournal = candidate => {
+    if (typeof candidate?.completeExecutionWithReply !== 'function') throw coded('invalid_dispatcher_options','journal must support atomic runner completion');
+  };
+  requireAtomicJournal(journal);
   let activeJournal = journal;
   let active = false;
   let stopping = false;
@@ -156,7 +160,7 @@ export function createLocalMessagingDispatcher({
       }
       if (result && result.status === "completed") {
         const replyId = "rep-" + randomUUID();
-        await activeJournal.recordReply({
+        await activeJournal.completeExecutionWithReply({
           sender: fullJob.recipient,
           recipient: fullJob.sender,
           messageId: replyId,
@@ -165,7 +169,6 @@ export function createLocalMessagingDispatcher({
           text: result.text || "",
           metadata: {...result.metadata, _loopDepth: (fullJob.metadata?._loopDepth ?? fullJob.loopDepth ?? 1) + 1},
         });
-        await activeJournal.completeExecution(fullJob.messageId);
       } else {
         await activeJournal.holdExecution(
           fullJob.messageId,
@@ -201,7 +204,7 @@ export function createLocalMessagingDispatcher({
   }
 
   async function start({ journal: injectedJournal } = {}) {
-    if (injectedJournal) activeJournal = injectedJournal;
+    if (injectedJournal) { requireAtomicJournal(injectedJournal); activeJournal = injectedJournal; }
     if (active) return;
     active = true;
     stopping = false;

@@ -661,3 +661,16 @@ rule (`foreign_access_denied`).
 fields of the three MCP surfaces and lists each intended difference: the bound-only `triangle_cancel_message`, the
 Codex-only `triangle_attach_session`, and the bound adapter's required `claimId`,
 `replyId` and `generation`, which attached chats generate or default.
+
+## Atomic runner completion (candidate; not yet installed)
+
+The candidate production dispatcher commits a successful runner reply and the
+request's `completed` phase together. A crash before COMMIT leaves the execution
+uncertain with no reply; restart holds it without replay. A crash after COMMIT
+preserves one reply and completed state. The backend must support
+`completeExecutionWithReply`; separate-write fallback is refused.
+
+This prevents new runner reply/completion partial states. It does not repair old
+ones or remove owner `mark-completed` reconciliation. Interactive claim/reply and
+pinned-route custody use their existing paths. No new permission or agent-facing
+operation is added. See the [source verification](../reviews/2026-10-29-atomic-local-runner-completion.md).

@@ -726,6 +726,8 @@ export function createTestSqliteJournal({ dbPath }) {
  *   again, including after a restart. Finished work is marked completed.
  * - stop: awaits active executions to complete before shutdown.
  */
+// Recovery-only fixture: intentionally models completion without producing replies.
+// Atomic reply persistence is exercised through the production dispatcher tests.
 export function createTestRecoverableDispatcher({
   execute = async () => {},
   journal = null,

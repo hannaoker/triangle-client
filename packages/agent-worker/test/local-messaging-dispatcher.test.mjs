@@ -637,6 +637,6 @@ test('the dispatcher compacts finished records at start and at most hourly, and 
 });
 
 test('the dispatcher exposes exactly one name per hook: start, stop, notifyAdmission (plus status)',()=>{
- const dispatcher=createLocalMessagingDispatcher({journal:{},runRecipient:async()=>{}});
+ const dispatcher=createLocalMessagingDispatcher({journal:{completeExecutionWithReply(){}},runRecipient:async()=>{}});
  assert.deepEqual(Object.keys(dispatcher).sort(),['notifyAdmission','start','status','stop']);
 });
