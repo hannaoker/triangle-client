@@ -218,7 +218,7 @@ read-only path must not enroll identities, create messages, trigger wakes or
 change configuration. This is the local portion of old R4, not remote aggregation.
 
 Status, 2026-10-30: implemented on branch `claude/u2-route-explanations`, based on U1's
-head `257ae70` (PR #148, still open), committed locally and not pushed. Review of
+head `257ae70` (PR #148, still open), pushed as draft PR #149. Review of
 `sessions`, `discover`, `local_status`/`session_status` and the owner identity view
 together: agents get one router-computed explanation per entry on both `sessions` rows
 and `discover` entries (`route`, `principal`, `principalState`, `send.permitted`,
@@ -273,12 +273,15 @@ Deliverable: a short schema/authority delta against the October 25 identity desi
 not a rewrite of its cryptographic and rotation proposals. No remote rollout.
 
 Status, 2026-10-30: delivered as `2026-10-30-identity-destination-design-delta.md`
-(design only, not owner-approved). It lists nine places where shipped code differs from the
-October text, the identifiers to preserve, the session-to-principal, revocation, inbound
-delivery and alias rules to adopt, what the review and reply authorization does not cover,
-the prerequisites for an Iroh or MESH adapter, and seven open owner decisions with
-recommendations (D1 to D7). The two that matter most: storage lets a rebind swap a profile's
-principal silently (D2), and nothing stops one principal being bound to several profiles (D3).
+(design only, not owner-approved; an independent model review, not a human or Codex review,
+found one high, six medium, thirteen low and seven nit issues, all addressed). It lists nine
+places where shipped code differs from the October text, the identifiers to preserve, the
+session-to-principal, revocation, inbound delivery and alias rules to adopt, what the review and
+reply authorization does not cover, the prerequisites for an Iroh or MESH adapter, and six open
+owner decisions with recommendations (D1 to D6). The ones that matter most: storage lets a rebind
+swap a profile's principal silently (D2); storage lets one principal be bound to several profiles,
+and only the migrate planner refuses it, within one inventory (D3); and the terminal-plus-plan-id
+gate does not stop a same-user agent from approving its own mapping (D5).
 
 ### Deferred — Iroh, MESH and cross-machine acceptance
 
