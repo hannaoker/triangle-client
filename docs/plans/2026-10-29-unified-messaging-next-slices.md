@@ -272,6 +272,14 @@ R2 activation is a separately scoped owner decision with fresh installed evidenc
 Deliverable: a short schema/authority delta against the October 25 identity design,
 not a rewrite of its cryptographic and rotation proposals. No remote rollout.
 
+Status, 2026-10-30: delivered as `2026-10-30-identity-destination-design-delta.md`
+(design only, not owner-approved). It lists nine places where shipped code differs from the
+October text, the identifiers to preserve, the session-to-principal, revocation, inbound
+delivery and alias rules to adopt, what the review and reply authorization does not cover,
+the prerequisites for an Iroh or MESH adapter, and seven open owner decisions with
+recommendations (D1 to D7). The two that matter most: storage lets a rebind swap a profile's
+principal silently (D2), and nothing stops one principal being bound to several profiles (D3).
+
 ### Deferred — Iroh, MESH and cross-machine acceptance
 
 Retain the original designs as backlog, with prerequisites reopened against fresh
