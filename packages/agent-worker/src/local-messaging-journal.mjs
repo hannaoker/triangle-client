@@ -763,7 +763,7 @@ export function createLocalMessagingJournal({
     }
   }
 
-  async function recordReply(envelope) {
+  function recordReplySync(envelope) {
     assertNotClosed();
     if (!envelope || typeof envelope !== "object") {
       throw coded("invalid_envelope", "Reply envelope must be an object");
@@ -807,6 +807,39 @@ export function createLocalMessagingJournal({
 
     const row = db.prepare("SELECT * FROM local_replies WHERE message_id = ?").get(messageId);
     return { ...mapReplyRow(row), isDuplicate: false };
+  }
+
+  async function recordReply(envelope) {
+    return recordReplySync(envelope);
+  }
+
+  // Runner completion has one durable boundary. Do not await between writes:
+  // other operations on this connection must never observe a partial completion.
+  async function completeExecutionWithReply(envelope) {
+    assertNotClosed();
+    if (!envelope || typeof envelope !== 'object' || typeof envelope.inReplyTo !== 'string') {
+      throw coded('invalid_envelope','A correlated runner reply is required');
+    }
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const orig=db.prepare('SELECT * FROM local_messages WHERE message_id = ?').get(envelope.inReplyTo);
+      if (!orig) throw coded('invalid_reply_correlation','Original runner request not found');
+      if (orig.recipient_type !== 'runner' || orig.reply_route_key) throw coded('invalid_recipient_type','Atomic runner completion requires an unpinned runner request');
+      if (!['executing','completed'].includes(orig.phase)) throw coded('execution_not_active','Runner request is not executing or completed');
+      const stored=db.prepare('SELECT message_id FROM local_replies WHERE in_reply_to = ?').get(envelope.inReplyTo);
+      if (stored && stored.message_id !== envelope.messageId) throw coded('duplicate_id_conflict','A different reply already exists for this runner request');
+      if (orig.phase==='completed' && !stored) throw coded('execution_not_active','Completed runner request has no stored reply');
+      const reply=recordReplySync(envelope);
+      if (orig.phase==='executing') {
+        const changed=db.prepare("UPDATE local_messages SET phase = 'completed', updated_at = ? WHERE message_id = ? AND phase = 'executing'").run(Date.now(),orig.message_id);
+        if (changed.changes!==1) throw coded('execution_not_active','Runner completion lost execution ownership');
+      }
+      db.exec('COMMIT');
+      return reply;
+    } catch(error) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
   }
 
   async function listReplies({ requester, requestId, inReplyTo, limit = 50, cursor = null } = {}) {
@@ -2214,6 +2247,7 @@ export function createLocalMessagingJournal({
     recoverQueued,
     claimExecution,
     completeExecution,
+    completeExecutionWithReply,
     holdExecution,
     getLateResult,
     getHeldView,

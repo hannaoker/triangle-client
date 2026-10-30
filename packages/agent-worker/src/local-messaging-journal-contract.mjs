@@ -25,7 +25,14 @@ import { coded } from "./local-messaging-errors.mjs";
  * - claimExecution(messageId): Atomically move 'queued_local' to 'executing' and return
  *     the record; return null when the record is in any other phase, so work that is
  *     claimed, finished or held is never started again.
- * - completeExecution(messageId): Mark finished work 'completed' so it is never re-run
+ * - completeExecutionWithReply(envelope): Required additionally by the production
+ *     dispatcher (enforced there, not by this shared RPC/test-adapter validator).
+ *     Correlate and persist a runner reply and mark its request completed in one
+ *     synchronous durable transaction. Exact retries must not add another reply;
+ *     held, closed and interactive requests must not be completed through it.
+ *     There is no fallback to separate recordReply/completeExecution calls.
+ * - completeExecution(messageId): Legacy/helper transition. Do not use it with a
+ *     separate recordReply call for new runner completions. Mark finished work 'completed' so it is never re-run
  *     after a restart.
  * - holdExecution(messageId, reason): Mark work 'held' (uncertain or refused); a held
  *     record is never automatically replayed.
