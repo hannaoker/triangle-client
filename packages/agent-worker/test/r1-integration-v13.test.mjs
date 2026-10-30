@@ -1099,7 +1099,7 @@ test("Public DTO decoration: discover_recipients, list_replies, get_message_stat
       turnCredential: tokenA,
     });
 
-    // 1. discoverRecipients decorated with entries including principal
+    // 1. The legacy array is unchanged; entries are asserted in local-messaging-discovery-details.test.mjs
     const disc = await client.discoverRecipients();
     assert.deepEqual(disc, [INSTANCE_BOB]);
 

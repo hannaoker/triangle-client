@@ -7,22 +7,33 @@ import {
 } from "./local-messaging-protocol.mjs";
 import { coded } from "./local-messaging-errors.mjs";
 
-// Keeps only the { id, principal } of entries that name a listed recipient. Anything else the host sent, a repeated id
-// and malformed entries are dropped. Returns undefined, not an empty list, when entries were absent or none were usable.
+// Same shape as AGENT_ID_PATTERN in identity-primitives.mjs, kept inline so the client needs no registry module.
+const PRINCIPAL_PATTERN = /^agent_[a-f0-9]{32}$/;
+
+// Returns one { id, principal } per listed recipient, in the order of `recipients`, or undefined. Only that pairing is
+// trusted: other fields and entries for unlisted ids are ignored, but a missing, repeated or malformed entry for a
+// listed recipient makes the whole list unavailable, because it would otherwise read as "no principal".
 function projectRecipientEntries(recipients, entries) {
   if (!Array.isArray(entries)) return undefined;
   const listed = new Set(recipients);
   const seen = new Set();
-  const projected = [];
+  const repeated = new Set();
+  const principals = new Map();
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object") continue;
     const { id, principal } = entry;
-    if (typeof id !== "string" || !listed.has(id) || seen.has(id)) continue;
-    if (principal !== null && (typeof principal !== "string" || principal === "")) continue;
+    if (typeof id !== "string" || !listed.has(id)) continue;
+    if (seen.has(id)) {
+      repeated.add(id);
+      continue;
+    }
     seen.add(id);
-    projected.push({ id, principal });
+    if (principal === null || (typeof principal === "string" && PRINCIPAL_PATTERN.test(principal))) {
+      principals.set(id, principal);
+    }
   }
-  return projected.length === 0 && recipients.length > 0 ? undefined : projected;
+  if (recipients.some((id) => repeated.has(id) || !principals.has(id))) return undefined;
+  return recipients.map((id) => ({ id, principal: principals.get(id) }));
 }
 
 export function createLocalControlClient({
@@ -263,8 +274,9 @@ export function createLocalControlClient({
       return res.recipients || [];
     },
     // The same call with the router's per-recipient metadata, for agent-facing surfaces. `entries` ({ id, principal })
-    // exists only while the host's identity router is enabled, and each one is checked against `recipients`, so an agent
-    // never sees an id or a field the host did not list as authorized. No `entries` means the metadata is unavailable.
+    // exists only while the host's identity router is enabled, and is passed on only as one entry per listed recipient
+    // (projectRecipientEntries), so an agent never sees an id or a value the host did not list as authorized.
+    // No `entries` means the metadata is unavailable.
     async discoverRecipientDetails(options = {}) {
       const res = await callRpc("discover_recipients", {}, options);
       const recipients = Array.isArray(res?.recipients) ? res.recipients : [];

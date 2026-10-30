@@ -22,15 +22,23 @@ const BOUND_EXTRA_REQUIRED = {
   triangle_ack_notification: ["generation"],
 };
 // The bound adapter serves one explicitly enabled Codex conversation and attached chats an interactive session, so
-// these tools describe themselves (and their arguments) differently. Every other shared tool has one text everywhere.
-const DESCRIPTION_EXCEPTIONS = [
+// these tools describe themselves differently. Every other shared tool has one tool text everywhere.
+const TOOL_TEXT_EXCEPTIONS = [
   "triangle_list_inbox",
   "triangle_claim_message",
   "triangle_reply_message",
   "triangle_ack_notification",
   "triangle_get_status", // starts from the shared text (checked below); the bound adapter and Codex chats append a sentence
 ];
-// The bound adapter rejects unknown arguments on its Codex-conversation inbox tools; attached chats leave the schema open.
+// On these tools the bound adapter declares no argument text at all while attached chats describe every argument.
+// Argument text is compared everywhere else, including on the tools above whose tool text differs.
+const BOUND_UNDESCRIBED_ARGUMENTS = {
+  triangle_list_inbox: ["limit", "cursor"],
+  triangle_claim_message: ["messageId", "claimId"],
+  triangle_reply_message: ["messageId", "claimToken", "replyId", "text"],
+};
+// The bound adapter declares closed schemas (additionalProperties: false) on its Codex-conversation inbox tools and
+// attached chats leave them open. This is the declared schema only: the bound handlers ignore unknown keys.
 const BOUND_CLOSED_SCHEMAS = ["triangle_list_inbox", "triangle_claim_message", "triangle_reply_message"];
 
 const names = (tools) => tools.map((tool) => tool.name).sort();
@@ -92,27 +100,35 @@ test("shared arguments have the same type and constraints on every surface", () 
   }
 });
 
-test("shared tools describe themselves and their arguments identically, except the listed tools", () => {
+test("shared tools and arguments are described identically, except the listed differences", () => {
   const bound = index(BOUND);
   const codex = index(CODEX);
   const claude = index(CLAUDE);
-  const argumentText = (tool) => Object.fromEntries(properties(tool).map((argument) => [argument, tool.inputSchema.properties[argument].description]));
+  const argumentText = (tool, argument) => tool.inputSchema.properties[argument].description;
   for (const [name, tool] of claude) {
-    // Attached Claude and Codex chats are one surface for text; Codex chats only add a sentence to the status text
-    // about attaching on first use.
-    assert.deepEqual(argumentText(codex.get(name)), argumentText(tool), `${name} argument text (codex)`);
-    if (name !== "triangle_get_status") assert.equal(codex.get(name).description, tool.description, `${name} description (codex)`);
-    if (DESCRIPTION_EXCEPTIONS.includes(name)) continue;
-    assert.equal(bound.get(name).description, tool.description, `${name} description (bound)`);
-    assert.deepEqual(argumentText(bound.get(name)), argumentText(tool), `${name} argument text (bound)`);
+    // Codex chats reuse the Claude tool objects and only add a sentence to the status text about attaching on first use.
+    if (name !== "triangle_get_status") assert.equal(codex.get(name).description, tool.description, `${name} text (codex)`);
+    if (!TOOL_TEXT_EXCEPTIONS.includes(name)) assert.equal(bound.get(name).description, tool.description, `${name} text (bound)`);
+    for (const argument of properties(tool)) {
+      assert.equal(argumentText(codex.get(name), argument), argumentText(tool, argument), `${name}.${argument} text (codex)`);
+      if (!(BOUND_UNDESCRIBED_ARGUMENTS[name] ?? []).includes(argument)) {
+        assert.equal(argumentText(bound.get(name), argument), argumentText(tool, argument), `${name}.${argument} text (bound)`);
+      }
+    }
   }
-  for (const name of DESCRIPTION_EXCEPTIONS) {
-    assert.notEqual(bound.get(name).description, claude.get(name).description, `${name} is no longer a description exception`);
+  for (const name of TOOL_TEXT_EXCEPTIONS) {
+    assert.notEqual(bound.get(name).description, claude.get(name).description, `${name} is no longer a tool text exception`);
   }
   assert.notEqual(codex.get("triangle_get_status").description, claude.get("triangle_get_status").description, "codex status text is no longer an exception");
+  for (const [name, argumentNames] of Object.entries(BOUND_UNDESCRIBED_ARGUMENTS)) {
+    for (const argument of argumentNames) {
+      assert.equal(argumentText(bound.get(name), argument), undefined, `${name}.${argument} is no longer undescribed on the bound adapter`);
+      assert.ok(argumentText(claude.get(name), argument), `${name}.${argument} must stay described on attached chats`);
+    }
+  }
 });
 
-test("unknown-argument policy matches on every surface, except the bound inbox tools that reject extras", () => {
+test("the declared unknown-argument policy matches on every surface, except the bound inbox tools that declare a closed schema", () => {
   const bound = index(BOUND);
   const codex = index(CODEX);
   const claude = index(CLAUDE);

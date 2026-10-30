@@ -102,14 +102,17 @@ same semantics on the bound MCP, attached Codex/Claude MCP and owner CLI.
   `discoverRecipients` for current library callers (the R0 local adapter builds
   its send-eligibility set from it); do not silently change its return type or
   attach hidden properties to an array.
-- Project `entries` in the client through an allowlist: keep only `id` and
-  `principal`, require `id` to be one of `recipients`, drop malformed or duplicate
-  entries, and leave `entries` absent when the host sent none or none are usable.
-  A future server field or a malformed frame must not widen what the agent sees.
+- Project `entries` in the client through an allowlist: pass them on only as
+  exactly one `{id, principal}` per listed recipient, in the order of `recipients`,
+  with `principal` an `agent_` id or null. Ignore other fields and entries for
+  unlisted ids, and leave `entries` absent when the host sent none or its list is
+  missing, repeated or malformed for any listed recipient. A future server field or
+  a malformed frame must not widen what the agent sees, and a listed id never has a
+  silently missing entry.
 - Pass the structured result through CLI `discover` and both MCP adapter paths
   (`local-messaging-mcp-adapter.mjs` for the bound Codex conversation,
   `claude-session-mcp-child.mjs` for attached Claude and Codex chats). Grok has no
-  separate discovery code; it goes through the CLI. Keep all existing output
+  discover operation, so U1 changes nothing for Grok. Keep all existing output
   fields and tool names. If the router is disabled or an older host omits
   `entries`, absence means unavailable metadata, not an invented binding.
 - Document `principal: null` as "none known to this host now". The server also
@@ -122,12 +125,15 @@ same semantics on the bound MCP, attached Codex/Claude MCP and owner CLI.
   `triangle_send_message` (tool and argument text) across the bound adapter and
   attached chats, defined in `local-messaging-protocol.mjs` beside
   `STATUS_TOOL_DESCRIPTION`. The `to` text names the accepted forms: an exact id
-  from discovery, never a label; an `agent_` principal when discovery lists one;
-  `peer_` addresses are not supported. Property types already agree across the
-  three surfaces. Extend the parity assertions to types, `additionalProperties` and
-  descriptions, with explicit exception lists that fail once an exception stops
-  being true. Do not tighten previously accepted inputs casually; reject or
-  normalize consistently at the trusted server boundary.
+  from discovery, never a label; an `agent_` principal when discovery lists one and
+  it names exactly one local recipient (a principal bound to several recipients is
+  refused as `recipient_ambiguous`, even when the caller may message only one of
+  them, so the id is the fallback); `peer_` addresses are not supported. Property
+  types already agree across the three surfaces. Extend the parity assertions to
+  types, `additionalProperties` and descriptions of the declared schemas, with
+  explicit exception lists that fail once an exception stops being true. Do not
+  tighten previously accepted inputs casually; reject or normalize consistently at
+  the trusted server boundary.
 - Keep deliberate exceptions: bound host status versus own-session status,
   lifecycle attach, unsupported bound cancellation, stable retry-ID requirements.
   This does not grant new approval bypasses. The owner's standing Claude review
@@ -147,13 +153,21 @@ Pass criteria:
   one `{id, principal}` per authorized recipient; router disabled: no `entries`).
 - Authenticated socket-to-client-to-MCP/CLI tests preserve exact authorized
   `id`/`principal` values and the original recipients array.
-- Client tests with a hostile or older host show the allowlist: extra fields,
-  entries for unlisted ids, duplicates and malformed entries never reach the agent.
+- Client tests with a hostile or older host show the allowlist: extra fields never
+  reach the agent, entries for unlisted ids are ignored, and a missing, repeated or
+  malformed entry for a listed recipient makes `entries` unavailable.
+- Server-level tests also cover an unreadable registry (null principals), a
+  credential scoped to one recipient (raw `entries` narrowed with `recipients`) and
+  a principal bound to two recipients (listed for both; send by that principal is
+  `recipient_ambiguous`).
 - An unauthorized recipient never appears in either representation. Missing,
   disabled or unreadable registry cases do not fabricate principals or break
   legacy IDs. Labels remain display-only.
 - Type/required-field/unknown-property parity assertions pass with an explicit
-  exception list; exercise actual handlers, not snapshots alone.
+  exception list. They compare the declared schemas; the discovery handlers are
+  exercised over real sockets on every surface. Unknown-key enforcement stays
+  schema-level (the bound handlers ignore extra keys) because tightening accepted
+  inputs is out of scope here.
 - Existing resolver, router, registry-snapshot, adapter-conformance, status and
   tool-parity suites (the six-file set named in the evidence section), and the
   retry/correlation, exact-grant and tool suites, pass.
@@ -163,11 +177,19 @@ Pass criteria:
 
 Status, 2026-10-29: implemented on branch `claude/u1-discovery-metadata`
 (`discoverRecipientDetails`, CLI `discover`, both MCP adapters, shared descriptions in
-`local-messaging-protocol.mjs`, extended parity test, runbook note). Source tests: the
-full agent-worker suite passes (1251 tests, 3 skipped, 0 failures) and the root
-runner-contract and packaged-installer tests pass (11). Not done: independent review,
-merge, installed read-only discovery checks, and the harness reload that refreshes
-loaded tool descriptions.
+`local-messaging-protocol.mjs`, extended parity test, runbook note). An independent
+model review (read-only Opus; not a human or Codex review) found no path that shows an
+agent an id or principal it is not authorized for. Its one medium finding (a principal
+bound to several recipients cannot replace the id in a send) and its low and nit
+findings were fixed: the shared tool text and runbook say so, the client now passes
+`entries` on only as one well-formed entry per listed recipient, the parity exceptions
+are per argument, and tests now cover an unreadable registry, a scoped credential and
+the shared principal. Accepted gap: the attached Codex surface shares the child's
+`runSessionTool` and is exercised only through the Claude child. Source tests: the
+full agent-worker suite passes (1254 tests, 3 skipped, 0 failures) and the root
+runner-contract and packaged-installer tests pass (11). Not done: merge, installed
+read-only discovery checks, and the harness reload that refreshes loaded tool
+descriptions.
 
 ### U2 — Coherent local route and reachability explanations (second PR)
 

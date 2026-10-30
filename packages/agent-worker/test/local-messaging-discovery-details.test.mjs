@@ -28,6 +28,7 @@ import {
   createSuccessResponse,
   PROTOCOL_VERSION,
 } from "../src/local-messaging-protocol.mjs";
+import { REGISTRY_FILE_NAME } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
 import { initIdentityRegistry, bindProfileInRegistry } from "./local-messaging-identity-fixtures.mjs";
 
@@ -38,6 +39,8 @@ const SENDER = "a".repeat(64);
 const BOB = deriveClientInstanceId("bob");
 const CHARLIE = deriveClientInstanceId("charlie");
 const DAVE = deriveClientInstanceId("dave");
+const PA = `agent_${"a".repeat(32)}`;
+const PB = `agent_${"b".repeat(32)}`;
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../src/local-messaging-cli.mjs", import.meta.url));
 
@@ -93,9 +96,14 @@ function rawRpc(socketPath, { method, credential, senderId }) {
   });
 }
 
-// A real server: SENDER may message bob and charlie. The registry binds `bound` profiles (dave is bound but not
-// authorized for SENDER); the router is on only when `enabled`.
-async function withServer({ registry = true, bound = [], enabled = false }, run) {
+// A real server: SENDER may message the `authorized` recipients (default bob and charlie), through a credential that
+// is scoped to `allowedRecipients` when given. The registry binds the `bound` profiles; an item can also be
+// { profile, principalOf } to share another profile's principal. dave is bound but never authorized for SENDER.
+// The router is on only when `enabled`; `corruptRegistry` makes the registry unreadable.
+async function withServer(
+  { registry = true, bound = [], enabled = false, authorized = [BOB, CHARLIE], allowedRecipients = null, corruptRegistry = false },
+  run,
+) {
   const dir = privateTmp("tri-disc-srv-");
   const stateRoot = path.join(dir, "state");
   const identityRoot = path.join(dir, "identity");
@@ -104,9 +112,12 @@ async function withServer({ registry = true, bound = [], enabled = false }, run)
   const bindings = {};
   if (registry) {
     initIdentityRegistry(identityRoot);
-    bound.forEach((profile, index) => {
-      bindings[profile] = bindProfileInRegistry(identityRoot, profile, index + 1);
+    bound.forEach((item, index) => {
+      const { profile, principalOf = null } = typeof item === "string" ? { profile: item } : item;
+      const overrides = principalOf ? { principal_id: bindings[principalOf].principal_id } : {};
+      bindings[profile] = bindProfileInRegistry(identityRoot, profile, index + 1, overrides);
     });
+    if (corruptRegistry) fs.writeFileSync(path.join(identityRoot, REGISTRY_FILE_NAME), "{ not json", { mode: 0o600 });
   }
   if (enabled) setupRouter({ enable: true, registryRoot: identityRoot, stateRoot });
   const secret = "test-secret-32-bytes-long-1234567890";
@@ -115,7 +126,7 @@ async function withServer({ registry = true, bound = [], enabled = false }, run)
   const server = createLocalControlServer({
     socketPath,
     journal,
-    acl: createOwnerAcl({ rules: { [SENDER]: [BOB, CHARLIE] } }),
+    acl: createOwnerAcl({ rules: { [SENDER]: authorized } }),
     credentialValidator: createTurnCapabilityValidator({ secret }),
     dispatcher: { start() {}, stop() {}, notifyAdmission() {} },
     statusProvider: async () => ({ ok: true, version: 1 }),
@@ -129,7 +140,10 @@ async function withServer({ registry = true, bound = [], enabled = false }, run)
     ],
   });
   await server.start();
-  const credential = createTurnCapabilityIssuer({ secret }).issue({ senderId: SENDER });
+  const credential = createTurnCapabilityIssuer({ secret }).issue({
+    senderId: SENDER,
+    ...(allowedRecipients ? { allowedRecipients } : {}),
+  });
   const client = createLocalControlClient({ socketPath, senderId: SENDER, turnCredential: credential });
   try {
     return await run({ client, socketPath, credential, bindings });
@@ -153,7 +167,7 @@ async function callListRecipients(client, credential) {
   return response.result.content[0].text;
 }
 
-test("discoverRecipientDetails passes on only the id and principal of authorized recipients", async () => {
+test("discoverRecipientDetails passes entries on only as one well-formed pairing per listed recipient", async () => {
   const cases = [
     {
       name: "router disabled or an older host: no entries",
@@ -161,41 +175,68 @@ test("discoverRecipientDetails passes on only the id and principal of authorized
       expected: { recipients: ["a", "b"] },
     },
     {
-      name: "well-formed entries pass through in order",
-      payload: { recipients: ["a", "b"], entries: [{ id: "a", principal: "agent_1" }, { id: "b", principal: null }] },
-      expected: { recipients: ["a", "b"], entries: [{ id: "a", principal: "agent_1" }, { id: "b", principal: null }] },
+      name: "well-formed entries pass through",
+      payload: { recipients: ["a", "b"], entries: [{ id: "a", principal: PA }, { id: "b", principal: null }] },
+      expected: { recipients: ["a", "b"], entries: [{ id: "a", principal: PA }, { id: "b", principal: null }] },
+    },
+    {
+      name: "entries follow the order of recipients",
+      payload: { recipients: ["a", "b"], entries: [{ id: "b", principal: PB }, { id: "a", principal: PA }] },
+      expected: { recipients: ["a", "b"], entries: [{ id: "a", principal: PA }, { id: "b", principal: PB }] },
     },
     {
       name: "extra fields are dropped",
-      payload: { recipients: ["a"], entries: [{ id: "a", principal: "agent_1", secret: "s", label: "display" }] },
-      expected: { recipients: ["a"], entries: [{ id: "a", principal: "agent_1" }] },
+      payload: { recipients: ["a"], entries: [{ id: "a", principal: PA, secret: "s", label: "display" }] },
+      expected: { recipients: ["a"], entries: [{ id: "a", principal: PA }] },
     },
     {
-      name: "an entry for an id that is not a listed recipient is dropped",
-      payload: { recipients: ["a"], entries: [{ id: "a", principal: null }, { id: "zzz", principal: "agent_9" }] },
+      name: "an entry for an unlisted id is ignored",
+      payload: { recipients: ["a"], entries: [{ id: "a", principal: null }, { id: "zzz", principal: PB }] },
       expected: { recipients: ["a"], entries: [{ id: "a", principal: null }] },
     },
     {
-      name: "a duplicate id keeps the first entry",
-      payload: { recipients: ["a"], entries: [{ id: "a", principal: "agent_1" }, { id: "a", principal: "agent_2" }] },
-      expected: { recipients: ["a"], entries: [{ id: "a", principal: "agent_1" }] },
+      name: "junk that does not touch a listed recipient is ignored",
+      payload: { recipients: ["c"], entries: [null, "x", 7, [], { id: 5, principal: null }, { id: "c", principal: null }] },
+      expected: { recipients: ["c"], entries: [{ id: "c", principal: null }] },
     },
     {
-      name: "malformed entries are dropped, valid ones kept",
-      payload: {
-        recipients: ["a", "b", "c"],
-        entries: [null, "x", 7, { id: "a" }, { id: "b", principal: 7 }, { id: "b", principal: "" }, { id: 5, principal: null }, { id: "c", principal: null }],
-      },
-      expected: { recipients: ["a", "b", "c"], entries: [{ id: "c", principal: null }] },
+      name: "a repeated id, even with identical entries, makes entries unavailable",
+      payload: { recipients: ["a", "b"], entries: [{ id: "a", principal: PA }, { id: "a", principal: PA }, { id: "b", principal: null }] },
+      expected: { recipients: ["a", "b"] },
     },
     {
-      name: "entries that are not a list stay absent",
-      payload: { recipients: ["a"], entries: "agent_1" },
+      name: "conflicting entries for one id make entries unavailable",
+      payload: { recipients: ["a"], entries: [{ id: "a", principal: PA }, { id: "a", principal: PB }] },
       expected: { recipients: ["a"] },
     },
     {
-      name: "nothing usable stays absent instead of looking like an empty list",
+      name: "a malformed entry followed by a valid one for the same id makes entries unavailable",
+      payload: { recipients: ["a"], entries: [{ id: "a", principal: 7 }, { id: "a", principal: null }] },
+      expected: { recipients: ["a"] },
+    },
+    {
+      name: "a missing principal field makes entries unavailable",
+      payload: { recipients: ["a"], entries: [{ id: "a" }] },
+      expected: { recipients: ["a"] },
+    },
+    ...["peer_" + "a".repeat(32), "agent_" + "a".repeat(31), "agent_" + "A".repeat(32), "", 7].map((principal) => ({
+      name: `a principal that is not an agent_ id (${JSON.stringify(principal)}) makes entries unavailable`,
+      payload: { recipients: ["a"], entries: [{ id: "a", principal }] },
+      expected: { recipients: ["a"] },
+    })),
+    {
+      name: "a listed recipient without an entry makes entries unavailable",
+      payload: { recipients: ["a", "b"], entries: [{ id: "a", principal: null }] },
+      expected: { recipients: ["a", "b"] },
+    },
+    {
+      name: "only entries for unlisted ids make entries unavailable",
       payload: { recipients: ["a"], entries: [{ id: "zzz", principal: null }] },
+      expected: { recipients: ["a"] },
+    },
+    {
+      name: "entries that are not a list stay absent",
+      payload: { recipients: ["a"], entries: PA },
       expected: { recipients: ["a"] },
     },
     {
@@ -217,7 +258,7 @@ test("discoverRecipientDetails passes on only the id and principal of authorized
 });
 
 test("discoverRecipients keeps returning the plain recipients array", async () => {
-  await withFakeHost({ recipients: ["a", "b"], entries: [{ id: "a", principal: "agent_1" }] }, async (client) => {
+  await withFakeHost({ recipients: ["a", "b"], entries: [{ id: "a", principal: PA }] }, async (client) => {
     assert.deepEqual(await client.discoverRecipients(), ["a", "b"]);
   });
 });
@@ -259,6 +300,46 @@ test("router enabled but registry absent: principal is null (none known now), ne
     assert.equal(details.entries.length, details.recipients.length);
     assert.deepEqual(details.entries.map((entry) => entry.principal), details.recipients.map(() => null));
     assert.deepEqual(details.entries.map((entry) => entry.id), details.recipients);
+  });
+});
+
+test("router enabled but registry unreadable: principal is null for every recipient and the legacy list is unharmed", async () => {
+  await withServer({ bound: ["bob"], enabled: true, corruptRegistry: true }, async ({ client, socketPath, credential }) => {
+    const authorized = await client.discoverRecipients();
+    assert.deepEqual([...authorized].sort(), [BOB, CHARLIE].sort());
+    const expected = { recipients: authorized, entries: authorized.map((id) => ({ id, principal: null })) };
+    assert.deepEqual(await rawRpc(socketPath, { method: "discover_recipients", credential, senderId: SENDER }), expected);
+    assert.deepEqual(await client.discoverRecipientDetails(), expected);
+  });
+});
+
+test("a credential scoped to one recipient narrows entries as well as recipients", async () => {
+  await withServer({ bound: ["bob", "charlie"], enabled: true, allowedRecipients: [BOB] }, async ({ client, socketPath, credential, bindings }) => {
+    const expected = { recipients: [BOB], entries: [{ id: BOB, principal: bindings.bob.principal_id }] };
+    // The raw frame shows the server's own filtering; the client's listed-id check could hide a regression there.
+    const raw = await rawRpc(socketPath, { method: "discover_recipients", credential, senderId: SENDER });
+    assert.deepEqual(raw, expected);
+    assert.ok(!JSON.stringify(raw).includes(bindings.charlie.principal_id));
+    assert.deepEqual(await client.discoverRecipientDetails(), expected);
+  });
+});
+
+test("a principal bound to two recipients is listed for both, and send by that principal is refused as ambiguous", async () => {
+  const bound = ["bob", { profile: "charlie", principalOf: "bob" }];
+  await withServer({ bound, enabled: true }, async ({ client, bindings }) => {
+    const shared = bindings.bob.principal_id;
+    const details = await client.discoverRecipientDetails();
+    assert.deepEqual(details.entries, details.recipients.map((id) => ({ id, principal: shared })));
+    await assert.rejects(client.sendMessage({ to: shared, text: "which one?" }), (err) => err.code === "recipient_ambiguous");
+    // The exact id still works.
+    const sent = await client.sendMessage({ to: BOB, text: "by exact id" });
+    assert.ok(sent.messageId);
+  });
+  // The ambiguity also holds when the caller may message only one of the two, which discovery cannot reveal.
+  await withServer({ bound, enabled: true, authorized: [BOB] }, async ({ client, bindings }) => {
+    const shared = bindings.bob.principal_id;
+    assert.deepEqual(await client.discoverRecipientDetails(), { recipients: [BOB], entries: [{ id: BOB, principal: shared }] });
+    await assert.rejects(client.sendMessage({ to: shared, text: "which one?" }), (err) => err.code === "recipient_ambiguous");
   });
 });
 
