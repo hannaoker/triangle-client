@@ -16,7 +16,7 @@ test("MCP adapter lists tools and handles initialize", async () => {
   const token = issuer.issue({ senderId: "desktop-codex" });
 
   const mockClient = {
-    discoverRecipients: async () => ["gravity2"],
+    discoverRecipientDetails: async () => ({ recipients: ["gravity2"] }),
     sendMessage: async () => ({ accepted: true, messageId: "msg-1", status: "queued_local" }),
     getMessageStatus: async () => ({ messageId: "msg-1", phase: "queued_local" }),
     listReplies: async () => [],
@@ -74,7 +74,7 @@ test("MCP stdio regression: initialize -> initialized notification (no response)
   const token = issuer.issue({ senderId: "desktop-codex" });
 
   const mockClient = {
-    discoverRecipients: async () => ["gravity2"],
+    discoverRecipientDetails: async () => ({ recipients: ["gravity2"] }),
   };
 
   const handler = createLocalMessagingMcpHandler({
@@ -159,7 +159,7 @@ test("MCP adapter supports dynamic per-turn injection seam", async () => {
   let dynamicToken = issuer.issue({ senderId: "desktop-codex" });
 
   const mockClient = {
-    discoverRecipients: async () => ["gravity2"],
+    discoverRecipientDetails: async () => ({ recipients: ["gravity2"] }),
   };
 
   const handler = createLocalMessagingMcpHandler({
@@ -268,7 +268,7 @@ test("the adapter never holds or consults a credential validator: the server val
   const validator = { validate() { throw new Error("the adapter process must not validate credentials"); } };
   let forwarded;
   const handler = createLocalMessagingMcpHandler({
-    client: { discoverRecipients: async (options) => { forwarded = options; return ["gravity2"]; } },
+    client: { discoverRecipientDetails: async (options) => { forwarded = options; return { recipients: ["gravity2"] }; } },
     credentialValidator: validator,
     turnCredential: "opaque-token-validated-by-the-server",
   });
@@ -280,6 +280,21 @@ test("the adapter never holds or consults a credential validator: the server val
   const refused = await none.handleRequest({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "triangle_list_recipients", arguments: {} } });
   assert.equal(refused.result.isError, true);
   assert.match(refused.result.content[0].text, /missing injected turn credential/);
+});
+
+test("triangle_list_recipients returns the host's entries beside recipients and omits them when the host sent none", async () => {
+  const entries = [{ id: "gravity2", principal: "agent_0123456789abcdef0123456789abcdef" }];
+  const listed = async (details) => {
+    const handler = createLocalMessagingMcpHandler({
+      client: { discoverRecipientDetails: async () => details },
+      turnCredential: "mock-token",
+    });
+    const response = await handler.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "triangle_list_recipients", arguments: {} } });
+    assert.equal(response.result.isError, false, JSON.stringify(response));
+    return JSON.parse(response.result.content[0].text);
+  };
+  assert.deepEqual(await listed({ recipients: ["gravity2"], entries }), { recipients: ["gravity2"], entries });
+  assert.deepEqual(await listed({ recipients: ["gravity2"] }), { recipients: ["gravity2"] });
 });
 
 test("triangle_ack_notification calls client.ackNotification and returns result", async () => {
