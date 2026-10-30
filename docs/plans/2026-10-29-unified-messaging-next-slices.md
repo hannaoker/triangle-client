@@ -1,8 +1,10 @@
 # Unified messaging: current-state review and next implementation slices
 
-Status: reviewed implementation plan, 2026-10-29. Planning only; no new runtime,
-identity mapping, delivery permission, network route or installation is authorized
-by this document. Baseline: client main `741ff27` (#147), with atomic runner
+Status: reviewed implementation plan, 2026-10-29, revised the same day after an
+independent source review (its refinements are folded into U1 and the evidence
+section). U1 implementation was started on the owner's go-ahead in chat; this
+document itself authorizes no identity mapping, delivery permission, network route,
+merge or installation. Baseline: client main `741ff27` (#147), with atomic runner
 completion #146 installed on the Mini. This supplements the October 25 unified
 interface and identity designs; it supersedes their implementation-status claims
 where explicitly noted below, not their recorded owner decisions.
@@ -59,9 +61,12 @@ pending replies, 2 held tasks and 1 queued request. Those are not test fixtures.
    `local-messaging-server.mjs`, `discover_recipients` returns the legacy
    `recipients` array plus additive `entries` containing `id` and `principal` when
    routing is enabled. `local-messaging-client.mjs:discoverRecipients` returns only
-   `res.recipients`. Both MCP adapters then reconstruct `{recipients}`. The agent
-   therefore loses metadata that the server already supplied. Fix propagation;
-   do not introduce a second registry or new authority.
+   `res.recipients`. Both MCP adapters then reconstruct `{recipients}`, and the CLI
+   `discover` command does the same. The agent therefore loses metadata that the
+   server already supplied. No test asserts `entries` at any level (the Public DTO
+   test in `r1-integration-v13.test.mjs` is commented as covering it but asserts
+   only the array), so the server projection is itself unverified. Fix
+   propagation; do not introduce a second registry or new authority.
 2. **Contract parity tests have a deliberate blind spot.**
    `local-messaging-tool-parity.test.mjs` compares names, property names and
    required fields, but explicitly excludes argument types, most descriptions
@@ -92,42 +97,66 @@ pending replies, 2 held tasks and 1 queued request. Those are not test fixtures.
 Outcome: an agent gets the useful identity metadata already available, with the
 same semantics on the bound MCP, attached Codex/Claude MCP and owner CLI.
 
-- Add a structured discovery client method/result that retains `recipients` and
-  `entries`. Preserve the existing array-returning `discoverRecipients` for
-  current library callers; do not silently change its return type or attach
-  hidden properties to an array.
-- Pass the structured result through CLI `discover`, both MCP adapter paths and
-  Grok's equivalent path where it uses this operation. Keep all existing output
+- Add a structured discovery client method, `discoverRecipientDetails`, that
+  returns `{recipients, entries?}`. Preserve the existing array-returning
+  `discoverRecipients` for current library callers (the R0 local adapter builds
+  its send-eligibility set from it); do not silently change its return type or
+  attach hidden properties to an array.
+- Project `entries` in the client through an allowlist: keep only `id` and
+  `principal`, require `id` to be one of `recipients`, drop malformed or duplicate
+  entries, and leave `entries` absent when the host sent none or none are usable.
+  A future server field or a malformed frame must not widen what the agent sees.
+- Pass the structured result through CLI `discover` and both MCP adapter paths
+  (`local-messaging-mcp-adapter.mjs` for the bound Codex conversation,
+  `claude-session-mcp-child.mjs` for attached Claude and Codex chats). Grok has no
+  separate discovery code; it goes through the CLI. Keep all existing output
   fields and tool names. If the router is disabled or an older host omits
   `entries`, absence means unavailable metadata, not an invented binding.
+- Document `principal: null` as "none known to this host now". The server also
+  returns null while the registry snapshot is `absent` or `unreadable`, so null is
+  not proof that a recipient has no identity. A state that tells these apart
+  belongs to U2 ("keep unknown as unknown"), not to this slice.
 - Preserve server-side sender/credential filtering. Emit only authorized entries;
   do not join a global inventory into an agent-visible result.
-- Align shared discovery/send descriptions and argument schemas. Extend parity
-  assertions to meaningful types, bounds and unknown-property policy, after
-  documenting existing differences. Do not tighten previously accepted inputs
-  casually; reject or normalize consistently at the trusted server boundary.
+- Share one description for `triangle_list_recipients` and one for
+  `triangle_send_message` (tool and argument text) across the bound adapter and
+  attached chats, defined in `local-messaging-protocol.mjs` beside
+  `STATUS_TOOL_DESCRIPTION`. The `to` text names the accepted forms: an exact id
+  from discovery, never a label; an `agent_` principal when discovery lists one;
+  `peer_` addresses are not supported. Property types already agree across the
+  three surfaces. Extend the parity assertions to types, `additionalProperties` and
+  descriptions, with explicit exception lists that fail once an exception stops
+  being true. Do not tighten previously accepted inputs casually; reject or
+  normalize consistently at the trusted server boundary.
 - Keep deliberate exceptions: bound host status versus own-session status,
   lifecycle attach, unsupported bound cancellation, stable retry-ID requirements.
   This does not grant new approval bypasses. The owner's standing Claude review
   authorization is separate from delivery ACLs and harness tool permissions.
 
 Primary files: `local-messaging-client.mjs`, `local-messaging-cli.mjs`,
-`local-messaging-mcp-adapter.mjs`, `claude-session-mcp-child.mjs`, relevant Grok
-client path and existing protocol/description constants. Server change only if a
+`local-messaging-mcp-adapter.mjs`, `claude-session-mcp-child.mjs` and the existing
+description constants in `local-messaging-protocol.mjs`. Server change only if a
 real projection defect is demonstrated; no journal or identity schema migration
-is expected. Avoid a new module unless sharing definitions materially reduces
-maintenance; account for the runtime bundle closure if one is added.
+is expected. No new module is needed (shared text lives beside
+`STATUS_TOOL_DESCRIPTION`), so the installer file list is unchanged; account for
+the runtime bundle closure if one is added later.
 
 Pass criteria:
 
+- A server-level test asserts the `entries` projection itself (router enabled:
+  one `{id, principal}` per authorized recipient; router disabled: no `entries`).
 - Authenticated socket-to-client-to-MCP/CLI tests preserve exact authorized
   `id`/`principal` values and the original recipients array.
+- Client tests with a hostile or older host show the allowlist: extra fields,
+  entries for unlisted ids, duplicates and malformed entries never reach the agent.
 - An unauthorized recipient never appears in either representation. Missing,
   disabled or unreadable registry cases do not fabricate principals or break
   legacy IDs. Labels remain display-only.
 - Type/required-field/unknown-property parity assertions pass with an explicit
   exception list; exercise actual handlers, not snapshots alone.
-- Existing resolver, status, retry/correlation, exact-grant and tool suites pass.
+- Existing resolver, router, registry-snapshot, adapter-conformance, status and
+  tool-parity suites (the six-file set named in the evidence section), and the
+  retry/correlation, exact-grant and tool suites, pass.
 - Installed read-only discovery checks agree across the applicable surfaces.
   Loaded tool descriptions require normal harness reload; do not claim additive
   result compatibility means already-loaded schemas/descriptions refresh live.
@@ -212,8 +241,12 @@ its reply. Source tests never establish a live provider or installed tool result
 
 Fresh source review at `741ff27`; 41 existing resolver/router, adapter conformance,
 tool-parity and status tests passed. Log:
-`/private/tmp/unified-interface-plan-baseline.log`. This is a review baseline,
-not acceptance of the proposed changes. The shared interface and identity designs,
+`/private/tmp/unified-interface-plan-baseline.log`. That set omitted
+`router-registry-snapshot.test.mjs` (10 tests, the registry snapshot behind
+`principal`); the independent review re-ran all six files (status, tool-parity,
+recipient-resolver, router-registry-snapshot, transport-adapter-conformance,
+unified-router) at 51 of 51 passing, and that six-file set is the U1 gate. This is
+a review baseline, not acceptance of the proposed changes. The shared interface and identity designs,
 R1/R2 acceptance notes and current source were inspected; no new Reason source
 comparison, server audit, remote test or live message was performed for this plan.
 
