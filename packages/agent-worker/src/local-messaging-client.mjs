@@ -10,15 +10,39 @@ import { coded } from "./local-messaging-errors.mjs";
 // Same shape as AGENT_ID_PATTERN in identity-primitives.mjs, kept inline so the client needs no registry module.
 const PRINCIPAL_PATTERN = /^agent_[a-f0-9]{32}$/;
 
-// Returns one { id, principal } per listed recipient, in the order of `recipients`, or undefined. Only that pairing is
-// trusted: other fields and entries for unlisted ids are ignored, but a missing, repeated or malformed entry for a
-// listed recipient makes the whole list unavailable, because it would otherwise read as "no principal".
+const PRINCIPAL_STATES = new Set(["bound", "unbound", "unknown"]);
+const ADDRESS_KINDS = new Set(["id", "principal"]);
+
+// The optional explanation of an entry: what the principal state is, the route, and the caller's send gate. Each field
+// is kept only when it is well formed and consistent with the entry's principal; otherwise it is simply absent, which
+// reads as "not stated". Nothing else the host sends is passed on.
+function projectEntryExplanation(entry, principal) {
+  const explanation = {};
+  const state = entry.principalState;
+  if (PRINCIPAL_STATES.has(state) && (state === "bound") === (principal !== null)) explanation.principalState = state;
+  if (entry.route === "local") explanation.route = "local";
+  const send = entry.send;
+  if (send !== null && typeof send === "object" && !Array.isArray(send) && typeof send.permitted === "boolean" && Array.isArray(send.addressKinds)) {
+    const kinds = send.addressKinds;
+    const wellFormed = kinds.every((kind) => ADDRESS_KINDS.has(kind)) && new Set(kinds).size === kinds.length;
+    // A refused caller has no address form, a permitted one always has the exact id, and a principal form needs both a
+    // principal and the exact id beside it.
+    const consistent = (send.permitted ? kinds.includes("id") : kinds.length === 0) && (!kinds.includes("principal") || principal !== null);
+    if (wellFormed && consistent) explanation.send = { permitted: send.permitted, addressKinds: [...kinds] };
+  }
+  return explanation;
+}
+
+// Returns one { id, principal, ...explanation } per listed recipient, in the order of `recipients`, or undefined. Only
+// that pairing is required and trusted: other fields and entries for unlisted ids are ignored, but a missing, repeated
+// or malformed entry for a listed recipient makes the whole list unavailable, because it would otherwise read as
+// "no principal". The optional explanation fields (projectEntryExplanation) may be absent, as from an older host.
 function projectRecipientEntries(recipients, entries) {
   if (!Array.isArray(entries)) return undefined;
   const listed = new Set(recipients);
   const seen = new Set();
   const repeated = new Set();
-  const principals = new Map();
+  const projected = new Map();
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object") continue;
     const { id, principal } = entry;
@@ -29,11 +53,11 @@ function projectRecipientEntries(recipients, entries) {
     }
     seen.add(id);
     if (principal === null || (typeof principal === "string" && PRINCIPAL_PATTERN.test(principal))) {
-      principals.set(id, principal);
+      projected.set(id, { id, principal, ...projectEntryExplanation(entry, principal) });
     }
   }
-  if (recipients.some((id) => repeated.has(id) || !principals.has(id))) return undefined;
-  return recipients.map((id) => ({ id, principal: principals.get(id) }));
+  if (recipients.some((id) => repeated.has(id) || !projected.has(id))) return undefined;
+  return recipients.map((id) => projected.get(id));
 }
 
 export function createLocalControlClient({

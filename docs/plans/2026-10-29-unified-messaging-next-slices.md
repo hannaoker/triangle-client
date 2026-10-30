@@ -217,6 +217,44 @@ local principal lookup and legacy/profile/session addressing keep working. The
 read-only path must not enroll identities, create messages, trigger wakes or
 change configuration. This is the local portion of old R4, not remote aggregation.
 
+Status, 2026-10-30: implemented on branch `claude/u2-route-explanations`, based on U1's
+head `257ae70` (PR #148, still open), committed locally and not pushed. Review of
+`sessions`, `discover`, `local_status`/`session_status` and the owner identity view
+together: agents get one router-computed explanation per entry on both `sessions` rows
+and `discover` entries (`route`, `principal`, `principalState`, `send.permitted`,
+`send.addressKinds`), reusing the existing presence, attachment, capability and delivery
+fields and the server-side filtering. The owner identity view (`identity_view_v1`,
+binding ids, authority origins, registry sequence) stays owner-only and is not projected.
+All new fields exist only while principal routing is enabled, so router-off output is
+byte-identical to U1 (checked against `257ae70` by the reviewer). `principalState`
+(`bound`, `unbound`, `unknown`) resolves the U1 open point that `null` could mean an
+unreadable registry; `addressKinds` answers the U1 review's ambiguous-principal finding
+per entry without naming other candidates (it reveals no more than the
+`recipient_ambiguous` a principal send already returns), so the tool text no longer
+carries that caveat. `send.permitted` follows the send gate (owner policy, then
+credential scope). For the bound conversation and attached chats, whose scope is issued
+from the live ACL, a policy-allowed chat that is down reads permitted with its own
+attachment evidence; fixed-scope readers (paired Claude, Grok) are judged by their scope.
+A reachable route this caller cannot use reads `not_permitted`, never ready. Discovery-only
+rows read `permitted: false`. `triangle-local status` gains an `identity` block explaining
+disabled reply identity and unbound chats (read-only; pin admission, principal mapping,
+grants and enrolment are untouched). `STATUS_SEMANTICS` defines status once (MCP without
+a message ID: own session view; owner CLI: host view; with a message ID: that message's
+delivery observations), pinned across surfaces by a real-host test. Tests were written
+first and failed for the expected reasons; twelve mutants of the new behaviour were each
+caught. An independent read-only Opus review (a model review, not a human or Codex review)
+found no blocker, high or authority leak, and one medium (the exemption for a down chat
+also applied to fixed-scope readers: fixed), four low and nits (all fixed or documented).
+Accepted limits: the bound Codex thread's own chat row reads `permitted` although that
+address never receives; the R0 wrapper's `sendEligible` and `send.permitted` answer
+different questions; `sessions` rows are passed through by the client as before (only
+`entries` are allowlisted); the paired Claude can be granted chats it can never message
+(older behaviour, worth a separate setup-time refusal). Source tests: the complete
+agent-worker suite passes (1291 tests, 3 skipped, 0 failures; U1 had 1254) and the root
+runner-contract and packaged-installer tests pass (11). No new module, so the installer file list is unchanged. Not
+done: merge, installed read-only discovery checks, and the harness reload that refreshes
+loaded tool descriptions.
+
 ### U3 — Close the identity/destination design before remote adapters
 
 Design/review first, separate from U1/U2. Inventory actual registry and binding

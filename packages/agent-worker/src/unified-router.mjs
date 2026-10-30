@@ -106,6 +106,33 @@ function sanitizeDto(dto) {
 }
 
 /**
+ * Looks up the principal bound to a local recipient, keeping unknown as unknown: `unbound` is only said when the
+ * registry was read (or does not exist yet) and holds no binding; a registry that cannot be read, or holds a binding
+ * with an unusable principal, is `unknown`.
+ *
+ * @param {object|null} snapshot
+ * @param {string} instanceId
+ * @returns {{ principal: string|null, state: "bound"|"unbound"|"unknown" }}
+ */
+function lookupPrincipal(snapshot, instanceId) {
+  if (snapshot?.state === "absent") {
+    return { principal: null, state: "unbound" };
+  }
+  if (snapshot?.state !== "ok" || typeof snapshot.bindingForInstance !== "function") {
+    return { principal: null, state: "unknown" };
+  }
+  try {
+    const principal = snapshot.bindingForInstance(instanceId)?.principal_id;
+    if (!principal) return { principal: null, state: "unbound" };
+    return typeof principal === "string" && AGENT_ID_PATTERN.test(principal)
+      ? { principal, state: "bound" }
+      : { principal: null, state: "unknown" };
+  } catch {
+    return { principal: null, state: "unknown" };
+  }
+}
+
+/**
  * Evaluates canMessage predicate for an ambiguity candidate.
  * Fails closed on denial or thrown exceptions.
  *
@@ -640,6 +667,72 @@ export function createUnifiedRouter({
   }
 
   /**
+   * Explains local addresses for one caller, read-only: the route, the principal (and whether "none" is actually
+   * known), and which address forms currently reach exactly that recipient. Used by `sessions` and `discover` so a
+   * caller does not have to join their lists by hand. Returns null while the router is disabled, so legacy output
+   * stays byte-for-byte what it was.
+   *
+   * Reads the registry snapshot and the local directory only: it resolves nothing through resolveSend, so it never
+   * moves the send counters, and it never names another candidate of a shared principal.
+   *
+   * @param {string[]} ids Exact addresses to explain.
+   * @param {object} [options]
+   * @param {(id: string) => boolean} [options.permitted] The caller's send gate for an address (owner policy and
+   *   credential scope). Without it nothing is claimed about sending and `send` is omitted.
+   * @param {object} [options.snapshot]
+   * @returns {ReadonlyArray<object>|null} One frozen explanation per id, in order.
+   */
+  function describeAddresses(ids, options = {}) {
+    if (!isEnabled()) return null;
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+      throw new TypeError("ids must be an array of strings");
+    }
+    const permitted = typeof options.permitted === "function" ? options.permitted : null;
+
+    let snapshot = options.snapshot ?? null;
+    if (!snapshot && snapshotProvider && typeof snapshotProvider.get === "function") {
+      try {
+        snapshot = snapshotProvider.get();
+      } catch {
+        snapshot = null; // an unreadable registry is unknown, never "no principal"
+      }
+    }
+    const directory = getRecipients();
+
+    // Whether to:<principal> resolves to exactly this recipient, by the resolver send uses and for any caller.
+    const principalNamesOnly = (principal, id) => {
+      try {
+        const res = resolveRecipient({ to: principal, recipients: directory, snapshot });
+        return res.kind === "resolved" && res.recipientId === id;
+      } catch {
+        return false; // a directory the resolver cannot read offers no principal form
+      }
+    };
+
+    return Object.freeze(
+      ids.map((id) => {
+        const { principal, state } = lookupPrincipal(snapshot, id);
+        const explanation = { id, route: "local", principal, principalState: state };
+        if (permitted) {
+          let allowed = false;
+          try {
+            allowed = permitted(id) === true;
+          } catch {
+            allowed = false;
+          }
+          const kinds = [];
+          if (allowed) {
+            kinds.push("id");
+            if (principal !== null && principalNamesOnly(principal, id)) kinds.push("principal");
+          }
+          explanation.send = Object.freeze({ permitted: allowed, addressKinds: Object.freeze(kinds) });
+        }
+        return Object.freeze(explanation);
+      })
+    );
+  }
+
+  /**
    * Decorates list_inbox response, ensuring raw internal journal columns
    * (to_principal, resolved_via) are stripped in both router modes while
    * preserving stable pagination and cursor fields.
@@ -751,6 +844,7 @@ export function createUnifiedRouter({
     decorateStatus,
     decorateReplies,
     decorateSessions,
+    describeAddresses,
     decorateInbox,
     statusBlock,
     getCounters,
@@ -784,6 +878,11 @@ export function decorateReplies(responseOrReplies, options = {}) {
 export function decorateSessions(responseOrSessions, options = {}) {
   const router = options.router ?? createUnifiedRouter(options);
   return router.decorateSessions(responseOrSessions, options);
+}
+
+export function describeAddresses(ids, options = {}) {
+  const router = options.router ?? createUnifiedRouter(options);
+  return router.describeAddresses(ids, options);
 }
 
 export function decorateInbox(responseOrItems, options = {}) {

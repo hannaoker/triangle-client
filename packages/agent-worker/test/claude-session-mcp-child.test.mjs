@@ -618,7 +618,14 @@ test("attached chats get each recipient's principal beside the recipients list w
     assert.equal(response.result.isError, false, JSON.stringify(response));
     assert.deepEqual(JSON.parse(response.result.content[0].text), {
       recipients: [env.codexId],
-      entries: [{ id: env.codexId, principal: binding.principal_id }],
+      entries: [{
+        id: env.codexId,
+        principal: binding.principal_id,
+        principalState: "bound",
+        route: "local",
+        // This server has no local recipient directory, so the principal could not resolve to it: only the id works.
+        send: { permitted: true, addressKinds: ["id"] },
+      }],
     });
   } finally {
     await child?.close();

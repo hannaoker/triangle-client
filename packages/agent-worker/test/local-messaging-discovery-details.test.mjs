@@ -44,6 +44,12 @@ const PB = `agent_${"b".repeat(32)}`;
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../src/local-messaging-cli.mjs", import.meta.url));
 
+// What the host sends for an entry the caller may message: the principal pairing (U1) plus the router's explanation of it
+// (U2): whether "none" was read, the route, and the address forms that reach exactly that recipient.
+function entryFor(id, principal, { state = principal ? "bound" : "unbound", addressKinds = principal ? ["id", "principal"] : ["id"] } = {}) {
+  return { id, principal, principalState: state, route: "local", send: { permitted: true, addressKinds } };
+}
+
 function privateTmp(prefix) {
   const base = fs.existsSync("/private/tmp") ? "/private/tmp" : os.tmpdir();
   const dir = fs.mkdtempSync(path.join(base, prefix));
@@ -263,12 +269,12 @@ test("discoverRecipients keeps returning the plain recipients array", async () =
   });
 });
 
-test("router enabled: the server sends one {id, principal} per authorized recipient and the client and bound MCP pass it on", async () => {
+test("router enabled: the server sends one explained {id, principal, ...} entry per authorized recipient and the client and bound MCP pass it on", async () => {
   await withServer({ bound: ["bob", "dave"], enabled: true }, async ({ client, socketPath, credential, bindings }) => {
     const principals = { [BOB]: bindings.bob.principal_id, [CHARLIE]: null };
     const authorized = await client.discoverRecipients();
     assert.deepEqual([...authorized].sort(), [BOB, CHARLIE].sort());
-    const entries = authorized.map((id) => ({ id, principal: principals[id] }));
+    const entries = authorized.map((id) => entryFor(id, principals[id]));
 
     const raw = await rawRpc(socketPath, { method: "discover_recipients", credential, senderId: SENDER });
     assert.deepEqual(raw, { recipients: authorized, entries });
@@ -307,7 +313,7 @@ test("router enabled but registry unreadable: principal is null for every recipi
   await withServer({ bound: ["bob"], enabled: true, corruptRegistry: true }, async ({ client, socketPath, credential }) => {
     const authorized = await client.discoverRecipients();
     assert.deepEqual([...authorized].sort(), [BOB, CHARLIE].sort());
-    const expected = { recipients: authorized, entries: authorized.map((id) => ({ id, principal: null })) };
+    const expected = { recipients: authorized, entries: authorized.map((id) => entryFor(id, null, { state: "unknown" })) };
     assert.deepEqual(await rawRpc(socketPath, { method: "discover_recipients", credential, senderId: SENDER }), expected);
     assert.deepEqual(await client.discoverRecipientDetails(), expected);
   });
@@ -315,7 +321,7 @@ test("router enabled but registry unreadable: principal is null for every recipi
 
 test("a credential scoped to one recipient narrows entries as well as recipients", async () => {
   await withServer({ bound: ["bob", "charlie"], enabled: true, allowedRecipients: [BOB] }, async ({ client, socketPath, credential, bindings }) => {
-    const expected = { recipients: [BOB], entries: [{ id: BOB, principal: bindings.bob.principal_id }] };
+    const expected = { recipients: [BOB], entries: [entryFor(BOB, bindings.bob.principal_id)] };
     // The raw frame shows the server's own filtering; the client's listed-id check could hide a regression there.
     const raw = await rawRpc(socketPath, { method: "discover_recipients", credential, senderId: SENDER });
     assert.deepEqual(raw, expected);
@@ -329,16 +335,17 @@ test("a principal bound to two recipients is listed for both, and send by that p
   await withServer({ bound, enabled: true }, async ({ client, bindings }) => {
     const shared = bindings.bob.principal_id;
     const details = await client.discoverRecipientDetails();
-    assert.deepEqual(details.entries, details.recipients.map((id) => ({ id, principal: shared })));
+    // Both are listed with the shared principal, and neither offers it as an address: send refuses it as ambiguous.
+    assert.deepEqual(details.entries, details.recipients.map((id) => entryFor(id, shared, { addressKinds: ["id"] })));
     await assert.rejects(client.sendMessage({ to: shared, text: "which one?" }), (err) => err.code === "recipient_ambiguous");
     // The exact id still works.
     const sent = await client.sendMessage({ to: BOB, text: "by exact id" });
     assert.ok(sent.messageId);
   });
-  // The ambiguity also holds when the caller may message only one of the two, which discovery cannot reveal.
+  // The ambiguity also holds when the caller may message only one of the two. The entry now says so without naming the other.
   await withServer({ bound, enabled: true, authorized: [BOB] }, async ({ client, bindings }) => {
     const shared = bindings.bob.principal_id;
-    assert.deepEqual(await client.discoverRecipientDetails(), { recipients: [BOB], entries: [{ id: BOB, principal: shared }] });
+    assert.deepEqual(await client.discoverRecipientDetails(), { recipients: [BOB], entries: [entryFor(BOB, shared, { addressKinds: ["id"] })] });
     await assert.rejects(client.sendMessage({ to: shared, text: "which one?" }), (err) => err.code === "recipient_ambiguous");
   });
 });
@@ -373,7 +380,7 @@ test("CLI discover keeps recipients and adds entries only while the router is en
 
     const after = await run(["discover"]);
     assert.deepEqual(after.recipients, [recipient]);
-    assert.deepEqual(after.entries, [{ id: recipient, principal: binding.principal_id }]);
+    assert.deepEqual(after.entries, [entryFor(recipient, binding.principal_id)]);
   } finally {
     await host?.stop();
     fs.rmSync(root, { recursive: true, force: true });
