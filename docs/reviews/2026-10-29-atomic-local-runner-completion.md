@@ -69,3 +69,13 @@ The preliminary restricted top-level run had four environment-access failures
 complete run with normal local access passed those checks. Focused 60/60,
 syntax and whitespace checks passed. Log:
 `/private/tmp/pr146-review-worker-unrestricted.log`.
+
+## Follow-up independent review
+
+Claude reviewed `637d1fe..3b53064` through Triangle under the standing owner
+review authorization, without another owner approval prompt. Verdict: no blockers
+or material issues. It verified production failure callers and ran focused tests
+and scratch mutation checks; the earlier surviving fence mutations now fail.
+It did not run live acceptance or repeat the full suite. Its remaining small
+coverage note is addressed by asserting that a stale execution failure also
+preserves an owner-closed (`failed`) record. No additional runtime code changed.

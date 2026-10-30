@@ -106,5 +106,10 @@ test('a stale execution failure cannot overwrite completed or held state',async(
   await j.holdExecution('held-task','runner_timeout');const held=await j.getRecord('held-task');
   await j.recordExecutionFailure({messageId:'held-task',reason:'persistence_failure'});
   assert.deepEqual(await j.getRecord('held-task'),held);
+  const db=new DatabaseSync(path.join(root,'local-messaging.sqlite'));
+  db.prepare("UPDATE local_messages SET phase='failed' WHERE message_id='held-task'").run();db.close();
+  const closed=await j.getRecord('held-task');
+  await j.recordExecutionFailure({messageId:'held-task',reason:'persistence_failure'});
+  assert.deepEqual(await j.getRecord('held-task'),closed);
  }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
