@@ -246,3 +246,15 @@ of a disposable revoke, through this candidate provider and the real transaction
 adapter. Verify zero write on denial, one exact audited revoke on approval,
 separate fresh interaction on each attempt and bounded cancellation. Do not use a
 live principal for this test or enable a command before that evidence is reviewed.
+
+### Interactive password acceptance — 2026-10-30 PDT
+
+The owner-led disposable native test has now run. Cancellation preserved registry
+and audit bytes; two separate password approvals each committed one audited revoke
+and refused replay. The owner confirmed a separate prompt and password entry each
+time. Live identity/policy/manifests and message/reply/pin records stayed unchanged.
+See `../reviews/2026-10-30-owner-approval-macos-acceptance.md` for timings, the
+initial approved-instead-of-cancelled attempt and remaining limits. This supersedes
+the earlier “no native prompt ran” checkpoint only for this acceptance run. It
+does not activate a production provider or command. Summary visibility,
+biometric/headless behavior and live timeout cleanup remain unaccepted.
