@@ -83,8 +83,7 @@ public final class FileEnrollmentJournal: EnrollmentJournal, @unchecked Sendable
     private static let maximumBytes = 4096
     private let root: URL
     private let applicationRoot: URL?
-    public convenience init() {
-        let applicationRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/The Triangle", isDirectory: true)
+    public convenience init(applicationRoot: URL = CLIStorageConfiguration.desktopRoot) {
         self.init(root: applicationRoot.appendingPathComponent("enrollment-journal", isDirectory: true), applicationRoot: applicationRoot)
     }
     private init(root: URL, applicationRoot: URL?) { self.root = root; self.applicationRoot = applicationRoot }

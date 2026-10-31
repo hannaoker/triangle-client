@@ -1,5 +1,12 @@
 # macOS Keychain policy
 
+This policy applies to the installed desktop home. Standalone CLI homes use
+explicitly separate file custody, including in Developer ID builds; they do not
+read, copy, or fall back to desktop Keychain credentials. See
+[`standalone-cli.md`](../../docs/triangle-client/standalone-cli.md) for home
+selection, private file storage, and macOS CI provisioning. Selecting the desktop
+home explicitly retains the desktop policy below.
+
 Mailbox credential items use the Data Protection Keychain and are explicitly
 non-synchronizable. The fixed generic-password service for mailbox credentials is
 `dev.thetriangle.mesh.mailbox`; the validated local profile name is the account.

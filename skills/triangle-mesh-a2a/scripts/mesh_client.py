@@ -13,7 +13,7 @@ import subprocess
 import shutil
 import sys
 
-DEFAULT_PROFILE = os.environ.get("MESH_PROFILE", "dawn-hermes-mini-seven")
+DEFAULT_PROFILE = os.environ.get("MESH_PROFILE", "default")
 
 
 def resolve_mailbox_bin():
@@ -21,14 +21,14 @@ def resolve_mailbox_bin():
   env_bin = os.environ.get("TRIANGLE_MAILBOX_BIN")
   if env_bin:
     return os.path.expanduser(env_bin)
+  on_path = shutil.which("triangle-mailbox")
+  if on_path:
+    return on_path
   macos_default = os.path.expanduser(
     "~/Library/Application Support/The Triangle/bin/triangle-mailbox"
   )
   if os.path.isfile(macos_default):
     return macos_default
-  on_path = shutil.which("triangle-mailbox")
-  if on_path:
-    return on_path
   return macos_default
 
 
@@ -316,6 +316,7 @@ def open_direct_room(recipient_agent_id_or_handle, profile=DEFAULT_PROFILE):
 
 def main():
   parser = argparse.ArgumentParser(description="Triangle MESH A2A CLI")
+  parser.add_argument("--home", help="Absolute CLI home (or TRIANGLE_HOME); owns credentials, locks and state")
   parser.add_argument(
     "--profile",
     "-p",
@@ -325,6 +326,7 @@ def main():
   subparsers = parser.add_subparsers(dest="command", required=True)
 
   subparsers.add_parser("status", help="Get agent profile status")
+  subparsers.add_parser("paths", help="Show the selected CLI home and credential store")
 
   poll_parser = subparsers.add_parser("poll", help="Poll pending mailbox deliveries")
   poll_parser.add_argument("--wait", "-w", type=int, default=0, help="Max seconds to wait for delivery")
@@ -356,9 +358,21 @@ def main():
   ack_parser.add_argument("--delivery", "-d", type=int, required=True, help="Delivery ID to acknowledge")
 
   args = parser.parse_args()
+  if args.home is not None:
+    if not os.path.isabs(args.home) or os.path.normpath(args.home) == "/":
+      parser.error("--home must be a non-root absolute directory")
+    os.environ["TRIANGLE_HOME"] = args.home
 
-  if args.command == "status":
-    print(json.dumps(get_status(profile=args.profile), indent=2))
+  if args.command in ("paths", "status"):
+    # Preserve helper diagnostics and its exit code, including missing profiles.
+    command = [DEFAULT_BIN, args.command]
+    if args.command == "status":
+      command += ["--profile", args.profile]
+    try:
+      sys.exit(subprocess.run(command).returncode)
+    except OSError:
+      print("mesh: triangle-mailbox is unavailable; install it on PATH or set TRIANGLE_MAILBOX_BIN", file=sys.stderr)
+      sys.exit(127)
   elif args.command == "poll":
     res = poll_mailbox(wait_seconds=args.wait, interval=args.interval, profile=args.profile)
     print(json.dumps(res, indent=2))

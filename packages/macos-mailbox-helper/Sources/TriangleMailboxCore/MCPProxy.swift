@@ -190,7 +190,10 @@ public struct MCPProxy: Sendable {
                 let credential: VerifiedCredential
                 do { credential = try await gate.credential(for: profile) }
                 catch {
-                    writeDiagnostic(gateReason(error), output: output)
+                    if let storageError = error as? CLIStorageError {
+                        let data = try? JSONSerialization.data(withJSONObject: ["error": storageError.code, "detail": storageError.description], options: [.sortedKeys])
+                        if let data { output.writeStderr(data + Data([0x0a])) }
+                    } else { writeDiagnostic(gateReason(error), output: output) }
                     return .failed
                 }
                 let workloadAuth: WorkloadTokenManager?
@@ -345,7 +348,8 @@ public struct MCPProxy: Sendable {
         credential: VerifiedCredential,
         instanceID: ClientInstanceID,
         transport: any MeshTransport,
-        workloadAuth: WorkloadTokenManager?
+        workloadAuth: WorkloadTokenManager?,
+        applicationRoot: URL = CLIStorageConfiguration.desktopRoot
     ) -> MCPTransactionRewriter {
         let mailboxTransport = AuthenticatedMailboxTransactionTransport(
             origin: credential.origin,
@@ -360,7 +364,7 @@ public struct MCPProxy: Sendable {
         return MCPTransactionRewriter(
             instanceID: instanceID,
             protocolOwnership: .selfServeDrain,
-            store: FileMailboxTransactionStore(instanceID: instanceID),
+            store: FileMailboxTransactionStore(instanceID: instanceID, applicationRoot: applicationRoot),
             transport: mailboxTransport
         )
     }
@@ -431,7 +435,8 @@ public struct MCPProxy: Sendable {
     }
 
     private func gateReason(_ error: Error) -> String {
-        switch error as? VerifiedCredentialGateError {
+        if let storageError = error as? CLIStorageError { return storageError.code }
+        return switch error as? VerifiedCredentialGateError {
         case .profileNotFound: "profile_not_found"
         case .localAuthorizationRequired: "local_authorization_required"
         case .offline: "identity_verification_offline"

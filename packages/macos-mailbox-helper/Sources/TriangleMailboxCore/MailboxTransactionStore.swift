@@ -107,9 +107,7 @@ public final class FileMailboxTransactionStore: MailboxTransactionStore, @unchec
     private let managedDirectories: [URL]
     private let simulatedCrashAt: MailboxTransactionStoreCrashPoint?
 
-    public convenience init(instanceID: ClientInstanceID) {
-        let applicationRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/The Triangle", isDirectory: true)
+    public convenience init(instanceID: ClientInstanceID, applicationRoot: URL = CLIStorageConfiguration.desktopRoot) {
         let modelState = applicationRoot.appendingPathComponent("model-state", isDirectory: true)
         let instances = modelState.appendingPathComponent("instances", isDirectory: true)
         let instanceRoot = instances.appendingPathComponent(instanceID.value, isDirectory: true)

@@ -531,6 +531,8 @@ public struct EnrollmentService: Sendable {
             lease = try reservation.acquire(for: profile)
         } catch EnrollmentReservationError.alreadyInProgress {
             return .preflightBlocked(profile: profile, status: .alreadyInProgress)
+        } catch let error as CLIStorageError {
+            throw error
         } catch {
             return .preflightBlocked(profile: profile, status: .reservationUnavailable)
         }
@@ -729,6 +731,7 @@ public struct EnrollmentService: Sendable {
         let lease: any EnrollmentReservationLease
         do { lease = try reservation.acquire(for: profile) }
         catch EnrollmentReservationError.alreadyInProgress { return .preflightBlocked(profile: profile, status: .alreadyInProgress) }
+        catch let error as CLIStorageError { throw error }
         catch { return .preflightBlocked(profile: profile, status: .reservationUnavailable) }
         defer { lease.release() }
 
@@ -961,6 +964,8 @@ public struct VerifiedCredentialGate: Sendable {
                 if delay > 0 {
                     try await Task.sleep(nanoseconds: delay)
                 }
+            } catch let error as CLIStorageError {
+                throw error
             } catch EnrollmentReservationError.unsafeReservation {
                 throw VerifiedCredentialGateError.journalIneligible
             } catch {

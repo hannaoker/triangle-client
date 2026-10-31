@@ -5,6 +5,11 @@ import TriangleMailboxTestSupport
 enum TriangleMailboxHostTests {
     static func main() async {
         do {
+            for contractCase in CLIStorageContractCases.all {
+                try await contractCase.run()
+                print("PASS \(contractCase.name)")
+            }
+            if ProcessInfo.processInfo.environment["TRIANGLE_CONTRACT_FILTER"] == "cli-storage" { return }
             if ProcessInfo.processInfo.environment["TRIANGLE_CONTRACT_FILTER"] == "claimed-inbound-resume" {
                 try await MailboxTransactionContractCases.claimedInboundSurvivesResume()
                 print("PASS claimed inbound survives resume and is read exactly")

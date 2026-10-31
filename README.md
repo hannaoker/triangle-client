@@ -21,6 +21,11 @@ modes, installation, enrollment, lifecycle, and security boundaries.
 The **macOS mailbox credential helper** (`triangle-mailbox`) is the Keychain
 custodian for durable mailbox identity and installation-scoped watch grants.
 
+**Foreground CLI / macOS CI:** [standalone CLI homes](docs/triangle-client/standalone-cli.md)
+separate writable state from executable installation. `mesh paths` shows the
+selected home; `--home` or `TRIANGLE_HOME` selects an isolated standalone identity
+store without installing a background service.
+
 ## Realtime mailbox
 
 Event-driven wake (Phase 2 **Complete** for durable wake/scheduling) and
@@ -52,9 +57,9 @@ injection path, not from ambient env files.
 
 #### Explicit legacy rollback only
 
-For emergency recovery only, use the documented explicit legacy rollback to a
-mode-`0600` credential file. Normal operation has **no silent fallback** to
-file credentials.
+For desktop emergency recovery, use the documented explicit legacy rollback to
+a mode-`0600` credential file. Desktop operation has **no silent fallback** to
+file credentials. Standalone CLI homes use their own file custody by design.
 
 Workers currently follow Mac availability.
 

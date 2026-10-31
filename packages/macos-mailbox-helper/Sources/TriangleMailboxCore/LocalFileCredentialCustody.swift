@@ -9,7 +9,8 @@ import Security
 
 /// Local Mini / ad-hoc helper custody: 0600 files under Application Support.
 /// Opt in with `TRIANGLE_FILE_CREDENTIALS=1` or an `ENABLED` marker written by
-/// the export script. Production Developer ID builds keep Keychain-only custody.
+/// the export script. Production desktop builds keep Keychain-only custody.
+/// Standalone CLI homes explicitly instantiate file stores through CLIStorageConfiguration.
 public enum LocalCredentialStores {
     public static var rootURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -61,9 +62,11 @@ public enum LocalCredentialStores {
 
 public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
     private let root: URL
+    private let managedRoot: URL?
     private let lock = NSLock()
 
-    public init(root: URL = LocalCredentialStores.rootURL) {
+    public init(root: URL = LocalCredentialStores.rootURL, managedRoot: URL? = nil) {
+        self.managedRoot = managedRoot
         self.root = root.appendingPathComponent("mailbox", isDirectory: true)
     }
 
@@ -80,7 +83,7 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
     public func read(for profile: ProfileName) throws -> CredentialBinding {
         try lock.withLock {
             let url = try prepareURL(for: profile)
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try PrivateCredentialFile.read(url) else {
                 throw CredentialStoreError.itemNotFound
             }
             do {
@@ -119,22 +122,23 @@ public final class FileCredentialStore: CredentialStore, @unchecked Sendable {
     }
 
     private func prepareURL(for profile: ProfileName) throws -> URL {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try PrivateCredentialFile.prepareDirectory(root, managedRoot: managedRoot)
         return root.appendingPathComponent("\(profile.value).json")
     }
 
     private func write(_ binding: CredentialBinding, to url: URL) throws {
         let data = try JSONEncoder().encode(binding)
-        try data.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateCredentialFile.write(data, to: url)
     }
 }
 
 public final class FileWorkloadKeyStore: WorkloadKeyStore, @unchecked Sendable {
     private let root: URL
+    private let managedRoot: URL?
     private let lock = NSLock()
 
-    public init(root: URL = LocalCredentialStores.rootURL) {
+    public init(root: URL = LocalCredentialStores.rootURL, managedRoot: URL? = nil) {
+        self.managedRoot = managedRoot
         self.root = root.appendingPathComponent("workload", isDirectory: true)
     }
 
@@ -156,7 +160,7 @@ public final class FileWorkloadKeyStore: WorkloadKeyStore, @unchecked Sendable {
     public func read(for profile: ProfileName) throws -> WorkloadKeyRecord {
         try lock.withLock {
             let url = try prepareURL(for: profile)
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try PrivateCredentialFile.read(url) else {
                 throw WorkloadKeyStoreError.itemNotFound
             }
             if let payload = try? JSONDecoder().decode(StoredWorkloadKeyFilePayload.self, from: data),
@@ -205,14 +209,13 @@ public final class FileWorkloadKeyStore: WorkloadKeyStore, @unchecked Sendable {
     }
 
     private func prepareURL(for profile: ProfileName) throws -> URL {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try PrivateCredentialFile.prepareDirectory(root, managedRoot: managedRoot)
         return root.appendingPathComponent("\(profile.value).json")
     }
 
     private func write(_ payload: StoredWorkloadKeyFilePayload, to url: URL) throws {
         let data = try JSONEncoder().encode(payload)
-        try data.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateCredentialFile.write(data, to: url)
     }
 }
 
@@ -224,9 +227,11 @@ private struct StoredWorkloadKeyFilePayload: Codable, Sendable {
 
 public final class FileWatchGrantStore: WatchGrantStore, @unchecked Sendable {
     private let root: URL
+    private let managedRoot: URL?
     private let lock = NSLock()
 
-    public init(root: URL = LocalCredentialStores.rootURL) {
+    public init(root: URL = LocalCredentialStores.rootURL, managedRoot: URL? = nil) {
+        self.managedRoot = managedRoot
         self.root = root.appendingPathComponent("watch", isDirectory: true)
     }
 
@@ -243,7 +248,7 @@ public final class FileWatchGrantStore: WatchGrantStore, @unchecked Sendable {
     public func read(for installationID: InstallationID) throws -> WatchGrantBinding {
         try lock.withLock {
             let url = try prepareURL(for: installationID)
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try PrivateCredentialFile.read(url) else {
                 throw WatchGrantStoreError.itemNotFound
             }
             do {
@@ -278,14 +283,13 @@ public final class FileWatchGrantStore: WatchGrantStore, @unchecked Sendable {
     }
 
     private func prepareURL(for installationID: InstallationID) throws -> URL {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try PrivateCredentialFile.prepareDirectory(root, managedRoot: managedRoot)
         return root.appendingPathComponent("\(installationID.value).json")
     }
 
     private func write(_ binding: WatchGrantBinding, to url: URL) throws {
         let data = try JSONEncoder().encode(binding)
-        try data.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateCredentialFile.write(data, to: url)
     }
 }
 

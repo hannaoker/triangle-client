@@ -43,9 +43,7 @@ public final class FileEnrollmentReservation: EnrollmentReservation, @unchecked 
     private let root: URL
     private let applicationRoot: URL?
 
-    public convenience init() {
-        let applicationRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/The Triangle", isDirectory: true)
+    public convenience init(applicationRoot: URL = CLIStorageConfiguration.desktopRoot) {
         self.init(root: applicationRoot.appendingPathComponent("enrollment-locks", isDirectory: true), applicationRoot: applicationRoot)
     }
 
@@ -57,12 +55,18 @@ public final class FileEnrollmentReservation: EnrollmentReservation, @unchecked 
     public func acquire(for profile: ProfileName) throws -> any EnrollmentReservationLease {
         try ensureSafeRoot()
         let directoryFD = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard directoryFD >= 0 else { throw EnrollmentReservationError.unsafeReservation }
+        guard directoryFD >= 0 else {
+            try CLIStorageError.checkAccess("open profile lock directory")
+            throw EnrollmentReservationError.unsafeReservation
+        }
         defer { close(directoryFD) }
 
         let filename = Self.lockFileName(for: profile)
         let descriptor = openat(directoryFD, filename, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else { throw EnrollmentReservationError.unsafeReservation }
+        guard descriptor >= 0 else {
+            try CLIStorageError.checkAccess("open profile lock for writing")
+            throw EnrollmentReservationError.unsafeReservation
+        }
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFREG,
@@ -73,8 +77,10 @@ public final class FileEnrollmentReservation: EnrollmentReservation, @unchecked 
             throw EnrollmentReservationError.unsafeReservation
         }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
             close(descriptor)
-            if errno == EWOULDBLOCK { throw EnrollmentReservationError.alreadyInProgress }
+            if code == EWOULDBLOCK { throw EnrollmentReservationError.alreadyInProgress }
+            try CLIStorageError.checkAccess("acquire profile lock", code: code)
             throw EnrollmentReservationError.unsafeReservation
         }
         return FileReservationLease(descriptor: descriptor)
@@ -90,7 +96,9 @@ public final class FileEnrollmentReservation: EnrollmentReservation, @unchecked 
     private func ensureSafeDirectory(_ directory: URL, allowIntermediateCreation: Bool) throws {
         var metadata = stat()
         if lstat(directory.path, &metadata) != 0 {
-            guard errno == ENOENT else { throw EnrollmentReservationError.unsafeReservation }
+            let code = errno
+            try CLIStorageError.checkAccess("inspect CLI home", code: code)
+            guard code == ENOENT else { throw EnrollmentReservationError.unsafeReservation }
             do {
                 try FileManager.default.createDirectory(
                     at: directory,
@@ -98,6 +106,17 @@ public final class FileEnrollmentReservation: EnrollmentReservation, @unchecked 
                     attributes: [.posixPermissions: 0o700]
                 )
             } catch {
+                let nsError = error as NSError
+                if nsError.domain == NSPOSIXErrorDomain {
+                    try CLIStorageError.checkAccess("create CLI home", code: Int32(nsError.code))
+                }
+                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                if let underlying, underlying.domain == NSPOSIXErrorDomain {
+                    try CLIStorageError.checkAccess("create CLI home", code: Int32(underlying.code))
+                }
+                if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteNoPermissionError {
+                    throw CLIStorageError.accessDenied(operation: "create CLI home", code: EACCES)
+                }
                 throw EnrollmentReservationError.unsafeReservation
             }
             guard lstat(directory.path, &metadata) == 0 else { throw EnrollmentReservationError.unsafeReservation }

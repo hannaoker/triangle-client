@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "test": "node scripts/run-all-tests.mjs",
+    "test:cli": "python3 tests/mesh-cli.test.py",
     "test:runtime": "node scripts/run-all-tests.mjs runtime",
     "test:gateway": "node scripts/run-all-tests.mjs gateway",
     "test:console": "npm --prefix packages/client-console test"
