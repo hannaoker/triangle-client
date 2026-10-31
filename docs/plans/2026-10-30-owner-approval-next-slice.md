@@ -204,3 +204,67 @@ acceptance. No installed artifact, live binding, permission or message changed.
 Next: implement and review the macOS provider without enabling a command, then
 perform a separately scoped owner-led disposable interactive test. Move requires
 the D1 compatibility work first; Linux/Windows providers remain unimplemented.
+
+
+## macOS provider candidate (not activated)
+
+`packages/triangle-cli/src/owner-approval-macos.mjs` connects the provider interface
+to an explicitly pinned native executable. The release supplies the canonical
+private executable path and SHA-256; peer/CLI input must never select either.
+Before each launch it verifies file custody, pin, operation digest, exact shared
+summary and remaining deadline. It uses direct pipes and a minimal environment,
+not a shell, inherited provider credentials or a cached sudo session. Unsupported
+platforms and malformed challenges refuse without spawning.
+
+Replies must be one bounded canonical JSON object with the exact nonce/digest,
+a known outcome and a successful process exit. Cancellation, deadline, malformed
+or excessive output terminate the child, with bounded SIGKILL fallback, and the
+provider waits for child exit. The coordinator still decides whether approval is
+fresh and whether the registry operation matches. Hash pinning is not a claim
+against arbitrary same-user code/file replacement or the verify/exec race.
+
+`scripts/probes/owner-approval-provider.swift` is a candidate standalone helper.
+`--validate-request` only validates and returns unavailable, without creating an
+LAContext. `--authenticate` would evaluate `.deviceOwnerAuthentication` with a fresh
+context, zero biometric reuse allowance, the exact operation summary and digest.
+Cancellation/timeout invalidates the context. No password, token or reusable
+approval receipt is returned. OS success is not yet evidence of fresh user
+interaction: prior-auth reuse, full-summary visibility, password fallback and
+headless behavior remain interactive release gates. The helper is not installed
+or selected by a production command.
+
+The Node contract/provider/transaction plus migrate/status checks pass 86 tests.
+Provider process tests use pinned disposable Python stand-ins, including wrong
+nonce/digest, changed executable, denial/cancellation/unavailability, invalid or
+oversized output, nonzero exit, minimal environment and forced cleanup. These
+stand-ins do not prove OS authentication. The actual Swift helper compiled under
+Swift 6 and passed strict signature verification; five validation-only cases ran
+against the native executable. No `--authenticate` invocation occurred.
+
+Next acceptance requires the owner to be present for explicit denial and approval
+of a disposable revoke, through this candidate provider and the real transaction
+adapter. Verify zero write on denial, one exact audited revoke on approval,
+separate fresh interaction on each attempt and bounded cancellation. Do not use a
+live principal for this test or enable a command before that evidence is reviewed.
+
+### Interactive password acceptance — 2026-10-30 PDT
+
+The owner-led disposable native test has now run. Cancellation preserved registry
+and audit bytes; two separate password approvals each committed one audited revoke
+and refused replay. The owner confirmed a separate prompt and password entry each
+time. Live identity/policy/manifests and message/reply/pin records stayed unchanged.
+See `../reviews/2026-10-30-owner-approval-macos-acceptance.md` for timings, the
+initial approved-instead-of-cancelled attempt and remaining limits. This supersedes
+the earlier “no native prompt ran” checkpoint only for this acceptance run. It
+does not activate a production provider or command. Summary visibility,
+biometric/headless behavior and live timeout cleanup remain unaccepted.
+
+### Stack review checkpoint
+
+The #153–#156 follow-up review tightened whole-string identifier matching and
+added a reproducible opt-in native validation test. 108 affected tests passed with
+the native candidate explicitly supplied (zero skipped). The owner did not check
+full prompt-detail visibility, so that gate remains open; no repeat prompt was
+triggered. The refreshed candidate differs in validation code from the previously
+interactively accepted binary and is not installed or activated. See the review
+record for the exact source/interactive evidence boundary.
