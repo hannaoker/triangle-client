@@ -130,3 +130,40 @@ Compiled on the Mini with `/usr/bin/swiftc` using a disposable module cache;
 This proves the compiled command can query capability with normal access. It
 leaves every interactive acceptance gate above unresolved. Probe executable and
 module cache are under `/private/tmp`; the reviewed source is committed here.
+
+
+## Contract implementation checkpoint
+
+`packages/triangle-cli/src/owner-approval.mjs` now implements the library-only
+operation contract. Only profile move/revoke requests are accepted, with closed
+fields, canonical existing registry directory, expected sequence, exact active
+before identity and (for moves) exact new principal/authority. Requests are copied,
+frozen, assigned a random nonce and bounded monotonic deadline, and hashed for
+provider display/correlation. There is no serialized approval receipt.
+
+A coordinator-local opaque handle gets one authentication attempt. The trusted
+in-process provider receives the immutable challenge; its outcome is not a
+CLI/MCP argument. The default provider refuses as unavailable. Denial, cancellation,
+provider failure, timeout, late approval and replay cannot enter the commit path.
+Cancellation/expiry before dispatch avoids requesting authentication at all.
+
+After approval the coordinator invokes a trusted lock adapter and rechecks the
+deadline, cancellation, exact registry sequence and original binding inside its
+callback. It passes only the frozen operation to that adapter's committer. No
+production lock/commit adapter is connected yet; fake-adapter tests establish
+contract sequencing only, not real registry exclusion or durable transactions.
+The future adapter must use the actual registry owner lock, revalidate custody,
+apply one synchronous audited operation and retain D2/D3. No arbitrary shell or
+user-configurable provider is permitted by the intended integration.
+
+Tests cover the operation fields, exact challenge digest, mutation-resistant
+snapshot, one-use and cross-coordinator/serialized handle refusal, unavailable/
+denied/cancelled/malformed outcomes, provider exceptions, timeout with late result,
+pre-dispatch cancellation, changed sequence/principal/origin/generation/binding id,
+missing binding and expiry while awaiting the lock. Existing inventory-migrate
+and status CLI behavior is exercised alongside it.
+
+This source slice adds no CLI command, OS provider, live prompt, registry writer,
+installed artifact or permission. First-time mapping and ordinary messaging stay
+unchanged. Production provider, locking/commit integration and interactive
+owner acceptance remain the next gates, not claims made by these tests.
