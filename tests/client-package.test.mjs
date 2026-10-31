@@ -19,7 +19,7 @@ const sha = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 function run(args) {
   return spawnSync(process.execPath, args, { cwd: root, encoding: "utf8" });
 }
-function fixture() {
+function fixture({ ownerApproval = false } = {}) {
   const dir = mkdtempSync(
     join(realpathSync(tmpdir()), "triangle-package-install-"),
   );
@@ -41,6 +41,7 @@ function fixture() {
     out,
     "--test-root",
     dir,
+    ...(ownerApproval ? ["--owner-approval", "candidate"] : []),
   ]);
   assert.equal(built.status, 0, built.stderr);
   const { archive, installer } = JSON.parse(built.stdout);
@@ -74,6 +75,10 @@ test("prebuilt package installs without build tools, stages stopped service and 
     let result = f.install();
     assert.equal(result.status, 0, result.stderr);
     const home = join(f.dir, "home");
+    const receipt = JSON.parse(readFileSync(join(home, "Library/Application Support/The Triangle/package-install.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
+    assert.equal(manifest.ownerApprovalCandidate, undefined);
+    assert.equal(manifest.files.some(entry => entry.path === "bin/triangle-owner-approval"), false);
     const untouched = join(
       home,
       "Library/Application Support/The Triangle/owner-kept.json",
@@ -440,4 +445,39 @@ test("bundled Node must actually support unflagged SQLite, not only a major vers
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("owner approval candidate packages the native helper without activation or a global command", () => {
+  const f = fixture({ ownerApproval: true });
+  try {
+    const result = f.install();
+    assert.equal(result.status, 0, result.stderr);
+    const app = join(f.dir, "home/Library/Application Support/The Triangle");
+    const receipt = JSON.parse(readFileSync(join(app, "package-install.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
+    assert.equal(manifest.ownerApprovalCandidate.activation, "disabled");
+    assert.equal(manifest.ownerApprovalCandidate.minimumMacOS, "13.0");
+    const entry = manifest.files.find(f => f.path === "bin/triangle-owner-approval");
+    assert.ok(entry);
+    assert.equal(sha(join(receipt.release, entry.path)), entry.sha256);
+    assert.equal(entry.mode, 0o700);
+    assert.equal(existsSync(join(app, "bin/triangle-owner-approval")), false);
+    assert.equal(existsSync(join(app, "client/activate.json")), false);
+    // No mode means refusal before reading stdin or creating an auth context.
+    assert.equal(spawnSync(join(receipt.release, entry.path), [], { encoding: "utf8" }).status, 64);
+    assert.equal(existsSync(join(app, "identity")), false);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+
+test("owner approval packaging refuses an activation value", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "triangle-package-invalid-approval-"));
+  try {
+    const output = join(dir, "output");
+    const result = run(["scripts/release/build-client-package.mjs", "--version", "0.1.0-test", "--output", output, "--owner-approval", "enabled"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /accepts only candidate/);
+    assert.equal(existsSync(output), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

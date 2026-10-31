@@ -97,3 +97,38 @@ validation mode. Do not relabel it as the exact interactively accepted artifact;
 packaged native activation still needs release-artifact acceptance and confirmation
 that the full operation details are readable. No live or installed code changed
 as part of this follow-up review.
+
+## Exact packaged candidate acceptance
+
+The owner approved a second scoped test of the actual `0.2.0-owner-approval.1`
+archive: cancel once, then approve once, inspecting full operation details.
+Runtime code, bundled Node and native executable came from the extracted archive;
+only fixture creation used the source test helper. The temporary harness was
+`/private/tmp/owner-auth-packaged-acceptance.mjs`; it is not a production command.
+
+- Archive SHA-256: `2c40b315c14f7f724659c959e0cb3da723254ab4e0ce14516349558c8ade5e97`.
+- Native executable SHA-256: `440eb808e7ebc196606ec784893be2ff8f0e0529b4fabc143e3e4a8cd5d81bb3`.
+- Runtime source: merged `22b48ee`; packager source: `621deb1`.
+
+| Attempt | Result | Time including human response | Sequence |
+| --- | --- | --- | --- |
+| Cancel | `owner_approval_cancelled`; registry/audit byte-identical | 13.152 s | 4 → 4 |
+| Approve | One audited disposable revoke; replay refused; siblings unchanged | 6.657 s | 4 → 5 |
+
+The owner confirmed **full principal and registry path were readable, and approval
+required a password**. This closes the previously unconfirmed visibility gate for
+this exact local password-path candidate. Both operation digests/nonces were
+fresh. Live identity/audit, policies, manifests and full message/reply/pin row-set
+hashes stayed unchanged. No third prompt ran. The fixture has an unused third
+binding from the reused harness template; it was not revoked.
+
+Private durable evidence:
+`~/Library/Application Support/The Triangle/releases/owner-approval-packaged-acceptance.json`
+and the updated `owner-approval-package-candidate.json` beside it.
+
+The artifact remains a private candidate extracted under `/private/tmp`, not an
+installed Mini release or published download. No production command selects it.
+Source packaging review/merge and any separately scoped command rollout still
+remain. Touch ID/Watch, SSH/headless, wrong-password and live timeout cleanup are
+not established by this password/cancel run. Same-user tamper resistance and
+identity moves remain outside this acceptance.
