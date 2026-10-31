@@ -49,12 +49,10 @@ passes them. The OS prompt is the only gate.
    `registry_unsafe` and `registry_corrupt` have a specific line. A test pins the wording and
    that no path appears.
 
-Mutation probes (one guard removed at a time, 42 guards): 7 caught before, 36 after. The 6
-that survive are each repeated by a second layer or need a second OS user: the loader's platform
-and canonical-root checks (the macOS provider repeats both), its directory check (unreachable
-once the manifest path cannot be read), its helper-hash format check (the provider repeats it)
-and the two owner-uid checks (they need another user to test). The second layer rejects the
-same input in every case. Three packaging mutants (default release root one level too shallow,
+Mutation probes (one guard removed at a time, 42 guards, run on the final test code after a
+passing baseline): 7 caught before, 39 after. The 3 that survive cannot be reached from a
+test: the loader's directory check (unreachable once the manifest path cannot be read) and the
+two owner-uid checks (they need another OS user). Three packaging mutants (default release root one level too shallow,
 test-only manifests selecting the helper, a candidate build also declaring the command) are
 all caught by the packaging tests.
 
@@ -62,14 +60,53 @@ Left as they are: result printing sits inside the try that reports "did not comp
 message already says to check status before retrying), and the bridge import catch-all calls
 any load failure "package is incomplete".
 
+## Review of the added tests
+
+An independent read-only reviewer ran the first test commit and tried deleting guards. Findings
+and what was done:
+
+1. Four loader guards were not actually pinned: the macOS provider repeats the platform, path
+   and hash-format checks, so a refusal looked the same with or without the loader's guard.
+   Fixed: the tests call `authenticate` with an already-aborted signal, which a selected
+   provider answers with 'cancelled' before checking anything and the unavailable provider
+   answers with 'unavailable'. The canonical-root case now reaches the release through a
+   symlinked parent, and the hash-mismatch case is a separate live-provider test.
+2. The packaging test would have launched the real native helper (an OS prompt) if its
+   stand-in write were ever lost. Fixed: the manifest pins the stand-in's own hash.
+3. The macOS-only private-symlink case vanished silently on Linux. It is now skipped visibly.
+4. The `/usr/bin/python3` stand-in opens an install dialog on a Mac without Command Line Tools.
+   The new stand-ins run on the test Node (see the Codex review below for the shebang
+   follow-up). The older stand-in in `identity-revoke-cli.test.mjs` is unchanged.
+5. Overstated names and one weak case: argument-shape cases now carry a valid `--confirm`.
+6. The signalled-child test waits for 'close' (after stderr drains) and clears its timer on error.
+7. Not done: the stand-in and manifest builder exist in three copies (the sibling test, this
+   file, the packaging test); a shared fixture module would stop them drifting.
+
+## Codex review of this PR
+
+Two findings, both fixed in `5ec2b00`:
+
+1. Test portability (medium): the stand-ins used `#!${process.execPath}`, and a shebang cannot
+   name an interpreter path with spaces, so the control and packaging tests failed under the
+   packaged Node (`.../Application Support/The Triangle/releases/.../bin/node`). Both stand-ins
+   are now a `/bin/sh` launcher with the Node path shell-quoted and the approving script inline.
+   The packaging fixture also names the Node license it finds beside the Node (the packaged
+   Node keeps it under `LICENSES/`), so the suite runs under the packaged Node. Verified: the
+   43 hardening tests pass under the regular Node and under the packaged Node, and the revoke
+   packaging test passes under both.
+2. Message accuracy (low): expiry is also checked after the provider approves and inside the
+   registry lock, so "approval expired before it was granted" could be wrong. It now reads "The
+   approval window expired. Run the apply command again."
+
 ## Private package (not published, not installed)
 
-Built from this branch at `0df83e4` with the prebuilt inputs earlier reviews used (installed
-helper and client binaries and the bundled Node 22.22.3 of release `0.2.0-identity.1`, read
-only), `--owner-approval revoke`, no `--test-root`:
+Built from this branch at `5ec2b00` (the final source; this document is the only later change)
+with the prebuilt inputs earlier reviews used (installed helper and client binaries and the
+bundled Node 22.22.3 of release `0.2.0-identity.1`, read only), `--owner-approval revoke`, no
+`--test-root`. It replaces `0.2.0-owner-revoke.1`, which predated the wording fix and was removed:
 
-- `/private/tmp/triangle-owner-revoke-package/triangle-client-0.2.0-owner-revoke.1-darwin-arm64.tar.gz`
-- archive SHA-256 `f9dd11e532238d83e9c5f9a4521a37f5fce390556550f6ba9aa7439f3ed3b215`
+- `/private/tmp/triangle-owner-revoke-package/triangle-client-0.2.0-owner-revoke.2-darwin-arm64.tar.gz`
+- archive SHA-256 `2e6cf72b90dac78877142f66f36ea3dc8acd433f1a25bd5068d67d770d0b3319`
 - installer SHA-256 `be2e6cb95e4274ebeeaa9bf172d7dcc33bc9d96cb9982e861eb59ef730c00de1`
 - native helper SHA-256 `440eb808e7ebc196606ec784893be2ff8f0e0529b4fabc143e3e4a8cd5d81bb3`
 
@@ -85,7 +122,7 @@ packaged helper (validation only). `authenticate` was never called.
 For the owner-led acceptance, extract into a fresh private directory and use that copy:
 
     mkdir -m 700 /private/tmp/triangle-owner-revoke-accept
-    tar -xzf /private/tmp/triangle-owner-revoke-package/triangle-client-0.2.0-owner-revoke.1-darwin-arm64.tar.gz -C /private/tmp/triangle-owner-revoke-accept
+    tar -xzf /private/tmp/triangle-owner-revoke-package/triangle-client-0.2.0-owner-revoke.2-darwin-arm64.tar.gz -C /private/tmp/triangle-owner-revoke-accept
 
 ## Still not done
 
