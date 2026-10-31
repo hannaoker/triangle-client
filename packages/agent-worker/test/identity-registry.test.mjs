@@ -1638,16 +1638,17 @@ test("Item 4: boundaries (no network, no process spawn, nothing outside root, le
     rmSync(base, { recursive: true, force: true });
   }
 });
-test("Item 4: source-level isolation — only the identity mapping modules and router snapshot provider import identity-registry.mjs", () => {
+test("Item 4: source-level isolation — only approved identity modules import identity-registry.mjs", () => {
   const packagesDir = path.join(REPO_ROOT, "packages");
   const selfFile = path.join(REPO_ROOT, "packages/agent-worker/src/identity-registry.mjs");
-  // The mapping library and its CLI bridge are the deliberate importers; nothing in the
-  // supervisor or the runtime reaches the registry.
+  // Registry readers and explicit owner-transaction libraries are the deliberate
+  // importers. The new approval adapter is not wired into a command or supervisor.
   const allowedImporters = new Set([
     path.join(REPO_ROOT, "packages/agent-worker/src/identity-mapping.mjs"),
     path.join(REPO_ROOT, "packages/agent-worker/src/router-registry-snapshot.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/identity-migrate.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/identity-status.mjs"),
+    path.join(REPO_ROOT, "packages/triangle-cli/src/owner-approval-registry.mjs"),
   ]);
   const offending = [];
 
@@ -1676,7 +1677,7 @@ test("Item 4: source-level isolation — only the identity mapping modules and r
   assert.deepEqual(
     offending,
     [],
-    `Only the identity mapping modules and router snapshot provider may import identity-registry.mjs, found: ${offending.join(", ")}`,
+    `Only approved identity modules may import identity-registry.mjs, found: ${offending.join(", ")}`,
   );
 });
 

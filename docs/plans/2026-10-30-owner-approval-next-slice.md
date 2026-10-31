@@ -167,3 +167,40 @@ This source slice adds no CLI command, OS provider, live prompt, registry writer
 installed artifact or permission. First-time mapping and ordinary messaging stay
 unchanged. Production provider, locking/commit integration and interactive
 owner acceptance remain the next gates, not claims made by these tests.
+
+
+## Review correction and revoke-only transaction slice
+
+Review of the v1 registry found `AUDIT_ACTIONS = {init, bind, revoke}` in
+`identity-registry.mjs`; both new writes and old readers reject a new move audit
+action. D2 correctly forbids an identity change disguised as `bind`. Therefore
+move integration must wait for a versioned audit/schema/runtime-floor decision
+under D1. Do not relax D2 or add an unreadable audit action to the v1 file.
+Revoke can proceed separately using its existing v1 action.
+
+The contract review also found a late-callback gap: an adapter that returned or
+threw before invoking its retained callback could otherwise commit after the
+caller had already seen failure. The coordinator now permits callback entry only
+within the adapter's synchronous call scope. Promise-returning adapters are
+refused, and retained/queued callbacks cannot commit afterward. This matches the
+registry's existing synchronous lock/transaction, not a promise of asynchronous
+lock-adapter support.
+
+`packages/triangle-cli/src/owner-approval-registry.mjs` implements the revoke-only
+adapter with the real `updateIdentityRegistry` lock and audit transaction. It
+checks the exact operation and original binding in that transaction, uses one
+captured timestamp for revocation and audit, preserves every other binding, and
+refuses missing, repeated, retained or asynchronous commit callbacks. The
+architecture allowlist names this one writer explicitly; a separate test verifies
+that no command or runtime imports it. No OS provider or CLI is wired to it.
+
+84 affected tests passed: contract, actual disposable-registry revoke integration,
+registry behavior and migrate/status CLI. Test-provider approval appends one real
+revoke entry; test-provider denial/cancellation/unavailability, expired approval,
+wrong original binding and concurrent sequence changes make no durable change.
+These are real transaction tests with fake authentication, not OS approval
+acceptance. No installed artifact, live binding, permission or message changed.
+
+Next: implement and review the macOS provider without enabling a command, then
+perform a separately scoped owner-led disposable interactive test. Move requires
+the D1 compatibility work first; Linux/Windows providers remain unimplemented.
