@@ -1,4 +1,4 @@
-// No CLI wiring: this adapter only connects a trusted approval coordinator to
+// The guarded owner CLI bridge connects its trusted approval coordinator to
 // the existing synchronous, locked, audited v1 revoke transaction. A move needs
 // a separately versioned audit action; never disguise it as a v1 bind/revoke.
 import { updateIdentityRegistry } from '../../agent-worker/src/identity-registry.mjs';

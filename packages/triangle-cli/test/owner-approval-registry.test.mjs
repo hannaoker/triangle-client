@@ -82,13 +82,13 @@ test('expiry while the real registry is locked refuses without durable changes',
 });
 
 
-test('the revoke transaction adapter has no production command or runtime importer',()=>{
+test('the revoke transaction adapter is reachable only through the guarded owner CLI bridge',()=>{
  const packages=path.resolve(import.meta.dirname,'../..');
  const offenders=[];
  function walk(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
   const file=path.join(dir,entry.name);
   if(entry.isDirectory())walk(file);
-  else if(entry.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-registry.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-registry'))offenders.push(file);
+  else if(entry.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-registry.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-revoke.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-registry'))offenders.push(file);
  }}
  for(const entry of fs.readdirSync(packages,{withFileTypes:true})){
   const src=path.join(packages,entry.name,'src');if(entry.isDirectory()&&fs.existsSync(src))walk(src);

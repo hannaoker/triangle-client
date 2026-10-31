@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { initIdentityRegistry, bindProfileInRegistry } from "../packages/agent-worker/test/local-messaging-identity-fixtures.mjs";
 const root = resolve(import.meta.dirname, "..");
 const sha = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 function run(args) {
@@ -41,7 +42,7 @@ function fixture({ ownerApproval = false } = {}) {
     out,
     "--test-root",
     dir,
-    ...(ownerApproval ? ["--owner-approval", "candidate"] : []),
+    ...(ownerApproval ? ["--owner-approval", typeof ownerApproval === "string" ? ownerApproval : "candidate"] : []),
   ]);
   assert.equal(built.status, 0, built.stderr);
   const { archive, installer } = JSON.parse(built.stdout);
@@ -477,7 +478,32 @@ test("owner approval packaging refuses an activation value", () => {
     const output = join(dir, "output");
     const result = run(["scripts/release/build-client-package.mjs", "--version", "0.1.0-test", "--output", output, "--owner-approval", "enabled"]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /accepts only candidate/);
+    assert.match(result.stderr, /accepts only candidate or revoke/);
     assert.equal(existsSync(output), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("revoke-enabled package declares only the explicit owner command; installed plan remains read-only", () => {
+  const f = fixture({ ownerApproval: "revoke" });
+  try {
+    const installed = f.install();assert.equal(installed.status, 0, installed.stderr);
+    const home = join(f.dir, "home"), app = join(home, "Library/Application Support/The Triangle");
+    const receipt = JSON.parse(readFileSync(join(app, "package-install.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
+    assert.deepEqual(manifest.ownerApproval.commands, ["identity.revoke"]);
+    assert.equal(manifest.ownerApprovalCandidate, undefined);
+    assert.equal(manifest.ownerApproval.binary, "bin/triangle-owner-approval");
+    assert.ok(manifest.files.some(entry => entry.path === manifest.ownerApproval.binary));
+    const registry = join(app, "identity");initIdentityRegistry(registry);bindProfileInRegistry(registry, "alpha", 1);
+    const before = ["identity-registry-v1.json", "registry-audit.jsonl"].map(file => readFileSync(join(registry, file), "utf8"));
+    const wrapper = join(home, ".local/bin/triangle");
+    const result = spawnSync(wrapper, ["identity", "revoke", "alpha", "--registry-root", registry, "--json"], {env:{...process.env,HOME:home},encoding:"utf8"});
+    assert.equal(result.status, 0, result.stderr);const plan = JSON.parse(result.stdout);
+    assert.equal(plan.scope, "local-principal-binding");assert.match(plan.planId,/^[a-f0-9]{64}$/);
+    const noTerminal = spawnSync(wrapper, ["identity", "revoke", "alpha", "--registry-root", registry, "--confirm", plan.planId], {env:{...process.env,HOME:home},encoding:"utf8"});
+    assert.equal(noTerminal.status, 2);assert.match(noTerminal.stderr,/local owner terminal/);
+    assert.deepEqual(["identity-registry-v1.json", "registry-audit.jsonl"].map(file => readFileSync(join(registry, file), "utf8")),before);
+    assert.equal(existsSync(join(app,"client/activate.json")),false);
+  } finally { rmSync(f.dir,{recursive:true,force:true}); }
 });

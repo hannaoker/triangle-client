@@ -1648,6 +1648,7 @@ test("Item 4: source-level isolation — only approved identity modules import i
     path.join(REPO_ROOT, "packages/agent-worker/src/router-registry-snapshot.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/identity-migrate.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/identity-status.mjs"),
+    path.join(REPO_ROOT, "packages/triangle-cli/src/identity-revoke.mjs"),
     path.join(REPO_ROOT, "packages/triangle-cli/src/owner-approval-registry.mjs"),
   ]);
   const offending = [];
