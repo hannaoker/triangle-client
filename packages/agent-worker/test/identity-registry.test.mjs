@@ -1907,12 +1907,32 @@ test("Review Item 1: audit entry must describe the exact mutation (mutation_does
     assert.deepEqual(snapReg(), regBefore);
     assert.deepEqual(snapAudit(), auditBefore);
 
+    // A plain bind may renew an identity, but must not move its principal or authority.
+    // Refusals leave both the durable registry and its audit history untouched.
+    for (const change of [
+      { principal_id: `agent_${hex32("alpha-new-agent")}` },
+      { authority_origin: "https://mesh2.example.test" },
+      { principal_id: `agent_${hex32("alpha-new-agent")}`, authority_origin: "https://mesh2.example.test" },
+    ]) {
+      assert.throws(() => updateIdentityRegistry({
+        root, expectedSequence: 3, now: "2026-10-25T16:03:00.000Z",
+        action: "bind", subject: bAlpha.profile_instance_id,
+        mutate: (r) => {
+          r.bindings[bAlpha.profile_instance_id] = {
+            ...bAlpha, ...change, binding_id: `bind_${hex32("alpha-gen2")}`,
+            binding_generation: 2, issued_at: "2026-10-25T16:03:00.000Z", revoked_at: null,
+          };
+          return r;
+        },
+      }), (err) => err.code === "binding_conflict" && err.reason === "identity_change_requires_move");
+      assert.deepEqual(snapReg(), regBefore);
+      assert.deepEqual(snapAudit(), auditBefore);
+    }
+
     // Positive rebind: generation = old + 1, new binding_id, revoked_at = null, issued_at updated
     const bAlphaGen2 = {
       ...bAlpha,
       binding_id: `bind_${hex32("alpha-gen2")}`,
-      principal_id: `agent_${hex32("alpha-new-agent")}`,
-      authority_origin: "https://mesh2.example.test",
       binding_generation: 2,
       issued_at: "2026-10-25T16:03:00.000Z",
       revoked_at: null,
@@ -1949,6 +1969,26 @@ test("Review Item 1: audit entry must describe the exact mutation (mutation_does
 
     regBefore = snapReg();
     auditBefore = snapAudit();
+
+    // Revocation must not provide a back door for moving the profile on a later bind.
+    for (const change of [
+      { principal_id: `agent_${hex32("alpha-new-agent")}` },
+      { authority_origin: "https://mesh2.example.test" },
+    ]) {
+      assert.throws(() => updateIdentityRegistry({
+        root, expectedSequence: 5, now: "2026-10-25T16:05:00.000Z",
+        action: "bind", subject: bAlpha.profile_instance_id,
+        mutate: (r) => {
+          r.bindings[bAlpha.profile_instance_id] = {
+            ...bAlphaGen2, ...change, binding_id: `bind_${hex32("alpha-gen3-rebind")}`,
+            binding_generation: 3, issued_at: "2026-10-25T16:05:00.000Z", revoked_at: null,
+          };
+          return r;
+        },
+      }), (err) => err.code === "binding_conflict" && err.reason === "identity_change_requires_move");
+      assert.deepEqual(snapReg(), regBefore);
+      assert.deepEqual(snapAudit(), auditBefore);
+    }
 
     // Double revoke (when old binding already has revoked_at !== null) -> refused
     assert.throws(
