@@ -16,7 +16,7 @@ import { ATTACH_HINT } from "../src/local-messaging-interactive-session.mjs";
 import { REGISTRY_FILE_NAME } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
 import { encodeFrame, createMessageParser, createSuccessResponse, PROTOCOL_VERSION } from "../src/local-messaging-protocol.mjs";
-import { initIdentityRegistry, bindProfileInRegistry } from "./local-messaging-identity-fixtures.mjs";
+import { initIdentityRegistry, bindProfileInRegistry, seedLegacyProfileBinding } from "./local-messaging-identity-fixtures.mjs";
 
 // `sessions` and `discover` answer the same questions for every visible entry: who it is (label, kind, principal and
 // whether "none" is known), whether this caller may send and with which address forms, and what delivery path exists
@@ -171,7 +171,7 @@ async function withWorld(options, run) {
     bound.forEach((item, index) => {
       const { profile, principalOf = null } = typeof item === "string" ? { profile: item } : item;
       const overrides = principalOf ? { principal_id: bindings[principalOf].principal_id } : {};
-      bindings[profile] = bindProfileInRegistry(identityRoot, profile, index + 1, overrides);
+      bindings[profile] = (principalOf ? seedLegacyProfileBinding : bindProfileInRegistry)(identityRoot, profile, index + 1, overrides);
     });
     if (corruptRegistry) fs.writeFileSync(path.join(identityRoot, REGISTRY_FILE_NAME), "{ not json", { mode: 0o600 });
   }

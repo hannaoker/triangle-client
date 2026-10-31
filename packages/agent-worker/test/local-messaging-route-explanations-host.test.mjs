@@ -24,7 +24,7 @@ import { createAttachedClaudeSessionMcpChild } from "../src/claude-session-mcp-c
 import { REGISTRY_FILE_NAME } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
 import { ATTACH_HINT } from "../src/local-messaging-interactive-session.mjs";
-import { initIdentityRegistry, bindProfileInRegistry } from "./local-messaging-identity-fixtures.mjs";
+import { initIdentityRegistry, bindProfileInRegistry, seedLegacyProfileBinding } from "./local-messaging-identity-fixtures.mjs";
 
 // The same questions as the scripted-broker tests, answered by a real supervisor host: real owner configuration, receiver
 // policy, lifecycle discovery, attached MCP children, identity registry and router, over the real socket, MCP handlers and
@@ -54,7 +54,7 @@ async function fixture({ router = true, workspaceMessaging = true, inbox = false
     initIdentityRegistry(identityRoot);
     bindings.gravity2 = bindProfileInRegistry(identityRoot, "gravity2", 1);
     bindings.gravity3 = bindProfileInRegistry(identityRoot, "gravity3", 2);
-    bindings.gravity4 = bindProfileInRegistry(identityRoot, "gravity4", 3, { principal_id: bindings.gravity3.principal_id });
+    bindings.gravity4 = seedLegacyProfileBinding(identityRoot, "gravity4", 3, { principal_id: bindings.gravity3.principal_id });
     setupRouter({ enable: true, registryRoot: identityRoot, stateRoot: config.stateRoot });
   }
   const desktop = readPrivateJson(config.integrationPath);

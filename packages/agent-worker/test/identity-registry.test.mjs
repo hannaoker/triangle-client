@@ -2706,3 +2706,43 @@ test("Review Item 3: multi-process stress test (4 writer processes and 1 reader 
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+
+test("a second active profile for a principal is refused without durable writes; a revoked owner does not reserve it", () => {
+  const base = makeTmpRoot("id-reg-principal-unique-");
+  const root = path.join(base, "identity");
+  try {
+    const alpha = makeValidBinding("alpha");
+    const beta = makeValidBinding("beta", { principal_id: alpha.principal_id });
+    updateIdentityRegistry({ root, expectedSequence: 0, action: "init", subject: null, mutate: r => r });
+    const bind = (binding, sequence) => updateIdentityRegistry({ root, expectedSequence: sequence,
+      action: "bind", subject: binding.profile_instance_id,
+      mutate: r => { r.bindings[binding.profile_instance_id] = binding; return r; } });
+    bind(alpha, 1);
+    const registryFile = path.join(root, REGISTRY_FILE_NAME);
+    const auditFile = path.join(root, AUDIT_FILE_NAME);
+    const before = readFileSync(registryFile), auditBefore = readFileSync(auditFile);
+    for (const authority_origin of [alpha.authority_origin, "https://another.example.test"]) {
+      assert.throws(() => bind({ ...beta, authority_origin }, 2),
+        e => e.code === "binding_conflict" && e.reason === "principal_already_bound");
+      assert.deepEqual(readFileSync(registryFile), before);
+      assert.deepEqual(readFileSync(auditFile), auditBefore);
+    }
+    updateIdentityRegistry({ root, expectedSequence: 2, action: "revoke", subject: alpha.profile_instance_id,
+      mutate: r => { r.bindings[alpha.profile_instance_id].revoked_at = "2026-10-30T12:00:00.000Z"; return r; } });
+    bind(beta, 3);
+    // Reactivating alpha must not create the same duplicate through the renewal path.
+    assert.throws(() => bind({ ...alpha, binding_id: `bind_${hex32("alpha-renew")}`, binding_generation: 2 }, 4),
+      e => e.code === "binding_conflict" && e.reason === "principal_already_bound");
+    assert.equal(readIdentityRegistry({ root }).registry.sequence, 4);
+    // Seed a historical v1 duplicate directly: readers must still accept it and
+    // revocation must remain possible, rather than stranding the entire registry.
+    const legacy = JSON.parse(readFileSync(registryFile, "utf8"));
+    legacy.bindings[alpha.profile_instance_id].revoked_at = null;
+    writeFileSync(registryFile, JSON.stringify(legacy) + "\n", { mode: 0o600 });
+    assert.equal(readIdentityRegistry({ root }).state, "ok");
+    updateIdentityRegistry({ root, expectedSequence: 4, action: "revoke", subject: alpha.profile_instance_id,
+      mutate: r => { r.bindings[alpha.profile_instance_id].revoked_at = "2026-10-30T12:00:00.000Z"; return r; } });
+    assert.equal(readIdentityRegistry({ root }).registry.sequence, 5);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});

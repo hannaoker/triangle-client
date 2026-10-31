@@ -359,3 +359,15 @@ The next source slice implements D2 only: refuse principal/authority changes on
 plain `bind`, including a revoked record, while retaining same-identity renewal.
 No move command, schema migration, registry rewrite, new binding or installation
 is included. D3 uniqueness and D5 approval mechanisms remain separate work.
+
+
+### D3 source follow-up
+
+The D3 patch refuses a second active profile for one principal at the registry's
+locked mutation boundary, including reactivation of a revoked record. The mapping
+planner also checks active bindings already recorded for other profiles, covering
+an identity that moved between inventories. A revoked binding does not reserve a
+principal. Existing duplicate v1 registries remain readable and can be resolved
+through revocation; this patch neither migrates nor repairs them automatically.
+Historical duplicate-directory tests explicitly seed legacy files, rather than
+using the new writer to create a forbidden state. No live registry is changed.
