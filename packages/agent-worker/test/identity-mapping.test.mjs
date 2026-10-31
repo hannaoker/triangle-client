@@ -1031,3 +1031,22 @@ test("Review: an invalid explicit now is rejected before anything is read or wri
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test("planning blocks a principal moved on disk to another profile while its old registry binding remains active", () => {
+  const principalId = "agent_0123456789abcdef0123456789abcdef";
+  const authorityOrigin = "https://mesh.example.com";
+  const inventory = { identities: [{ principalId, authorityOrigin, kind: "mesh-managed",
+    profiles: [{ profile: "new-worker", instanceId: deriveClientInstanceId("new-worker") }], diagnostics: [] }],
+    unmappedProfiles: [], diagnostics: [] };
+  const oldId = deriveClientInstanceId("old-worker");
+  const old = { profile_instance_id: oldId, profile_name: "old-worker", principal_id: principalId,
+    authority_origin: authorityOrigin, revoked_at: null };
+  const registry = { sequence: 2, bindings: { [oldId]: old } };
+  const blocked = planIdentityMapping({ inventory, registry });
+  assert.equal(blocked.proposals.length, 0);
+  assert.equal(blocked.blocked[0].reason, BLOCKED_REASONS.CONFLICTS_WITH_RECORDED);
+  const released = planIdentityMapping({ inventory, registry: { ...registry,
+    bindings: { [oldId]: { ...old, revoked_at: "2026-10-30T12:00:00.000Z" } } } });
+  assert.equal(released.proposals.length, 1);
+});

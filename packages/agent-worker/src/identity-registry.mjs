@@ -1366,6 +1366,12 @@ function assertMutationMatchesAction(current, oldBindings, nextBindings, action,
         throw codedError("binding_conflict", "identity_change_requires_move");
       }
     }
+    // Enforce uniqueness at the locked mutation boundary, not only in inventory
+    // planning. Keep old v1 files readable so duplicate legacy bindings can be revoked.
+    if (Object.entries(nextBindings).some(([instanceId, binding]) =>
+      instanceId !== subject && binding.revoked_at === null && binding.principal_id === nextB.principal_id)) {
+      throw codedError("binding_conflict", "principal_already_bound");
+    }
     return nextB.binding_id;
   }
 

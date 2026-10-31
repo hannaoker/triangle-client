@@ -30,7 +30,7 @@ import {
 } from "../src/local-messaging-protocol.mjs";
 import { REGISTRY_FILE_NAME } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
-import { initIdentityRegistry, bindProfileInRegistry } from "./local-messaging-identity-fixtures.mjs";
+import { initIdentityRegistry, bindProfileInRegistry, seedLegacyProfileBinding } from "./local-messaging-identity-fixtures.mjs";
 
 // discover_recipients carries the legacy `recipients` list plus, while the identity router is enabled, `entries`
 // ({ id, principal }). The client must hand both to the agent without ever widening what the host authorized.
@@ -121,7 +121,7 @@ async function withServer(
     bound.forEach((item, index) => {
       const { profile, principalOf = null } = typeof item === "string" ? { profile: item } : item;
       const overrides = principalOf ? { principal_id: bindings[principalOf].principal_id } : {};
-      bindings[profile] = bindProfileInRegistry(identityRoot, profile, index + 1, overrides);
+      bindings[profile] = (principalOf ? seedLegacyProfileBinding : bindProfileInRegistry)(identityRoot, profile, index + 1, overrides);
     });
     if (corruptRegistry) fs.writeFileSync(path.join(identityRoot, REGISTRY_FILE_NAME), "{ not json", { mode: 0o600 });
   }

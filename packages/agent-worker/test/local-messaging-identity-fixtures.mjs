@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { updateIdentityRegistry, LOCAL_PROFILE_BINDING_SCHEMA } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
@@ -38,5 +40,18 @@ export function bindProfileInRegistry(root, profileName, expectedSequence, overr
       return reg;
     },
   });
+  return binding;
+}
+
+// Historical v1 files may already contain duplicate active principals. Seed that
+// old shape explicitly; current mutation APIs must not be used to create it.
+// Audit entries attest binding ids, not principal content, so retain that history.
+export function seedLegacyProfileBinding(root, profileName, expectedSequence, overrides = {}) {
+  const binding = makeMeshManagedBinding(profileName, overrides);
+  bindProfileInRegistry(root, profileName, expectedSequence);
+  const file = path.join(root, "identity-registry-v1.json");
+  const registry = JSON.parse(fs.readFileSync(file, "utf8"));
+  registry.bindings[binding.profile_instance_id] = binding;
+  fs.writeFileSync(file, JSON.stringify(registry) + "\n", { mode: 0o600 });
   return binding;
 }

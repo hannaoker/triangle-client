@@ -910,7 +910,13 @@ test("Ambiguity filtering through both ACL and capability scope; unauthorized la
     const sharedPrincipal = "agent_11112222333344445555666677778888";
     initRegistry(f.identityRoot);
     bindProfile(f.identityRoot, "bob", 1, { principal_id: sharedPrincipal });
-    bindProfile(f.identityRoot, "charlie", 2, { principal_id: sharedPrincipal });
+    const charlie = bindProfile(f.identityRoot, "charlie", 2);
+    // Historical v1 duplicate: new writes refuse it, but the router must still
+    // handle old files without revealing unauthorized ambiguity candidates.
+    const legacyPath = path.join(f.identityRoot, "identity-registry-v1.json");
+    const legacy = JSON.parse(fs.readFileSync(legacyPath, "utf8"));
+    legacy.bindings[charlie.profile_instance_id].principal_id = sharedPrincipal;
+    fs.writeFileSync(legacyPath, JSON.stringify(legacy) + "\n", { mode: 0o600 });
 
     setupRouter({ enable: true, registryRoot: f.identityRoot, stateRoot: f.stateRoot });
 

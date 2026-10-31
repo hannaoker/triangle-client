@@ -313,6 +313,15 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
           continue;
         }
 
+        // Inventory may have moved the principal to another profile since the
+        // previous run. The registry, not just this inventory, owns that binding.
+        if (Object.entries(existingBindings).some(([id, binding]) =>
+          id !== instanceId && binding.revoked_at === null && binding.principal_id === principalId)) {
+          rawBlocked.push({ profile: profileName, profileInstanceId: instanceId,
+            reason: BLOCKED_REASONS.CONFLICTS_WITH_RECORDED });
+          continue;
+        }
+
         // Single valid profile for mesh-managed identity.
         // Check against registry bindings for this instance ID.
         const existing = existingBindings[instanceId];
