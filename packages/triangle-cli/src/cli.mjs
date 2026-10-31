@@ -369,11 +369,14 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               owner_approval_unavailable: "Local owner authentication is unavailable. This package may not enable identity revocation.",
               owner_approval_cancelled: "Identity revocation was cancelled.",
               owner_approval_denied: "Owner authentication was denied.",
-              owner_approval_expired: "Approval expired. Create a fresh plan.",
-              plan_stale: "The registry changed. Create a fresh plan.",
+              owner_approval_expired: "Approval expired before it was granted. Run the apply command again.",
+              plan_stale: "That plan ID does not match the current registry. Create a fresh plan and use its ID.",
               registry_sequence_conflict: "The registry changed during approval. Create a fresh plan.",
               owner_approval_stale: "The binding changed during approval. Create a fresh plan.",
               identity_binding_not_active: "No active local binding was found for that profile.",
+              invalid_owner_operation: "The profile name or registry path is not valid. Use a canonical absolute path with no symbolic links.",
+              registry_unsafe: "The registry location is not safe to use (symbolic link, wrong owner or loose permissions).",
+              registry_corrupt: "The identity registry could not be read.",
             }[code] ?? "Identity revocation did not complete. Check identity status before retrying.";
             io.stderr(flags.json ? JSON.stringify({ error: code, message }) : `${message} (${code})`);
             if (interrupted) return interrupted === "SIGINT" ? 130 : 143;

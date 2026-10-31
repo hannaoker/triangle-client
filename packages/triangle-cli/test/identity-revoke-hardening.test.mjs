@@ -172,6 +172,26 @@ test('argument-shape errors are usage errors that never authenticate',async t=>{
  assert.equal(calls,0);assert.deepEqual(f.bytes(),before);
 });
 
+test('errors say what is true and what to do, without paths',async t=>{
+ const f=fixture(t),broken=fixture(t,'broken'),before=f.bytes();
+ fs.writeFileSync(path.join(broken.registry,'identity-registry-v1.json'),'{not json');
+ const link=path.join(f.root,'registry-link');fs.symlinkSync(f.registry,link);
+ const deps={identityDependencies:{isTerminal:true,ownerApprovalProvider:{authenticate:async()=>'approved'}}};
+ const wrong=await run(['identity','revoke','alpha','--registry-root',f.registry,'--confirm','0'.repeat(64)],deps);
+ assert.equal(wrong.code,2);assert.match(wrong.err,/plan ID does not match/);assert.doesNotMatch(wrong.err,/registry changed/);
+ const errors=[wrong.err];
+ for(const [args,code,patterns] of [
+  [['identity','revoke','bad/name','--registry-root',f.registry],2,[/invalid_owner_operation/,/profile name or registry path is not valid/]],
+  [['identity','revoke','alpha','--registry-root',link],1,[/registry_unsafe/,/not safe to use/]],
+  [['identity','revoke','alpha','--registry-root',broken.registry],1,[/registry_corrupt/,/could not be read/]],
+ ]){
+  const result=await run(args,deps);assert.equal(result.code,code,args.join(' '));
+  for(const pattern of patterns)assert.match(result.err,pattern);errors.push(result.err);
+ }
+ for(const text of errors)assert.equal(text.includes(f.root)||text.includes(broken.root),false,'no path in errors');
+ assert.deepEqual(f.bytes(),before);
+});
+
 test('a malformed confirmation never reaches the provider, even when the bridge is called directly',async t=>{
  const f=fixture(t),before=f.bytes(),id=f.plan().planId;let calls=0;
  const provider={authenticate:async()=>{calls++;return 'approved';}};
