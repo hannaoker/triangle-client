@@ -106,3 +106,10 @@ test('expiry during executable verification is rechecked before spawn',async t=>
  const provider=createMacOSOwnerApprovalProvider({...f.options,clockMs:()=>++reads===1?f.challenge.request.issuedAt:f.challenge.request.deadline});
  assert.equal(await provider.authenticate(f.challenge),'unavailable');assert.equal(fs.existsSync(f.pidfile),false);
 });
+
+
+test('nonce with a trailing newline is refused before spawning',async t=>{
+ const f=fixture(t),request={...f.challenge.request,nonce:f.challenge.request.nonce+'\n'};
+ const challenge={...f.challenge,request,digest:createHash('sha256').update(canonicalJson(request)).digest('hex')};
+ assert.equal(await f.provider().authenticate(challenge),'unavailable');assert.equal(fs.existsSync(f.pidfile),false);
+});

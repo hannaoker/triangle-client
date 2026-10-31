@@ -177,3 +177,10 @@ test('a deferred lock callback cannot commit in the return microtask',async t=>{
  await assert.rejects(coord.execute(coord.prepare(f.op)),{code:'owner_approval_unavailable'});
  assert.equal(lateError.code,'owner_approval_unavailable');assert.equal(commits,0);
 });
+
+
+for(const field of ['profileId','principalId','bindingId'])test(`trailing newline in ${field} is refused`,t=>{
+ const f=fixture(t),op=structuredClone(f.op);
+ if(field==='profileId')op.profileId+='\n';else op.before[field]+='\n';
+ assert.throws(()=>f.coord.prepare(op),{code:'invalid_owner_operation'});assert.equal(f.calls,0);
+});

@@ -21,7 +21,8 @@ private func emit(_ request: Request, _ outcome: String) {
     FileHandle.standardOutput.write(Data([10]))
 }
 private func matches(_ value: String, _ expression: String) -> Bool {
-    value.range(of: expression, options: .regularExpression) != nil
+    guard let range = value.range(of: expression, options: .regularExpression) else { return false }
+    return range == value.startIndex..<value.endIndex
 }
 private func readRequest() throws -> Request {
     var data = Data()

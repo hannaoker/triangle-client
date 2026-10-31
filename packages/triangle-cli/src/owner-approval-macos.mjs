@@ -10,7 +10,7 @@ import { normalizeOwnerOperation, describeOwnerOperation } from './owner-approva
 
 function frame(challenge, now) {
   const {request,digest,summary} = challenge ?? {};
-  if (!request || request.schema !== 'owner_operation_v1' || !/^[a-f0-9]{64}$/.test(request.nonce) ||
+  if (!request || request.schema !== 'owner_operation_v1' || typeof request.nonce !== 'string' || request.nonce.length !== 64 || !/^[a-f0-9]{64}$/.test(request.nonce) ||
       !Number.isSafeInteger(request.issuedAt) || !Number.isSafeInteger(request.deadline) ||
       request.deadline <= request.issuedAt || request.deadline-request.issuedAt > 120000 ||
       now < request.issuedAt || now >= request.deadline) return null;

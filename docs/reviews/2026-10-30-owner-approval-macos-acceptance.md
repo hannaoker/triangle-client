@@ -72,3 +72,28 @@ registry paths are in the private records. The harness is not a production CLI.
 - Move remains unavailable pending versioned audit/schema work; Linux/Windows
   providers are not implemented. Same-user arbitrary file/code tampering remains
   outside the claimed protection.
+
+## Follow-up source review
+
+The owner later clarified that they did not check full prompt-detail visibility;
+that gate remains unverified. No additional prompt was opened for this review.
+
+Review tightened approval identifiers and the native frame matcher to reject a
+trailing newline: end-anchored regexes alone could accept one. This changes input
+validation, not the OS authentication policy. Regression cases now cover profile,
+principal, binding id and nonce. Existing valid identifiers are unchanged.
+
+A committed opt-in test, `packages/triangle-cli/test/owner-approval-native.test.mjs`,
+reproduces native validation without `--authenticate`. Set
+`TRIANGLE_OWNER_APPROVAL_NATIVE_BIN` to the privately built candidate executable;
+the ordinary suite skips it when no executable is supplied. This review explicitly
+supplied a freshly compiled, signature-verified Swift 6/macOS 13 arm64 candidate.
+The native test checked a valid frame, five invalid frames and missing mode.
+108 affected tests passed, zero skipped, including that native test.
+
+The interactive password record above remains scoped to source `4951788` and its
+recorded executable hash. The stricter-validation binary was exercised only in
+validation mode. Do not relabel it as the exact interactively accepted artifact;
+packaged native activation still needs release-artifact acceptance and confirmation
+that the full operation details are readable. No live or installed code changed
+as part of this follow-up review.

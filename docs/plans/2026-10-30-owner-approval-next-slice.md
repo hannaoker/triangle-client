@@ -258,3 +258,13 @@ initial approved-instead-of-cancelled attempt and remaining limits. This superse
 the earlier “no native prompt ran” checkpoint only for this acceptance run. It
 does not activate a production provider or command. Summary visibility,
 biometric/headless behavior and live timeout cleanup remain unaccepted.
+
+### Stack review checkpoint
+
+The #153–#156 follow-up review tightened whole-string identifier matching and
+added a reproducible opt-in native validation test. 108 affected tests passed with
+the native candidate explicitly supplied (zero skipped). The owner did not check
+full prompt-detail visibility, so that gate remains open; no repeat prompt was
+triggered. The refreshed candidate differs in validation code from the previously
+interactively accepted binary and is not installed or activated. See the review
+record for the exact source/interactive evidence boundary.
