@@ -135,7 +135,7 @@ for(const [signal,exit] of [['SIGINT',130],['SIGTERM',143]])test(`${signal} reac
   const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('child did not finish: '+stderr));},20000);
   child.stderr.on('data',chunk=>{stderr+=chunk;if(!sent&&stderr.includes('READY')){sent=true;child.kill(signal);}});
   child.once('error',reject);
-  child.once('exit',(code,received)=>{clearTimeout(timer);resolve({code,received});});
+  child.once('close',(code,received)=>{clearTimeout(timer);resolve({code,received});}); // after stderr has drained
  });
  assert.deepEqual(result,{code:exit,received:null},stderr);
  assert.match(stderr,/ABORTED/);assert.match(stderr,/Identity revocation was cancelled/);
