@@ -11,9 +11,11 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
 import { initIdentityRegistry, bindProfileInRegistry } from "../packages/agent-worker/test/local-messaging-identity-fixtures.mjs";
 const root = resolve(import.meta.dirname, "..");
 const sha = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
@@ -28,6 +30,10 @@ function fixture({ ownerApproval = false } = {}) {
   const helper = join(dir, "helper");
   writeFileSync(helper, "#!/bin/sh\necho fake-helper\n", { mode: 0o700 });
   const out = join(dir, "out");
+  // The builder looks for the Node license beside a Node install (<node dir>/../LICENSE); the packaged Node keeps
+  // it at <release>/LICENSES/node-LICENSE, so name whichever exists and the suite also runs under the packaged Node.
+  const nodeDir = dirname(realpathSync(process.execPath));
+  const nodeLicense = [join(nodeDir, "../LICENSE"), join(nodeDir, "../LICENSES/node-LICENSE")].find(file => existsSync(file));
   const built = run([
     "scripts/release/build-client-package.mjs",
     "--version",
@@ -42,6 +48,7 @@ function fixture({ ownerApproval = false } = {}) {
     out,
     "--test-root",
     dir,
+    ...(nodeLicense ? ["--node-license", nodeLicense] : []),
     ...(ownerApproval ? ["--owner-approval", typeof ownerApproval === "string" ? ownerApproval : "candidate"] : []),
   ]);
   assert.equal(built.status, 0, built.stderr);
@@ -79,6 +86,7 @@ test("prebuilt package installs without build tools, stages stopped service and 
     const receipt = JSON.parse(readFileSync(join(home, "Library/Application Support/The Triangle/package-install.json"), "utf8"));
     const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
     assert.equal(manifest.ownerApprovalCandidate, undefined);
+    assert.equal(manifest.ownerApproval, undefined);
     assert.equal(manifest.files.some(entry => entry.path === "bin/triangle-owner-approval"), false);
     const untouched = join(
       home,
@@ -459,6 +467,7 @@ test("owner approval candidate packages the native helper without activation or 
     const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
     assert.equal(manifest.ownerApprovalCandidate.activation, "disabled");
     assert.equal(manifest.ownerApprovalCandidate.minimumMacOS, "13.0");
+    assert.equal(manifest.ownerApproval, undefined);
     const entry = manifest.files.find(f => f.path === "bin/triangle-owner-approval");
     assert.ok(entry);
     assert.equal(sha(join(receipt.release, entry.path)), entry.sha256);
@@ -484,7 +493,15 @@ test("owner approval packaging refuses an activation value", () => {
 });
 
 
-test("revoke-enabled package declares only the explicit owner command; installed plan remains read-only", () => {
+// Approves whatever it is asked, using the Node that runs the tests; stands in for the native helper
+// so no OS prompt can appear. A shebang cannot name an interpreter path with spaces (the packaged Node
+// lives under "Application Support"), so this is a /bin/sh launcher with the Node path shell-quoted.
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
+const APPROVER_JS = 'let s="";process.stdin.on("data",c=>{s+=c;}).on("end",()=>{const r=JSON.parse(s);'
+  + 'process.stdout.write(JSON.stringify({digest:r.digest,nonce:r.nonce,outcome:"approved",version:1})+"\\n");});';
+const STAND_IN_APPROVER = `#!/bin/sh\nexec ${shellQuote(process.execPath)} -e '${APPROVER_JS}'\n`;
+
+test("revoke-enabled package declares only the explicit owner command; installed plan remains read-only", async () => {
   const f = fixture({ ownerApproval: "revoke" });
   try {
     const installed = f.install();assert.equal(installed.status, 0, installed.stderr);
@@ -505,5 +522,28 @@ test("revoke-enabled package declares only the explicit owner command; installed
     assert.equal(noTerminal.status, 2);assert.match(noTerminal.stderr,/local owner terminal/);
     assert.deepEqual(["identity-registry-v1.json", "registry-audit.jsonl"].map(file => readFileSync(join(registry, file), "utf8")),before);
     assert.equal(existsSync(join(app,"client/activate.json")),false);
+    // The installed layout itself, not a hand-made release directory, must select the pinned helper.
+    // Layout check only: a real package is not test-only, so the stand-in below flips that one flag.
+    const installed_ = name => import(pathToFileURL(join(receipt.release, "packages/triangle-cli/src", name)).href);
+    const { loadPackagedRevokeProvider, planIdentityRevoke } = await installed_("identity-revoke.mjs");
+    const { describeOwnerOperation } = await installed_("owner-approval.mjs");
+    const { canonicalJson } = await installed_("canonical.mjs");
+    const helper = join(receipt.release, manifest.ownerApproval.binary), manifestFile = join(receipt.release, "package-manifest.json");
+    writeFileSync(helper, STAND_IN_APPROVER); // the existing private file keeps its mode
+    // The manifest pins the stand-in's own hash, never whatever is on disk: the real helper could not match
+    // it, so it could not be launched (and could not open an OS prompt) even if the write above were lost.
+    const standInHash = createHash("sha256").update(STAND_IN_APPROVER).digest("hex");
+    const rewrite = patch => writeFileSync(manifestFile, JSON.stringify({ ...manifest, ...patch,
+      files: manifest.files.map(entry => entry.path === manifest.ownerApproval.binary ? { ...entry, sha256: standInHash } : entry) }));
+    const request = { schema: "owner_operation_v1", ...planIdentityRevoke({ registryRoot: registry, profile: "alpha" }).operation,
+      nonce: "9".repeat(64), issuedAt: Math.floor(performance.now()), deadline: Math.floor(performance.now()) + 60000 };
+    const challenge = { request, digest: createHash("sha256").update(canonicalJson(request)).digest("hex"), summary: describeOwnerOperation(request) };
+    const decide = () => loadPackagedRevokeProvider().authenticate(challenge); // default release root: this install
+    rewrite({});
+    assert.equal(await decide(), "unavailable", "a test-only package never selects the helper");
+    rewrite({ testOnly: false });
+    assert.equal(await decide(), "approved", "the installed layout selects its pinned helper (the stand-in ran)");
+    rewrite({ testOnly: false, ownerApprovalCandidate: { activation: "disabled" } });
+    assert.equal(await decide(), "unavailable", "a candidate marker beside the policy refuses");
   } finally { rmSync(f.dir,{recursive:true,force:true}); }
 });
