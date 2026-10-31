@@ -268,3 +268,31 @@ full prompt-detail visibility, so that gate remains open; no repeat prompt was
 triggered. The refreshed candidate differs in validation code from the previously
 interactively accepted binary and is not installed or activated. See the review
 record for the exact source/interactive evidence boundary.
+
+### Merged stack and packaged candidate
+
+PRs #153–#156 merged in order; main reached `22b48ee`. This merges libraries and
+evidence only. No production command selects the provider.
+
+The macOS package builder now has an explicit `--owner-approval candidate` path.
+It compiles the tracked native helper in Swift 6 mode for the native architecture
+and macOS 13, signs it as `dev.thetriangle.owner-approval`, includes it in the
+versioned release and hash manifest, and records disabled activation/source hash.
+It does not install a global helper command or select the provider. Ordinary
+packages omit the candidate. An `enabled` value is refused before building.
+
+The first full package run passed 10 cases, including a real native candidate in
+an isolated install. Two final targeted checks passed after adding ordinary-package
+absence and invalid-activation assertions. The real non-test candidate archive
+`0.2.0-owner-approval.1` was also built: 155 files verified, native signature
+verified, `LC_BUILD_VERSION` reports minimum macOS 13.0, and the native validation
+test passed against the extracted package using its bundled Node. Those are
+artifact checks, not an OS-13 machine acceptance claim or native authentication.
+
+Archive (private candidate, not published):
+`/private/tmp/triangle-owner-approval-package-candidate/triangle-client-0.2.0-owner-approval.1-darwin-arm64.tar.gz`.
+SHA-256: `2c40b315c14f7f724659c959e0cb3da723254ab4e0ce14516349558c8ade5e97`.
+The versioned helper remains inside the extracted candidate, not the live Mini
+install. Existing helpers, service, identities and messaging permissions were not
+changed. The exact packaged executable still needs an owner-led disposable prompt
+test, including readable full details, before a command rollout.

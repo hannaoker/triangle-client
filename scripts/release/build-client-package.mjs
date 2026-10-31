@@ -50,6 +50,7 @@ function main() {
         "--helper-metadata",
         "--client-metadata",
         "--node-license",
+        "--owner-approval",
       ].includes(args[i]) ||
       !args[i + 1]
     )
@@ -65,6 +66,8 @@ function main() {
   if (process.platform !== "darwin")
     throw Error("Only macOS packages are supported");
   if (!options.output) throw Error("--output is required");
+  if (options["owner-approval"] !== undefined && options["owner-approval"] !== "candidate")
+    throw Error("--owner-approval accepts only candidate (no command activation)");
   const scratch = mkdtempSync(join(tmpdir(), "triangle-package-build-"));
   const digest = (data) => createHash("sha256").update(data).digest("hex");
   try {
@@ -158,6 +161,20 @@ function main() {
       "triangle-mailbox": helper,
       "triangle-client": client,
     };
+    let ownerApprovalCandidate = null;
+    if (options["owner-approval"] === "candidate") {
+      const source = join(root, "scripts/probes/owner-approval-provider.swift");
+      execFileSync("git", ["ls-files", "--error-unmatch", "scripts/probes/owner-approval-provider.swift"], { cwd: root, stdio: "pipe" });
+      const info = lstatSync(source);
+      if (!info.isFile() || info.isSymbolicLink()) throw Error("Unsafe owner approval source");
+      const binary = join(scratch, "triangle-owner-approval");
+      execFileSync("/usr/bin/swiftc", ["-swift-version", "6", "-parse-as-library",
+        "-target", `${process.arch === "arm64" ? "arm64" : "x86_64"}-apple-macos13.0`,
+        "-module-cache-path", join(scratch, "approval-module-cache"), source, "-o", binary], { stdio: "pipe" });
+      binaries["triangle-owner-approval"] = binary;
+      ownerApprovalCandidate = { binary: "bin/triangle-owner-approval", activation: "disabled",
+        sourceSHA256: digest(readFileSync(source)), minimumMacOS: "13.0" };
+    }
     mkdirSync(join(stage, "bin"), { mode: 0o700 });
     for (const [name, path] of Object.entries(binaries)) {
       const source = realpathSync(path);
@@ -165,7 +182,7 @@ function main() {
       copyFileSync(source, join(stage, "bin", name));
       chmodSync(join(stage, "bin", name), 0o700);
       if (name !== "node" && !fixture) {
-        if (prebuilt) {
+        if (prebuilt && name !== "triangle-owner-approval") {
           const metadataPath =
             options[
               name === "triangle-mailbox"
@@ -192,7 +209,7 @@ function main() {
           "--sign",
           "-",
           "--identifier",
-          "dev.thetriangle.mailbox",
+          name === "triangle-owner-approval" ? "dev.thetriangle.owner-approval" : "dev.thetriangle.mailbox",
           join(stage, "bin", name),
         ]);
         execFileSync("/usr/bin/codesign", [
@@ -284,6 +301,7 @@ function main() {
       signingMode: "public_ad_hoc",
       credentialCustody: "file",
       testOnly: Boolean(fixture),
+      ...(ownerApprovalCandidate ? { ownerApprovalCandidate } : {}),
       files: paths.map((path) => ({
         path,
         size: lstatSync(join(stage, path)).size,
