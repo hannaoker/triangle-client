@@ -369,7 +369,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               owner_approval_unavailable: "Local owner authentication is unavailable. This package may not enable identity revocation.",
               owner_approval_cancelled: "Identity revocation was cancelled.",
               owner_approval_denied: "Owner authentication was denied.",
-              owner_approval_expired: "Approval expired before it was granted. Run the apply command again.",
+              owner_approval_expired: "The approval window expired. Run the apply command again.",
               plan_stale: "That plan ID does not match the current registry. Create a fresh plan and use its ID.",
               registry_sequence_conflict: "The registry changed during approval. Create a fresh plan.",
               owner_approval_stale: "The binding changed during approval. Create a fresh plan.",

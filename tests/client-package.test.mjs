@@ -11,7 +11,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
@@ -30,6 +30,10 @@ function fixture({ ownerApproval = false } = {}) {
   const helper = join(dir, "helper");
   writeFileSync(helper, "#!/bin/sh\necho fake-helper\n", { mode: 0o700 });
   const out = join(dir, "out");
+  // The builder looks for the Node license beside a Node install (<node dir>/../LICENSE); the packaged Node keeps
+  // it at <release>/LICENSES/node-LICENSE, so name whichever exists and the suite also runs under the packaged Node.
+  const nodeDir = dirname(realpathSync(process.execPath));
+  const nodeLicense = [join(nodeDir, "../LICENSE"), join(nodeDir, "../LICENSES/node-LICENSE")].find(file => existsSync(file));
   const built = run([
     "scripts/release/build-client-package.mjs",
     "--version",
@@ -44,6 +48,7 @@ function fixture({ ownerApproval = false } = {}) {
     out,
     "--test-root",
     dir,
+    ...(nodeLicense ? ["--node-license", nodeLicense] : []),
     ...(ownerApproval ? ["--owner-approval", typeof ownerApproval === "string" ? ownerApproval : "candidate"] : []),
   ]);
   assert.equal(built.status, 0, built.stderr);
@@ -489,14 +494,12 @@ test("owner approval packaging refuses an activation value", () => {
 
 
 // Approves whatever it is asked, using the Node that runs the tests; stands in for the native helper
-// so no OS prompt can appear.
-const STAND_IN_APPROVER = `#!${process.execPath}
-let input = "";
-process.stdin.on("data", chunk => { input += chunk; }).on("end", () => {
-  const request = JSON.parse(input);
-  process.stdout.write(JSON.stringify({ digest: request.digest, nonce: request.nonce, outcome: "approved", version: 1 }) + "\\n");
-});
-`;
+// so no OS prompt can appear. A shebang cannot name an interpreter path with spaces (the packaged Node
+// lives under "Application Support"), so this is a /bin/sh launcher with the Node path shell-quoted.
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
+const APPROVER_JS = 'let s="";process.stdin.on("data",c=>{s+=c;}).on("end",()=>{const r=JSON.parse(s);'
+  + 'process.stdout.write(JSON.stringify({digest:r.digest,nonce:r.nonce,outcome:"approved",version:1})+"\\n");});';
+const STAND_IN_APPROVER = `#!/bin/sh\nexec ${shellQuote(process.execPath)} -e '${APPROVER_JS}'\n`;
 
 test("revoke-enabled package declares only the explicit owner command; installed plan remains read-only", async () => {
   const f = fixture({ ownerApproval: "revoke" });

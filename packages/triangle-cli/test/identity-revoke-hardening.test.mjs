@@ -40,13 +40,12 @@ const confirmArgs=f=>['identity','revoke','alpha','--registry-root',f.registry,'
 
 // --- Release-capability selection: one broken condition per case, everything else valid. ---
 // Approves anything it is asked, using the Node that runs the tests (no Python, no Command Line Tools).
-const STAND_IN=`#!${process.execPath}
-let input='';
-process.stdin.on('data',chunk=>{input+=chunk;}).on('end',()=>{
- const request=JSON.parse(input);
- process.stdout.write(JSON.stringify({digest:request.digest,nonce:request.nonce,outcome:'approved',version:1})+'\\n');
-});
-`;
+// A shebang cannot name an interpreter path with spaces (the packaged Node lives under
+// "Application Support"), so the script is a /bin/sh launcher with the Node path shell-quoted.
+const shellQuote=value=>`'${value.replaceAll("'","'\\''")}'`;
+const APPROVER_JS='let s="";process.stdin.on("data",c=>{s+=c;}).on("end",()=>{const r=JSON.parse(s);'
+ +'process.stdout.write(JSON.stringify({digest:r.digest,nonce:r.nonce,outcome:"approved",version:1})+"\\n");});';
+const STAND_IN=`#!/bin/sh\nexec ${shellQuote(process.execPath)} -e '${APPROVER_JS}'\n`;
 function releaseFixture(t){
  const root=temporary(t,'identity-revoke-release-'),dir=path.join(root,'release'),executable=path.join(dir,'bin/triangle-owner-approval');
  fs.mkdirSync(path.dirname(executable),{recursive:true,mode:0o700});fs.chmodSync(dir,0o700);
