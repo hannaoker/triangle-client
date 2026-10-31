@@ -371,3 +371,25 @@ principal. Existing duplicate v1 registries remain readable and can be resolved
 through revocation; this patch neither migrates nor repairs them automatically.
 Historical duplicate-directory tests explicitly seed legacy files, rather than
 using the new writer to create a forbidden state. No live registry is changed.
+
+
+### Installed D2/D3 and next D5 gate — 2026-10-30
+
+PRs #151 and #152 are merged, main `77fcf89`. Installed supervisor/worker
+artifacts were hash-verified, and the installed registry module passed disposable
+identity-change/duplicate refusal, unchanged-on-refusal, renewal and revoked-owner
+release checks. Live registry/audit, policy and backlog stayed unchanged.
+
+The older packaged owner CLI initially lacked the planner. A CLI-only package
+update to `0.2.0-identity.1` closed that gap: all 151 package files verified, and
+the real installed `triangle identity migrate` command passed disposable-inventory
+planning and recorded-principal conflict checks without confirmation or writes.
+Existing helpers and running service were preserved. See the two installed
+verification records named in `2026-10-30-owner-approval-next-slice.md`.
+
+The next D5 work is the provider/operation contract and interactive feasibility,
+not remote rollout. The macOS non-interactive capability probe compiled and
+reported policy available with normal OS access; no authentication was attempted.
+Linux and Windows providers remain unimplemented. No claim of fresh owner
+approval, same-user tamper resistance or an accepted interactive prompt follows
+from this probe. Existing harness chats still need their separate reload check.
