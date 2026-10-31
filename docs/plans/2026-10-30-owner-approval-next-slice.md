@@ -296,3 +296,15 @@ The versioned helper remains inside the extracted candidate, not the live Mini
 install. Existing helpers, service, identities and messaging permissions were not
 changed. The exact packaged executable still needs an owner-led disposable prompt
 test, including readable full details, before a command rollout.
+
+### Exact archive prompt acceptance completed
+
+The owner-led test now used the exact extracted `0.2.0-owner-approval.1` helper
+and packaged libraries. Cancel preserved registry/audit bytes; approval appended
+one disposable revoke and refused replay. The owner confirmed full principal and
+registry path visibility and fresh password authentication. Live state hashes
+matched throughout. The review record above names exact archive/native hashes
+and timings; durable evidence is `owner-approval-packaged-acceptance.json` under
+the Mini's releases directory. This closes packaged password/visibility acceptance
+for that artifact only. The candidate is still not installed, published or selected
+by a production command. Review/merge the packaging PR before command rollout.
