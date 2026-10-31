@@ -35,6 +35,12 @@ export function normalizeOwnerOperation(value) {
     profileId: value.profileId, before, ...(after ? { after } : {}) });
 }
 
+export function describeOwnerOperation(op) {
+  return `${op.action}: ${op.profileId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
+    `From: ${op.before.principalId} at ${op.before.authorityOrigin}\n` +
+    (op.after ? `To: ${op.after.principalId} at ${op.after.authorityOrigin}` : 'Revoke this binding');
+}
+
 export function createUnavailableOwnerApprovalProvider() {
   return Object.freeze({ authenticate: async () => 'unavailable' });
 }
@@ -66,9 +72,7 @@ export function createOwnerApprovalCoordinator({
     const request = Object.freeze({ schema: 'owner_operation_v1', ...op,
       nonce: randomBytes(32).toString('hex'), issuedAt, deadline });
     const digest = createHash('sha256').update(canonicalJson(request)).digest('hex');
-    const summary = `${op.action}: ${op.profileId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
-      `From: ${op.before.principalId} at ${op.before.authorityOrigin}\n` +
-      (op.after ? `To: ${op.after.principalId} at ${op.after.authorityOrigin}` : 'Revoke this binding');
+    const summary = describeOwnerOperation(op);
     const challenge = Object.freeze({ request, digest, summary });
     const handle = Object.freeze({}); // no serializable approval or reusable receipt
     pending.set(handle, { op, issuedAt, deadline, challenge, used: false });
