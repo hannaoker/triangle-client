@@ -136,7 +136,7 @@ test('mutation of caller inputs cannot change the operation after prepare',async
 test('expiry is rechecked after waiting for the lock',async t=>{
  const f=fixture(t);let time=1000,commits=0;
  const coord=createOwnerApprovalCoordinator({clockMs:()=>time,provider:{authenticate:async()=> 'approved'},
-  async withLockedRegistry(_root,fn){time=61000;return fn({sequence:7,binding:f.op.before,commit(){commits++;}});}});
+  withLockedRegistry(_root,fn){time=61000;return fn({sequence:7,binding:f.op.before,commit(){commits++;}});}});
  await assert.rejects(coord.execute(coord.prepare(f.op)),{code:'owner_approval_expired'});assert.equal(commits,0);
 });
 
@@ -153,4 +153,27 @@ test('immediate cancellation and expiry before provider dispatch never request a
  controller.abort();await assert.rejects(first,{code:'owner_approval_cancelled'});assert.equal(f.calls,0);
  const g=fixture(t),second=g.coord.execute(g.prepare());g.setTime(61000);
  await assert.rejects(second,{code:'owner_approval_expired'});assert.equal(g.calls,0);
+});
+
+test('a lock adapter cannot commit through a retained callback after returning or throwing',async t=>{
+ const f=fixture(t);
+ for(const throws of [false,true]){
+  let late,commits=0;
+  const coord=createOwnerApprovalCoordinator({provider:{authenticate:async()=> 'approved'},withLockedRegistry(_root,fn){
+    late=fn;if(throws)throw Error('lock failed');
+  }});
+  await assert.rejects(coord.execute(coord.prepare(f.op)));
+  assert.throws(()=>late({sequence:7,binding:f.op.before,commit(){commits++;}}),{code:'owner_approval_unavailable'});
+  assert.equal(commits,0);
+ }
+});
+
+
+test('a deferred lock callback cannot commit in the return microtask',async t=>{
+ const f=fixture(t);let lateError,commits=0;
+ const coord=createOwnerApprovalCoordinator({provider:{authenticate:async()=> 'approved'},withLockedRegistry(_root,fn){
+  queueMicrotask(()=>{try{fn({sequence:7,binding:f.op.before,commit(){commits++;}});}catch(e){lateError=e;}});
+ }});
+ await assert.rejects(coord.execute(coord.prepare(f.op)),{code:'owner_approval_unavailable'});
+ assert.equal(lateError.code,'owner_approval_unavailable');assert.equal(commits,0);
 });

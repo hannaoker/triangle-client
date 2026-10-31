@@ -20,7 +20,7 @@ function identity(value, binding = false) {
       !Number.isSafeInteger(value.bindingGeneration) || value.bindingGeneration < 1 || value.revokedAt !== null)) invalid();
   return Object.freeze({ ...value });
 }
-function operation(value) {
+export function normalizeOwnerOperation(value) {
   if (!value || !['profile.move','profile.revoke'].includes(value.action)) invalid();
   keys(value, ['action','registryRoot','expectedSequence','profileId','before',...(value.action === 'profile.move' ? ['after'] : [])]);
   const root = value.registryRoot;
@@ -40,7 +40,7 @@ export function createUnavailableOwnerApprovalProvider() {
 }
 
 // withLockedRegistry(root, callback) must hold the existing exclusive registry
-// lock while invoking callback once with { sequence, binding, commit }. `binding`
+// lock synchronously while invoking callback once with { sequence, binding, commit }. `binding`
 // is this profile's exact before projection (or null). `commit(operation)` must
 // synchronously perform that exact dedicated audited mutation, retaining D2/D3
 // invariants. No production adapter exists yet; fake adapters only prove protocol
@@ -61,7 +61,7 @@ export function createOwnerApprovalCoordinator({
   }
   function prepare(value, { ttlMs = 60000 } = {}) {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 120000) invalid();
-    const op = operation(value), issuedAt = now(), deadline = issuedAt + ttlMs;
+    const op = normalizeOwnerOperation(value), issuedAt = now(), deadline = issuedAt + ttlMs;
     if (!Number.isSafeInteger(deadline)) invalid();
     const request = Object.freeze({ schema: 'owner_operation_v1', ...op,
       nonce: randomBytes(32).toString('hex'), issuedAt, deadline });
@@ -107,8 +107,11 @@ export function createOwnerApprovalCoordinator({
       if (outcome === 'cancelled') fail('owner_approval_cancelled');
       fail('owner_approval_unavailable');
     }
-    let entered = false;
-    const result = await withLockedRegistry(record.op.registryRoot, state => {
+    let entered = false, transactionOpen = true;
+    let result;
+    try {
+      result = withLockedRegistry(record.op.registryRoot, state => {
+      if (!transactionOpen) fail('owner_approval_unavailable');
       if (entered) fail('owner_approval_replayed');
       entered = true;
       fresh(record);
@@ -118,7 +121,12 @@ export function createOwnerApprovalCoordinator({
       }
       if (typeof state.commit !== 'function') fail('owner_approval_unavailable');
       return state.commit(record.op);
-    });
+      });
+    } finally { transactionOpen = false; }
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result).catch(() => {});
+      fail('owner_approval_unavailable');
+    }
     if (!entered) fail('owner_approval_unavailable');
     return result;
   }
