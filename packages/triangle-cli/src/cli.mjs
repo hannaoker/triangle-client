@@ -54,6 +54,9 @@ export const USAGE = `Usage: triangle <command> [options]
   identity migrate --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
                               Propose or apply owner-confirmed identity mapping records.
                               The registry defaults to identity/ beside the client directory.
+  identity revoke <profile> --registry-root DIR [--confirm PLAN_ID]
+                              Plan a local binding revocation; apply needs a terminal and fresh owner authentication.
+                              Does not revoke MESH credentials or messaging grants.
   status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
                               What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
@@ -325,6 +328,59 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           const report = await identityInventory({ clientRoot, ...identityDependencies });
           await print(io, flags, report, renderIdentityInventory);
           return 0;
+        }
+        if (sub === "revoke") {
+          allowOnly(flags, ["registry-root", "confirm"]);
+          if (rest.length !== 1 || !flags["registry-root"] || !isAbsolute(flags["registry-root"])) throw new UsageError("identity revoke <profile> requires --registry-root ABSOLUTE_PATH");
+          if (flags.confirm !== undefined) {
+            if (!/^[a-f0-9]{64}$/.test(flags.confirm) || flags.confirm.length !== 64) throw new UsageError("--confirm must be the exact 64-hex plan ID");
+            const terminal = identityDependencies.isTerminal !== undefined
+              ? (typeof identityDependencies.isTerminal === "function" ? identityDependencies.isTerminal() : Boolean(identityDependencies.isTerminal))
+              : Boolean((io?.stdin?.isTTY ?? process.stdin?.isTTY) && (io?.stdout?.isTTY ?? process.stdout?.isTTY));
+            if (!terminal || env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY) {
+              io.stderr("identity revoke --confirm requires a local owner terminal; SSH/headless application is unavailable");
+              return 2;
+            }
+          }
+          let bridge;
+          try { bridge = await import("./identity-revoke.mjs"); }
+          catch {
+            const message = "Identity revocation is unavailable because this CLI package is incomplete.";
+            io.stderr(flags.json ? JSON.stringify({ error: "owner_approval_unavailable", message }) : message);
+            return 1;
+          }
+          const { identityRevoke, renderIdentityRevokePlan } = bridge;
+          const cancellation = flags.confirm === undefined ? null : new AbortController();
+          let interrupted = null;
+          const interrupt = signal => { interrupted = signal; cancellation?.abort(); };
+          const interruptInt = () => interrupt("SIGINT"), interruptTerm = () => interrupt("SIGTERM");
+          if (cancellation) { process.once("SIGINT", interruptInt); process.once("SIGTERM", interruptTerm); }
+          try {
+            const result = await identityRevoke({ registryRoot: flags["registry-root"], profile: rest[0], confirm: flags.confirm ?? null,
+              provider: identityDependencies.ownerApprovalProvider, releaseRoot: identityDependencies.ownerApprovalReleaseRoot,
+              now: identityDependencies.now, signal: cancellation?.signal, onOperation: summary => io.stderr(summary) });
+            await print(io, flags, result, result => result.revoked
+              ? `Revoked the local principal binding for ${result.profile}. Exact-id delivery and messaging grants are unchanged.`
+              : renderIdentityRevokePlan(result));
+            return 0;
+          } catch (error) {
+            const code = typeof error.code === "string" ? error.code : "identity_revoke_failed";
+            const message = {
+              owner_approval_unavailable: "Local owner authentication is unavailable. This package may not enable identity revocation.",
+              owner_approval_cancelled: "Identity revocation was cancelled.",
+              owner_approval_denied: "Owner authentication was denied.",
+              owner_approval_expired: "Approval expired. Create a fresh plan.",
+              plan_stale: "The registry changed. Create a fresh plan.",
+              registry_sequence_conflict: "The registry changed during approval. Create a fresh plan.",
+              owner_approval_stale: "The binding changed during approval. Create a fresh plan.",
+              identity_binding_not_active: "No active local binding was found for that profile.",
+            }[code] ?? "Identity revocation did not complete. Check identity status before retrying.";
+            io.stderr(flags.json ? JSON.stringify({ error: code, message }) : `${message} (${code})`);
+            if (interrupted) return interrupted === "SIGINT" ? 130 : 143;
+            return ["invalid_owner_operation", "confirmation_mismatch", "plan_stale", "identity_binding_not_active"].includes(code) ? 2 : 1;
+          } finally {
+            if (cancellation) { process.removeListener("SIGINT", interruptInt); process.removeListener("SIGTERM", interruptTerm); }
+          }
         }
         if (sub === "migrate") {
           if (rest.length) throw new UsageError("identity migrate takes no positional arguments");

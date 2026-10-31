@@ -66,8 +66,8 @@ function main() {
   if (process.platform !== "darwin")
     throw Error("Only macOS packages are supported");
   if (!options.output) throw Error("--output is required");
-  if (options["owner-approval"] !== undefined && options["owner-approval"] !== "candidate")
-    throw Error("--owner-approval accepts only candidate (no command activation)");
+  if (options["owner-approval"] !== undefined && !["candidate", "revoke"].includes(options["owner-approval"]))
+    throw Error("--owner-approval accepts only candidate or revoke");
   const scratch = mkdtempSync(join(tmpdir(), "triangle-package-build-"));
   const digest = (data) => createHash("sha256").update(data).digest("hex");
   try {
@@ -162,7 +162,7 @@ function main() {
       "triangle-client": client,
     };
     let ownerApprovalCandidate = null;
-    if (options["owner-approval"] === "candidate") {
+    if (options["owner-approval"]) {
       const source = join(root, "scripts/probes/owner-approval-provider.swift");
       execFileSync("git", ["ls-files", "--error-unmatch", "scripts/probes/owner-approval-provider.swift"], { cwd: root, stdio: "pipe" });
       const info = lstatSync(source);
@@ -301,7 +301,11 @@ function main() {
       signingMode: "public_ad_hoc",
       credentialCustody: "file",
       testOnly: Boolean(fixture),
-      ...(ownerApprovalCandidate ? { ownerApprovalCandidate } : {}),
+      ...(ownerApprovalCandidate ? (options["owner-approval"] === "candidate"
+        ? { ownerApprovalCandidate }
+        : { ownerApproval: { version: 1, binary: ownerApprovalCandidate.binary,
+            commands: ["identity.revoke"], sourceSHA256: ownerApprovalCandidate.sourceSHA256,
+            minimumMacOS: ownerApprovalCandidate.minimumMacOS } }) : {}),
       files: paths.map((path) => ({
         path,
         size: lstatSync(join(stage, path)).size,

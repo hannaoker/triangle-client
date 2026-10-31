@@ -91,11 +91,11 @@ test('helper receives a minimal environment rather than inherited credentials',a
  finally{delete process.env.OWNER_APPROVAL_TEST_SECRET;}
 });
 
-test('native candidate provider is not selected by any CLI or runtime',()=>{
+test('native candidate provider is selected only through the guarded owner CLI bridge',()=>{
  const packages=path.resolve(import.meta.dirname,'../..'),offenders=[];
  function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){
   const file=path.join(dir,e.name);if(e.isDirectory())walk(file);
-  else if(e.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-macos.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-macos'))offenders.push(file);
+  else if(e.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-macos.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-revoke.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-macos'))offenders.push(file);
  }}
  for(const e of fs.readdirSync(packages,{withFileTypes:true})){const src=path.join(packages,e.name,'src');if(e.isDirectory()&&fs.existsSync(src))walk(src);}
  assert.deepEqual(offenders,[]);

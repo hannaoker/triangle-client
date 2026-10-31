@@ -1,4 +1,4 @@
-// Candidate provider only. No command imports or selects it. The executable/hash
+// Selected only by an explicit owner-command package capability. Executable/hash
 // are trusted release inputs, never arguments supplied by a peer or approval JSON.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';

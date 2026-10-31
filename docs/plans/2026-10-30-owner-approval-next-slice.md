@@ -308,3 +308,43 @@ and timings; durable evidence is `owner-approval-packaged-acceptance.json` under
 the Mini's releases directory. This closes packaged password/visibility acceptance
 for that artifact only. The candidate is still not installed, published or selected
 by a production command. Review/merge the packaging PR before command rollout.
+
+
+### Guarded owner revoke command — source implementation
+
+`triangle identity revoke <profile> --registry-root DIR` now proposes a deterministic
+read-only plan. It uses only the local registry, not MESH/workload credentials.
+Human output includes the exact operation and a shell-quoted apply command.
+`--confirm PLAN_ID` re-reads the plan, requires a local terminal (no SSH/headless
+apply), displays the operation, and requests fresh native authentication. Wrong
+or stale plans never authenticate. A concurrent change during approval refuses
+rather than replanning. SIGINT/SIGTERM propagate cancellation and listeners are
+removed after the operation. Expected errors are reported without raw paths or
+stacks; unrelated commands retain lazy worker-dependency loading.
+
+The source package builder adds the explicit `--owner-approval revoke` capability,
+separate from `candidate`. Only a private verified release manifest declaring
+`identity.revoke` can select its exact manifest-pinned native helper. Ordinary,
+candidate-only, test-only and unsupported-platform releases fail unavailable.
+No command-line helper path, `--yes`, JSON approval Boolean, environment token or
+terminal alone substitutes for OS authentication. Dependency injection is for
+trusted in-process tests, not peer input or a same-user tamper-resistance claim.
+
+This revokes a local principal binding only: exact-id delivery, receiver grants,
+MESH credentials and server identities are unchanged. No move/rebind command is
+added. Existing default/candidate packages are not enabled by the source change.
+
+Validation: final 133 focused tests passed with native validation explicitly
+supplied, zero skipped, covering CLI plan/apply, actual registry transaction,
+stale/concurrent state, cancellation, manifest selection/pin, malformed package
+and missing worker dependencies, plus existing migrate/status/core behavior.
+Apply approvals use stand-in providers or helpers in these tests; there was no
+new native prompt. All 12 packaging tests passed, including an isolated installed
+revoke-enabled package's read-only plan and refusal of non-terminal apply.
+The package run preceded the final interruption/error/render refinements; those
+were covered by the final focused run, not a repeated package run.
+
+No live registry, service, CLI install or receiver policy changed. Review the
+source PR and obtain exact packaged command/TTY/native acceptance against a fresh
+disposable registry before merging/installing a command-enabled release. See the
+owner-revoke command handoff for the checkpoint and remaining work.
