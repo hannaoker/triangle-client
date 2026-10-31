@@ -488,11 +488,14 @@ test("owner approval packaging refuses an activation value", () => {
 });
 
 
-// Approves whatever it is asked; stands in for the native helper so no OS prompt can appear.
-const STAND_IN_APPROVER = `#!/usr/bin/python3
-import sys,json
-r=json.load(sys.stdin)
-print(json.dumps({'version':1,'digest':r['digest'],'nonce':r['nonce'],'outcome':'approved'},sort_keys=True,separators=(',',':')))
+// Approves whatever it is asked, using the Node that runs the tests; stands in for the native helper
+// so no OS prompt can appear.
+const STAND_IN_APPROVER = `#!${process.execPath}
+let input = "";
+process.stdin.on("data", chunk => { input += chunk; }).on("end", () => {
+  const request = JSON.parse(input);
+  process.stdout.write(JSON.stringify({ digest: request.digest, nonce: request.nonce, outcome: "approved", version: 1 }) + "\\n");
+});
 `;
 
 test("revoke-enabled package declares only the explicit owner command; installed plan remains read-only", async () => {
@@ -524,8 +527,11 @@ test("revoke-enabled package declares only the explicit owner command; installed
     const { canonicalJson } = await installed_("canonical.mjs");
     const helper = join(receipt.release, manifest.ownerApproval.binary), manifestFile = join(receipt.release, "package-manifest.json");
     writeFileSync(helper, STAND_IN_APPROVER); // the existing private file keeps its mode
+    // The manifest pins the stand-in's own hash, never whatever is on disk: the real helper could not match
+    // it, so it could not be launched (and could not open an OS prompt) even if the write above were lost.
+    const standInHash = createHash("sha256").update(STAND_IN_APPROVER).digest("hex");
     const rewrite = patch => writeFileSync(manifestFile, JSON.stringify({ ...manifest, ...patch,
-      files: manifest.files.map(entry => entry.path === manifest.ownerApproval.binary ? { ...entry, sha256: sha(helper) } : entry) }));
+      files: manifest.files.map(entry => entry.path === manifest.ownerApproval.binary ? { ...entry, sha256: standInHash } : entry) }));
     const request = { schema: "owner_operation_v1", ...planIdentityRevoke({ registryRoot: registry, profile: "alpha" }).operation,
       nonce: "9".repeat(64), issuedAt: Math.floor(performance.now()), deadline: Math.floor(performance.now()) + 60000 };
     const challenge = { request, digest: createHash("sha256").update(canonicalJson(request)).digest("hex"), summary: describeOwnerOperation(request) };
@@ -533,7 +539,7 @@ test("revoke-enabled package declares only the explicit owner command; installed
     rewrite({});
     assert.equal(await decide(), "unavailable", "a test-only package never selects the helper");
     rewrite({ testOnly: false });
-    assert.equal(await decide(), "approved", "the installed layout selects its pinned helper");
+    assert.equal(await decide(), "approved", "the installed layout selects its pinned helper (the stand-in ran)");
     rewrite({ testOnly: false, ownerApprovalCandidate: { activation: "disabled" } });
     assert.equal(await decide(), "unavailable", "a candidate marker beside the policy refuses");
   } finally { rmSync(f.dir,{recursive:true,force:true}); }

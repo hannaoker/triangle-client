@@ -1,6 +1,7 @@
-// Pins what identity-revoke-cli.test.mjs leaves implicit: each single release-capability guard,
-// real SIGINT/SIGTERM through the CLI, the operation shown before authentication, every SSH
-// marker, and the printed apply command. Stand-in providers and helpers only: no OS prompt.
+// Pins what identity-revoke-cli.test.mjs leaves implicit: each release-capability guard the loader
+// alone decides (the two owner-uid checks need another OS user and are not testable here), real
+// SIGINT/SIGTERM through the CLI, the operation shown before authentication, every SSH marker, and
+// the printed apply command. Stand-in providers and helpers only: no OS prompt can appear.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -38,10 +39,13 @@ async function run(args,extra={}){
 const confirmArgs=f=>['identity','revoke','alpha','--registry-root',f.registry,'--confirm',f.plan().planId];
 
 // --- Release-capability selection: one broken condition per case, everything else valid. ---
-const STAND_IN=`#!/usr/bin/python3
-import sys,json
-r=json.load(sys.stdin)
-print(json.dumps({'version':1,'digest':r['digest'],'nonce':r['nonce'],'outcome':'approved'},sort_keys=True,separators=(',',':')))
+// Approves anything it is asked, using the Node that runs the tests (no Python, no Command Line Tools).
+const STAND_IN=`#!${process.execPath}
+let input='';
+process.stdin.on('data',chunk=>{input+=chunk;}).on('end',()=>{
+ const request=JSON.parse(input);
+ process.stdout.write(JSON.stringify({digest:request.digest,nonce:request.nonce,outcome:'approved',version:1})+'\\n');
+});
 `;
 function releaseFixture(t){
  const root=temporary(t,'identity-revoke-release-'),dir=path.join(root,'release'),executable=path.join(dir,'bin/triangle-owner-approval');
@@ -58,16 +62,27 @@ function releaseFixture(t){
   policy:patch=>write({...manifest,ownerApproval:{...manifest.ownerApproval,...patch}}),
   entry:patch=>write({...manifest,files:[{...manifest.files[0],...patch}]})};
 }
-// A well-formed challenge: the stand-in helper approves it, so 'approved' means the helper was selected.
+// A well-formed challenge: the stand-in helper approves it, so 'approved' means the helper really ran.
 function challengeFor(plan){
  const request={schema:'owner_operation_v1',...plan.operation,nonce:'9'.repeat(64),issuedAt:Math.floor(performance.now()),deadline:Math.floor(performance.now())+60000};
  return {request,digest:sha(canonicalJson(request)),summary:describeOwnerOperation(request)};
 }
-const select=(release,challenge,options={})=>loadPackagedRevokeProvider({releaseRoot:release.dir,platform:'darwin',...options}).authenticate(challenge);
+const load=(release,options={})=>loadPackagedRevokeProvider({releaseRoot:release.dir,platform:'darwin',...options});
+// An already-aborted signal makes a selected macOS provider answer 'cancelled' before it checks or runs
+// anything, while the unavailable provider still answers 'unavailable'. That tells the loader's own
+// refusal apart from the provider's re-checks of platform, path and hash, which would hide a missing guard.
+const select=(release,challenge,options={})=>load(release,options).authenticate(challenge,{signal:AbortSignal.abort()});
 
 test('control: a valid revoke release selects exactly its manifest-pinned helper',async t=>{
+ const f=fixture(t),release=releaseFixture(t),challenge=challengeFor(f.plan());
+ assert.equal(await select(release,challenge),'cancelled','the loader selected the macOS provider');
+ assert.equal(await load(release).authenticate(challenge),'approved','the stand-in helper ran (needs an executable temp directory)');
+});
+
+test('a helper that does not match its manifest hash is not run',async t=>{
  const f=fixture(t),release=releaseFixture(t);
- assert.equal(await select(release,challengeFor(f.plan())),'approved');
+ release.entry({sha256:sha('another helper')}); // well formed, so the loader selects; the provider then refuses before spawning
+ assert.equal(await load(release).authenticate(challengeFor(f.plan())),'unavailable');
 });
 
 const refusals={
@@ -94,7 +109,6 @@ const refusals={
  'no helper entry':r=>r.with({files:[]}),
  'a duplicated helper entry':r=>r.with({files:[r.manifest.files[0],r.manifest.files[0]]}),
  'a helper entry that is not private':r=>r.entry({mode:0o755}),
- 'a helper hash that does not match the file':r=>r.entry({sha256:sha('another helper')}),
  'an upper-case helper hash':r=>r.entry({sha256:r.manifest.files[0].sha256.toUpperCase()}),
  'a short helper hash':r=>r.entry({sha256:'0'.repeat(63)}),
  'a release directory others can read':r=>fs.chmodSync(r.dir,0o755),
@@ -103,21 +117,23 @@ const refusals={
  'a manifest that is a symbolic link':r=>{
   const real=path.join(r.root,'real-manifest.json');fs.renameSync(r.file,real);fs.symlinkSync(real,r.file);
  },
- // macOS can give a symbolic link private permissions, which leaves the regular-file check as its only refusal.
- ...(typeof fs.lchmodSync==='function'?{'a manifest that is a private symbolic link':r=>{
-  const real=path.join(r.root,'real-manifest.json');fs.renameSync(r.file,real);fs.symlinkSync(real,r.file);fs.lchmodSync(r.file,0o600);
- }}:{}),
  'a manifest over the size cap':r=>r.write(JSON.stringify(r.manifest)+' '.repeat(1024*1024)),
  'a manifest that is not JSON':r=>r.write('{not json'),
  'a missing manifest':r=>fs.rmSync(r.file),
- 'a release root reached through a symbolic link':r=>{
-  const link=path.join(r.root,'release-link');fs.symlinkSync(r.dir,link);return {releaseRoot:link};
+ // Only the directory is reached through a symbolic link, so the canonical-root check is the sole refusal.
+ 'a release root below a symbolic link':r=>{
+  const link=path.join(r.root,'root-link');fs.symlinkSync(r.root,link);return {releaseRoot:path.join(link,'release')};
  },
 };
-for(const [name,break_] of Object.entries(refusals))test(`release capability is refused for ${name}`,async t=>{
- const f=fixture(t),release=releaseFixture(t),options=break_(release);
- assert.equal(await select(release,challengeFor(f.plan()),options),'unavailable');
+const refuse=(name,break_,options={})=>test(`release capability is refused for ${name}`,options,async t=>{
+ const f=fixture(t),release=releaseFixture(t),broken=break_(release);
+ assert.equal(await select(release,challengeFor(f.plan()),broken),'unavailable');
 });
+for(const [name,break_] of Object.entries(refusals))refuse(name,break_);
+// macOS can give a symbolic link private permissions, which leaves the regular-file check as its only refusal.
+refuse('a manifest that is a private symbolic link',r=>{
+ const real=path.join(r.root,'real-manifest.json');fs.renameSync(r.file,real);fs.symlinkSync(real,r.file);fs.lchmodSync(r.file,0o600);
+},{skip:typeof fs.lchmodSync==='function'?false:'needs fs.lchmodSync (macOS)'});
 
 // --- Real signals through the CLI. ---
 const cliUrl=pathToFileURL(path.resolve(import.meta.dirname,'../src/cli.mjs')).href;
@@ -134,7 +150,7 @@ for(const [signal,exit] of [['SIGINT',130],['SIGTERM',143]])test(`${signal} reac
  const result=await new Promise((resolve,reject)=>{
   const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('child did not finish: '+stderr));},20000);
   child.stderr.on('data',chunk=>{stderr+=chunk;if(!sent&&stderr.includes('READY')){sent=true;child.kill(signal);}});
-  child.once('error',reject);
+  child.once('error',error=>{clearTimeout(timer);reject(error);});
   child.once('close',(code,received)=>{clearTimeout(timer);resolve({code,received});}); // after stderr has drained
  });
  assert.deepEqual(result,{code:exit,received:null},stderr);
@@ -143,7 +159,7 @@ for(const [signal,exit] of [['SIGINT',130],['SIGTERM',143]])test(`${signal} reac
 });
 
 // --- What the owner sees and where apply is refused. ---
-test('the exact operation is on stderr, and equals the OS challenge summary, before the provider is asked',async t=>{
+test('the exact operation is on stderr, and equals the summary in the challenge, before the provider is asked',async t=>{
  const f=fixture(t),plan=f.plan(),err=[];let shown=null,summary=null;
  const code=await main(confirmArgs(f),{env:{},io:{stdout(){},stderr:s=>err.push(s)},identityDependencies:{isTerminal:true,
   ownerApprovalProvider:{authenticate:async challenge=>{shown=err.join('\n');summary=challenge.summary;return 'cancelled';}}}});
@@ -159,14 +175,15 @@ for(const variable of ['SSH_CONNECTION','SSH_CLIENT','SSH_TTY'])test(`${variable
 });
 
 test('argument-shape errors are usage errors that never authenticate',async t=>{
- const f=fixture(t),before=f.bytes();let calls=0;
+ const f=fixture(t),before=f.bytes(),id=f.plan().planId;let calls=0;
  const deps={identityDependencies:{isTerminal:true,ownerApprovalProvider:{authenticate:async()=>{calls++;return 'approved';}}}};
  const root=/requires --registry-root ABSOLUTE_PATH/;
+ // Every case carries a valid --confirm and an approving provider, so calls===0 shows the shape error came first.
  for(const [args,message] of [
-  [['identity','revoke','alpha','beta','--registry-root',f.registry],root],
-  [['identity','revoke','--registry-root',f.registry],root],
-  [['identity','revoke','alpha','--registry-root','relative/registry'],root],
-  [['identity','revoke','alpha'],root],
+  [['identity','revoke','alpha','beta','--registry-root',f.registry,'--confirm',id],root],
+  [['identity','revoke','--registry-root',f.registry,'--confirm',id],root],
+  [['identity','revoke','alpha','--registry-root','relative/registry','--confirm',id],root],
+  [['identity','revoke','alpha','--confirm',id],root],
   [['identity','revoke','alpha','--registry-root',f.registry,'--confirm','not-hex'],/64-hex/],
  ]){const result=await run(args,deps);assert.equal(result.code,2,args.join(' '));assert.match(result.err,message,args.join(' '));}
  assert.equal(calls,0);assert.deepEqual(f.bytes(),before);
