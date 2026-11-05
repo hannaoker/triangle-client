@@ -126,7 +126,75 @@ export function createGrokBroker({config, issue}) {
   };
 }
 
-export async function runGrokCommand(operation, options, {configPath,env,input,output}) {
+// `grok wait` exit contract: 0 = a match is ready, GROK_WAIT_TIMEOUT_EXIT = the
+// timeout passed with no match; errors keep the CLI's existing code (1).
+export const GROK_WAIT_TIMEOUT_EXIT = 3;
+export const GROK_WAIT_DEFAULT_SECONDS = 750;
+// One call must fit under a 13-minute (780s) foreground tool call with margin.
+export const GROK_WAIT_MAX_SECONDS = 760;
+const WAIT_FIRST_INTERVAL_MS = 250, WAIT_MAX_INTERVAL_MS = 2000, WAIT_GRANT_REFRESH_MS = 240000, WAIT_LIST_LIMIT = 50;
+const WAIT_ONLY = ['waitInbox','json','timeout'];
+const NOT_FOR_WAIT = ['in-reply-to','message-id','limit','cursor','to','text','text-file','claim-id','claim-file','reply-id'];
+function waitPlan(options) {
+  const byRequest = options['request-id'] !== undefined, byInbox = options.waitInbox === true;
+  if (byRequest === byInbox) throw coded('invalid_arguments','Choose exactly one of --request-id or --inbox');
+  if (byRequest && (typeof options['request-id'] !== 'string' || !options['request-id'])) throw coded('invalid_arguments','Exact request-id required');
+  if (NOT_FOR_WAIT.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is not valid for grok wait');
+  const raw = options.timeout ?? String(GROK_WAIT_DEFAULT_SECONDS);
+  const seconds = typeof raw === 'string' && /^\d{1,3}(\.\d{1,3})?$/.test(raw) ? Number(raw) : NaN;
+  if (!(seconds > 0) || seconds > GROK_WAIT_MAX_SECONDS) throw coded('invalid_arguments',`timeout must be seconds in (0, ${GROK_WAIT_MAX_SECONDS}]`);
+  return {mode:byRequest?'request':'inbox',requestId:byRequest?options['request-id']:null,timeoutMs:Math.round(seconds*1000),json:options.json === true};
+}
+// Read-only: only the list calls `grok replies` / `grok inbox` already make. Never
+// consumes, claims or acks; the caller runs replies+consume or inbox+claim after.
+// The local broker has no watch/long-poll RPC, so this is a bounded backoff poll.
+export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms))} = {}) {
+  const started = now(), deadline = started + plan.timeoutMs;
+  // Every broker call (connect + RPC can each use the timeout) is bounded by the
+  // remaining budget, so a call never runs much past the deadline: the whole
+  // wait ends within about timeout + 1s, under the 780s foreground-call limit.
+  const budget = () => Math.min(5000, Math.max(500, Math.floor((deadline - now()) / 2)));
+  const timedOut = polls => ({state:'timeout',ids:[],more:false,waitedMs:Math.max(0, now() - started),polls});
+  let rpc = await grant({timeout:budget()}), refreshAt = now() + WAIT_GRANT_REFRESH_MS, interval = WAIT_FIRST_INTERVAL_MS, polls = 0;
+  for (;;) {
+    // Check before every call after the first poll; never start one past the deadline.
+    if (polls > 0 && now() >= deadline) return timedOut(polls);
+    // Grants live 300s; refresh well before a long wait outlives one.
+    if (now() >= refreshAt) {
+      rpc = await grant({timeout:budget()}); refreshAt = now() + WAIT_GRANT_REFRESH_MS;
+      if (now() >= deadline) return timedOut(polls);
+    }
+    const timeout = budget();
+    polls++;
+    let ids, more;
+    if (plan.mode === 'request') {
+      const replies = await client.listReplies({requestId:plan.requestId,limit:WAIT_LIST_LIMIT},{...rpc,timeout});
+      ids = replies.map(r=>r.messageId); more = replies.length >= WAIT_LIST_LIMIT;
+    } else {
+      const items = await client.listInbox({limit:WAIT_LIST_LIMIT},{...rpc,timeout});
+      ids = [...items].map(i=>i.messageId); more = items.nextCursor != null;
+    }
+    const waitedMs = Math.max(0, now() - started);
+    if (ids.length) return {state:'ready',ids,more,waitedMs,polls};
+    const remaining = deadline - now();
+    if (remaining <= 0) return timedOut(polls);
+    await sleep(Math.min(interval, remaining));
+    interval = Math.min(WAIT_MAX_INTERVAL_MS, Math.round(interval * 1.5));
+  }
+}
+// IDs and counts only: never message bodies, senders' text, claim tokens or credentials.
+function waitSummary(plan, outcome) {
+  const base = {operation:'wait',mode:plan.mode,state:outcome.state};
+  const ids = plan.mode === 'request' ? {requestId:plan.requestId,replyIds:outcome.ids} : {messageIds:outcome.ids};
+  return {...base,...ids,count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
+}
+function waitLine(plan, outcome) {
+  const what = plan.mode === 'request' ? `repl${outcome.ids.length===1?'y':'ies'} for request ${JSON.stringify(plan.requestId)}` : `inbox message${outcome.ids.length===1?'':'s'}`;
+  if (outcome.state === 'timeout') return `grok wait: timeout after ${plan.timeoutMs/1000}s; no ${plan.mode === 'request' ? `unconsumed reply for request ${JSON.stringify(plan.requestId)}` : 'unclaimed inbox message'}`;
+  return `grok wait: ready; ${outcome.ids.length}${outcome.more?'+':''} ${what}: ${outcome.ids.map(id=>JSON.stringify(id)).join(', ')}`;
+}
+
+export async function runGrokCommand(operation, options, {configPath,env,input,output,waitClock}) {
   const config = readPrivateJson(configPath), entries = grokBindings(config);
   if (config.enabled !== true || config.grok?.enabled !== true) throw coded('local_disabled','Grok messaging disabled');
   const context = env.CURSOR_CONVERSATION_ID;
@@ -135,7 +203,10 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
   const b = options.alias ? entries.find(b=>b.alias===options.alias) : digest ? entries.find(b=>b.contextHash===digest) : null;
   if (!b || (b.contextHash !== null && b.contextHash !== digest)) throw coded('grok_context_mismatch','Choose your own paired context or explicit alias');
   if (!b.enabled || b.revoked) throw coded('session_disabled','Grok pairing disabled');
-  if (!['status','sessions','send','inbox','claim','reply','replies','consume'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
+  if (!['status','sessions','send','inbox','claim','reply','replies','consume','wait'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
+  if (operation !== 'wait' && WAIT_ONLY.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is only valid for grok wait');
+  // Validate before any broker call so bad wait arguments never touch the socket.
+  const plan = operation === 'wait' ? waitPlan(options) : null;
   const client = createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId:b.senderId});
   const messageText = async () => {
     if (options.text !== undefined) throw coded('invalid_arguments','Use stdin or text-file for Grok message bodies');
@@ -160,10 +231,18 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
     if (!text.trim() || Buffer.byteLength(text)>128*1024) throw coded('invalid_message','Bounded nonempty text required');
     return text;
   };
-  try {
-    const grant = await client.exchangeInteractiveSession({bindingId:b.bindingId,sessionId:b.sessionId,generation:b.generation,secret:b.secret,contextHash:b.contextHash});
+  const exchange = async (rpcOptions = {}) => {
+    const grant = await client.exchangeInteractiveSession({bindingId:b.bindingId,sessionId:b.sessionId,generation:b.generation,secret:b.secret,contextHash:b.contextHash},rpcOptions);
     if (grant.senderId!==b.senderId || grant.bindingId!==b.bindingId || grant.generation!==b.generation || grant.sessionId!==b.sessionId) throw coded('binding_changed','Unexpected Grok grant');
-    const rpc = {credential:grant.credential}; let result;
+    return {credential:grant.credential};
+  };
+  try {
+    if (operation==='wait') {
+      const outcome = await waitForMatch(plan, client, exchange, waitClock);
+      output.write((plan.json ? JSON.stringify(waitSummary(plan,outcome)) : waitLine(plan,outcome))+'\n');
+      return outcome.state === 'ready' ? 0 : GROK_WAIT_TIMEOUT_EXIT;
+    }
+    const rpc = await exchange(); let result;
     if (operation==='status') result = options['message-id'] !== undefined ? await client.getMessageStatus({messageId:options['message-id']},rpc) : await client.localStatus(rpc);
     if (operation==='sessions') result = {sessions:await client.listSessions(rpc)};
     if (operation==='inbox') {const items=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpc);result={items:[...items],nextCursor:items.nextCursor};}
