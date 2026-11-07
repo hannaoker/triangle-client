@@ -3,7 +3,7 @@
 Candidate branch: `claude/workspace-class-grants`, based on main `0452f13` (PRs #158 and #159 merged).
 At review time this was a source candidate: nothing was installed, no live policy or grant was changed, and no Mini state was
 touched. It was merged to main as `3267715` (PR #160) on 2026-11-07 and installed on the Mini the same day, supervisor runtime
-only, with no class grant applied; see "Installation" below.
+only, with no class grant applied (see "Installation"). The acceptance run is recorded under "Acceptance result".
 
 ## Behavior
 
@@ -80,7 +80,7 @@ writer that mishandles a valid policy. Its findings and what became of them:
 
 Not adopted from the review: refusing SSH sessions as `identity revoke` does. That check exists there because the OS prompt
 needs a GUI session. Here it would stop an owner who administers the Mini remotely, and the gate is a confirmation step either
-way; the owner can ask for it.
+way; the owner decided on 2026-11-07 not to add it (see Owner decisions).
 
 ## Owner decisions
 
@@ -88,7 +88,10 @@ way; the owner can ask for it.
    waiting for D5-A (OS authentication), knowing that it is a confirmation step and not a boundary: a pseudo-terminal passes it
    and a process running as the same user can edit the policy file. D5-A stays a possible follow-up, not a precondition. The
    choice covers class grants only; it does not move the D5 decision (C) for identity chat mappings.
-2. **Open:** whether to refuse SSH sessions for applying a plan. Not adopted so far.
+2. **Decided 2026-11-07, in chat ("Don't refuse SSH"):** applying a plan does not refuse SSH sessions. It keeps needing only a
+   terminal on stdin and stdout plus the plan id, so it works over an SSH pseudo-terminal. `identity revoke --confirm` refuses
+   when `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is set (`packages/triangle-cli/src/cli.mjs`) because its OS password prompt
+   needs someone at the Mac; this gate has no such prompt, and an environment check would be trivially bypassed. No code change.
 
 Residual risk, unchanged by the gate: any live session of the sender harness in the workspace, including one that has read
 untrusted content, can wake a recipient-harness chat and obtain an answer with no person in the loop, because Codex pre-approves
@@ -134,11 +137,44 @@ The owner asked for the install in chat after the merge. Main `3267715` was inst
 
 ## Owner acceptance once installed
 
-Status 2026-11-07: the runtime is installed and these steps have not been run. Reload the two older session MCP children, or
-use fresh chats, first.
+Status 2026-11-07: run the same day on fresh chats; the result is under "Acceptance result" below. The steps stay here as the
+checklist for the next install.
 
 On fresh chats, in a real terminal: print the plan and read its `dormant` and `effect`; apply it; from a new Claude chat and
 a new Codex chat that never had a grant, check that the Claude chat lists the Codex chat after one heartbeat, sends, and gets
 the correlated reply; check that Claude to Claude is refused and that an ended Codex chat disappears from the directory; revoke,
 and check that the next send reports `recipient_not_allowed`; confirm `list-session-grants` shows `classGrants: []` and the
 policy stays version 3. Record the result beside this note.
+
+## Acceptance result (2026-11-07)
+
+Run at the owner's request in chat, from a fresh Claude chat (`the-triangle-d5`, 4886e6ab) against the live Codex chat 12de4548.
+Neither chat appeared in an exact pair. At the start the supervisor and all four session MCP children ran the installed bundle
+`7eb3b2f0…`, no `4d0a391d` process remained, and the older Claude chat 4b4cd69b and Codex chat 219b4f0f had ended.
+
+A separate install of main `cc929a0` (PR #145, `grok wait`) moved the supervisor to bundle `9034909d…` at 21:23:36Z, partway
+through; it changes only `grok-local-session.mjs` and `local-messaging-cli.mjs`. The apply, directory, send and reply, and
+Claude-to-Claude steps (reply at 21:19:51Z) ran on the first supervisor. The revoke (policy file rewritten at 21:27:33Z) and the
+refused send after it ran on the second, with this Claude chat's own session MCP child still on `7eb3b2f0…`.
+
+- Plan: `grant-session-class --sender-harness claude --to-harness codex` printed plan `49a5c839…` (`applied: false`,
+  `dormant: false`) and wrote nothing. Before the apply the Claude chat's directory listed only `gravity2`.
+- Apply: done in the owner's terminal step; the command itself was not observed. The live policy then read version 3 with
+  `classGrants: [{claude, codex}]`, both exact pairs unchanged and `requiresServiceRestart: false`.
+- Directory: the Claude chat then listed the Codex chat (online, attached, `send.permitted`), no ended Codex chat and no Claude
+  chat. The delay after the apply was not timed; the first listing after it already showed the chat.
+- Send and reply: message `1575003d…` was accepted (`queued_local`), showed `notified_unclaimed` right after the send and
+  `completed` once the reply arrived. The correlated reply read `class-grant acceptance ok 01a1b7d5`; it was consumed and the
+  wake acknowledged. The body's short id is not the label id (12de4548); the envelope sender was the 12de4548 address, which
+  is what the check relies on.
+- Claude to Claude: a send to the other live Claude chat (fd5b502d) failed with `recipient_not_allowed` and stored nothing
+  (`not_found` on a status lookup).
+- Revoke: `revoke-session-class --sender-harness claude --to-harness codex` needs no `--confirm` and no terminal; it returned
+  `changed: true` and `minimumPolicyReaderVersion: 3`. `list-session-grants` then showed version 3, two exact pairs and
+  `classGrants: []`. The Codex chat left the directory on the next listing, and the next send failed with
+  `recipient_not_allowed`.
+- End state: revoked, policy still version 3. Re-applying needs a new plan: the revoke advanced `classRevision`, so the earlier
+  plan id is stale.
+- Not covered: OS authentication (D5-A) is not part of this change, applying over SSH was not run, and the heartbeat delay was
+  not timed.
+- Record: `~/Library/Application Support/The Triangle/releases/class-grants-acceptance.json`.
