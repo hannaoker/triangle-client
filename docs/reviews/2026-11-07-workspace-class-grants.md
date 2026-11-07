@@ -1,7 +1,9 @@
 # Workspace class grants implementation verification
 
 Candidate branch: `claude/workspace-class-grants`, based on main `0452f13` (PRs #158 and #159 merged).
-Source candidate only. Nothing is installed, no live policy or grant was changed, and no Mini state was touched.
+At review time this was a source candidate: nothing was installed, no live policy or grant was changed, and no Mini state was
+touched. It was merged to main as `3267715` (PR #160) on 2026-11-07 and installed on the Mini the same day, supervisor runtime
+only, with no class grant applied; see "Installation" below.
 
 ## Behavior
 
@@ -54,7 +56,8 @@ was put to them (see Owner decisions).
   `cb80b1a` (no class grant change) in this execution environment, which restricts the `ps` probe it exercises.
 - The real CLI program on disposable state, with no live policy: the plan printed and wrote nothing; applying with no terminal
   was refused with `owner_terminal_required`; applying under a Python pty succeeded and produced a version 3 policy.
-- Not run: installed acceptance, any live OS prompt, anything on the Mini.
+- Not run at review time: installed acceptance, any live OS prompt, anything on the Mini (the install is recorded under
+  "Installation").
 
 ## Independent review
 
@@ -99,7 +102,40 @@ recipients keep working. Install a matching supervisor, CLI and session MCP runt
 applying. Revoke retains version 3, so rollback needs a compatible private policy together with its matching runtime, or
 disabling messaging. Do not run an older `setup-session-messaging` against a version 3 policy.
 
+## Installation (2026-11-07)
+
+The owner asked for the install in chat after the merge. Main `3267715` was installed as the supervisor runtime only.
+
+- Bundle: `4d0a391d51a090fcfc5eda3db93a6ccb180c8b1dc22fb1753951db2a6dce56a2` (from `77fcf89`) became
+  `7eb3b2f091562aa4b97a724cd042acb1d8719c101e48eb66a69e1f9609e71026` (from `3267715`). Manifest v14, the same 90 artifacts, the
+  same Node. Exactly three artifacts differ: `local-messaging-cli.mjs`, `local-messaging-interactive-session.mjs` and
+  `local-messaging-server.mjs`; a dry run in a scratch application root, compared with the old live manifest, showed exactly
+  that set. The codex, hermes and antigravity manifests were not restaged: no worker runner imports those files.
+- Before: a `git archive` snapshot of `3267715` passed `local-session-codex.test.mjs` (32 of 32) and the
+  `supervisor-runtime-bundle` and `worker-bundle-closure` suites (27 of 27). The quiet gate was open (executing 0, dispatcher
+  idle, wake idle); the standing backlog (`queued_local` 1, held 2, queued 1, `pendingReplies` 14) was left alone. The live
+  supervisor manifest, `session-messaging.json`, `local-messaging.json` and the status were copied to
+  `archive/class-grants-20261107T181637Z/`.
+- Procedure: `stage-runtime --agent supervisor` into the live application root, `validate-runtime`,
+  `triangle-client-service.sh start` with a 60 second readiness timeout, status and grant checks, then `commit-runtime`. The
+  script was set to roll back (`rollback-runtime` and a restart) on any failure before the commit; none was needed.
+- After: one supervisor process from the new bundle with launchd running; `validate-runtime` OK; journal counts identical to the
+  baseline; wake idle; 13 discovered sessions; the router still enabled. The two policy and config files are byte-identical to
+  the pre-install copies (policy version 2). The installed `list-session-grants` reports `classGrants: []` with both exact
+  pairs unchanged. `grant-session-class` without `--confirm` printed a plan (`applied: false`, `dormant: false`) and wrote
+  nothing. A Claude chat running an older session MCP child still listed its Codex exact pair and `gravity2`.
+- Not done: no class grant was applied or confirmed, and the live policy is unchanged. Two session MCP children started before
+  the install (one Claude chat, one Codex Desktop chat) still run the old bundle; reload them before the first grant is applied
+  (see "Policy and rollout" in the runbook).
+- Rollback: restore `supervisor.manifest.pre.json` from the archive directory over `worker-runtime/supervisor.manifest.json`
+  (mode 0600, atomic write), then run `TRIANGLE_READY_TIMEOUT_MS=60000 scripts/triangle-client-service.sh start`. The old
+  bundle is still on disk; the rollback record was consumed by `commit-runtime`.
+- Record: `~/Library/Application Support/The Triangle/releases/class-grants-install-verification.json`.
+
 ## Owner acceptance once installed
+
+Status 2026-11-07: the runtime is installed and these steps have not been run. Reload the two older session MCP children, or
+use fresh chats, first.
 
 On fresh chats, in a real terminal: print the plan and read its `dormant` and `effect`; apply it; from a new Claude chat and
 a new Codex chat that never had a grant, check that the Claude chat lists the Codex chat after one heartbeat, sends, and gets
