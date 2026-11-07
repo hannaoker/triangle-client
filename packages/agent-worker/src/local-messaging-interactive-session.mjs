@@ -196,7 +196,7 @@ export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
  // `codex` is the optional second harness: its own receiver policy (exact senders, hex principals or session addresses).
  // `exactPairs` (version 2) and `classGrants` (version 3) are the owner's narrower and broader session grants.
- if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex'&&k!=='exactPairs'&&k!=='classGrants').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||![1,2,3].includes(c.version)||typeof c.enabled!=='boolean'||
+ if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex'&&k!=='exactPairs'&&k!=='classGrants'&&k!=='classRevision').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||![1,2,3].includes(c.version)||typeof c.enabled!=='boolean'||
    !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
@@ -206,7 +206,7 @@ export function readSessionMessagingPolicy(file) {
     x.allowedSenders.length>64||new Set(x.allowedSenders).size!==x.allowedSenders.length||x.allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
  }
  if(c.version===1&&c.exactPairs!==undefined)throw coded('invalid_session_policy','Exact pairs require policy version 2');
- if(c.version<3&&c.classGrants!==undefined)throw coded('invalid_session_policy','Class grants require policy version 3');
+ if(c.version<3&&(c.classGrants!==undefined||c.classRevision!==undefined))throw coded('invalid_session_policy','Class grants require policy version 3');
  if(c.version>=2){
   const pairs=c.exactPairs;
   if(!Array.isArray(pairs)||pairs.length>128||pairs.some(p=>!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).sort().join(',')!=='recipient,sender'||
@@ -218,6 +218,9 @@ export function readSessionMessagingPolicy(file) {
   if(!Array.isArray(grants)||grants.length>CLASS_GRANT_DIRECTIONS.length||grants.some(g=>!g||typeof g!=='object'||Array.isArray(g)||Object.keys(g).sort().join(',')!=='recipientHarness,senderHarness'||
    !CLASS_GRANT_DIRECTIONS.some(([from,to])=>g.senderHarness===from&&g.recipientHarness===to))||
    new Set(grants.map(g=>g.senderHarness+'>'+g.recipientHarness)).size!==grants.length)throw coded('invalid_session_policy','Invalid session class grants');
+  // A counter that only grows with every class grant change: a plan printed for an earlier state cannot apply once the
+  // policy has come back to the same content, for example after a grant and its revoke.
+  if(!Number.isSafeInteger(c.classRevision)||c.classRevision<0)throw coded('invalid_session_policy','Invalid session class grants');
  }
  return c;
 }
@@ -346,8 +349,12 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
     const claudeReader=c.claudeOn&&c.allowedSenders.includes(reader),codexReader=c.codexOn&&c.codexSenders.includes(reader);
     if(claudeReader||codexReader||readerHarness!==null||c.exactPairs.some(p=>p.sender===reader)){
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
-     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>mayReceive(c,reader,row,readerHarness));
-     const up=new Map(rows.map(row=>[row.id,offlineReason(c,row,attachments.get(row.id),scope)===null]));
+     const reachable=row=>offlineReason(c,row,attachments.get(row.id),scope)===null;
+     // The owner's sender lists and exact pairs keep the whole directory they always gave. A class grant admits a reader only to
+     // the chats it can reach right now, so idle and ended chats and their titles stay out of sight.
+     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace}))
+      .filter(row=>mayReceive(c,reader,row)||readerHarness!==null&&mayReceive(c,reader,row,readerHarness)&&reachable(row));
+     const up=new Map(rows.map(row=>[row.id,reachable(row)]));
      // A session without a live lease is not offline: only an end event or a vanished host process says that.
      const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});
      result=listed.map(row=>({...row,attachment:up.get(row.id)?'attached':row.lifecycle==='ended'?'ended':'not-attached',

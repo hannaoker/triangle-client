@@ -540,8 +540,9 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(!['held','reconcile-message'].includes(command)&&['reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  // Class-grant flags mean nothing elsewhere either.
  if(!['grant-session-class','revoke-session-class'].includes(command)&&['sender-harness','to-harness'].some(key=>options[key]!==undefined)||command!=='grant-session-class'&&options.confirm!==undefined)throw coded('invalid_arguments','Argument is not valid for this command');
- // `interactive` comes only from the process's own stdin, never from an argument.
- if(SESSION_GRANT_COMMANDS.includes(command)){output.write(JSON.stringify(editSessionGrant(command,{...options,interactive:input?.isTTY===true},env))+'\n');return 0;}
+ // `interactive` comes only from the process's own stdin and stdout, never from an argument. Like `identity migrate --confirm`,
+ // applying a plan needs both to be terminals, so a captured or piped result does not count.
+ if(SESSION_GRANT_COMMANDS.includes(command)){output.write(JSON.stringify(editSessionGrant(command,{...options,interactive:input?.isTTY===true&&output?.isTTY===true},env))+'\n');return 0;}
  if(command==='setup-reply-identity'){output.write(JSON.stringify(setupReplyIdentity(options,env))+'\n');return 0;}
  if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
@@ -829,9 +830,15 @@ function setupWorkspaceMessagingLocked(options,env=process.env){
  const old=fs.existsSync(integrationPath)?readPrivateJson(integrationPath):null;
  const desktopSender=readPrivateJson(config.integrationPath).senderId;
  const kept=old?.enabled===true&&old?.installationId===d.installationId;
- // `--exact-only` means no workspace-wide inbound senders for this harness, so it also drops the class grants into it.
- const classGrants=kept&&Array.isArray(old.classGrants)?old.classGrants.filter(g=>!(options.exactOnly&&g.recipientHarness===harness)):null;
- const policy={version:kept?(old.version??1):1,...(kept&&old.exactPairs?{exactPairs:old.exactPairs}:{}),...(classGrants?{classGrants}:{}),enabled:true,workspace:d.workspace,installationId:d.installationId,secret:kept?old.secret:randomBytes(32).toString('hex'),
+ const version=kept?(old.version??1):1;
+ // A version 3 policy keeps what it holds. `--exact-only` means no workspace-wide inbound senders for this harness, so it also
+ // drops the class grants into it, and that counts as a class grant change. A damaged version 3 file, for example one an older
+ // release's setup rewrote without these fields, is repaired to hold none of them, which can only remove authority.
+ const held=version===3&&Array.isArray(old.classGrants)?old.classGrants:[];
+ const classGrants=held.filter(g=>!(options.exactOnly&&g?.recipientHarness===harness));
+ const v3=version===3?{exactPairs:Array.isArray(old.exactPairs)?old.exactPairs:[],classGrants,
+  classRevision:(Number.isSafeInteger(old.classRevision)&&old.classRevision>=0?old.classRevision:0)+(classGrants.length!==held.length?1:0)}:{};
+ const policy={version,...(kept&&old.exactPairs?{exactPairs:old.exactPairs}:{}),...v3,enabled:true,workspace:d.workspace,installationId:d.installationId,secret:kept?old.secret:randomBytes(32).toString('hex'),
   allowedSenders:harness==='claude'?(options.exactOnly?[]:[desktopSender]):(kept?old.allowedSenders:[]),
   allowedRecipients:[...config.recipients.map(r=>r.instanceId),...(config.inbox?.enabled?[desktopSender]:[])],
   ...(harness==='codex'?{codex:{enabled:true,allowedSenders:senders}}:old?.codex?{codex:old.codex}:{})};
@@ -860,7 +867,7 @@ function setupWorkspaceMessagingLocked(options,env=process.env){
  write();
  autoAttach?.write();
  writePrivateJson(configPath,{...config,sessionMessaging:{enabled:true,integrationPath}});
- return {workspace:d.workspace,harness,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false,
+ return {workspace:d.workspace,harness,mcpServer:name,requiresServiceRestart:true,requiresMcpReconnect:true,requiresHarnessApproval:true,discoveryOnly:false,classGrants:policy.classGrants??[],
   ...(harness==='codex'?{autoAttach:autoAttach.enabled,requiresHarnessHookApproval:autoAttach.changed&&autoAttach.enabled,codexConfig:path.join(d.workspace,'.codex','config.toml'),allowedSenders:senders,
    wakeConfigured:config.wake?.enabled===true&&typeof config.wake.codexPath==='string'&&typeof config.wake.codexHome==='string',requiresProjectTrust:true}:{})};
 }
@@ -1001,7 +1008,9 @@ export function setupRouter(options={},env=process.env){
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{process.exitCode=await runLocalMessagingCLI(process.argv.slice(2));}catch(error){
  // The owner reconciliation commands report what failed (IDs, phases and codes only); other commands keep the fixed text.
- const detailed=['held','reconcile-message','grant-session-class','revoke-session-class'].includes(process.argv[2])&&typeof error?.code==='string'&&typeof error.message==='string';
+ // The class-grant commands add only their own fixed messages: any other error may carry a file path.
+ const classOwn=['grant-session-class','revoke-session-class'].includes(process.argv[2])&&['invalid_arguments','owner_terminal_required','plan_stale','session_disabled','policy_busy','invalid_session_policy'].includes(error?.code)&&typeof error.message==='string';
+ const detailed=classOwn||['held','reconcile-message'].includes(process.argv[2])&&typeof error?.code==='string'&&typeof error.message==='string';
  process.stderr.write(JSON.stringify({error:typeof error?.code==='string'?error.code:'local_command_failed',message:detailed?error.message.slice(0,300):'Triangle local command failed; check binding, service status and arguments'})+'\n');process.exitCode=1;}
 }
 
@@ -1021,7 +1030,7 @@ function editSessionGrantLocked(command,options,env=process.env){
  if(!c.enabled||!d.enabled||c.installationId!==d.installationId||c.workspace!==d.workspace)throw coded('session_disabled','Workspace policy does not match discovery');
  const summary=policy=>({version:policy.version,exactPairs:policy.exactPairs??[],classGrants:policy.classGrants??[],workspaceWide:{claude:policy.allowedSenders,codex:policy.codex?.allowedSenders??[]},requiresServiceRestart:false});
  if(command==='list-session-grants')return summary(c);
- if(command==='grant-session-class'||command==='revoke-session-class')return editClassGrant(command,options,c,file,summary);
+ if(command==='grant-session-class'||command==='revoke-session-class')return editClassGrant(command,options,c,d,file,summary);
  if(options['sender-harness']!==undefined||options['to-harness']!==undefined||options.confirm!==undefined)throw coded('invalid_arguments','Argument is not valid for this command');
  const sender=options.senders?.length===1?options.senders[0]:null,recipient=options.to;
  if(typeof sender!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(sender)||typeof recipient!=='string'||!/^session-[a-f0-9]{64}$/.test(recipient)||sender===recipient)throw coded('invalid_arguments','Choose one exact --sender and --to session address');
@@ -1047,7 +1056,7 @@ function stableJson(value){
 }
 // A function declaration, not a const: the program entry above this code runs before later consts are initialized.
 function sameClassGrant(a,b){return a.senderHarness===b.senderHarness&&a.recipientHarness===b.recipientHarness;}
-function editClassGrant(command,options,c,file,summary){
+function editClassGrant(command,options,c,d,file,summary){
  const grant={senderHarness:options['sender-harness'],recipientHarness:options['to-harness']};
  if(options.senders!==undefined||options.to!==undefined)throw coded('invalid_arguments','Class grants take --sender-harness and --to-harness, not session addresses');
  if(!CLASS_GRANT_DIRECTIONS.some(([from,to])=>from===grant.senderHarness&&to===grant.recipientHarness))throw coded('invalid_arguments','Choose --sender-harness and --to-harness as claude and codex, one each');
@@ -1055,26 +1064,31 @@ function editClassGrant(command,options,c,file,summary){
  if(command==='revoke-session-class'){
   if(options.confirm!==undefined)throw coded('invalid_arguments','Argument is not valid for this command');
   if(!exists)return {...summary(c),changed:false};
-  const next={...c,classGrants:grants.filter(g=>!sameClassGrant(g,grant))};
+  const next={...c,classGrants:grants.filter(g=>!sameClassGrant(g,grant)),classRevision:(c.classRevision??0)+1};
   writePrivateJson(file,next);
   return {...summary(next),changed:true,minimumPolicyReaderVersion:3};
  }
  if(exists)return {...summary(c),changed:false};
+ // Whether messaging is on for a harness here, as the broker judges it: discovery opted in and, for Codex, its own messaging on.
+ // A grant for a harness that is not on is dormant: it changes nothing until the owner turns that harness on.
+ const harnessOn=harness=>(d.harnesses||['claude']).includes(harness)&&(harness!=='codex'||c.codex?.enabled===true);
+ const dormant=!(harnessOn(grant.senderHarness)&&harnessOn(grant.recipientHarness));
  // The plan covers the whole policy except its capability secret, so any other change makes it stale.
  const visible={...c};delete visible.secret;
  const body={schema:'session_class_grant_plan_v1',workspace:c.workspace,installationId:c.installationId,policyDigest:createHash('sha256').update(stableJson(visible)).digest('hex'),grant};
  const planId=createHash('sha256').update(stableJson(body)).digest('hex');
  if(options.confirm===undefined){
   const base=`triangle-local grant-session-class${options.config?` --config ${shellQuote(options.config)}`:''} --sender-harness ${grant.senderHarness} --to-harness ${grant.recipientHarness}`;
-  return {schema:body.schema,applied:false,workspace:c.workspace,grant,planId,requiresTerminal:true,
-   effect:`Every live, attached ${grant.senderHarness} chat in this workspace may start a conversation with every live, attached ${grant.recipientHarness} chat in it, with no further grant. `+
-    'The bound Codex conversation keeps its own inbox and is never a target. Replies need no grant. Exact pairs and sender lists are unchanged. The policy becomes version 3, which older runtimes refuse.',
+  return {schema:body.schema,applied:false,workspace:c.workspace,grant,planId,requiresTerminal:true,dormant,
+   effect:`Every live, attached ${grant.senderHarness} chat in this workspace may start a conversation with every live, attached ${grant.recipientHarness} chat in it, with no further grant, and a woken chat may answer without a person in the loop. `+
+    'The bound Codex conversation keeps its own inbox and is never a target. Replies need no grant. Exact pairs and sender lists are unchanged. The policy becomes version 3, which older runtimes refuse.'+
+    (dormant?' Messaging is not enabled for both harnesses in this workspace yet, so nothing changes until it is; the grant then takes effect without another step.':''),
    apply:`${base} --confirm ${planId}`};
  }
  if(typeof options.confirm!=='string'||!/^[a-f0-9]{64}$/.test(options.confirm))throw coded('invalid_arguments','--confirm takes the 64-character plan id');
  if(options.interactive!==true)throw coded('owner_terminal_required','Applying a class grant needs an interactive terminal; run the apply command yourself');
  if(options.confirm!==planId)throw coded('plan_stale','That plan id does not match the current policy; create a fresh plan');
- const next={...c,version:3,exactPairs:c.exactPairs??[],classGrants:[...grants,grant]};
+ const next={...c,version:3,exactPairs:c.exactPairs??[],classGrants:[...grants,grant],classRevision:(c.classRevision??0)+1};
  writePrivateJson(file,next);
- return {...summary(next),changed:true,minimumPolicyReaderVersion:3};
+ return {...summary(next),changed:true,minimumPolicyReaderVersion:3,dormant};
 }
