@@ -1,6 +1,6 @@
 # Identity registry v2 (D1): implementation plan
 
-Status: plan, 2026-11-07. No code. Draft for owner and reviewer comment; written by Claude Code and not yet reviewed by anyone else. It turns owner decision D1 of `2026-10-30-identity-destination-design-delta.md` (option A, approved 2026-10-30: a new schema version with a runtime floor) into buildable pieces. It authorizes no code, install, upgrade of the live registry, `peer_` id, pairing, alias or destination rule; each of those stays behind the gates in section 7. Baseline: client main `d418fb1` (PR #162), supervisor manifest v14. Every claim about shipped behavior cites source at that baseline; paths are under `packages/agent-worker/src/` unless they start with `docs/`, `test/`, `packages/` or `scripts/`.
+Status: plan, 2026-11-07. No code. All seven owner decisions (D1-1 to D1-7) were settled the same day at the recommended options (section 10); the plan as a whole still awaits the owner's go-ahead to start building. Written by Claude Code and not yet reviewed by anyone else. It turns owner decision D1 of `2026-10-30-identity-destination-design-delta.md` (option A, approved 2026-10-30: a new schema version with a runtime floor) into buildable pieces. It authorizes no code, install, upgrade of the live registry, `peer_` id, pairing, alias or destination rule; each of those stays behind the gates in section 7. Baseline: client main `d418fb1` (PR #162), supervisor manifest v14. Every claim about shipped behavior cites source at that baseline; paths are under `packages/agent-worker/src/` unless they start with `docs/`, `test/`, `packages/` or `scripts/`.
 
 ## 1. What D1 is
 
@@ -163,15 +163,20 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 
 ## 10. Owner decisions
 
-All are open. Recommendations first.
+**Decision log**
 
-1. **D1-1 Release shape.** **A:** keep v2 inside the existing modules, so D1 installs as a supervisor-only restage plus the client package, with no manifest bump and no helper change. **B:** split the v2 code into new modules (cleaner) and bump to v15 with the helper release path.
-2. **D1-2 File name.** **A:** keep `identity-registry-v1.json` and put the v2 schema inside, so v1 readers refuse loudly. **B:** use `identity-registry-v2.json`, which leaves v1 readers seeing a stale file or none, silently.
-3. **D1-3 Command home.** **A:** `triangle identity upgrade-registry` and `restore-registry` beside `inventory`, `migrate` and `revoke` (needs the client package install). **B:** `triangle-local` offline commands, installable with the supervisor like `grant-session-class`, at the price of splitting identity commands across two CLIs.
-4. **D1-4 Reserved shapes.** **A:** freeze the whole designed set now (serverless binding fields, pairing, alias, destination, reserved audit actions) so Slice 3a and the alias and destination commands need no second floor cycle. **B:** ship agent bindings plus empty collections and add shapes as they are built, each one another schema version and floor event.
-5. **D1-5 Way back.** **A:** backup restore only, with the loss rules of 5.4. **B:** also an in-place downgrade, which needs a separate audit stream or rewritten history; not recommended.
-6. **D1-6 Gate for the upgrade.** **A:** terminal plus plan id (D5-B) with an automatic backup. **B:** OS authentication (D5-A), which needs a new action kind in the Swift provider and the owner's live acceptance, as class grants would have.
-7. **D1-7 Caps.** **A:** 256 each for pairings, aliases and destinations; bindings stay at 1000. **B:** other values.
+- 2026-11-07, D1-1 to D1-7: the owner accepted the recommended option, A, on all seven ("Accept all" in chat). Together: v2 stays inside the existing modules with no manifest bump; the file keeps its v1 name; the upgrade and restore commands live in `triangle identity`; the whole designed set is frozen now; the way back is backup restore only; the upgrade is gated by a terminal plus plan id with an automatic backup; the new collections are capped at 256 each.
+- These are design decisions, not authorization to build or install. D1.0 starts on a separate go-ahead, and every production step stays behind the gates G1 to G5 in section 7.
+
+Options as proposed, with the chosen one marked:
+
+1. **D1-1 Release shape.** **A (chosen):** keep v2 inside the existing modules, so D1 installs as a supervisor-only restage plus the client package, with no manifest bump and no helper change. **B:** split the v2 code into new modules (cleaner) and bump to v15 with the helper release path.
+2. **D1-2 File name.** **A (chosen):** keep `identity-registry-v1.json` and put the v2 schema inside, so v1 readers refuse loudly. **B:** use `identity-registry-v2.json`, which leaves v1 readers seeing a stale file or none, silently.
+3. **D1-3 Command home.** **A (chosen):** `triangle identity upgrade-registry` and `restore-registry` beside `inventory`, `migrate` and `revoke` (needs the client package install). **B:** `triangle-local` offline commands, installable with the supervisor like `grant-session-class`, at the price of splitting identity commands across two CLIs.
+4. **D1-4 Reserved shapes.** **A (chosen):** freeze the whole designed set now (serverless binding fields, pairing, alias, destination, reserved audit actions) so Slice 3a and the alias and destination commands need no second floor cycle. **B:** ship agent bindings plus empty collections and add shapes as they are built, each one another schema version and floor event.
+5. **D1-5 Way back.** **A (chosen):** backup restore only, with the loss rules of 5.4. **B:** also an in-place downgrade, which needs a separate audit stream or rewritten history; not recommended.
+6. **D1-6 Gate for the upgrade.** **A (chosen):** terminal plus plan id (D5-B) with an automatic backup. **B:** OS authentication (D5-A), which needs a new action kind in the Swift provider and the owner's live acceptance, as class grants would have.
+7. **D1-7 Caps.** **A (chosen):** 256 each for pairings, aliases and destinations; bindings stay at 1000. **B:** other values.
 
 ## 11. After D1
 
