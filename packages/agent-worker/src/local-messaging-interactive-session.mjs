@@ -187,11 +187,16 @@ function resolvedWorkspace(workspace) {
  try { return fs.realpathSync(workspace); }
  catch { throw coded('workspace_missing','Opted-in workspace is missing or was moved'); }
 }
+// A class grant (policy version 3) names a sender harness and a recipient harness, never an address: every live attached
+// session of the first may start a conversation with every live attached session of the second. Only these two cross-harness
+// directions exist; a harness never gets a class grant to itself.
+export const CLASS_GRANT_DIRECTIONS=Object.freeze([Object.freeze(['claude','codex']),Object.freeze(['codex','claude'])]);
 // Workspace participation is a distinct owner capability. Discovery credentials never authorize messaging.
 export function readSessionMessagingPolicy(file) {
  const c=readPrivateJson(file);
  // `codex` is the optional second harness: its own receiver policy (exact senders, hex principals or session addresses).
- if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex'&&k!=='exactPairs').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||![1,2].includes(c.version)||typeof c.enabled!=='boolean'||
+ // `exactPairs` (version 2) and `classGrants` (version 3) are the owner's narrower and broader session grants.
+ if(!c||typeof c!=='object'||Object.keys(c).filter(k=>k!=='codex'&&k!=='exactPairs'&&k!=='classGrants').sort().join(',')!=='allowedRecipients,allowedSenders,enabled,installationId,secret,version,workspace'||![1,2,3].includes(c.version)||typeof c.enabled!=='boolean'||
    !UUID_PATTERN.test(c.installationId)||!HEX64_PATTERN.test(c.secret)||typeof c.workspace!=='string'||!path.isAbsolute(c.workspace)||resolvedWorkspace(c.workspace)!==c.workspace||
    !Array.isArray(c.allowedSenders)||!Array.isArray(c.allowedRecipients)||c.allowedSenders.length>64||c.allowedRecipients.length>64||
    [...c.allowedSenders,...c.allowedRecipients].some(id=>!HEX64_PATTERN.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
@@ -201,11 +206,18 @@ export function readSessionMessagingPolicy(file) {
     x.allowedSenders.length>64||new Set(x.allowedSenders).size!==x.allowedSenders.length||x.allowedSenders.some(id=>typeof id!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(id)))throw coded('invalid_session_policy','Invalid workspace messaging policy');
  }
  if(c.version===1&&c.exactPairs!==undefined)throw coded('invalid_session_policy','Exact pairs require policy version 2');
- if(c.version===2){
+ if(c.version<3&&c.classGrants!==undefined)throw coded('invalid_session_policy','Class grants require policy version 3');
+ if(c.version>=2){
   const pairs=c.exactPairs;
   if(!Array.isArray(pairs)||pairs.length>128||pairs.some(p=>!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).sort().join(',')!=='recipient,sender'||
    typeof p.sender!=='string'||!/^(session-)?[a-f0-9]{64}$/.test(p.sender)||typeof p.recipient!=='string'||!/^session-[a-f0-9]{64}$/.test(p.recipient)||p.sender===p.recipient)||
    new Set(pairs.map(p=>p.sender+'\0'+p.recipient)).size!==pairs.length)throw coded('invalid_session_policy','Invalid exact session pairs');
+ }
+ if(c.version===3){
+  const grants=c.classGrants;
+  if(!Array.isArray(grants)||grants.length>CLASS_GRANT_DIRECTIONS.length||grants.some(g=>!g||typeof g!=='object'||Array.isArray(g)||Object.keys(g).sort().join(',')!=='recipientHarness,senderHarness'||
+   !CLASS_GRANT_DIRECTIONS.some(([from,to])=>g.senderHarness===from&&g.recipientHarness===to))||
+   new Set(grants.map(g=>g.senderHarness+'>'+g.recipientHarness)).size!==grants.length)throw coded('invalid_session_policy','Invalid session class grants');
  }
  return c;
 }
@@ -257,6 +269,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    allowedSenders:liveSenders?c.allowedSenders.filter(id=>liveSenders.has(id)):c.allowedSenders,
    codexSenders:liveCodexSenders?codexSenders.filter(id=>id.startsWith('session-')||liveCodexSenders.has(id)):codexSenders,
    exactPairs:(c.exactPairs??[]).filter(p=>p.sender.startsWith('session-')||liveSenders===null||liveSenders.has(p.sender)||liveCodexSenders?.has(p.sender)),
+   classGrants:c.classGrants??[],
    allowedRecipients:liveRecipients?c.allowedRecipients.filter(id=>liveRecipients.has(id)):c.allowedRecipients};}
  // Why a session cannot be reached right now, judged from data already loaded (no I/O); null when it can be.
  const offlineReason=(c,r,a,scope=policyScope(c))=>!r||r.lifecycle==='ended'?'Session has ended or is not discovered'
@@ -285,12 +298,24 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  };
  // Reachable Codex chats a given sender may message, for its credential's recipient claim. Only senders the owner
  // listed for Codex pay for the scan.
- const mayReceive=(c,sender,row)=>(row.harness==='codex'?c.codexOn:c.claudeOn)&&((row.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender)||c.exactPairs.some(p=>p.sender===sender&&p.recipient===row.id));
- async function sessionReceiversFor(c,sender){
-  if(!c.allowedSenders.includes(sender)&&!c.codexSenders.includes(sender)&&!c.exactPairs.some(p=>p.sender===sender))return [];
+ // A class grant needs the sender's harness, which only a session address has (a hex principal never gets one). Rows without
+ // a harness are Claude sessions, as everywhere else in this file.
+ const harnessOfRow=row=>row.harness==='codex'?'codex':'claude';
+ const classAllows=(c,senderHarness,row)=>senderHarness!==null&&c.classGrants.some(g=>g.senderHarness===senderHarness&&g.recipientHarness===harnessOfRow(row));
+ const mayReceive=(c,sender,row,senderHarness=null)=>(row.harness==='codex'?c.codexOn:c.claudeOn)&&((row.harness==='codex'?c.codexSenders:c.allowedSenders).includes(sender)||c.exactPairs.some(p=>p.sender===sender&&p.recipient===row.id)||classAllows(c,senderHarness,row));
+ // The harness a class grant applies to for this sender, or null when no grant names it. Null costs nothing: a workspace without
+ // class grants, and every principal sender, never reads the directory for it.
+ const classHarnessOf=(c,harness)=>c.classGrants.some(g=>g.senderHarness===harness)?harness:null;
+ async function classSenderHarness(c,sender){
+  if(!c.classGrants.length||typeof sender!=='string'||!sender.startsWith('session-'))return null;
+  const r=await journal.getDiscoveredSession({id:sender,installationId:c.installationId,workspace:c.workspace});
+  return r&&r.lifecycle!=='ended'?classHarnessOf(c,harnessOfRow(r)):null;
+ }
+ async function sessionReceiversFor(c,sender,senderHarness=null){
+  if(!c.allowedSenders.includes(sender)&&!c.codexSenders.includes(sender)&&!c.exactPairs.some(p=>p.sender===sender)&&senderHarness===null)return [];
   const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
   return (await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace}))
-   .filter(row=>mayReceive(c,sender,row)&&offlineReason(c,row,attachments.get(row.id),scope)===null).map(row=>row.id);
+   .filter(row=>mayReceive(c,sender,row,senderHarness)&&offlineReason(c,row,attachments.get(row.id),scope)===null).map(row=>row.id);
  }
  return {
   isInteractiveSender:id=>typeof id==='string'&&id.startsWith('session-'),
@@ -306,22 +331,22 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
    await journal.attachDiscoveredSession({id,childId:request.childId,generation:r.generation,installationId:policyScope(c),wakeCapable:request.wakeCapable===true,now:clock()});
    await journal.bindAttachedSessionWake({senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId});
    return {senderId:id,sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,
-    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await sessionReceiversFor(c,id)]})};
+    credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await sessionReceiversFor(c,id,classHarnessOf(c,harness))]})};
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async describeLocalSession(id){const {r}=await current(id);
    return Object.freeze({address:id,generation:r.generation,principal:null,authorityOrigin:null,bindingGeneration:null});},
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
-  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!mayReceive(c,sender,r))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
+  async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!mayReceive(c,sender,r,await classSenderHarness(c,sender)))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
   // One policy read, one directory listing and one attachment listing however many sessions there are.
   async listFor(reader){let result=[];try{
-    const c=policy();
+    const c=policy(),readerHarness=await classSenderHarness(c,reader);
     // A reader outside a harness's sender list is simply shown nothing of that harness.
     const claudeReader=c.claudeOn&&c.allowedSenders.includes(reader),codexReader=c.codexOn&&c.codexSenders.includes(reader);
-    if(claudeReader||codexReader||c.exactPairs.some(p=>p.sender===reader)){
+    if(claudeReader||codexReader||readerHarness!==null||c.exactPairs.some(p=>p.sender===reader)){
      const scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
-     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>mayReceive(c,reader,row));
+     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(row=>mayReceive(c,reader,row,readerHarness));
      const up=new Map(rows.map(row=>[row.id,offlineReason(c,row,attachments.get(row.id),scope)===null]));
      // A session without a live lease is not offline: only an end event or a vanished host process says that.
      const listed=await withSessionPresence(rows,{probe:processProbe,now:clock(),leaseOf:row=>up.get(row.id)?attachments.get(row.id).expires_at-30000:null});

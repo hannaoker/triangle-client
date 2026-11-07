@@ -643,3 +643,155 @@ test('CLI program creates and revokes v2 exact grants without exposing secrets',
   const revoke=await runProgram(['revoke-session',...args]);assert.equal(revoke.code,0,revoke.stderr);assert.deepEqual(JSON.parse(revoke.stdout).exactPairs,[]);
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+test('class grant policy is version 3 only, strict, and never names a harness to itself',()=>{
+ const f=ownerFiles({claude:true});try{
+  const file=readPrivateJson(f.configPath).sessionMessaging.integrationPath,old=readPrivateJson(file);
+  const grant={senderHarness:'claude',recipientHarness:'codex'},reverse={senderHarness:'codex',recipientHarness:'claude'};
+  writePrivateJson(file,{...old,version:3,exactPairs:[],classGrants:[grant]});assert.deepEqual(readSessionMessagingPolicy(file).classGrants,[grant]);
+  writePrivateJson(file,{...old,version:3,exactPairs:[],classGrants:[]});assert.deepEqual(readSessionMessagingPolicy(file).classGrants,[]);
+  writePrivateJson(file,{...old,version:3,exactPairs:[],classGrants:[grant,reverse]});assert.equal(readSessionMessagingPolicy(file).classGrants.length,2);
+  for(const patch of [
+   {version:3,exactPairs:[]},{version:3,classGrants:[grant]},{version:2,exactPairs:[],classGrants:[grant]},{version:1,classGrants:[grant]},
+   {version:3,exactPairs:[],classGrants:[grant,grant]},{version:3,exactPairs:[],classGrants:[grant,reverse,grant]},
+   {version:3,exactPairs:[],classGrants:[{senderHarness:'claude',recipientHarness:'claude'}]},
+   {version:3,exactPairs:[],classGrants:[{senderHarness:'claude',recipientHarness:'grok'}]},
+   {version:3,exactPairs:[],classGrants:[{...grant,extra:true}]},{version:3,exactPairs:[],classGrants:[{senderHarness:'claude'}]},
+   {version:3,exactPairs:[],classGrants:'claude>codex'},{version:4,exactPairs:[],classGrants:[]},
+  ]){
+   writePrivateJson(file,{...old,...patch});assert.throws(()=>readSessionMessagingPolicy(file),{code:'invalid_session_policy'},JSON.stringify(patch));
+  }
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a class grant is a two-step owner action: plan, then confirm from a terminal; revoking needs neither',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=ownerFiles({claude:true});try{
+  const file=readPrivateJson(f.configPath).sessionMessaging.integrationPath;
+  const base={config:f.configPath,'sender-harness':'claude','to-harness':'codex'};
+  const before=fs.readFileSync(file,'utf8');
+  const plan=editSessionGrant('grant-session-class',base);
+  assert.equal(plan.applied,false);assert.equal(plan.requiresTerminal,true);assert.match(plan.planId,/^[a-f0-9]{64}$/);assert.match(plan.apply,/--confirm [a-f0-9]{64}$/);
+  assert.equal(fs.readFileSync(file,'utf8'),before,'a plan changes nothing');assert.equal(JSON.stringify(plan).includes(readPrivateJson(file).secret),false,'a plan never carries the capability secret');
+  // The plan's id covers the policy except its capability secret, so it is not a hash anyone could test secret guesses against.
+  const original=readPrivateJson(file);writePrivateJson(file,{...original,secret:'a'.repeat(64)});
+  assert.equal(editSessionGrant('grant-session-class',base).planId,plan.planId);writePrivateJson(file,original);
+  // Only an interactive terminal applies a plan: not a script, a pipe or an agent shell.
+  assert.throws(()=>editSessionGrant('grant-session-class',{...base,confirm:plan.planId}),{code:'owner_terminal_required'});
+  assert.throws(()=>editSessionGrant('grant-session-class',{...base,confirm:plan.planId,interactive:false}),{code:'owner_terminal_required'});
+  assert.throws(()=>editSessionGrant('grant-session-class',{...base,confirm:'0'.repeat(64),interactive:true}),{code:'plan_stale'});
+  assert.throws(()=>editSessionGrant('grant-session-class',{...base,confirm:'short',interactive:true}),{code:'invalid_arguments'});
+  assert.equal(fs.readFileSync(file,'utf8'),before);
+  // The plan is bound to the policy it described: any other change makes it stale.
+  editSessionGrant('grant-session',{config:f.configPath,senders:[f.desktopSender],to:'session-'+'b'.repeat(64)});
+  assert.throws(()=>editSessionGrant('grant-session-class',{...base,confirm:plan.planId,interactive:true}),{code:'plan_stale'});
+  const fresh=editSessionGrant('grant-session-class',base);assert.notEqual(fresh.planId,plan.planId);
+  const applied=editSessionGrant('grant-session-class',{...base,confirm:fresh.planId,interactive:true});
+  assert.equal(applied.version,3);assert.equal(applied.changed,true);assert.equal(applied.minimumPolicyReaderVersion,3);assert.equal('secret' in applied,false);
+  assert.deepEqual(applied.classGrants,[{senderHarness:'claude',recipientHarness:'codex'}]);assert.equal(applied.exactPairs.length,1);
+  assert.equal(fs.statSync(file).mode&0o777,0o600);assert.equal(readSessionMessagingPolicy(file).version,3);
+  assert.equal(editSessionGrant('grant-session-class',base).changed,false,'already granted: nothing to plan or apply');
+  // Exact grants keep working on a version 3 policy; they never lower its version or drop class grants.
+  const pair={config:f.configPath,senders:[f.desktopSender],to:'session-'+'c'.repeat(64)};
+  const exact=editSessionGrant('grant-session',pair);assert.equal(exact.version,3);assert.equal(exact.minimumPolicyReaderVersion,3);assert.equal(exact.classGrants.length,1);
+  assert.equal(editSessionGrant('revoke-session',pair).version,3);
+  assert.equal(editSessionGrant('list-session-grants',{config:f.configPath}).classGrants.length,1);
+  // Revoking only removes authority, so it needs no plan and no terminal, and the policy stays version 3.
+  const revoked=editSessionGrant('revoke-session-class',base);
+  assert.equal(revoked.changed,true);assert.deepEqual(revoked.classGrants,[]);assert.equal(revoked.version,3);assert.equal(readSessionMessagingPolicy(file).version,3);
+  assert.equal(editSessionGrant('revoke-session-class',base).changed,false);
+  assert.throws(()=>editSessionGrant('revoke-session-class',{...base,confirm:plan.planId}),{code:'invalid_arguments'});
+  for(const bad of [{'sender-harness':'claude','to-harness':'claude'},{'sender-harness':'grok','to-harness':'codex'},{'sender-harness':'claude'},{'to-harness':'codex'},{...base,senders:[f.desktopSender]},{...base,to:'session-'+'d'.repeat(64)}]){
+   assert.throws(()=>editSessionGrant('grant-session-class',{config:f.configPath,...bad}),{code:'invalid_arguments'},JSON.stringify(bad));
+  }
+  assert.throws(()=>editSessionGrant('grant-session',{...pair,'sender-harness':'claude'}),{code:'invalid_arguments'},'class flags are not valid for exact grants');
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('the CLI program prints a class-grant plan but refuses to apply it without a terminal',async()=>{
+ const f=ownerFiles({claude:true});try{
+  const file=readPrivateJson(f.configPath).sessionMessaging.integrationPath;
+  const args=['--config',f.configPath,'--sender-harness','claude','--to-harness','codex'];
+  const plan=await runProgram(['grant-session-class',...args]);assert.equal(plan.code,0,plan.stderr);
+  const shown=JSON.parse(plan.stdout);assert.equal(shown.applied,false);assert.match(shown.apply,/^triangle-local grant-session-class --config '.*' --sender-harness claude --to-harness codex --confirm [a-f0-9]{64}$/);
+  const apply=await runProgram(['grant-session-class',...args,'--confirm',shown.planId]);
+  assert.notEqual(apply.code,0);assert.match(apply.stderr,/owner_terminal_required/);assert.equal(readSessionMessagingPolicy(file).version,1,'nothing was written');
+  // The flags of this command mean nothing elsewhere.
+  const stray=await runProgram(['list-session-grants','--config',f.configPath,'--confirm',shown.planId]);assert.notEqual(stray.code,0);assert.match(stray.stderr,/invalid_arguments/);
+  const strayHarness=await runProgram(['status','--config',f.configPath,'--sender-harness','claude']);assert.notEqual(strayHarness.code,0);assert.match(strayHarness.stderr,/invalid_arguments/);
+  const strayRevoke=await runProgram(['revoke-session-class',...args,'--confirm',shown.planId]);assert.notEqual(strayRevoke.code,0);assert.match(strayRevoke.stderr,/invalid_arguments/);
+  assert.deepEqual(JSON.parse((await runProgram(['list-session-grants','--config',f.configPath])).stdout).classGrants,[]);
+  const revoke=await runProgram(['revoke-session-class',...args]);assert.equal(revoke.code,0,revoke.stderr);assert.equal(JSON.parse(revoke.stdout).changed,false);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a class grant admits every live session of the harness, new ones included, with no per-session grant',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=await fixture({claude:true});try{
+  const file=f.config.sessionMessaging.integrationPath,policy=readPrivateJson(file);
+  // Nobody is listed for Codex chats, so only a class grant can admit a Claude session.
+  writePrivateJson(file,{...policy,codex:{enabled:true,allowedSenders:[]}});
+  const claudeChat=async()=>{
+   const sessionId=uuid(),childId=uuid();await f.lifecycle(sessionId,'SessionStart','claude');
+   const attach=()=>f.client().attachSession({harness:'claude',sessionId,childId,secret:policy.secret,installationId:policy.installationId});
+   const first=await attach();return {address:first.senderId,client:f.client(first.senderId),attach};
+  };
+  const codexChat=async()=>{const thread=uuid();await f.lifecycle(thread,'SessionStart');const child=f.codexChild();await call(child,thread,'triangle_get_status');return {thread,child,address:f.address(thread)};};
+  // A fresh credential, as the chat's heartbeat renews it, and what that credential lists as reachable Codex chats.
+  const reach=async chat=>{const grant=await chat.attach();const rows=await chat.client.listSessions({credential:grant.credential});
+   return {grant,visible:rows.filter(r=>r.harness==='codex'&&r.capabilities.reachable).map(r=>r.id).sort()};};
+  const apply=(from,to)=>{const base={config:f.configPath,'sender-harness':from,'to-harness':to};return editSessionGrant('grant-session-class',{...base,confirm:editSessionGrant('grant-session-class',base).planId,interactive:true});};
+
+  const claudeA=await claudeChat(),codexA=await codexChat();
+  const before=await reach(claudeA);assert.deepEqual(before.visible,[],'no class grant yet');
+  await assert.rejects(claudeA.client.sendMessage({to:codexA.address,text:'early',messageId:'cg-early',requestId:'cg-early'},{credential:before.grant.credential}),{code:'recipient_not_allowed'});
+
+  assert.equal(apply('claude','codex').version,3);
+  // Sessions that start after the grant need nothing more: not a new Claude chat, not a new Codex chat.
+  const claudeB=await claudeChat(),codexB=await codexChat();
+  const expected=[codexA.address,codexB.address].sort();
+  assert.deepEqual((await reach(claudeA)).visible,expected);
+  const b=await reach(claudeB);assert.deepEqual(b.visible,expected);
+  await claudeB.client.sendMessage({to:codexB.address,text:'hello',messageId:'cg-1',requestId:'cg-1'},{credential:b.grant.credential});
+  const claim=await call(codexB.child,codexB.thread,'triangle_claim_message',{messageId:'cg-1',claimId:'cg-1-claim'});
+  // Replies follow claim custody; a class grant is a grant to start a conversation only.
+  await call(codexB.child,codexB.thread,'triangle_reply_message',{messageId:'cg-1',claimToken:claim.claimToken,text:'hi',replyId:'cg-1-reply'});
+  assert.deepEqual((await claudeB.client.listReplies({requestId:'cg-1'},{credential:b.grant.credential})).map(r=>r.text),['hi']);
+
+  // The grant is one-way and for sessions: the reverse direction and the bound owner principal are untouched.
+  await assert.rejects(call(codexA.child,codexA.thread,'triangle_send_message',{to:claudeA.address,text:'reverse',messageId:'cg-rev',requestId:'cg-rev'}),/recipient_not_allowed/);
+  await assert.rejects(f.owner.sendMessage({to:codexA.address,text:'owner',messageId:'cg-owner',requestId:'cg-owner'},{credential:await f.grant()}),{code:'recipient_not_allowed'});
+  apply('codex','claude');await codexA.child.heartbeat();
+  await call(codexA.child,codexA.thread,'triangle_send_message',{to:claudeA.address,text:'reverse',messageId:'cg-rev2',requestId:'cg-rev2'});
+
+  // An ended chat and the bound Codex conversation are never targets.
+  await f.lifecycle(codexA.thread,'SessionEnd');
+  const afterEnd=await reach(claudeA);assert.deepEqual(afterEnd.visible,[codexB.address]);
+  await assert.rejects(claudeA.client.sendMessage({to:codexA.address,text:'ended',messageId:'cg-ended',requestId:'cg-ended'},{credential:afterEnd.grant.credential}),{code:'session_offline'});
+  const bound=f.address('11111111-2222-4333-8444-555555555555');await f.lifecycle('11111111-2222-4333-8444-555555555555','SessionStart');
+  const withBound=await reach(claudeA);assert.equal(withBound.visible.includes(bound),false);
+  await assert.rejects(claudeA.client.sendMessage({to:bound,text:'bound',messageId:'cg-bound',requestId:'cg-bound'},{credential:withBound.grant.credential}),error=>['session_offline','recipient_not_allowed'].includes(error.code));
+
+  // Revoking fences a credential that was issued while the grant stood, at the next send.
+  const stale=await reach(claudeB);assert.deepEqual(stale.visible,[codexB.address]);
+  assert.equal(editSessionGrant('revoke-session-class',{config:f.configPath,'sender-harness':'claude','to-harness':'codex'}).changed,true);
+  await assert.rejects(claudeB.client.sendMessage({to:codexB.address,text:'revoked',messageId:'cg-revoked',requestId:'cg-revoked'},{credential:stale.grant.credential}),{code:'recipient_not_allowed'});
+  assert.deepEqual((await reach(claudeB)).visible,[]);
+ }finally{await f.close();}
+});
+
+test('ordinary setup keeps class grants; exact-only setup drops the ones that admit into that harness',async()=>{
+ const {editSessionGrant}=await import('../src/local-messaging-cli.mjs');
+ const f=ownerFiles({claude:true});try{
+  const file=readPrivateJson(f.configPath).sessionMessaging.integrationPath;
+  for(const [from,to] of [['claude','codex'],['codex','claude']]){
+   const base={config:f.configPath,'sender-harness':from,'to-harness':to};
+   editSessionGrant('grant-session-class',{...base,confirm:editSessionGrant('grant-session-class',base).planId,interactive:true});
+  }
+  assert.equal(readSessionMessagingPolicy(file).classGrants.length,2);
+  setupWorkspaceMessaging(f.codexOptions);
+  assert.equal(readSessionMessagingPolicy(file).version,3);assert.equal(readSessionMessagingPolicy(file).classGrants.length,2,'ordinary setup keeps class grants');
+  setupWorkspaceMessaging({...f.codexOptions,senders:undefined,exactOnly:true});
+  assert.deepEqual(readSessionMessagingPolicy(file).classGrants,[{senderHarness:'codex',recipientHarness:'claude'}],'exact-only for Codex drops the grant into Codex and keeps the other');
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
