@@ -631,7 +631,7 @@ process remains, then remove only that stale lock before retrying. Never steal a
 active lock or remove the policy itself. Reads and message processing do not
 acquire this owner-edit lock.
 
-## Workspace class grants (source candidate, not installed)
+## Workspace class grants (installed on Mini 2026-11-07; none applied)
 
 An exact grant names two addresses, and every new chat is a new address, so a standing arrangement between harnesses
 needed a grant for each pair. A class grant names two harnesses instead: while it stands, every live attached session of
@@ -696,6 +696,19 @@ runtime, or disable messaging; do not hand-edit the version field. Do not run an
 version 3 policy: it rewrites the file without the class fields it does not know, and neither release can then read it. This
 release's setup repairs such a file by dropping the class fields it lost, which can only remove authority; otherwise disable
 messaging and set it up again, which starts a fresh version 1 policy and drops the exact pairs too.
+
+Installed state (2026-11-07). Main `3267715` is installed as the supervisor runtime only: bundle `7eb3b2f0…`, manifest v14 with
+the same 90 artifacts, replacing `4d0a391d…` (from `77fcf89`, PRs #151 and #152). Exactly three artifacts differ:
+`local-messaging-cli.mjs`, `local-messaging-interactive-session.mjs` and `local-messaging-server.mjs`. The codex, hermes and
+antigravity manifests were not restaged, because no worker runner imports those files. Nothing else changed:
+`session-messaging.json` and `local-messaging.json` are byte-identical to their pre-install copies (policy version 2;
+`list-session-grants` reports `classGrants: []`), journal counts and wake state were unchanged, and no class grant has been applied. `triangle-local` and any
+session MCP child started now run the new bundle. Children started before the install (one Claude chat and one Codex Desktop
+chat at install time) keep the old one until reloaded, and must be reloaded before the first grant is applied. The install
+record is `~/Library/Application Support/The Triangle/releases/class-grants-install-verification.json`; the pre-change copies
+are in `~/Library/Application Support/The Triangle/archive/class-grants-20261107T181637Z/`, and a manual rollback restores
+`supervisor.manifest.pre.json` from there and starts the service. The acceptance steps in the
+[review record](../reviews/2026-11-07-workspace-class-grants.md) have not been run.
 
 ## Delivery explanations (candidate installed on Mini 2026-10-28)
 
