@@ -149,8 +149,13 @@ policy stays version 3. Record the result beside this note.
 ## Acceptance result (2026-11-07)
 
 Run at the owner's request in chat, from a fresh Claude chat (`the-triangle-d5`, 4886e6ab) against the live Codex chat 12de4548.
-Neither chat appeared in an exact pair. The runtime was the installed bundle `7eb3b2f0…`: all four session MCP children ran it,
-no `4d0a391d` process remained, and the older Claude chat 4b4cd69b and Codex chat 219b4f0f had ended.
+Neither chat appeared in an exact pair. At the start the supervisor and all four session MCP children ran the installed bundle
+`7eb3b2f0…`, no `4d0a391d` process remained, and the older Claude chat 4b4cd69b and Codex chat 219b4f0f had ended.
+
+A separate install of main `cc929a0` (PR #145, `grok wait`) moved the supervisor to bundle `9034909d…` at 21:23:36Z, partway
+through; it changes only `grok-local-session.mjs` and `local-messaging-cli.mjs`. The apply, directory, send and reply, and
+Claude-to-Claude steps (reply at 21:19:51Z) ran on the first supervisor. The revoke (policy file rewritten at 21:27:33Z) and the
+refused send after it ran on the second, with this Claude chat's own session MCP child still on `7eb3b2f0…`.
 
 - Plan: `grant-session-class --sender-harness claude --to-harness codex` printed plan `49a5c839…` (`applied: false`,
   `dormant: false`) and wrote nothing. Before the apply the Claude chat's directory listed only `gravity2`.
