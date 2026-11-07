@@ -48,7 +48,7 @@ export function describeRecipientDelivery(row){
  if(row.capabilities?.reachable)return view('ready_to_queue','A delivery route is attached; this does not prove execution.','Send a request, then inspect its message status and correlated reply.');
  if(row.attachment==='ended'||row.lifecycle==='ended')return view('session_ended','The session has ended.','Reopen the same session or ask the owner to select a new target; do not silently substitute another chat.');
  if(row.attachment==='not-attached')return view('not_attached','The chat has no current Triangle attachment.','Open or reload that chat and call triangle_get_status.');
- if(row.capabilities?.visible)return view('visible_only','Listed by discovery; delivery authorization or attachment is not established.','Ask the owner to check exact grants and session attachment. Discovery alone grants no delivery permission.');
+ if(row.capabilities?.visible)return view('visible_only','Listed by discovery; delivery authorization or attachment is not established.','Ask the owner to check exact and class grants and session attachment. Discovery alone grants no delivery permission.');
  return view('availability_unknown','The recipient is configured; live delivery availability is not established.','Send only if authorized and check the resulting message status.');
 }
 

@@ -604,7 +604,8 @@ still apply in addition to session policy.
 To opt a harness into messaging without workspace-wide inbound senders, use
 `setup-session-messaging --harness codex --workspace WORKSPACE --exact-only` (or
 `--harness claude`). This explicitly clears only that harness's workspace-wide
-sender list; existing exact pairs and the other harness's grants are preserved.
+sender list, and the class grants into it (see "Workspace class grants"); existing
+exact pairs and the other harness's grants are preserved.
 It retains the normal setup/trust/reload requirements. Do not apply it to a live
 workspace without owner approval for the intended permission change.
 
@@ -629,6 +630,72 @@ A crash can leave a lock: stop owner configuration commands, verify no such edit
 process remains, then remove only that stale lock before retrying. Never steal an
 active lock or remove the policy itself. Reads and message processing do not
 acquire this owner-edit lock.
+
+## Workspace class grants (source candidate, not installed)
+
+An exact grant names two addresses, and every new chat is a new address, so a standing arrangement between harnesses
+needed a grant for each pair. A class grant names two harnesses instead: while it stands, every live attached session of
+the sender harness in this workspace may start a conversation with every live attached session of the recipient harness,
+with no further grant. Only `claude` to `codex` and `codex` to `claude` exist, each as its own directional grant; a harness
+never gets one to itself.
+
+```text
+triangle-local grant-session-class --sender-harness claude --to-harness codex                   # prints a plan; changes nothing
+triangle-local grant-session-class --sender-harness claude --to-harness codex --confirm PLAN_ID # applies it, in a terminal
+triangle-local revoke-session-class --sender-harness claude --to-harness codex
+triangle-local list-session-grants                                                              # now also reports classGrants
+```
+
+What it grants. The grant is read at the same three points as an exact pair: the delivery directory, the credential's recipient
+claim and the authoritative send-time check. A session that starts after the grant needs nothing more, and revoking fences a
+credential that was issued while the grant stood at its next send. Only live, attached, not-ended sessions of the recipient
+harness can be messaged, and a reader admitted only by a class grant is listed only those chats: idle and ended chats, and their
+titles, stay out of its directory. The owner's sender lists and exact pairs keep the wider directory they always gave. The
+bound Codex conversation is never a target, because it keeps its own identity and inbox. A class grant applies to session
+addresses only: a hex principal such as the bound owner identity never gains anything from it. Replies follow claim custody and
+need no grant in either direction. Exact pairs and the workspace-wide sender lists are unchanged and independent of it. If
+messaging is not on for either harness the grant is dormant: the plan says so (`dormant: true`), and `setup-session-messaging`
+reports `classGrants`, so turning that harness on later does not activate a standing grant unseen.
+
+What it trusts. The sender's harness is read from its discovery row, and that row holds whatever its registration claimed. A
+process running as the same user can register a made-up session of either harness with a hook payload and the policy secret.
+An exact pair needs one specific session; under a class grant such a process can message every chat of the other harness. That
+stays inside the same-account boundary every owner file has, but it is a wider reach than an exact pair gives.
+
+Applying one is a deliberate two-step owner action. The first call prints a plan and changes nothing. The second names the plan
+id and needs both stdin and stdout to be terminals, as `identity migrate --confirm` does (`owner_terminal_required` otherwise);
+a piped or captured result does not count. The id covers the whole policy except its capability secret, including the grant
+and a revision counter (`classRevision`) that grows with every class grant change. A plan therefore goes stale (`plan_stale`)
+after any other policy change, and it cannot be replayed from a shell history or transcript after a grant and its revoke have
+brought the policy back to the same content. This is the weaker "terminal plus plan id" gate (D5-B). The approved D5 decision
+(C) reserves it for first-time profile bindings and asks for OS authentication (D5-A) for chat mappings. A class grant is
+authority by harness and workspace with no per-chat confirmation, the shape identity rule 3.A.3 refuses to accept for mappings,
+so the owner accepted D5-B for class grants specifically on 2026-11-07, which does not move the D5 decision for chat mappings.
+It is a confirmation step, not a security boundary. It stops scripts,
+agent shells and anything that captures output. It does not stop a process that allocates a pseudo-terminal (a pty from Python's
+standard library passes it, which was tried on disposable state), and nothing here protects the policy file itself: it is
+private to the account, so a process running as the same user can write a class grant into it directly. D5-A is a separate
+follow-up: the owner-approval helper accepts only identity operations today, and teaching it this one changes the native
+helper, the release manifest and the owner's live acceptance. Revoking only removes authority, so it needs no plan and no
+terminal.
+
+This is a broader grant than an exact pair and is the reason the exact-pair model exists. Any live session of the sender harness
+in this workspace, including one that has read untrusted content, can wake a recipient-harness chat and obtain an answer with no
+person in the loop: Codex pre-approves its inbox tools so that a woken chat can answer. Prefer exact pairs wherever the recipient
+holds anything sensitive. Identity decision D4 is unchanged: chats stay unbound, a class grant gives no session a principal, and
+it does not let any chat inherit another's authority.
+
+Policy and rollout. Applying the first class grant migrates the private session policy to version 3, which adds `classGrants`
+and keeps `exactPairs` required. Older readers reject version 3: attached sessions then disappear from listings and the supervisor
+logs `Workspace session messaging unavailable (invalid_session_policy)`, while configured recipients keep working. Install the
+matching supervisor, CLI and session MCP runtime and reload existing MCP children before applying. Exact grant and revoke on a
+version 3 policy keep version 3, and revoking the last class grant keeps it too. `setup-session-messaging` keeps class grants;
+with `--exact-only` it drops the ones that admit into that harness, because that flag means no workspace-wide inbound senders,
+and that counts as a class grant change. Rollback: restore a privately saved compatible policy together with its matching
+runtime, or disable messaging; do not hand-edit the version field. Do not run an older `setup-session-messaging` against a
+version 3 policy: it rewrites the file without the class fields it does not know, and neither release can then read it. This
+release's setup repairs such a file by dropping the class fields it lost, which can only remove authority; otherwise disable
+messaging and set it up again, which starts a fresh version 1 policy and drops the exact pairs too.
 
 ## Delivery explanations (candidate installed on Mini 2026-10-28)
 
