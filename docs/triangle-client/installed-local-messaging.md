@@ -701,8 +701,8 @@ Installed state (2026-11-07). Main `3267715` is installed as the supervisor runt
 the same 90 artifacts, replacing `4d0a391d…` (from `77fcf89`, PRs #151 and #152). Exactly three artifacts differ:
 `local-messaging-cli.mjs`, `local-messaging-interactive-session.mjs` and `local-messaging-server.mjs`. The codex, hermes and
 antigravity manifests were not restaged, because no worker runner imports those files. Nothing else changed:
-`session-messaging.json` and `local-messaging.json` are byte-identical to their pre-install copies (policy version 2,
-`classGrants` `[]`), journal counts and wake state were unchanged, and no class grant has been applied. `triangle-local` and any
+`session-messaging.json` and `local-messaging.json` are byte-identical to their pre-install copies (policy version 2;
+`list-session-grants` reports `classGrants: []`), journal counts and wake state were unchanged, and no class grant has been applied. `triangle-local` and any
 session MCP child started now run the new bundle. Children started before the install (one Claude chat and one Codex Desktop
 chat at install time) keep the old one until reloaded, and must be reloaded before the first grant is applied. The install
 record is `~/Library/Application Support/The Triangle/releases/class-grants-install-verification.json`; the pre-change copies
