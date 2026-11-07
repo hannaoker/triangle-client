@@ -35,7 +35,8 @@ identity operations, so teaching it this one changes the native helper, the rele
 
 The approved D5 decision (C) reserves D5-B for first-time profile bindings and asks for D5-A for chat mappings. A class grant is
 authority by harness and workspace with no per-chat confirmation, the shape identity rule 3.A.3 refuses to accept for mappings.
-No recorded owner decision covers using D5-B here. That decision is open (see below).
+No recorded owner decision covered using D5-B here until 2026-11-07, when the owner accepted it for class grants after this
+was put to them (see Owner decisions).
 
 ## Verification
 
@@ -78,10 +79,13 @@ Not adopted from the review: refusing SSH sessions as `identity revoke` does. Th
 needs a GUI session. Here it would stop an owner who administers the Mini remotely, and the gate is a confirmation step either
 way; the owner can ask for it.
 
-## Owner decisions still open
+## Owner decisions
 
-1. Whether the terminal-plus-plan-id gate is enough for class grants, or class grants wait for D5-A (OS authentication).
-2. Whether to refuse SSH sessions for applying a plan.
+1. **Decided 2026-11-07, in chat:** the terminal-plus-plan-id gate (D5-B) is accepted for class grants. The owner chose it over
+   waiting for D5-A (OS authentication), knowing that it is a confirmation step and not a boundary: a pseudo-terminal passes it
+   and a process running as the same user can edit the policy file. D5-A stays a possible follow-up, not a precondition. The
+   choice covers class grants only; it does not move the D5 decision (C) for identity chat mappings.
+2. **Open:** whether to refuse SSH sessions for applying a plan. Not adopted so far.
 
 Residual risk, unchanged by the gate: any live session of the sender harness in the workspace, including one that has read
 untrusted content, can wake a recipient-harness chat and obtain an answer with no person in the loop, because Codex pre-approves

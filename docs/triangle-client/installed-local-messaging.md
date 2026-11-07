@@ -670,7 +670,8 @@ after any other policy change, and it cannot be replayed from a shell history or
 brought the policy back to the same content. This is the weaker "terminal plus plan id" gate (D5-B). The approved D5 decision
 (C) reserves it for first-time profile bindings and asks for OS authentication (D5-A) for chat mappings. A class grant is
 authority by harness and workspace with no per-chat confirmation, the shape identity rule 3.A.3 refuses to accept for mappings,
-so using D5-B here has no owner decision behind it yet. It is a confirmation step, not a security boundary. It stops scripts,
+so the owner accepted D5-B for class grants specifically on 2026-11-07, which does not move the D5 decision for chat mappings.
+It is a confirmation step, not a security boundary. It stops scripts,
 agent shells and anything that captures output. It does not stop a process that allocates a pseudo-terminal (a pty from Python's
 standard library passes it, which was tried on disposable state), and nothing here protects the policy file itself: it is
 private to the account, so a process running as the same user can write a class grant into it directly. D5-A is a separate
