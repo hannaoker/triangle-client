@@ -24,6 +24,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   ftruncateSync,
@@ -1416,6 +1417,7 @@ function ensureSafeRootForWrite(root) {
   if (!st) {
     try {
       mkdirSync(root, { mode: 0o700 });
+      chmodSync(root, 0o700); // the umask may have taken bits away, and a root left at the wrong mode fails every later call
       syncDir(path.dirname(root));
     } catch (error) {
       if (error?.code !== "EEXIST") {
@@ -1864,6 +1866,8 @@ function readAndVerifyUnlocked(root, fsHooks = null) {
       auditEntries: auditResult.entries,
       committedByteLength: auditResult.committedByteLength,
       uncommittedTail: auditResult.uncommittedTail,
+      registryBytes: regBuf,
+      auditBytes: auditBuf,
     },
   };
 }
@@ -2451,5 +2455,531 @@ export function updateIdentityRegistry({
       registry: validatedRegistry,
       auditEntry,
     });
+  });
+}
+
+// ---- backups and restore (D1.3) -------------------------------------------------------------------------------------------------
+//
+// A backup is a private directory OUTSIDE the registry root that holds exactly the two files a reader accepts (the registry
+// file and the committed bytes of the audit log). It must live outside: the root custody check refuses any directory inside
+// the root, so a backup there would make every read and write fail. Both functions below hold the registry lock while they
+// copy, so a backup is always a pair that was consistent at one instant, and a restore cannot interleave with a writer.
+
+const RAW_COPY_MAX_BYTES = 64 * 1024 * 1024;
+
+function sha256Buffer(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+// macOS volumes are case-insensitive by default, so two spellings of one directory must not look disjoint.
+const foldCase = process.platform === "darwin" ? (p) => p.toLowerCase() : (p) => p;
+
+function isSameOrInside(parent, child) {
+  const rel = path.relative(foldCase(parent), foldCase(child));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function assertDisjointDirs(a, b, reason) {
+  if (isSameOrInside(a, b) || isSameOrInside(b, a)) {
+    throw codedError("invalid_registry", reason);
+  }
+}
+
+function stampFromIso(nowIso) {
+  return `${nowIso.slice(0, 19).replace(/[-:]/g, "")}Z`;
+}
+
+function createPrivateChildDir(parent, baseName) {
+  for (let n = 1; n <= 99; n += 1) {
+    const dir = path.join(parent, n === 1 ? baseName : `${baseName}-${n}`);
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if (err?.code === "EEXIST") continue;
+      throw codedError("registry_unsafe", "backup_mkdir_failed");
+    }
+    chmodSync(dir, 0o700);
+    return dir;
+  }
+  throw codedError("registry_unsafe", "backup_name_exhausted");
+}
+
+function writePrivateFileSync(filePath, buffer) {
+  const fd = openSync(filePath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    fchmodSync(fd, 0o600); // on the descriptor we hold, whatever the umask did
+    writeBufferAll(fd, buffer);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function removeOwnDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {}
+}
+
+/**
+ * Copies the verified registry pair into a new private directory under `backupParent` (created 0700 when missing).
+ * Needs a readable registry; copies the registry file and only the committed bytes of the audit log, so a stale uncommitted
+ * line (for example a crashed upgrade) is never carried into a backup. The copy is read back with the registry reader and
+ * compared byte for byte before it is reported. Returns where it is and what it holds.
+ */
+export function backupIdentityRegistry({ root, backupParent, now, lockTimeoutMs = LOCK_TIMEOUT_MS, faultHook = null } = {}) {
+  const nowIso = resolveNowIso(now, "invalid_registry");
+  assertRootPathSyntax(root);
+  assertRootPathSyntax(backupParent);
+  assertDisjointDirs(root, backupParent, "backup_parent_overlaps_registry_root");
+  // Reading must not create anything: a missing root, or a root without a registry file, is refused before the lock (which
+  // would create the root's lock file).
+  if (!checkSafeExistingRoot(root) || !lstatSync(path.join(root, REGISTRY_FILE_NAME), { throwIfNoEntry: false })) {
+    throw codedError("invalid_registry", "backup_requires_registry");
+  }
+  return withRegistryLock(root, lockTimeoutMs, () => {
+    const live = readAndVerifyUnlocked(root);
+    if (live.state !== "ok") {
+      throw codedError("invalid_registry", "backup_requires_registry");
+    }
+    const registryBytes = live.internal.registryBytes;
+    const auditBytes = live.internal.auditBytes === null ? null : live.internal.auditBytes.subarray(0, live.internal.committedByteLength);
+    ensureSafeRootForWrite(backupParent);
+    const dir = createPrivateChildDir(backupParent, `backup-${live.registry.schema === IDENTITY_REGISTRY_SCHEMA_V2 ? "v2" : "v1"}-${stampFromIso(nowIso)}`);
+    try {
+      if (typeof faultHook === "function") faultHook("before_backup_write", { dir });
+      writePrivateFileSync(path.join(dir, REGISTRY_FILE_NAME), registryBytes);
+      if (auditBytes !== null && auditBytes.length > 0) {
+        writePrivateFileSync(path.join(dir, AUDIT_FILE_NAME), auditBytes);
+      }
+      syncDir(dir);
+      syncDir(backupParent);
+      if (typeof faultHook === "function") faultHook("after_backup_write", { dir });
+      const copy = readAndVerifyUnlocked(dir);
+      if (
+        copy.state !== "ok" ||
+        copy.registry.schema !== live.registry.schema ||
+        copy.registry.sequence !== live.registry.sequence ||
+        copy.registry.auditHead.hash !== live.registry.auditHead.hash ||
+        copy.internal.uncommittedTail !== 0 ||
+        !copy.internal.registryBytes.equals(registryBytes) ||
+        (auditBytes !== null && auditBytes.length > 0 && !copy.internal.auditBytes?.equals(auditBytes))
+      ) {
+        throw codedError("registry_corrupt", "backup_verification_failed");
+      }
+      if (typeof faultHook === "function") faultHook("after_backup_verify", { dir });
+    } catch (err) {
+      removeOwnDir(dir);
+      throw err;
+    }
+    return deepFreeze({
+      dir,
+      schema: live.registry.schema,
+      sequence: live.registry.sequence,
+      auditHead: live.registry.auditHead,
+      bindings: Object.keys(live.registry.bindings).length,
+      registrySha256: sha256Buffer(registryBytes),
+      auditSha256: auditBytes === null || auditBytes.length === 0 ? null : sha256Buffer(auditBytes),
+      takenAt: nowIso,
+    });
+  });
+}
+
+function readRawFilePair(root) {
+  const reg = readNoFollowDescriptor(path.join(root, REGISTRY_FILE_NAME), RAW_COPY_MAX_BYTES, "registry_corrupt", "registry_oversized");
+  const aud = readNoFollowDescriptor(path.join(root, AUDIT_FILE_NAME), RAW_COPY_MAX_BYTES, "registry_corrupt", "audit_oversized");
+  if (reg.status === "vanished" || aud.status === "vanished") {
+    const err = codedError("registry_chain_broken", "file_vanished_during_read");
+    err.transientRace = true;
+    throw err;
+  }
+  return { registryBytes: reg.buffer, auditBytes: aud.buffer };
+}
+
+function fingerprintOf(bytes) {
+  return {
+    registry: bytes.registryBytes === null ? null : sha256Buffer(bytes.registryBytes),
+    audit: bytes.auditBytes === null ? null : sha256Buffer(bytes.auditBytes),
+  };
+}
+
+function countV2OnlyData(registry) {
+  if (registry.schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
+    return { serverlessBindings: 0, pairings: 0, aliases: 0, destinations: 0, any: false };
+  }
+  const serverlessBindings = Object.values(registry.bindings).filter((b) => b.trust_mode === "serverless-peer").length;
+  const pairings = Object.keys(registry.pairings).length;
+  const aliases = Object.keys(registry.aliases).length;
+  const destinations = Object.keys(registry.destinations).length;
+  return { serverlessBindings, pairings, aliases, destinations, any: serverlessBindings + pairings + aliases + destinations > 0 };
+}
+
+// What the live root holds, read once. A root whose entries or files are unsafe is refused (`registry_unsafe`); a registry that
+// fails validation or its chain is described as "unreadable" so it can still be replaced from a backup.
+// `final` is false for the lock-free read behind a plan: a read that raced a writer is thrown for the caller to retry. Under
+// the lock (and on the caller's last attempt) a registry that fails its checks is described as unreadable.
+function describeLiveRegistry(root, { final = true, fsHooks = null } = {}) {
+  let verified;
+  try {
+    verified = readAndVerifyUnlocked(root, fsHooks);
+  } catch (err) {
+    if (err?.code === "registry_unsafe" || err?.transientRace === true || (!final && isRetryableReadTimingError(err))) throw err;
+    const bytes = readRawFilePair(root);
+    return {
+      state: "unreadable",
+      errorCode: `${err?.code ?? "unknown"}:${err?.reason ?? ""}`,
+      registry: null,
+      entries: [],
+      uncommittedTail: null,
+      v2Data: null,
+      bytes,
+      fingerprint: fingerprintOf(bytes),
+    };
+  }
+  if (verified.state === "absent") {
+    const bytes = checkSafeExistingRoot(root) ? readRawFilePair(root) : { registryBytes: null, auditBytes: null };
+    return { state: "absent", errorCode: null, registry: null, entries: [], uncommittedTail: null, v2Data: null, bytes, fingerprint: fingerprintOf(bytes) };
+  }
+  const bytes = { registryBytes: verified.internal.registryBytes, auditBytes: verified.internal.auditBytes };
+  return {
+    state: "ok",
+    errorCode: null,
+    registry: verified.registry,
+    entries: verified.internal.auditEntries.slice(0, verified.registry.auditHead.sequence),
+    uncommittedTail: verified.internal.uncommittedTail,
+    v2Data: countV2OnlyData(verified.registry),
+    bytes,
+    fingerprint: fingerprintOf(bytes),
+  };
+}
+
+function describeBackupDir(backupDir) {
+  let verified;
+  try {
+    verified = readAndVerifyUnlocked(backupDir);
+  } catch (err) {
+    const wrapped = codedError("invalid_registry", "restore_backup_unreadable");
+    wrapped.detail = `${err?.code ?? "unknown"}:${err?.reason ?? ""}`;
+    throw wrapped;
+  }
+  if (verified.state !== "ok") {
+    const wrapped = codedError("invalid_registry", "restore_backup_unreadable");
+    wrapped.detail = "absent";
+    throw wrapped;
+  }
+  if (verified.registry.schema !== IDENTITY_REGISTRY_SCHEMA) {
+    throw codedError("invalid_registry", "restore_backup_not_v1");
+  }
+  if (verified.internal.uncommittedTail !== 0) {
+    throw codedError("invalid_registry", "restore_backup_unfinished_write");
+  }
+  return {
+    dir: backupDir,
+    registry: verified.registry,
+    entries: verified.internal.auditEntries,
+    registryBytes: verified.internal.registryBytes,
+    auditBytes: verified.internal.auditBytes,
+  };
+}
+
+function leadingEqualCount(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let n = 0;
+  while (n < limit && a[n].hash === b[n].hash) n += 1;
+  return n;
+}
+
+function compareHistories(live, backup) {
+  if (live.state !== "ok") {
+    return { relation: "unknown", discarded: [], commonPrefix: 0 };
+  }
+  const common = leadingEqualCount(live.entries, backup.entries);
+  const liveSeq = live.registry.sequence;
+  const backupSeq = backup.registry.sequence;
+  // `unrelated`: not one audit entry in common, so the backup is another registry, not an earlier or later state of this one
+  let relation = common === 0 ? "unrelated" : "diverged";
+  if (common === liveSeq && common === backupSeq) relation = "same";
+  else if (common === backupSeq && liveSeq > common) relation = "ahead";
+  else if (common === liveSeq && backupSeq > common) relation = "behind";
+  const discarded = live.entries
+    .slice(common)
+    .map((e) => ({ sequence: e.sequence, at: e.at, action: e.action, subject: e.subject, bindingId: e.bindingId }));
+  return { relation, discarded, commonPrefix: common };
+}
+
+/**
+ * Why a restore needs the owner's explicit acceptance of routing changes: it would re-activate a revoked binding, add a
+ * binding the live registry does not have, move one to another principal, or the backup is not an earlier state of this
+ * registry (`behind`, `diverged`, `unrelated`). An empty list means it only removes or revokes bindings, or changes none.
+ */
+function routingAcknowledgement(relation, routing) {
+  const reasons = [];
+  if (routing.reactivated.length > 0) reasons.push("reactivates_revoked_binding");
+  if (routing.added.length > 0) reasons.push("adds_binding");
+  if (routing.changed.length > 0) reasons.push("changes_binding");
+  if (relation === "behind" || relation === "diverged" || relation === "unrelated") reasons.push(`backup_is_${relation}`);
+  return reasons;
+}
+
+function bindingSummary(instanceId, binding) {
+  return {
+    instanceId,
+    profile: binding.profile_name,
+    principal: binding.principal_id,
+    trustMode: binding.trust_mode,
+    generation: binding.binding_generation,
+  };
+}
+
+function sortSummaries(list) {
+  return list.sort((a, b) => compareCodeUnits(a.profile, b.profile) || compareCodeUnits(a.instanceId, b.instanceId));
+}
+
+/**
+ * What a restore changes for routing, binding by binding: `added` (the backup holds an active binding the live registry does
+ * not), `removed` (an active live binding the backup lacks), `reactivated` (revoked live, active in the backup: the restore
+ * undoes a revoke), `revoked` (active live, revoked in the backup) and `changed` (active in both with another principal,
+ * origin or trust mode). With no readable live registry every active backup binding is `added`.
+ */
+function compareBindings(liveRegistry, backupRegistry) {
+  const live = liveRegistry === null ? {} : liveRegistry.bindings;
+  const out = { added: [], removed: [], reactivated: [], revoked: [], changed: [] };
+  for (const [instanceId, binding] of Object.entries(backupRegistry.bindings)) {
+    const was = live[instanceId];
+    const active = binding.revoked_at === null;
+    if (!was) {
+      if (active) out.added.push(bindingSummary(instanceId, binding));
+      continue;
+    }
+    const wasActive = was.revoked_at === null;
+    if (!wasActive && active) out.reactivated.push(bindingSummary(instanceId, binding));
+    else if (wasActive && !active) out.revoked.push(bindingSummary(instanceId, binding));
+    else if (wasActive && active && (was.principal_id !== binding.principal_id || was.authority_origin !== binding.authority_origin || was.trust_mode !== binding.trust_mode)) {
+      out.changed.push(bindingSummary(instanceId, binding));
+    }
+  }
+  for (const [instanceId, was] of Object.entries(live)) {
+    if (!Object.hasOwn(backupRegistry.bindings, instanceId) && was.revoked_at === null) out.removed.push(bindingSummary(instanceId, was));
+  }
+  for (const list of Object.values(out)) sortSummaries(list);
+  return out;
+}
+
+function publicLive(live) {
+  return {
+    state: live.state,
+    errorCode: live.errorCode,
+    schema: live.registry === null ? null : live.registry.schema,
+    sequence: live.registry === null ? null : live.registry.sequence,
+    auditHead: live.registry === null ? null : live.registry.auditHead,
+    bindings: live.registry === null ? null : Object.keys(live.registry.bindings).length,
+    uncommittedTail: live.uncommittedTail,
+    v2Data: live.v2Data,
+    fingerprint: live.fingerprint,
+  };
+}
+
+function publicBackup(backup) {
+  return {
+    dir: backup.dir,
+    schema: backup.registry.schema,
+    sequence: backup.registry.sequence,
+    auditHead: backup.registry.auditHead,
+    bindings: Object.keys(backup.registry.bindings).length,
+    registrySha256: sha256Buffer(backup.registryBytes),
+    auditSha256: backup.auditBytes === null ? null : sha256Buffer(backup.auditBytes),
+  };
+}
+
+/**
+ * Read-only description of what restoring `backupDir` over `root` would do: the live registry (or that it is absent or
+ * unreadable), the backup, how their histories relate (`same`, `ahead` = the live registry has the backup's history and more,
+ * `behind`, `diverged`, or `unknown` when the live registry cannot be read), the audit entries a restore would discard, what it
+ * changes for routing binding by binding (including revokes it would undo), the v2-only data it would lose, and the
+ * fingerprint of the live files a restore must be confirmed against. Writes nothing and
+ * creates nothing. A backup that cannot be restored is refused with the same errors `restoreIdentityRegistry` gives.
+ */
+export function inspectIdentityRegistryRestore({ root, backupDir, fsHooks = null } = {}) {
+  assertRootPathSyntax(root);
+  assertRootPathSyntax(backupDir);
+  assertDisjointDirs(root, backupDir, "backup_overlaps_registry_root");
+  const backup = describeBackupDir(backupDir);
+  let live;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      live = describeLiveRegistry(root, { final: attempt >= READ_MAX_RETRIES, fsHooks });
+      break;
+    } catch (err) {
+      if (attempt < READ_MAX_RETRIES && isRetryableReadTimingError(err)) {
+        sleepSyncMs(READ_RETRY_BACKOFF_MS[attempt] ?? 20);
+        continue;
+      }
+      throw err;
+    }
+  }
+  const { relation, discarded, commonPrefix } = compareHistories(live, backup);
+  const routing = compareBindings(live.registry, backup.registry);
+  return deepFreeze({
+    live: publicLive(live),
+    backup: publicBackup(backup),
+    relation,
+    commonPrefix,
+    discarded,
+    routing,
+    routingAcknowledgement: routingAcknowledgement(relation, routing),
+    willLoseV2Data: live.v2Data !== null && live.v2Data.any,
+  });
+}
+
+function validateLiveFingerprint(value) {
+  const ok = (v) => v === null || (typeof v === "string" && HEX_64_PATTERN.test(v));
+  if (!isPlainObject(value) || !hasExactKeys(value, new Set(["registry", "audit"])) || !ok(value.registry) || !ok(value.audit)) {
+    throw codedError("invalid_registry", "expected_live_fingerprint_required");
+  }
+}
+
+/**
+ * Replaces the live registry pair with the pair in `backupDir` (a v1 backup that reads and verifies), under the registry
+ * lock. `expectedLiveFingerprint` and `expectedBackup` (both from `inspectIdentityRegistryRestore`) are the compare-and-set:
+ * if the live files, or the backup's bytes, are not the ones that were planned, nothing is touched (`registry_changed`). The live registry may be absent or unreadable (that is
+ * what a restore is for). A readable v2 registry that holds v2-only data (a serverless binding, pairing, alias or
+ * destination) is refused unless `discardV2Data` is set. A restore that would re-activate a revoked binding, add or move a
+ * binding, or install a backup that is not an earlier state of this registry is refused unless `acceptRoutingChanges` is set
+ * (the plan lists each one). Staging files a killed restore left behind are removed under the lock. Before anything is replaced the live files are copied byte for byte
+ * into a new `before-restore-...` directory under `archiveParent`. The registry file is replaced first and then the audit log,
+ * so a crash between the two leaves either a readable registry with one stale audit line (which the next write discards) or an
+ * unreadable pair that running the restore again replaces; nothing is lost either way, the archive has the previous files.
+ */
+export function restoreIdentityRegistry({
+  root,
+  backupDir,
+  archiveParent,
+  expectedLiveFingerprint,
+  expectedBackup,
+  discardV2Data = false,
+  acceptRoutingChanges = false,
+  now,
+  lockTimeoutMs = LOCK_TIMEOUT_MS,
+  faultHook = null,
+} = {}) {
+  const nowIso = resolveNowIso(now, "invalid_registry");
+  assertRootPathSyntax(root);
+  assertRootPathSyntax(backupDir);
+  assertRootPathSyntax(archiveParent);
+  assertDisjointDirs(root, backupDir, "backup_overlaps_registry_root");
+  assertDisjointDirs(root, archiveParent, "backup_parent_overlaps_registry_root");
+  validateLiveFingerprint(expectedLiveFingerprint);
+  if (!isPlainObject(expectedBackup) || !HEX_64_PATTERN.test(expectedBackup.registrySha256 ?? "") || !(expectedBackup.auditSha256 === null || HEX_64_PATTERN.test(expectedBackup.auditSha256 ?? ""))) {
+    throw codedError("invalid_registry", "expected_backup_required");
+  }
+  const backup = describeBackupDir(backupDir);
+  // the bytes that will be written are the bytes that were planned, not whatever the directory holds now
+  if (
+    sha256Buffer(backup.registryBytes) !== expectedBackup.registrySha256 ||
+    (backup.auditBytes === null ? null : sha256Buffer(backup.auditBytes)) !== expectedBackup.auditSha256
+  ) {
+    throw codedError("registry_changed", "backup_changed_since_plan");
+  }
+  ensureSafeRootForWrite(root);
+  return withRegistryLock(root, lockTimeoutMs, () => {
+    // staging files of a restore that was killed: nothing else uses these names, and we hold the lock
+    for (const name of readdirSync(root)) {
+      if (name.startsWith(`${REGISTRY_FILE_NAME}.tmp-restore-`)) rmSync(path.join(root, name), { force: true });
+    }
+    const live = describeLiveRegistry(root);
+    if (live.fingerprint.registry !== expectedLiveFingerprint.registry || live.fingerprint.audit !== expectedLiveFingerprint.audit) {
+      throw codedError("registry_changed", "live_registry_changed_since_plan");
+    }
+    if (live.state === "ok" && live.v2Data.any && discardV2Data !== true) {
+      throw codedError("restore_refused", "restore_would_lose_v2_data");
+    }
+    const { relation, discarded } = compareHistories(live, backup);
+    const routing = compareBindings(live.registry, backup.registry);
+    if (routingAcknowledgement(relation, routing).length > 0 && acceptRoutingChanges !== true) {
+      throw codedError("restore_refused", "restore_would_change_routing");
+    }
+
+    let archive = null;
+    if (live.bytes.registryBytes !== null || live.bytes.auditBytes !== null) {
+      ensureSafeRootForWrite(archiveParent);
+      if (typeof faultHook === "function") faultHook("before_archive", { root, backupDir });
+      const tag = live.state === "ok" ? (live.registry.schema === IDENTITY_REGISTRY_SCHEMA_V2 ? "v2" : "v1") : live.state;
+      const dir = createPrivateChildDir(archiveParent, `before-restore-${tag}-${stampFromIso(nowIso)}`);
+      try {
+        const files = [];
+        for (const [name, bytes] of [[REGISTRY_FILE_NAME, live.bytes.registryBytes], [AUDIT_FILE_NAME, live.bytes.auditBytes]]) {
+          if (bytes === null) continue;
+          writePrivateFileSync(path.join(dir, name), bytes);
+          files.push({ name, sha256: sha256Buffer(bytes) });
+        }
+        syncDir(dir);
+        syncDir(archiveParent);
+        if (typeof faultHook === "function") faultHook("after_archive_write", { root, archiveDir: dir });
+        for (const { name, sha256 } of files) {
+          const back = readNoFollowDescriptor(path.join(dir, name), RAW_COPY_MAX_BYTES, "registry_corrupt", "archive_oversized");
+          if (back.status !== "ok" || sha256Buffer(back.buffer) !== sha256) {
+            throw codedError("registry_corrupt", "archive_verification_failed");
+          }
+        }
+        archive = { dir, files };
+      } catch (err) {
+        removeOwnDir(dir);
+        throw err;
+      }
+      if (typeof faultHook === "function") faultHook("after_archive", { root, archiveDir: archive.dir });
+    }
+
+    try {
+      const registryPath = path.join(root, REGISTRY_FILE_NAME);
+      const auditPath = path.join(root, AUDIT_FILE_NAME);
+      const suffix = `${process.pid}-${randomBytes(6).toString("hex")}`;
+      const registryTemp = `${registryPath}.tmp-restore-${suffix}`;
+      const auditTemp = `${registryPath}.tmp-restore-audit-${suffix}`;
+      const stagedAudit = backup.auditBytes !== null && backup.auditBytes.length > 0;
+      try {
+        writePrivateFileSync(registryTemp, backup.registryBytes);
+        if (stagedAudit) writePrivateFileSync(auditTemp, backup.auditBytes);
+        if (typeof faultHook === "function") faultHook("before_registry_replace", { root, backupDir });
+        renameSync(registryTemp, registryPath);
+        if (typeof faultHook === "function") faultHook("after_registry_replace", { root, backupDir });
+        if (stagedAudit) {
+          renameSync(auditTemp, auditPath);
+        } else {
+          rmSync(auditPath, { force: true });
+        }
+        syncDir(root);
+        if (typeof faultHook === "function") faultHook("after_audit_replace", { root, backupDir });
+      } finally {
+        for (const temp of [registryTemp, auditTemp]) {
+          try {
+            rmSync(temp, { force: true });
+          } catch {}
+        }
+      }
+
+      const after = readAndVerifyUnlocked(root);
+      if (
+        after.state !== "ok" ||
+        after.registry.schema !== backup.registry.schema ||
+        after.registry.sequence !== backup.registry.sequence ||
+        after.registry.auditHead.hash !== backup.registry.auditHead.hash ||
+        after.internal.uncommittedTail !== 0 ||
+        !after.internal.registryBytes.equals(backup.registryBytes)
+      ) {
+        throw codedError("registry_corrupt", "restore_verification_failed");
+      }
+      return deepFreeze({
+        restored: { schema: after.registry.schema, sequence: after.registry.sequence, auditHead: after.registry.auditHead },
+        archive,
+        live: { state: live.state, schema: live.registry === null ? null : live.registry.schema, sequence: live.registry === null ? null : live.registry.sequence },
+        relation,
+        discarded,
+        routing,
+      });
+    } catch (err) {
+      // whatever went wrong from here on, the files that were replaced (or were about to be) are in the archive: say where
+      if (archive !== null && err !== null && typeof err === "object" && err.archive === undefined) err.archive = archive;
+      throw err;
+    }
   });
 }
