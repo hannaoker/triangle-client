@@ -15,7 +15,6 @@ import {
   IDENTITY_REGISTRY_SCHEMA_V2,
   readIdentityRegistry,
   REGISTRY_FILE_NAME,
-  SERVERLESS_PAIRING_SCHEMA,
   updateIdentityRegistry,
   upgradeRegistryV1ToV2,
 } from "../src/identity-registry.mjs";
@@ -31,6 +30,7 @@ import {
   makeV1Root,
   peerBindingV2,
   readRaw,
+  serverlessPairing as pairing,
   snapshotFiles,
   T0,
   T1,
@@ -80,27 +80,6 @@ function bindOn(root, binding, { expectedSequence, now = T2 } = {}) {
       return r;
     },
   });
-}
-
-function pairing(n, localPrincipal) {
-  return {
-    schema: SERVERLESS_PAIRING_SCHEMA,
-    pairing_id: `pair_${hex32(`pair:${n}`)}`,
-    local_principal_id: localPrincipal,
-    remote_principal_id: `peer_${hex32(`remote:${n}`)}`,
-    remote_principal_public_key: b64u(`rpk:${n}`, 32),
-    remote_endpoint_ids: [hex64(`ep:${n}`)],
-    petname: `friend-${n}`,
-    binding_generation: 1,
-    issued_at: T0,
-    expires_at: "2027-11-07T10:00:00.000Z",
-    remote_invitation_sig: b64u(`inv:${n}`, 64),
-    local_owner_approval_sig: b64u(`app:${n}`, 64),
-    next_key_digest: null,
-    pending_rotation: null,
-    pending_endpoint_update: null,
-    revoked_at: null,
-  };
 }
 
 // A v2 root that also holds records the writer cannot create yet: a serverless binding, a pairing, an alias, a destination.

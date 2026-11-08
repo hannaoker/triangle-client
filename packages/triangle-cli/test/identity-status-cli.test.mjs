@@ -22,7 +22,7 @@ import {
   planIdentityMapping,
   applyIdentityMapping,
 } from "../../agent-worker/src/identity-mapping.mjs";
-import { readIdentityRegistry } from "../../agent-worker/src/identity-registry.mjs";
+import { readIdentityRegistry, updateIdentityRegistry, upgradeRegistryV1ToV2 } from "../../agent-worker/src/identity-registry.mjs";
 
 function setupJoinedFakeFixture({ profiles = ["bob"] } = {}) {
   const fake = createFakeAuthority({ authority: "https://mesh.test" });
@@ -197,6 +197,48 @@ test("doctor --identity: after applyIdentityMapping, profile is recorded, no Ide
     assert.match(text, /Identity \(host-local; disk observations, not live authority verification\)/);
     assert.match(text, /recorded/);
     assert.ok(!text.includes("! Identity:"), "No Identity warning after apply");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("status --identity names the registry schema and, for v2, the record counts; a recorded profile stays recorded", async () => {
+  const f = setupJoinedFakeFixture();
+  try {
+    await joinAndMakeHealthy(f.fake, f.home);
+    const syncReadInv = () =>
+      buildIdentityInventory(
+        readInstallationInventory({ clientRoot: f.client, pidAlive: () => "unknown", advisoryHeldAt: () => "unknown" })
+      );
+    const plan = planIdentityMapping({ inventory: syncReadInv(), registry: readIdentityRegistry({ root: f.registry }) });
+    applyIdentityMapping({ root: f.registry, confirmation: plan.planId, readInventory: syncReadInv });
+
+    const run = async (extra = []) => {
+      const out = [];
+      const code = await main(
+        ["status", "--identity", "--client-root", f.client, "--registry-root", f.registry, "--home", f.home, ...extra],
+        { env: {}, fetchImpl: f.fake.fetchImpl, io: { stdout: (s) => out.push(s), stderr: () => {} } }
+      );
+      assert.equal(code, 0);
+      return out.join("\n");
+    };
+
+    const sequence = readIdentityRegistry({ root: f.registry }).registry.sequence;
+    const v1Text = await run();
+    assert.ok(v1Text.split("\n").includes(`Registry:  ok \u00b7 v1 \u00b7 sequence ${sequence} \u00b7 ${f.registry}`), v1Text);
+
+    updateIdentityRegistry({ root: f.registry, expectedSequence: sequence, action: "upgrade", subject: null, mutate: (r) => upgradeRegistryV1ToV2(r) });
+    const v2Text = await run();
+    assert.ok(
+      v2Text.split("\n").includes(`Registry:  ok \u00b7 v2 \u00b7 sequence ${sequence + 1} \u00b7 pairings 0 \u00b7 aliases 0 \u00b7 destinations 0 \u00b7 ${f.registry}`),
+      v2Text
+    );
+    const report = JSON.parse(await run(["--json"]));
+    assert.deepEqual(
+      [report.identity.registry.schema, report.identity.registry.collections],
+      ["identity_registry_v2", { pairings: 0, aliases: 0, destinations: 0 }]
+    );
+    assert.equal(report.identity.profiles[0].state, "recorded");
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

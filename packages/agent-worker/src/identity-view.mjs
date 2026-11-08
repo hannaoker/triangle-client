@@ -1,5 +1,8 @@
 import { planIdentityMapping } from "./identity-mapping.mjs";
 
+// The view reads the registry's own words and imports no registry code; a test builds a real v2 registry and fails if this drifts.
+const REGISTRY_SCHEMA_V2 = "identity_registry_v2";
+
 function compareCodeUnits(a, b) {
   const sa = String(a ?? "");
   const sb = String(b ?? "");
@@ -16,6 +19,12 @@ function deepFreeze(obj) {
     }
   }
   return obj;
+}
+
+function countRecords(collection) {
+  return collection !== null && typeof collection === "object" && !Array.isArray(collection)
+    ? Object.keys(collection).length
+    : 0;
 }
 
 const FAULT_BLOCKED_REASONS = new Set([
@@ -50,6 +59,8 @@ export function buildIdentityView({ inventory, registry } = {}) {
   }
 
   let registryState = "absent";
+  let registrySchema = null;
+  let registryCollections = null;
   let registrySequence = 0;
   let auditVerifiedThrough = 0;
   let auditUncommittedTail = 0;
@@ -58,6 +69,15 @@ export function buildIdentityView({ inventory, registry } = {}) {
   if (registry && typeof registry === "object") {
     if (registry.state === "ok") {
       registryState = "ok";
+      registrySchema = typeof registry.registry?.schema === "string" ? registry.registry.schema : null;
+      // Record counts of the v2 collections (nothing in them is shown yet: no command reads or writes them).
+      if (registrySchema === REGISTRY_SCHEMA_V2) {
+        registryCollections = {
+          pairings: countRecords(registry.registry.pairings),
+          aliases: countRecords(registry.registry.aliases),
+          destinations: countRecords(registry.registry.destinations),
+        };
+      }
       registrySequence = typeof registry.registry?.sequence === "number" ? registry.registry.sequence : 0;
       auditVerifiedThrough = typeof registry.audit?.verifiedThrough === "number" ? registry.audit.verifiedThrough : 0;
       auditUncommittedTail = typeof registry.audit?.uncommittedTail === "number" ? registry.audit.uncommittedTail : 0;
@@ -71,6 +91,8 @@ export function buildIdentityView({ inventory, registry } = {}) {
 
   const viewRegistry = {
     state: registryState,
+    schema: registrySchema,
+    collections: registryCollections,
     sequence: registrySequence,
     auditVerifiedThrough,
     auditUncommittedTail,
@@ -86,6 +108,13 @@ export function buildIdentityView({ inventory, registry } = {}) {
   const existingBindings = (registryState === "ok" && registry?.registry?.bindings && typeof registry.registry.bindings === "object")
     ? registry.registry.bindings
     : {};
+
+  // Serverless-peer bindings (v2 only) are no MESH identity: no inventory evidence applies to them, so they get a row of
+  // their own instead of `recorded_only` with a missing-profile warning, and their profile is not `local_only`.
+  const serverlessBindings = Object.values(existingBindings).filter(
+    (binding) => binding && typeof binding === "object" && binding.trust_mode === "serverless-peer",
+  );
+  const serverlessInstanceIds = new Set(serverlessBindings.map((binding) => binding.profile_instance_id));
 
   // Index inventory profiles for quick lookup
   const inventoryInstanceIdsSet = new Set();
@@ -175,6 +204,7 @@ export function buildIdentityView({ inventory, registry } = {}) {
   // 4. local_only = plan localOnly
   if (Array.isArray(plan.localOnly)) {
     for (const l of plan.localOnly) {
+      if (serverlessInstanceIds.has(l.profileInstanceId)) continue;
       profileRows.push({
         profile: l.profile,
         profileInstanceId: l.profileInstanceId,
@@ -192,6 +222,7 @@ export function buildIdentityView({ inventory, registry } = {}) {
   if (registryState === "ok") {
     for (const binding of Object.values(existingBindings)) {
       if (!binding || typeof binding !== "object") continue;
+      if (binding.trust_mode === "serverless-peer") continue;
       if (!inventoryInstanceIdsSet.has(binding.profile_instance_id)) {
         profileRows.push({
           profile: binding.profile_name,
@@ -205,6 +236,23 @@ export function buildIdentityView({ inventory, registry } = {}) {
         });
       }
     }
+  }
+
+  // 6. serverless = a v2 serverless-peer binding whose profile has no other row (a blocked row for the same profile
+  // keeps its place)
+  const rowInstanceIds = new Set(profileRows.map((row) => row.profileInstanceId));
+  for (const binding of serverlessBindings) {
+    if (rowInstanceIds.has(binding.profile_instance_id)) continue;
+    profileRows.push({
+      profile: binding.profile_name,
+      profileInstanceId: binding.profile_instance_id,
+      state: "serverless",
+      principalId: binding.principal_id,
+      authorityOrigin: null,
+      bindingId: binding.binding_id,
+      generation: binding.binding_generation,
+      reason: binding.revoked_at === null ? null : "revoked",
+    });
   }
 
   // Sort profile rows by profile, then profileInstanceId
@@ -221,6 +269,7 @@ export function buildIdentityView({ inventory, registry } = {}) {
     blocked: profileRows.filter((p) => p.state === "blocked").length,
     localOnly: profileRows.filter((p) => p.state === "local_only").length,
     recordedOnly: profileRows.filter((p) => p.state === "recorded_only").length,
+    serverless: profileRows.filter((p) => p.state === "serverless").length,
     faults: 0,
     warnings: 0,
   };

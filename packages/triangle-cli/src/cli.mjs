@@ -374,13 +374,14 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               registry_sequence_conflict: "The registry changed during approval. Create a fresh plan.",
               owner_approval_stale: "The binding changed during approval. Create a fresh plan.",
               identity_binding_not_active: "No active local binding was found for that profile.",
+              identity_binding_not_supported: "That profile has a serverless peer binding. This command revokes only MESH-managed agent bindings.",
               invalid_owner_operation: "The profile name or registry path is not valid. Use a canonical absolute path with no symbolic links.",
               registry_unsafe: "The registry location is not safe to use (symbolic link, wrong owner or loose permissions).",
               registry_corrupt: "The identity registry could not be read.",
             }[code] ?? "Identity revocation did not complete. Check identity status before retrying.";
             io.stderr(flags.json ? JSON.stringify({ error: code, message }) : `${message} (${code})`);
             if (interrupted) return interrupted === "SIGINT" ? 130 : 143;
-            return ["invalid_owner_operation", "confirmation_mismatch", "plan_stale", "identity_binding_not_active"].includes(code) ? 2 : 1;
+            return ["invalid_owner_operation", "confirmation_mismatch", "plan_stale", "identity_binding_not_active", "identity_binding_not_supported"].includes(code) ? 2 : 1;
           } finally {
             if (cancellation) { process.removeListener("SIGINT", interruptInt); process.removeListener("SIGTERM", interruptTerm); }
           }
