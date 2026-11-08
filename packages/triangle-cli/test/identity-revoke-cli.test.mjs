@@ -6,7 +6,7 @@ import os from 'node:os';
 import {main} from '../src/cli.mjs';
 import {identityRevoke,planIdentityRevoke,loadPackagedRevokeProvider} from '../src/identity-revoke.mjs';
 import {initIdentityRegistry,bindProfileInRegistry} from '../../agent-worker/test/local-messaging-identity-fixtures.mjs';
-import {readIdentityRegistry,updateIdentityRegistry} from '../../agent-worker/src/identity-registry.mjs';
+import {readIdentityRegistry,updateIdentityRegistry,upgradeRegistryV1ToV2} from '../../agent-worker/src/identity-registry.mjs';
 
 function fixture(t){
  const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'identity-revoke-')));
@@ -143,4 +143,19 @@ test('cancellation reaches the provider and preserves bytes; CLI restores its in
  const counts=['SIGINT','SIGTERM'].map(s=>process.listenerCount(s));
  const result=await f.run(['--confirm',f.plan().planId],{identityDependencies:{isTerminal:true,ownerApprovalProvider:{authenticate:async()=> 'cancelled'}}});
  assert.equal(result.code,1);assert.deepEqual(['SIGINT','SIGTERM'].map(s=>process.listenerCount(s)),counts);assert.deepEqual(f.bytes(),before);
+});
+
+test('an upgraded v2 registry revokes through the same owner flow: one audited revoke, schema and siblings kept',async t=>{
+ const f=fixture(t),seq=readIdentityRegistry({root:f.registry}).registry.sequence;
+ updateIdentityRegistry({root:f.registry,expectedSequence:seq,action:'upgrade',subject:null,mutate:r=>upgradeRegistryV1ToV2(r)});
+ const plan=f.plan();let calls=0;
+ assert.equal(plan.operation.expectedSequence,seq+1);assert.equal(plan.operation.profileId,f.a.profile_instance_id);
+ const result=await f.run(['--confirm',plan.planId,'--json'],{identityDependencies:{isTerminal:true,ownerApprovalProvider:{authenticate:async challenge=>{
+  calls++;assert.equal(challenge.request.profileId,f.a.profile_instance_id);return 'approved';}}}});
+ assert.equal(result.code,0,result.err);assert.equal(JSON.parse(result.out).registrySequence,seq+2);assert.equal(calls,1);
+ const after=readIdentityRegistry({root:f.registry}).registry;
+ assert.equal(after.schema,'identity_registry_v2');assert.ok(after.bindings[f.a.profile_instance_id].revoked_at);
+ assert.equal(after.bindings[f.b.profile_instance_id].revoked_at,null);
+ const lines=fs.readFileSync(path.join(f.registry,'registry-audit.jsonl'),'utf8').trim().split('\n').map(l=>JSON.parse(l));
+ assert.deepEqual(lines.slice(-2).map(e=>e.action),['upgrade','revoke']);
 });

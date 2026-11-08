@@ -145,6 +145,11 @@ const AUDIT_ACTIONS_V2 = new Set([
   "pair_revoke",
 ]);
 
+// Audit action names that exist for later slices; the writer refuses them with `action_not_available`.
+const RESERVED_AUDIT_ACTIONS = new Set(
+  [...AUDIT_ACTIONS_V2].filter((name) => !AUDIT_ACTIONS.has(name) && name !== "upgrade"),
+);
+
 const PAIRING_ID_PATTERN = /^pair_[a-f0-9]{32}$/;
 const ALIAS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const DESTINATION_HARNESSES = new Set(["claude", "codex"]);
@@ -2089,12 +2094,40 @@ function appendAuditEntrySync(root, auditPath, committedByteLength, uncommittedT
   }
 }
 
-function assertMutationMatchesAction(current, oldBindings, nextBindings, action, subject) {
+function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action, subject) {
+  const oldBindings = oldRegistry.bindings;
+  const nextBindings = nextRegistry.bindings;
   if (action === "init") {
     if (current.state !== "absent" || Object.keys(nextBindings).length !== 0) {
       throw codedError("invalid_registry", "mutation_does_not_match_action");
     }
     return null;
+  }
+  if (action === "upgrade") {
+    // The conversion is a pure function, so recompute it and compare: a mutation cannot smuggle any other change into an upgrade.
+    if (
+      current.state !== "ok" ||
+      oldRegistry.schema !== IDENTITY_REGISTRY_SCHEMA ||
+      nextRegistry.schema !== IDENTITY_REGISTRY_SCHEMA_V2
+    ) {
+      throw codedError("invalid_registry", "mutation_does_not_match_action");
+    }
+    const expected = upgradeRegistryV1ToV2(current.registry);
+    for (const name of ["bindings", "pairings", "aliases", "destinations"]) {
+      if (canonicalJson(nextRegistry[name]) !== canonicalJson(expected[name])) {
+        throw codedError("invalid_registry", "mutation_does_not_match_action");
+      }
+    }
+    return null;
+  }
+  const storedV2 = nextRegistry.schema === IDENTITY_REGISTRY_SCHEMA_V2;
+  if (storedV2) {
+    // Bind and revoke leave the other collections alone; their own actions are reserved for later slices.
+    for (const name of ["pairings", "aliases", "destinations"]) {
+      if (canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
+        throw codedError("invalid_registry", "mutation_does_not_match_action");
+      }
+    }
   }
 
   // Every binding other than `subject` must be identical to oldBindings (and no extra bindings added)
@@ -2119,6 +2152,15 @@ function assertMutationMatchesAction(current, oldBindings, nextBindings, action,
     throw codedError("invalid_registry", "mutation_does_not_match_action");
   }
   const oldB = Object.hasOwn(oldBindings, subject) ? oldBindings[subject] : null;
+
+  // Serverless records are written by a later slice (pairing, key custody and its approval gate); until then this writer
+  // neither creates nor changes one.
+  if (
+    storedV2 &&
+    (nextB.trust_mode !== "mesh-managed" || (oldB !== null && oldB.trust_mode !== "mesh-managed"))
+  ) {
+    throw codedError("invalid_registry", "action_not_available");
+  }
 
   if (action === "bind") {
     if (oldB === null) {
@@ -2224,7 +2266,11 @@ export function updateIdentityRegistry({
   ) {
     throw codedError("invalid_registry", "invalid_expected_sequence");
   }
-  if (!AUDIT_ACTIONS.has(action)) {
+  // The names reserved for later slices exist in the audit vocabulary but no writer implements them yet.
+  if (RESERVED_AUDIT_ACTIONS.has(action)) {
+    throw codedError("invalid_registry", "action_not_available");
+  }
+  if (!AUDIT_ACTIONS.has(action) && action !== "upgrade") {
     throw codedError("invalid_registry", "invalid_audit_action");
   }
   if (subject !== null && (typeof subject !== "string" || !INSTANCE_ID_PATTERN.test(subject))) {
@@ -2232,6 +2278,9 @@ export function updateIdentityRegistry({
   }
   if (action === "init" && subject !== null) {
     throw codedError("invalid_registry", "init_subject_must_be_null");
+  }
+  if (action === "upgrade" && subject !== null) {
+    throw codedError("invalid_registry", "upgrade_subject_must_be_null");
   }
   if ((action === "bind" || action === "revoke") && subject === null) {
     throw codedError("invalid_registry", "subject_required_for_action");
@@ -2245,10 +2294,18 @@ export function updateIdentityRegistry({
 
   return withRegistryLock(root, lockTimeoutMs, () => {
     const current = readAndVerifyUnlocked(root);
-    // D1.0: v2 can be read but not written yet. A writer that does not know v2 must not touch a v2 registry.
-    if (current.state === "ok" && current.registry.schema !== IDENTITY_REGISTRY_SCHEMA) {
-      throw codedError("invalid_registry", "writer_requires_v1");
+    const storedSchema = current.state === "ok" ? current.registry.schema : IDENTITY_REGISTRY_SCHEMA;
+    // `upgrade` turns a stored v1 registry into v2 and is the only action that changes the schema; everything else keeps it.
+    // These checks come before the sequence check so a retry after a successful upgrade learns why it cannot run again.
+    if (action === "upgrade") {
+      if (current.state !== "ok") {
+        throw codedError("invalid_registry", "upgrade_requires_registry");
+      }
+      if (storedSchema !== IDENTITY_REGISTRY_SCHEMA) {
+        throw codedError("invalid_registry", "registry_already_v2");
+      }
     }
+    const resultSchema = action === "upgrade" ? IDENTITY_REGISTRY_SCHEMA_V2 : storedSchema;
     const currentSeq = current.state === "absent" ? 0 : current.registry.sequence;
 
     if (currentSeq !== expectedSequence) {
@@ -2282,7 +2339,7 @@ export function updateIdentityRegistry({
       throw codedError("invalid_registry", "mutate_returned_non_object");
     }
     const mutated = deepClonePlain(rawMutated);
-    if (mutated.schema !== baseRegistry.schema) {
+    if (mutated.schema !== resultSchema) {
       throw codedError("invalid_registry", "mutate_modified_schema");
     }
 
@@ -2315,14 +2372,14 @@ export function updateIdentityRegistry({
         hash: "a".repeat(64),
       },
     });
-    if (placeholderRegistry.schema !== IDENTITY_REGISTRY_SCHEMA) {
+    if (placeholderRegistry.schema !== resultSchema) {
       throw codedError("invalid_registry", "mutate_modified_schema");
     }
 
     const bindingId = assertMutationMatchesAction(
       current,
-      oldBindings,
-      placeholderRegistry.bindings,
+      baseRegistry,
+      placeholderRegistry,
       action,
       subject,
     );
@@ -2335,7 +2392,7 @@ export function updateIdentityRegistry({
       bindingId,
       prevHash,
     });
-    validateAuditEntryObject(auditEntry);
+    validateAuditEntryObject(auditEntry, { schema: resultSchema });
 
     const validatedRegistry = validateIdentityRegistry({
       ...placeholderRegistry,
