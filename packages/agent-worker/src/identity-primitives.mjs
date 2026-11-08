@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 
 export const AGENT_ID_PATTERN = /^agent_[a-f0-9]{32}$/;
+export const PEER_ID_PATTERN = /^peer_[a-f0-9]{32}$/;
 export const INSTANCE_ID_PATTERN = /^[a-f0-9]{64}$/;
 export const SESSION_ID_PATTERN = /^session-[a-f0-9]{64}$/;
 
