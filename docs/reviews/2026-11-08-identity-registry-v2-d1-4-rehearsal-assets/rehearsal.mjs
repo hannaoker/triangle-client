@@ -339,7 +339,7 @@ async function main() {
       const wrapper = fs.readFileSync(path.join(live, "bin/triangle-local"), "utf8");
       const constant = /^TRIANGLE_LOCAL_APPLICATION_ROOT = .*$/m;
       check(constant.test(wrapper), "installed triangle-local has no application-root constant");
-      fs.writeFileSync(wrapperPath, wrapper.replace(constant, `TRIANGLE_LOCAL_APPLICATION_ROOT = ${JSON.stringify(app).replace(/"/g, "'")}`), { mode: 0o700 });
+      fs.writeFileSync(wrapperPath, wrapper.replace(constant, () => `TRIANGLE_LOCAL_APPLICATION_ROOT = ${JSON.stringify(app).replace(/"/g, "'")}`), { mode: 0o700 });
       fs.chmodSync(wrapperPath, 0o700);
       // The installed client package's CLI code (its own node is the bundle's: same hash).
       const release = path.join(live, "releases", releaseVersion);
@@ -369,6 +369,17 @@ async function main() {
         if (!fs.existsSync(actual) || sha256File(actual) !== file.sha256 || (mode(actual) !== file.mode)) wrong += 1;
       }
       check(wrong === 0, `${wrong} packaged files differ from package-manifest.json`);
+      const listed = new Set(["package-manifest.json", ...manifest.files.map((f) => f.path)]);
+      const unmanifested = [];
+      const walk = (dir, prefix = "") => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const rel = prefix + entry.name;
+          if (entry.isDirectory()) walk(path.join(dir, entry.name), `${rel}/`);
+          else if (!listed.has(rel)) unmanifested.push(rel);
+        }
+      };
+      walk(cand);
+      check(unmanifested.length === 0, `${unmanifested.length} extracted files are not listed in package-manifest.json`, unmanifested.slice(0, 10));
       // Tie the package to the commit: every packaged file that git tracks is the committed blob.
       const git = (args) => run("/usr/bin/git", ["-C", options["repo-root"], ...args], { env: { PATH: "/usr/bin:/bin", HOME: home } });
       const sourceRef = options["source-commit"] ?? "HEAD";
@@ -477,7 +488,7 @@ async function main() {
       check(plan.code === 1 && json && json.ready === false, `expected a blocked plan (exit 1), got exit ${plan.code}`, { stdout: plan.stdout.slice(0, 600), stderr: plan.stderr.slice(0, 300) });
       check(json.refusals.includes("supervisor_cannot_read_v2"), "the plan does not refuse with supervisor_cannot_read_v2", json.refusals);
       const apply = await candPty(["identity", "upgrade-registry", "--client-root", client, "--confirm", json.planId]);
-      check(!apply.stderr.includes("pty-exit: 0"), "applying a blocked plan must not succeed", apply);
+      check(/pty-exit: 1\b/.test(apply.stderr) && apply.stdout.includes("supervisor_cannot_read_v2"), "applying a blocked plan must exit 1 and name the refusal", apply);
       check(same(registryFiles(), preUpgradeFiles), "registry bytes changed");
       check(backupListing().length === 0 && !fs.existsSync(backupsRoot), "a backup directory was created");
       return { planRefusals: json.refusals, planExit: plan.code, applyExit: /pty-exit: (-?\d+)/.exec(apply.stderr)?.[1], applyMessage: apply.stdout.trim().split("\n").slice(-3).join(" | ").slice(0, 300), registryUnchanged: true, noBackupDirectory: true };
@@ -525,7 +536,8 @@ async function main() {
       check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes("echo[beta]: candidate exact send"), "exact send failed on the candidate host", viaProfile);
       // Work sent through the installed host is still there: same journal.
       const earlier = await tl(["status", "--message-id", baselineSend.messageId]);
-      return { host: started, registryBlock: block, principalSend: { exit: viaPrincipal.code }, exactSend: { exit: viaProfile.code }, journalSharedWithInstalledHost: earlier.code === 0 ? "earlier message still readable" : `earlier message lookup exit ${earlier.code}` };
+      check(earlier.code === 0 && parseJson(earlier.stdout)?.phase === "completed", "the message sent through the installed host is not readable, completed, through the candidate host", earlier);
+      return { host: started, registryBlock: block, principalSend: { exit: viaPrincipal.code }, exactSend: { exit: viaProfile.code }, journalSharedWithInstalledHost: "the earlier message is readable and completed" };
     });
 
     await step("C3", "G2 rollback: restore the saved manifest, installed host serves again, then restage", async () => {
@@ -648,9 +660,10 @@ async function main() {
       const block = st.router?.registry ?? null;
       check(st.router?.enabled !== true || !block || block.state !== "ok", "the installed host reports the v2 registry as ok", st.router);
       const viaPrincipal = await send(principals.alpha, "installed host on v2, principal");
-      check(viaPrincipal.code !== 0, "a principal send succeeded on the installed host against v2", viaPrincipal);
-      const lookup = await tl(["status", "--message-id", viaPrincipal.messageId]);
+      check(viaPrincipal.code === 1 && viaPrincipal.json?.error === "route_unavailable", "the principal send was not refused with route_unavailable (exit 1)", viaPrincipal);
       check(!JSON.stringify(viaPrincipal.json).includes("echo[alpha]"), "the refused principal send reached a runner", viaPrincipal);
+      const lookup = await tl(["status", "--message-id", viaPrincipal.messageId]);
+      check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
       const viaProfile = await send("beta", "installed host on v2, exact");
       check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes("echo[beta]: installed host on v2, exact"), "exact-id send did not keep working", viaProfile);
       const floor = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
@@ -668,7 +681,8 @@ async function main() {
     await step("E3", "installed client package CLI (0.2.0-identity.1 copy) against the v2 registry: refuses loudly, changes nothing", async () => {
       const migrate = await instCliRun(["identity", "migrate", "--client-root", client, "--registry-root", registry, "--json"]);
       const view = await instCliRun(["status", "--identity", "--client-root", client, "--registry-root", registry]);
-      check(migrate.code !== 0, "installed `identity migrate` accepted the v2 registry", migrate);
+      check(migrate.code === 1 && migrate.stderr.includes("registry_corrupt: unknown_registry_key"), "installed `identity migrate` did not fail with registry_corrupt: unknown_registry_key (exit 1)", migrate);
+      check(view.stdout.includes("unreadable"), "installed `status --identity` does not call the v2 registry unreadable", view);
       check(same(registryFiles(), postUpgradeFiles), "the registry changed under the installed CLI");
       return {
         migrate: { exit: migrate.code, stderrHead: migrate.stderr.trim().split("\n").slice(0, 6).map((l) => l.slice(0, 160)), stdoutHead: migrate.stdout.trim().slice(0, 200) },
@@ -722,7 +736,9 @@ async function main() {
       const block = st.router?.registry ?? null;
       check(st.router?.enabled !== true || !block || block.state !== "ok", "the running installed host still reports the registry as ok", st.router);
       const principal = await send(principals.alpha, "running installed host, v2 flip");
-      check(principal.code !== 0 && !JSON.stringify(principal.json).includes("echo[alpha]"), "a principal send was delivered by the installed host on v2", principal);
+      check(principal.code === 1 && principal.json?.error === "route_unavailable" && !JSON.stringify(principal.json).includes("echo[alpha]"), "the principal send was not refused with route_unavailable (exit 1)", principal);
+      const lookup = await tl(["status", "--message-id", principal.messageId]);
+      check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
       const exact = await send("beta", "running installed host, exact after flip");
       check(exact.code === 0 && JSON.stringify(exact.json).includes("echo[beta]: running installed host, exact after flip"), "exact-id send stopped working", exact);
       return { forcedWrite: forced, registryBlock: block, principalSend: { exit: principal.code, outcome: principal.json }, exactSend: { exit: exact.code, reachedRunner: "beta" } };
@@ -764,9 +780,9 @@ async function main() {
       const planJson = jsonOf(planRun);
       const before = { files: registryFiles(), backups: backupListing() };
       const piped = await candCli(["identity", "upgrade-registry", "--client-root", client, "--confirm", planJson.planId]);
-      check(piped.code !== 0, "apply without a terminal succeeded", piped);
+      check(piped.code === 2 && /terminal/.test(piped.stderr), "apply without a terminal was not refused for lack of a terminal (exit 2)", piped);
       const wrongId = await candPty(["identity", "upgrade-registry", "--client-root", client, "--confirm", "0".repeat(64)]);
-      check(!/pty-exit: 0/.test(wrongId.stderr), "apply with a wrong plan id succeeded", wrongId);
+      check(/pty-exit: 2\b/.test(wrongId.stderr) && wrongId.stdout.includes("plan_stale"), "apply with a wrong plan id was not refused as plan_stale (exit 2)", wrongId);
       // A second v1 registry directory in the same application root, which the running supervisor does not read.
       const other = path.join(app, "identity-other");
       fs.cpSync(registry, other, { recursive: true });
