@@ -135,7 +135,8 @@ test("a crashed upgrade leaves a registry today's reader cannot read; the backup
     (err) => err.code === "registry_chain_broken" && err.reason === "invalid_audit_action",
   );
   // the failure message says how to put the clean pair back, and that does
-  assert.match(crashed.err, /To put the clean pair back: triangle identity restore-registry --client-root /);
+  // the hint is a command that can be pasted: every path quoted (the default location has a space in it), both roots named
+  assert.match(crashed.err, /To put the clean pair back: triangle identity restore-registry --client-root '[^']*The Triangle\/client' --registry-root '[^']*The Triangle\/identity' --from '[^']*identity-backups\/backup-v1-[^']*'/);
   const backup = crashed.err.match(/A backup was made first: (.+)/)[1];
   const restorePlan = JSON.parse((await f.run("restore-registry", ["--from", backup, "--json"])).out);
   const restored = await f.run("restore-registry", ["--from", backup, "--confirm", restorePlan.planId], { identityDependencies: { now: clock(9) } });

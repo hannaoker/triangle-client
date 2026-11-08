@@ -21,6 +21,7 @@ import {
   planRegistryRestore,
   planRegistryUpgrade,
   renderRestorePlan,
+  restoreCommand,
   renderRestoreResult,
   renderUpgradePlan,
   renderUpgradeResult,
@@ -548,7 +549,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
             const text = describeRefusal(code) ?? (typeof err?.message === "string" ? err.message : "The command did not complete.");
             const backupNote = err?.backup?.dir ? { backup: err.backup.dir } : {};
             const backupHint = err?.backup?.dir
-              ? `\nA backup was made first: ${err.backup.dir}\nTo put the clean pair back: triangle identity restore-registry --client-root ${clientRoot} --from ${err.backup.dir}`
+              ? `\nA backup was made first: ${err.backup.dir}\nTo put the clean pair back: ${restoreCommand({ clientRoot, registryRoot: normRegistry, from: err.backup.dir })}`
               : "";
             io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...backupNote }) : `${text} (${code})${backupHint}`);
             return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;

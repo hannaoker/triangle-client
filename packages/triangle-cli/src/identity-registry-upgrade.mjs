@@ -331,6 +331,7 @@ export async function applyRegistryRestore({ clientRoot, registryRoot, from, dis
     backupDir: from,
     archiveParent: plan.archiveParent,
     expectedLiveFingerprint: plan.live.fingerprint,
+    expectedBackup: { registrySha256: plan.backup.registrySha256, auditSha256: plan.backup.auditSha256 },
     discardV2Data: plan.discardV2Data,
     now: nowIso(now),
     faultHook,
@@ -365,6 +366,8 @@ const REFUSALS = {
   restore_backup_unfinished_write: "The backup ends in an unfinished write; it is not a clean copy.",
   backup_overlaps_registry_root: "The backup must be outside the registry directory.",
   registry_changed: "The registry changed after the plan was made. Make a fresh plan.",
+  backup_changed_since_plan: "The backup changed after the plan was made. Make a fresh plan.",
+  live_registry_changed_since_plan: "The registry changed after the plan was made. Make a fresh plan.",
   plan_stale: "That plan id does not match what is true now. Make a fresh plan and use its id.",
   confirmation_mismatch: "The confirmation must be the 64-hex plan id printed by the plan.",
 };
@@ -375,6 +378,18 @@ export function describeRefusal(code) {
 
 const short = (hash) => (typeof hash === "string" ? hash.slice(0, 12) : "-");
 const shellQuote = (value) => (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", `'\\''`)}'`);
+
+/** The restore command for a backup, ready to paste: every path quoted, both roots named. */
+export function restoreCommand({ clientRoot, registryRoot, from, discardV2Data = false, confirm = null }) {
+  return [
+    "triangle identity restore-registry",
+    `--client-root ${shellQuote(clientRoot)}`,
+    `--registry-root ${shellQuote(registryRoot)}`,
+    `--from ${shellQuote(from)}`,
+    ...(discardV2Data ? ["--discard-v2-data"] : []),
+    ...(confirm ? [`--confirm ${confirm}`] : []),
+  ].join(" ");
+}
 
 export function renderUpgradePlan(plan, { clientRoot } = {}) {
   const lines = [];
@@ -404,10 +419,13 @@ export function renderUpgradePlan(plan, { clientRoot } = {}) {
   }
   const seen = plan.observed?.supervisorRegistry;
   if (seen && seen.schema) lines.push(`The supervisor currently reads: ${seen.state}, ${seen.schema.replace(/^identity_registry_/, "")}, sequence ${seen.sequence ?? "?"}.`);
+  if (seen && seen.state === "ok" && reg.state === "ok" && (seen.sequence !== reg.sequence || seen.schema !== reg.schema)) {
+    lines.push("Note: that is not this registry's state. The supervisor may be reading another registry directory (check --client-root and --registry-root name the pair it uses), or a write just landed.");
+  }
   lines.push(`Backup:   a private copy is made first in ${plan.backupParent}${path.sep}backup-v1-<time> and read back; the upgrade does not run if it does not verify.`);
   lines.push("Change:   every binding is rewritten as local_profile_binding_v2, three empty collections (pairings, aliases, destinations) are added, and one `upgrade` audit entry is appended.");
   lines.push("Older runtimes: a supervisor or CLI from before this release cannot read a v2 registry and fails closed (agent_ principal sends are refused with route_unavailable; exact-id sends keep working).");
-  lines.push(`Way back: triangle identity restore-registry --client-root ${shellQuote(clientRoot ?? "DIR")} --from BACKUP_DIR   (it plans first and archives what it replaces)`);
+  lines.push(`Way back: ${restoreCommand({ clientRoot: clientRoot ?? "DIR", registryRoot: plan.registryRoot, from: "BACKUP_DIR" })}   (it plans first and archives what it replaces)`);
   lines.push(`Plan ID: ${plan.planId}`);
   if (plan.ready && clientRoot) {
     lines.push("");
@@ -442,6 +460,7 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
   const b = plan.backup;
   lines.push(`Backup:   ${b.dir}`);
   lines.push(`          ${b.schema.replace(/^identity_registry_/, "")} · sequence ${b.sequence} · ${plural(b.bindings, "binding")} · audit head ${short(b.auditHead.hash)}`);
+  if (live.uncommittedTail === 1) lines.push("          An interrupted write left an unfinished audit line; it is archived with the live files.");
   const relation = {
     same: "The live registry is exactly this backup's history; nothing is discarded.",
     ahead: "The live registry has this backup's history and more.",
@@ -468,7 +487,7 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
   if (plan.ready && clientRoot) {
     lines.push("");
     lines.push("To apply this plan (needs a terminal):");
-    lines.push(`  triangle identity restore-registry --client-root ${shellQuote(clientRoot)} --registry-root ${shellQuote(plan.registryRoot)} --from ${shellQuote(from ?? b.dir)}${plan.discardV2Data ? " --discard-v2-data" : ""} --confirm ${plan.planId}`);
+    lines.push(`  ${restoreCommand({ clientRoot, registryRoot: plan.registryRoot, from: from ?? b.dir, discardV2Data: plan.discardV2Data, confirm: plan.planId })}`);
   }
   return lines.join("\n");
 }

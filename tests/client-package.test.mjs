@@ -547,3 +547,45 @@ test("revoke-enabled package declares only the explicit owner command; installed
     assert.equal(await decide(), "unavailable", "a candidate marker beside the policy refuses");
   } finally { rmSync(f.dir,{recursive:true,force:true}); }
 });
+
+test("the installed CLI plans a registry upgrade read-only, fails closed with no supervisor to ask, and is ready once one answers", () => {
+  const f = fixture();
+  try {
+    const installed = f.install();assert.equal(installed.status, 0, installed.stderr);
+    const home = join(f.dir, "home"), app = join(home, "Library/Application Support/The Triangle");
+    const wrapper = join(home, ".local/bin/triangle"), client = join(app, "client"), registry = join(app, "identity");
+    initIdentityRegistry(registry);bindProfileInRegistry(registry, "alpha", 1);
+    const files = () => ["identity-registry-v1.json", "registry-audit.jsonl"].map(file => readFileSync(join(registry, file), "utf8"));
+    const before = files();
+    const call = args => spawnSync(wrapper, ["identity", "upgrade-registry", "--client-root", client, ...args], {env:{...process.env,HOME:home},encoding:"utf8"});
+
+    // nothing to ask: the plan refuses on the runtime manifest and the supervisor, and says so (exit 1)
+    const blocked = call(["--json"]);
+    assert.equal(blocked.status, 1, blocked.stderr);
+    const refused = JSON.parse(blocked.stdout);
+    assert.deepEqual([refused.ready, refused.refusals], [false, ["runtime_manifest_missing", "supervisor_unreachable"]]);
+
+    // a supervisor that reports it can read v2, and a v14 manifest
+    const status = { ok: true, router: { enabled: true, registry: { state: "ok", sequence: 2, schema: "identity_registry_v1", supportedSchemas: ["identity_registry_v1", "identity_registry_v2"] } } };
+    mkdirSync(join(app, "bin"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(app, "bin/triangle-local"), `#!/bin/sh\nprintf '%s' '${JSON.stringify(status)}'\n`, { mode: 0o700 });
+    writeFileSync(join(app, "worker-runtime/supervisor.manifest.json"), JSON.stringify({ version: 14 }), { mode: 0o600 });
+    const ready = call(["--json"]);
+    assert.equal(ready.status, 0, ready.stderr);
+    const plan = JSON.parse(ready.stdout);
+    assert.deepEqual([plan.ready, plan.refusals, plan.registry.schema, plan.registry.sequence], [true, [], "identity_registry_v1", 2]);
+    assert.match(plan.planId, /^[a-f0-9]{64}$/);
+
+    // applying needs a terminal; here there is none, so it is refused before anything is written
+    const noTerminal = call(["--confirm", plan.planId]);
+    assert.equal(noTerminal.status, 2);
+    assert.match(noTerminal.stderr, /requires standard input and output to be a terminal/);
+    assert.deepEqual(files(), before);
+    assert.equal(existsSync(join(app, "identity-backups")), false, "no plan or refusal creates the backup directory");
+    // the way back is installed too, and reads a backup that is not there as a refusal, not a crash
+    const restore = spawnSync(wrapper, ["identity", "restore-registry", "--client-root", client, "--from", join(app, "identity-backups/none")], {env:{...process.env,HOME:home},encoding:"utf8"});
+    assert.equal(restore.status, 1);
+    assert.match(restore.stderr, /restore_backup_unreadable/);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+

@@ -9,10 +9,11 @@ import path from "node:path";
 
 import { main } from "../src/cli.mjs";
 import { readSupervisorManifestVersion, runTriangleLocalStatus } from "../src/identity-registry-upgrade.mjs";
-import { bindProfileInRegistry } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
+import { bindProfileInRegistry, makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
 import { AUDIT_FILE, REGISTRY_FILE, START, V1, V2, clock, fixture, okStatus, stamp, writeManifest } from "./identity-registry-upgrade-helpers.mjs";
 import { agentBindingV2, appendAndCommit, peerBindingV2, serverlessPairing } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";
 import {
+  backupIdentityRegistry,
   canonicalJson,
   emptyIdentityRegistry,
   readIdentityRegistry,
@@ -131,6 +132,16 @@ test("floor 3: the RUNNING supervisor must say it can read v2", async (t) => {
   // a disabled router still reports what the process can read, and that is enough
   const disabled = fixture(t, { status: okStatus({ enabled: false, registry: { state: "disabled", sequence: 0, schema: null, supportedSchemas: [V1, V2] } }) });
   assert.equal((await disabled.plan()).ready, true);
+});
+
+test("the plan notes when the supervisor reports a registry that is not this one", async (t) => {
+  const f = fixture(t, { status: okStatus({ registry: { state: "ok", sequence: 9, schema: V1, supportedSchemas: [V1, V2] } }) });
+  const human = await f.run("upgrade-registry");
+  assert.equal(human.code, 0, human.out);
+  assert.ok(human.out.includes("The supervisor currently reads: ok, v1, sequence 9."), human.out);
+  assert.ok(human.out.includes("Note: that is not this registry's state."), human.out);
+  const same = fixture(t);
+  assert.ok(!(await same.run("upgrade-registry")).out.includes("Note: that is not this registry's state."));
 });
 
 test("a refusal under --json is one JSON object on standard error", async (t) => {
@@ -488,6 +499,34 @@ test("a restore is refused for a backup that is not a clean v1 copy, and for liv
   assert.equal(stale.code, 2);
   assert.ok(stale.err.includes("(plan_stale)"));
   assert.deepEqual(f.files(), bytes);
+});
+
+test("a restore plan shows an unfinished audit line in the live registry, which the archive keeps", async (t) => {
+  const f = fixture(t);
+  const backup = backupIdentityRegistry({ root: f.registry, backupParent: path.join(f.app, "identity-backups"), now: clock(1)() });
+  const gamma = makeMeshManagedBinding("gamma");
+  assert.throws(
+    () => updateIdentityRegistry({
+      root: f.registry,
+      expectedSequence: 3,
+      action: "bind",
+      subject: gamma.profile_instance_id,
+      now: clock(2)(),
+      mutate: (r) => { r.bindings[gamma.profile_instance_id] = gamma; return r; },
+      faultHook: (stage) => { if (stage === "after_audit_append") throw new Error("boom"); },
+    }),
+    /boom/,
+  );
+  assert.equal(readIdentityRegistry({ root: f.registry }).audit.uncommittedTail, 1);
+  const human = await f.run("restore-registry", ["--from", backup.dir]);
+  assert.equal(human.code, 0, human.err);
+  assert.ok(human.out.includes("An interrupted write left an unfinished audit line; it is archived with the live files."), human.out);
+  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  assert.equal(plan.live.uncommittedTail, 1);
+  const applied = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId, "--json"], { identityDependencies: { now: clock(9) } })).out);
+  const archived = fs.readFileSync(path.join(applied.archive.dir, AUDIT_FILE), "utf8").trim().split("\n");
+  assert.equal(archived.length, 4, "the unfinished line is in the archive");
+  assert.equal(readIdentityRegistry({ root: f.registry }).audit.uncommittedTail, 0);
 });
 
 // ---- the command line -----------------------------------------------------------------------------------------------------------

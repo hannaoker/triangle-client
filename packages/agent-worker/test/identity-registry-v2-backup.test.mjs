@@ -113,6 +113,7 @@ function restoreWith(env, backupDir, overrides = {}) {
     backupDir,
     archiveParent: env.backupParent,
     expectedLiveFingerprint: inspected.live.fingerprint,
+    expectedBackup: { registrySha256: inspected.backup.registrySha256, auditSha256: inspected.backup.auditSha256 },
     now: T3,
     ...overrides,
   });
@@ -395,12 +396,13 @@ test("a restore refuses to lose v2-only data unless told to, and then archives i
 test("a restore is a compare-and-set on the live files: if they changed since the plan, nothing is touched", () =>
   withEnv((env) => {
     const backup = upgradedWithBackup(env);
-    const planned = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }).live.fingerprint;
+    const inspected = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+    const planned = inspected.live.fingerprint;
     bindV2(env.root, "late-arrival", T4);
     const live = livePair(env.root);
     const entries = readdirSync(env.backupParent).sort();
     expectError(
-      () => restoreIdentityRegistry({ root: env.root, backupDir: backup.dir, archiveParent: env.backupParent, expectedLiveFingerprint: planned, now: T3 }),
+      () => restoreIdentityRegistry({ root: env.root, backupDir: backup.dir, archiveParent: env.backupParent, expectedLiveFingerprint: planned, expectedBackup: { registrySha256: inspected.backup.registrySha256, auditSha256: inspected.backup.auditSha256 }, now: T3 }),
       "registry_changed",
       "live_registry_changed_since_plan",
     );
@@ -411,6 +413,29 @@ test("a restore is a compare-and-set on the live files: if they changed since th
       expectError(() => restoreIdentityRegistry({ root: env.root, backupDir: backup.dir, archiveParent: env.backupParent, expectedLiveFingerprint: bad, now: T3 }), "invalid_registry", "expected_live_fingerprint_required");
     }
     assert.deepEqual(livePair(env.root), live);
+  }));
+
+test("a restore writes the backup bytes that were planned: a backup that changed since is refused", () =>
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    const planned = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+    const live = livePair(env.root);
+    const restore = (expectedBackup) => restoreIdentityRegistry({
+      root: env.root,
+      backupDir: backup.dir,
+      archiveParent: env.backupParent,
+      expectedLiveFingerprint: planned.live.fingerprint,
+      expectedBackup,
+      now: T3,
+    });
+    for (const bad of [undefined, null, {}, { registrySha256: "abc", auditSha256: null }, { registrySha256: planned.backup.registrySha256 }, { auditSha256: planned.backup.auditSha256 }]) {
+      expectError(() => restore(bad), "invalid_registry", "expected_backup_required");
+    }
+    // a copy that still reads and verifies, but is not the bytes that were planned (trailing newline in the registry file)
+    appendFileSync(path.join(backup.dir, REGISTRY_FILE_NAME), "\n");
+    expectError(() => restore({ registrySha256: planned.backup.registrySha256, auditSha256: planned.backup.auditSha256 }), "registry_changed", "backup_changed_since_plan");
+    assert.deepEqual(livePair(env.root), live, "nothing was replaced");
+    assert.deepEqual(readdirSync(env.backupParent).filter((n) => n.startsWith("before-restore-")), [], "nothing was archived");
   }));
 
 test("a restore can replace an unreadable live registry, and recreate a missing one", () =>
@@ -440,7 +465,14 @@ test("a stray directory inside the registry root stops a restore: replacing the 
     const live = livePair(env.root);
     expectError(() => inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }), "registry_unsafe");
     expectError(
-      () => restoreIdentityRegistry({ root: env.root, backupDir: backup.dir, archiveParent: env.backupParent, expectedLiveFingerprint: { registry: null, audit: null }, now: T3 }),
+      () => restoreIdentityRegistry({
+        root: env.root,
+        backupDir: backup.dir,
+        archiveParent: env.backupParent,
+        expectedLiveFingerprint: { registry: null, audit: null },
+        expectedBackup: { registrySha256: backup.registrySha256, auditSha256: backup.auditSha256 },
+        now: T3,
+      }),
       "registry_unsafe",
     );
     assert.deepEqual(livePair(env.root), live);

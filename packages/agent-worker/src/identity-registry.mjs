@@ -2769,8 +2769,8 @@ function validateLiveFingerprint(value) {
 
 /**
  * Replaces the live registry pair with the pair in `backupDir` (a v1 backup that reads and verifies), under the registry
- * lock. `expectedLiveFingerprint` (from `inspectIdentityRegistryRestore`) is the compare-and-set: if the live files are not
- * the ones that were planned, nothing is touched (`registry_changed`). The live registry may be absent or unreadable (that is
+ * lock. `expectedLiveFingerprint` and `expectedBackup` (both from `inspectIdentityRegistryRestore`) are the compare-and-set:
+ * if the live files, or the backup's bytes, are not the ones that were planned, nothing is touched (`registry_changed`). The live registry may be absent or unreadable (that is
  * what a restore is for). A readable v2 registry that holds v2-only data (a serverless binding, pairing, alias or
  * destination) is refused unless `discardV2Data` is set. Before anything is replaced the live files are copied byte for byte
  * into a new `before-restore-...` directory under `archiveParent`. The registry file is replaced first and then the audit log,
@@ -2782,6 +2782,7 @@ export function restoreIdentityRegistry({
   backupDir,
   archiveParent,
   expectedLiveFingerprint,
+  expectedBackup,
   discardV2Data = false,
   now,
   lockTimeoutMs = LOCK_TIMEOUT_MS,
@@ -2794,7 +2795,17 @@ export function restoreIdentityRegistry({
   assertDisjointDirs(root, backupDir, "backup_overlaps_registry_root");
   assertDisjointDirs(root, archiveParent, "backup_parent_overlaps_registry_root");
   validateLiveFingerprint(expectedLiveFingerprint);
+  if (!isPlainObject(expectedBackup) || !HEX_64_PATTERN.test(expectedBackup.registrySha256 ?? "") || !(expectedBackup.auditSha256 === null || HEX_64_PATTERN.test(expectedBackup.auditSha256 ?? ""))) {
+    throw codedError("invalid_registry", "expected_backup_required");
+  }
   const backup = describeBackupDir(backupDir);
+  // the bytes that will be written are the bytes that were planned, not whatever the directory holds now
+  if (
+    sha256Buffer(backup.registryBytes) !== expectedBackup.registrySha256 ||
+    (backup.auditBytes === null ? null : sha256Buffer(backup.auditBytes)) !== expectedBackup.auditSha256
+  ) {
+    throw codedError("registry_changed", "backup_changed_since_plan");
+  }
   ensureSafeRootForWrite(root);
   return withRegistryLock(root, lockTimeoutMs, () => {
     const live = describeLiveRegistry(root);
