@@ -8,9 +8,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { main } from "../src/cli.mjs";
-import { readSupervisorManifestVersion, runTriangleLocalStatus } from "../src/identity-upgrade.mjs";
+import { readSupervisorManifestVersion, renderRestorePlan, runTriangleLocalStatus } from "../src/identity-upgrade.mjs";
 import { bindProfileInRegistry, makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
-import { AUDIT_FILE, REGISTRY_FILE, START, V1, V2, clock, fixture, okStatus, stamp, writeManifest } from "./identity-registry-upgrade-helpers.mjs";
+import { AUDIT_FILE, REGISTRY_FILE, ROOT_AUTO, START, V1, V2, clock, fixture, okStatus, sha256Hex, stamp, writeManifest } from "./identity-registry-upgrade-helpers.mjs";
 import { agentBindingV2, appendAndCommit, peerBindingV2, serverlessPairing } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";
 import {
   backupIdentityRegistry,
@@ -45,7 +45,7 @@ test("the plan reports the floor and the way back, writes nothing, and is determ
   assert.deepEqual(f.files(), bytes);
 
   // what the plan rests on is in its id
-  f.state.status = okStatus({ registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, V2, "identity_registry_v3"] } });
+  f.state.status = okStatus({ registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, V2, "identity_registry_v3"], rootSha256: ROOT_AUTO } });
   assert.notEqual((await f.plan()).planId, plan.planId);
 });
 
@@ -130,12 +130,12 @@ test("floor 3: the RUNNING supervisor must say it can read v2", async (t) => {
   await expectBlocked(fixture(t, { status: okStatus({ registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: "identity_registry_v2" } }) }), "supervisor_cannot_read_v2");
   await expectBlocked(fixture(t, { status: okStatus({ registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, 2] } }) }), "supervisor_cannot_read_v2");
   // a disabled router still reports what the process can read, and that is enough
-  const disabled = fixture(t, { status: okStatus({ enabled: false, registry: { state: "disabled", sequence: 0, schema: null, supportedSchemas: [V1, V2] } }) });
+  const disabled = fixture(t, { status: okStatus({ enabled: false, registry: { state: "disabled", sequence: 0, schema: null, supportedSchemas: [V1, V2], rootSha256: ROOT_AUTO } }) });
   assert.equal((await disabled.plan()).ready, true);
 });
 
 test("the plan notes when the supervisor reports a registry that is not this one", async (t) => {
-  const f = fixture(t, { status: okStatus({ registry: { state: "ok", sequence: 9, schema: V1, supportedSchemas: [V1, V2] } }) });
+  const f = fixture(t, { status: okStatus({ registry: { state: "ok", sequence: 9, schema: V1, supportedSchemas: [V1, V2], rootSha256: ROOT_AUTO } }) });
   const human = await f.run("upgrade-registry");
   assert.equal(human.code, 0, human.out);
   assert.ok(human.out.includes("The supervisor currently reads: ok, v1, sequence 9."), human.out);
@@ -154,6 +154,22 @@ test("a refusal under --json is one JSON object on standard error", async (t) =>
   assert.equal(error.error, "runtime_upgrade_required");
   assert.match(error.message, /older than v14/);
   assert.equal(applied.out, "");
+});
+
+test("floor 3 is about the registry being upgraded: the supervisor must say which directory it reads, and it must be this one", async (t) => {
+  const registryBlock = (rootSha256) => ({ state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, V2], rootSha256 });
+  // another directory
+  const another = fixture(t, { status: okStatus({ registry: registryBlock(sha256Hex("/somewhere/else/identity")) }) });
+  const plan = await expectBlocked(another, "supervisor_reads_another_registry");
+  assert.equal(plan.floor.supervisor.supportedSchemas.includes(V2), true, "it can read v2, but not for this registry");
+  // not said at all, or not a digest: a supervisor that cannot say what it reads proves nothing about this registry
+  for (const bad of [undefined, null, 12, "ABC", "z".repeat(64), "a".repeat(63)]) {
+    const f = fixture(t, { status: okStatus({ registry: registryBlock(bad) }) });
+    const blocked = await expectBlocked(f, "supervisor_cannot_read_v2");
+    assert.equal(blocked.floor.supervisor.detail, "registry_root_not_reported", String(bad));
+  }
+  // the right directory passes
+  assert.equal((await fixture(t, { status: okStatus({ registry: registryBlock(ROOT_AUTO) }) }).plan()).ready, true);
 });
 
 test("several blocked conditions are all reported, in order", async (t) => {
@@ -243,7 +259,10 @@ test("a write that lands between the plan and the backup stops the upgrade; one 
   assert.equal(earlyRun.code, 2, earlyRun.err);
   assert.ok(earlyRun.err.includes("(plan_stale)"));
   assert.equal(readIdentityRegistry({ root: early.registry }).registry.schema, V1);
-  assert.match(earlyRun.err, /A backup was made first: /);
+  // the command's own words win, and it says the backup is not needed (restoring it would drop the newer write)
+  assert.match(earlyRun.err, /The registry changed while the backup was taken\. Nothing was upgraded\./);
+  assert.match(earlyRun.err, /The backup taken just before is kept; it is not needed: /);
+  assert.ok(!earlyRun.err.includes("To put the clean pair back"), earlyRun.err);
 
   // after the backup: the upgrade is a compare-and-set on the backed-up sequence
   const late = fixture(t);
@@ -259,7 +278,9 @@ test("a write that lands between the plan and the backup stops the upgrade; one 
   });
   assert.equal(lateRun.code, 1, lateRun.err);
   assert.ok(lateRun.err.includes("(registry_sequence_conflict)"), lateRun.err);
-  assert.match(lateRun.err, /A backup was made first: /);
+  assert.match(lateRun.err, /The registry changed after the backup was taken\. Nothing was upgraded\./);
+  assert.match(lateRun.err, /The backup taken just before is kept; it is not needed: /);
+  assert.ok(!lateRun.err.includes("To put the clean pair back"), lateRun.err);
   assert.deepEqual([readIdentityRegistry({ root: late.registry }).registry.schema, readIdentityRegistry({ root: late.registry }).registry.sequence], [V1, 4]);
 });
 
@@ -311,6 +332,91 @@ test("a registry swapped for another one with the same sequence between the plan
   assert.equal(readIdentityRegistry({ root: f.registry }).registry.schema, V1);
 });
 
+test("a plan id from before an upgrade and a restore does not come back to life when the registry looks the same again", async (t) => {
+  const f = fixture(t);
+  const first = await f.plan();
+  const upgradedBackup = await (async () => {
+    const applied = await f.run("upgrade-registry", ["--confirm", first.planId, "--json"], { identityDependencies: { now: clock(5) } });
+    assert.equal(applied.code, 0, applied.err);
+    return JSON.parse(applied.out).backup.dir;
+  })();
+  const restorePlan = JSON.parse((await f.run("restore-registry", ["--from", upgradedBackup, "--json"])).out);
+  const restored = await f.run("restore-registry", ["--from", upgradedBackup, "--confirm", restorePlan.planId, "--json"], { identityDependencies: { now: clock(9) } });
+  assert.equal(restored.code, 0, restored.err);
+  // the registry is byte for byte what it was when the first plan was made, but the backup folder is not
+  assert.equal((await f.plan()).registry.sequence, first.registry.sequence);
+  const replay = await f.run("upgrade-registry", ["--confirm", first.planId]);
+  assert.equal(replay.code, 2, replay.err);
+  assert.ok(replay.err.includes("(plan_stale)"));
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.schema, V1);
+  // and the restore plan from before the restore is stale too
+  const replayRestore = await f.run("restore-registry", ["--from", upgradedBackup, "--confirm", restorePlan.planId]);
+  assert.equal(replayRestore.code, 2);
+});
+
+test("a restore plan id is stale as soon as another backup or archive appears", async (t) => {
+  const f = fixture(t);
+  const backup = backupIdentityRegistry({ root: f.registry, backupParent: path.join(f.app, "identity-backups"), now: clock(1)() });
+  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  backupIdentityRegistry({ root: f.registry, backupParent: path.join(f.app, "identity-backups"), now: clock(2)() });
+  const stale = await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId]);
+  assert.equal(stale.code, 2, stale.err);
+  assert.ok(stale.err.includes("(plan_stale)"));
+  const fresh = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  assert.notEqual(fresh.planId, plan.planId);
+});
+
+test("the upgrade also compares the audit head under the lock: a different registry of the same sequence is not upgraded", async (t) => {
+  const f = fixture(t);
+  const other = fixture(t);
+  const plan = await f.plan();
+  const real = (await import("../../agent-worker/src/identity-registry.mjs")).backupIdentityRegistry;
+  const run = await f.run("upgrade-registry", ["--confirm", plan.planId], {
+    identityDependencies: {
+      backupIdentityRegistry: (args) => {
+        const backup = real(args); // the backup is of the planned registry ...
+        for (const name of [REGISTRY_FILE, AUDIT_FILE]) { // ... and then a registry with the same sequence takes its place
+          fs.copyFileSync(path.join(other.registry, name), path.join(f.registry, name));
+          fs.chmodSync(path.join(f.registry, name), 0o600);
+        }
+        return backup;
+      },
+    },
+  });
+  assert.equal(run.code, 1, run.err);
+  assert.ok(run.err.includes("(registry_sequence_conflict)"), run.err);
+  assert.match(run.err, /not the one that was backed up\. Nothing was upgraded\./);
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.schema, V1);
+});
+
+test("a restore that fails after it archived the live files says where they are", async (t) => {
+  const f = fixture(t);
+  const backup = backupIdentityRegistry({ root: f.registry, backupParent: path.join(f.app, "identity-backups"), now: clock(1)() });
+  bindProfileInRegistry(f.registry, "gamma", 3);
+  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  const failed = await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId], {
+    identityDependencies: {
+      now: clock(9),
+      faultHook: (stage) => { if (stage === "after_audit_replace") fs.appendFileSync(path.join(f.registry, REGISTRY_FILE), "\n"); },
+    },
+  });
+  assert.equal(failed.code, 1);
+  assert.match(failed.err, /The files that were being replaced are archived in: .*before-restore-v1-/);
+});
+
+test("the rendering tells apart a backup that shares part of the history from one that shares none", () => {
+  const base = {
+    registryRoot: "/a/identity", archiveParent: "/a/identity-backups", discarded: [], routing: { added: [], removed: [], reactivated: [], revoked: [], changed: [] },
+    routingAcknowledgement: [], refusals: [], ready: true, planId: "1".repeat(64), acceptRoutingChanges: false, discardV2Data: false,
+    backup: { dir: "/a/identity-backups/b", schema: V1, sequence: 3, bindings: 2, auditHead: { hash: "a".repeat(64) } },
+    live: { state: "ok", schema: V1, sequence: 4, bindings: 2, auditHead: { hash: "b".repeat(64) }, v2Data: null, uncommittedTail: 0 },
+  };
+  const diverged = renderRestorePlan({ ...base, relation: "diverged", commonPrefix: 2 });
+  assert.ok(diverged.includes("share their first 2 audit entries and differ after that"), diverged);
+  const unrelated = renderRestorePlan({ ...base, relation: "unrelated", commonPrefix: 0 });
+  assert.ok(unrelated.includes("no audit entry in common: they are different registries"), unrelated);
+});
+
 test("a crash during the upgrade keeps the backup, and the upgrade can be planned and applied again", async (t) => {
   const f = fixture(t);
   const plan = await f.plan();
@@ -353,7 +459,9 @@ function fakeTriangleLocal(app, body, mode = 0o700) {
 test("the real probe runs the installed triangle-local status with a clean environment and reads the answer", async (t) => {
   const f = fixture(t);
   const dump = path.join(f.root, "dump");
-  fakeTriangleLocal(f.app, `printf '%s\\n' "$@" > '${dump}.args'\nenv | sort > '${dump}.env'\nprintf '%s' '${JSON.stringify(okStatus())}'`);
+  const answer = okStatus();
+  answer.router.registry.rootSha256 = sha256Hex(f.registry); // what a real supervisor of this release says about the directory it reads
+  fakeTriangleLocal(f.app, `printf '%s\\n' "$@" > '${dump}.args'\nenv | sort > '${dump}.env'\nprintf '%s' '${JSON.stringify(answer)}'`);
   const status = await runTriangleLocalStatus({ applicationRoot: f.app, env: { HOME: "/home/x", PATH: "/usr/bin:/bin", SUPER_SECRET_TOKEN: "do-not-pass" } });
   assert.deepEqual(status.router.registry.supportedSchemas, [V1, V2]);
   assert.deepEqual(fs.readFileSync(`${dump}.args`, "utf8").trim().split("\n"), ["status", "--config", path.join(f.app, "client", "local-messaging.json")]);
@@ -414,9 +522,29 @@ test("the real probe refuses a triangle-local that is not executable or whose di
   assert.deepEqual(fs.readFileSync(dump, "utf8").trim().split("\n"), ["status", "--config", path.join(f.app, "my-client", "local-messaging.json")]);
 });
 
+test("the probe's time limit is hard: a child that ignores TERM, or leaves a grandchild holding the pipe, is not waited for", async (t) => {
+  const f = fixture(t);
+  const ask = (timeoutMs = 300) => runTriangleLocalStatus({ applicationRoot: f.app, env: { HOME: "/h", PATH: "/usr/bin:/bin" }, timeoutMs });
+  const timed = async (expectation) => {
+    const started = Date.now();
+    await assert.rejects(ask(), expectation);
+    return Date.now() - started;
+  };
+  fakeTriangleLocal(f.app, "trap '' TERM\nsleep 6");
+  assert.ok((await timed({ code: "supervisor_unreachable", detail: "timeout" })) < 2500, "TERM ignored");
+  fakeTriangleLocal(f.app, "(sleep 6 &) ; sleep 6");
+  assert.ok((await timed({ code: "supervisor_unreachable", detail: "timeout" })) < 2500, "a grandchild");
+  // output beyond the cap is refused without being kept
+  fakeTriangleLocal(f.app, "head -c 2000000 /dev/zero | tr '\\0' 'a'");
+  await assert.rejects(ask(5000), { code: "supervisor_unreachable", detail: "status_too_large" });
+  // an answer that arrives and a child that exits are enough, even if a grandchild keeps the pipe open afterwards
+  fakeTriangleLocal(f.app, "(sleep 3 &) ; echo '{\"router\":{}}'");
+  assert.deepEqual(await ask(2000), { router: {} });
+});
+
 test("what the supervisor says is shown only as plain tokens, never as terminal control characters", async (t) => {
   const evil = "bad\u001b[2Jname\u0007";
-  const f = fixture(t, { status: okStatus({ registry: { state: "o\u001bk", sequence: 9, schema: "identity_registry_v1\u0007", supportedSchemas: [V1, V2, evil] } }) });
+  const f = fixture(t, { status: okStatus({ registry: { state: "o\u001bk", sequence: 9, schema: "identity_registry_v1\u0007", supportedSchemas: [V1, V2, evil], rootSha256: ROOT_AUTO } }) });
   const human = await f.run("upgrade-registry");
   assert.equal(human.code, 0, human.out);
   assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(human.out), JSON.stringify(human.out));
@@ -425,15 +553,23 @@ test("what the supervisor says is shown only as plain tokens, never as terminal 
   assert.equal(plan.observed.supervisorRegistry.schema, "identity_registry_v1?");
 });
 
-test("the manifest reader returns the version and refuses what is not a private file", (t) => {
+test("the manifest reader returns the version and refuses what is not a private file in directories only its owner can write", async (t) => {
   const f = fixture(t, { manifest: 14 });
-  assert.equal(readSupervisorManifestVersion(f.app), 14);
+  assert.equal(await readSupervisorManifestVersion(f.app), 14);
   writeManifest(f.app, 15);
-  assert.equal(readSupervisorManifestVersion(f.app), 15);
+  assert.equal(await readSupervisorManifestVersion(f.app), 15);
+  for (const dir of [path.join(f.app, "worker-runtime"), f.app]) {
+    fs.chmodSync(dir, 0o777);
+    try {
+      await assert.rejects(readSupervisorManifestVersion(f.app), { code: "runtime_manifest_unreadable" }, `${dir} others can write`);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+  }
   writeManifest(f.app, 15, 0o640);
-  assert.throws(() => readSupervisorManifestVersion(f.app), { code: "runtime_manifest_unreadable" });
+  await assert.rejects(readSupervisorManifestVersion(f.app), { code: "runtime_manifest_unreadable" });
   fs.rmSync(path.join(f.app, "worker-runtime"), { recursive: true });
-  assert.throws(() => readSupervisorManifestVersion(f.app), { code: "runtime_manifest_missing" });
+  await assert.rejects(readSupervisorManifestVersion(f.app), { code: "runtime_manifest_missing" });
 });
 
 // ---- restore -------------------------------------------------------------------------------------------------------------------
@@ -530,13 +666,30 @@ test("a restore says what it changes for routing: a revoke it would undo, a bind
   });
   bindProfileInRegistry(f.registry, "gamma", 4);
   const human = await f.run("restore-registry", ["--from", backup.dir]);
-  assert.equal(human.code, 0, human.err);
+  assert.equal(human.code, 1, "a plan that cannot be applied yet exits 1");
   assert.ok(human.out.includes("What changes for routing (principal sends):"), human.out);
   assert.match(human.out, /! beta \(agent_[a-f0-9]{32}\): a REVOKE IS UNDONE, this binding routes again/);
   assert.match(human.out, /- gamma \(agent_[a-f0-9]{32}\): removed \(the live registry has it, the backup does not\)/);
-  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
-  assert.deepEqual([plan.routing.reactivated.map((x) => x.profile), plan.routing.removed.map((x) => x.profile)], [["beta"], ["gamma"]]);
-  const applied = await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId], { identityDependencies: { now: clock(9) } });
+  // a plan that would undo a revoke is not ready until the owner accepts the routing changes, and says so
+  assert.ok(human.out.includes("restore_would_change_routing"), human.out);
+  assert.ok(!human.out.includes("To apply this plan"), human.out);
+  const blocked = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  assert.deepEqual([blocked.ready, blocked.refusals, blocked.routingAcknowledgement], [false, ["restore_would_change_routing"], ["reactivates_revoked_binding"]]);
+  const refused = await f.run("restore-registry", ["--from", backup.dir, "--confirm", blocked.planId]);
+  assert.equal(refused.code, 1);
+  assert.ok(refused.err.includes("(restore_would_change_routing)"), refused.err);
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.bindings[beta.profile_instance_id].revoked_at !== null, true, "still revoked");
+
+  const accepted = await f.run("restore-registry", ["--from", backup.dir, "--accept-routing-changes"]);
+  assert.equal(accepted.code, 0, accepted.err);
+  assert.ok(accepted.out.includes("You accepted these routing changes (--accept-routing-changes)"), accepted.out);
+  assert.match(accepted.out, /restore-registry --client-root .* --accept-routing-changes --confirm [a-f0-9]{64}/);
+  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--accept-routing-changes", "--json"])).out);
+  assert.notEqual(plan.planId, blocked.planId, "the acceptance is part of the plan id");
+  assert.deepEqual([plan.ready, plan.routing.reactivated.map((x) => x.profile), plan.routing.removed.map((x) => x.profile)], [true, ["beta"], ["gamma"]]);
+  const withoutFlag = await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId]);
+  assert.equal(withoutFlag.code, 2, "the id of the accepted plan does not work without the flag");
+  const applied = await f.run("restore-registry", ["--from", backup.dir, "--accept-routing-changes", "--confirm", plan.planId], { identityDependencies: { now: clock(9) } });
   assert.equal(applied.code, 0, applied.err);
   assert.ok(applied.out.includes("Revoked bindings that route again: beta. Revoke them again with triangle identity revoke if that is not wanted."), applied.out);
   assert.equal(readIdentityRegistry({ root: f.registry }).registry.bindings[beta.profile_instance_id].revoked_at, null);
@@ -655,6 +808,7 @@ test("usage errors: roots, flags and positional arguments", async (t) => {
   assert.match((await call([...base, "--client-root", f.client, "extra"])).err, /takes no positional arguments/);
   assert.match((await call([...base, "--client-root", f.client, "--from", "/x"])).err, /unknown option --from/);
   assert.match((await call([...base, "--client-root", f.client, "--discard-v2-data"])).err, /unknown option --discard-v2-data/);
+  assert.match((await call([...base, "--client-root", f.client, "--accept-routing-changes"])).err, /unknown option --accept-routing-changes/);
   const restore = ["identity", "restore-registry", "--client-root", f.client];
   assert.match((await call(restore)).err, /requires --from BACKUP_DIR/);
   assert.match((await call([...restore, "--from", "relative"])).err, /--from must be an absolute path/);

@@ -566,7 +566,7 @@ test("the installed CLI plans a registry upgrade read-only, fails closed with no
     assert.deepEqual([refused.ready, refused.refusals], [false, ["runtime_manifest_missing", "supervisor_unreachable"]]);
 
     // a supervisor that reports it can read v2, and a v14 manifest
-    const status = { ok: true, router: { enabled: true, registry: { state: "ok", sequence: 2, schema: "identity_registry_v1", supportedSchemas: ["identity_registry_v1", "identity_registry_v2"] } } };
+    const status = { ok: true, router: { enabled: true, registry: { state: "ok", sequence: 2, schema: "identity_registry_v1", supportedSchemas: ["identity_registry_v1", "identity_registry_v2"], rootSha256: createHash("sha256").update(registry).digest("hex") } } };
     mkdirSync(join(app, "bin"), { recursive: true, mode: 0o700 });
     writeFileSync(join(app, "bin/triangle-local"), `#!/bin/sh\nprintf '%s' '${JSON.stringify(status)}'\n`, { mode: 0o700 });
     writeFileSync(join(app, "worker-runtime/supervisor.manifest.json"), JSON.stringify({ version: 14 }), { mode: 0o600 });

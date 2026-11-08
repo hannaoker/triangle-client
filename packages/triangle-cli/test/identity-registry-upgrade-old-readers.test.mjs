@@ -15,7 +15,7 @@ import { planRegistryUpgrade } from "../src/identity-upgrade.mjs";
 import { makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
 import { createRegistrySnapshotProvider } from "../../agent-worker/src/router-registry-snapshot.mjs";
 import { createUnifiedRouter } from "../../agent-worker/src/unified-router.mjs";
-import { AUDIT_FILE, REGISTRY_FILE, V1, V2, clock, fixture } from "./identity-registry-upgrade-helpers.mjs";
+import { AUDIT_FILE, REGISTRY_FILE, V1, V2, clock, fixture, sha256Hex } from "./identity-registry-upgrade-helpers.mjs";
 
 const BASELINE_COMMIT = "d418fb1";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -105,11 +105,13 @@ test("the floor passes only for a router that reports it can read v2: today's do
   const frozen = await loadFrozenRuntime(t);
   if (!frozen) return;
   const f = fixture(t);
+  // the server adds the digest of the registry directory it reads to the router's block; the old one knows no such field
+  const withRoot = (block) => (block.registry ? { ...block, registry: { ...block.registry, rootSha256: sha256Hex(f.registry) } } : block);
   const verdictFor = async (router) => (await planRegistryUpgrade({
     clientRoot: f.client,
     registryRoot: f.registry,
     readSupervisorManifestVersion: () => 14,
-    runSupervisorStatus: async () => ({ router: router.statusBlock() }),
+    runSupervisorStatus: async () => ({ router: withRoot(router.statusBlock()) }),
   })).floor.supervisor;
   const oldRouter = frozen.router.createUnifiedRouter({ enabled: true, snapshotProvider: frozen.snapshot.createRegistrySnapshotProvider({ root: f.registry }), recipients: RECIPIENTS });
   const newRouter = createUnifiedRouter({ enabled: true, snapshotProvider: createRegistrySnapshotProvider({ root: f.registry }), recipients: RECIPIENTS });

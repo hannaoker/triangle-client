@@ -1,6 +1,7 @@
 // Shared scratch fixture for the registry upgrade and restore command tests (D1.3): an application root with a client
 // directory, a v1 registry of two bindings, a supervisor runtime manifest, and a fake supervisor status. Nothing here touches
 // an installed host.
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,10 +20,14 @@ export function clock(offsetSeconds = 0) {
 }
 export const stamp = (iso) => `${iso.slice(0, 19).replace(/[-:]/g, "")}Z`;
 
+// What a supervisor of this release reports about the registry it reads: the schemas it can read, and a digest of the directory.
+// ROOT_AUTO is replaced by the fixture with the digest of its own registry directory.
+export const ROOT_AUTO = "auto";
+export const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 export function okStatus(over = {}) {
   return {
     ok: true,
-    router: { enabled: true, registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, V2] }, ...over },
+    router: { enabled: true, registry: { state: "ok", sequence: 3, schema: V1, supportedSchemas: [V1, V2], rootSha256: ROOT_AUTO }, ...over },
   };
 }
 
@@ -55,6 +60,10 @@ export function fixture(t, { manifest = 14, status = okStatus(), registry = true
     now: clock(),
     runSupervisorStatus: async () => {
       if (state.status instanceof Error) throw state.status;
+      const registry = state.status?.router?.registry;
+      if (registry && registry.rootSha256 === ROOT_AUTO) {
+        return { ...state.status, router: { ...state.status.router, registry: { ...registry, rootSha256: sha256Hex(reg) } } };
+      }
       return state.status;
     },
     ...extra,

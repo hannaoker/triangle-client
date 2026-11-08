@@ -2,9 +2,11 @@
 // the two files a reader accepts; a restore replaces the live pair from such a backup under the registry lock, against a
 // fingerprint of the live files, after archiving them.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   AUDIT_FILE_NAME,
@@ -36,6 +38,7 @@ import {
   upgradeThroughWriter,
 } from "./identity-registry-v2-helpers.mjs";
 
+const REGISTRY_URL = pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "../src/identity-registry.mjs")).href;
 const V1 = IDENTITY_REGISTRY_SCHEMA;
 const V2 = IDENTITY_REGISTRY_SCHEMA_V2;
 const T3 = "2026-11-07T10:15:00.000Z";
@@ -446,7 +449,9 @@ test("a restore can replace an unreadable live registry, and recreate a missing 
     bindV1(env.root);
     breakRegistryFile(env.root);
     const broken = livePair(env.root);
-    const out = restoreWith(env, backup.dir);
+    // nothing routes while the registry is unreadable, so restoring brings every binding of the backup back: the owner accepts that
+    expectError(() => restoreWith(env, backup.dir), "restore_refused", "restore_would_change_routing");
+    const out = restoreWith(env, backup.dir, { acceptRoutingChanges: true });
     assert.deepEqual([out.live.state, out.relation], ["unreadable", "unknown"]);
     assert.equal(path.basename(out.archive.dir), "before-restore-unreadable-20261107T101500Z");
     assert.deepEqual({ registry: bytesOf(out.archive.dir, REGISTRY_FILE_NAME), audit: bytesOf(out.archive.dir, AUDIT_FILE_NAME) }, broken, "the broken files are kept as they were");
@@ -454,7 +459,7 @@ test("a restore can replace an unreadable live registry, and recreate a missing 
 
     // the whole root is gone: it is recreated private, and there is nothing to archive
     rmSync(env.root, { recursive: true, force: true });
-    const again = restoreWith(env, backup.dir);
+    const again = restoreWith(env, backup.dir, { acceptRoutingChanges: true });
     assert.deepEqual([again.live.state, again.archive], ["absent", null]);
     assert.equal(modeOf(env.root), 0o700);
     assert.deepEqual([readIdentityRegistry({ root: env.root }).registry.sequence, rootEntries(env.root)], [3, [AUDIT_FILE_NAME, REGISTRY_FILE_NAME].sort()]);
@@ -482,14 +487,15 @@ test("what a restore changes for routing, binding by binding: undone revokes, ad
     const routing = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }).routing;
     assert.deepEqual([names(routing.reactivated), names(routing.removed), names(routing.added), names(routing.revoked), names(routing.changed)], [["ghost"], ["codex-headless"], [], [], []]);
     assert.deepEqual(routing.reactivated[0], { instanceId: ghost.profile_instance_id, profile: "ghost", principal: ghost.principal_id, trustMode: "mesh-managed", generation: 1 });
-    const out = restoreWith(env, backup.dir);
+    expectError(() => restoreWith(env, backup.dir), "restore_refused", "restore_would_change_routing");
+    const out = restoreWith(env, backup.dir, { acceptRoutingChanges: true });
     assert.deepEqual([names(out.routing.reactivated), names(out.routing.removed)], [["ghost"], ["codex-headless"]]);
     assert.equal(readIdentityRegistry({ root: env.root }).registry.bindings[ghost.profile_instance_id].revoked_at, null, "the binding routes again");
 
     // a backup that was taken after a revoke: restoring it revokes, and one with a binding the live registry lacks adds it
     revokeGhost();
     const later = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T3 });
-    restoreWith(env, backup.dir);
+    restoreWith(env, backup.dir, { acceptRoutingChanges: true }); // back to before the revoke: ghost routes again
     const forward = inspectIdentityRegistryRestore({ root: env.root, backupDir: later.dir }).routing;
     assert.deepEqual([names(forward.revoked), names(forward.reactivated)], [["ghost"], []]);
 
@@ -613,9 +619,9 @@ test("a stale uncommitted audit line in the live registry is not counted as hist
     assert.deepEqual([inspected.live.uncommittedTail, inspected.relation, inspected.discarded], [1, "same", []]);
   }));
 
-test("backups and archives are private whatever the umask", () =>
+test("backups and archives are private whatever the umask, including the folder that holds them", () =>
   withEnv((env) => {
-    backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 }); // the parent exists now
+    // the folder does not exist yet, so it is created under the restrictive umask too
     const old = process.umask(0o277);
     let backup;
     try {
@@ -623,8 +629,115 @@ test("backups and archives are private whatever the umask", () =>
     } finally {
       process.umask(old);
     }
-    assert.deepEqual([modeOf(backup.dir), modeOf(path.join(backup.dir, REGISTRY_FILE_NAME)), modeOf(path.join(backup.dir, AUDIT_FILE_NAME))], [0o700, 0o600, 0o600]);
+    assert.deepEqual([modeOf(env.backupParent), modeOf(backup.dir), modeOf(path.join(backup.dir, REGISTRY_FILE_NAME)), modeOf(path.join(backup.dir, AUDIT_FILE_NAME))], [0o700, 0o700, 0o600, 0o600]);
     assert.equal(readIdentityRegistry({ root: backup.dir }).registry.sequence, 3);
+  }));
+
+test("a restore needs the owner's acceptance whenever it is not just an earlier state: a newer, diverged or unrelated backup, or an added binding", () =>
+  withEnv((env) => {
+    const reasons = (backupDir) => inspectIdentityRegistryRestore({ root: env.root, backupDir }).routingAcknowledgement;
+    const base = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 });
+    assert.deepEqual(reasons(base.dir), [], "the live registry itself needs no acceptance");
+
+    // a newer backup that only REVOKES a binding changes no authority upwards, but it is not an earlier state of this registry
+    const ghost = agentBindingV1("ghost");
+    updateIdentityRegistry({
+      root: env.root, expectedSequence: 3, now: T2, action: "revoke", subject: ghost.profile_instance_id,
+      mutate: (r) => { r.bindings[ghost.profile_instance_id].revoked_at = T2; return r; },
+    });
+    const newer = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T3 });
+    restoreWith(env, base.dir, { acceptRoutingChanges: true });
+    assert.deepEqual(reasons(newer.dir), ["backup_is_behind"]);
+    expectError(() => restoreWith(env, newer.dir), "restore_refused", "restore_would_change_routing");
+    for (const flag of ["yes", "true", 1, {}]) {
+      expectError(() => restoreWith(env, newer.dir, { acceptRoutingChanges: flag }), "restore_refused", "restore_would_change_routing");
+    }
+    assert.equal(restoreWith(env, newer.dir, { acceptRoutingChanges: true }).restored.sequence, 4);
+
+    // an earlier state of this registry that only removes a binding the live registry added needs nothing
+    bindV1(env.root, "codex-headless");
+    assert.deepEqual(reasons(newer.dir), []);
+    assert.equal(restoreWith(env, newer.dir).restored.sequence, 4);
+
+    // another registry: unrelated, whatever it holds
+    const other = makeRoot("id-reg-v2b-other-");
+    try {
+      // created at another moment, so not even its first audit entry is the live registry's
+      updateIdentityRegistry({ root: other.root, expectedSequence: 0, now: T1, action: "init", subject: null, mutate: (r) => r });
+      bind(other.root, agentBindingV1("owner-profile"), T1);
+      const foreign = backupIdentityRegistry({ root: other.root, backupParent: path.join(other.base, "identity-backups"), now: T1 });
+      const inspected = inspectIdentityRegistryRestore({ root: env.root, backupDir: foreign.dir });
+      assert.deepEqual([inspected.relation, inspected.commonPrefix], ["unrelated", 0]);
+      assert.deepEqual(inspected.routingAcknowledgement, ["adds_binding", "backup_is_unrelated"]);
+      expectError(() => restoreWith(env, foreign.dir), "restore_refused", "restore_would_change_routing");
+      assert.equal(restoreWith(env, foreign.dir, { acceptRoutingChanges: true }).restored.sequence, 2);
+    } finally {
+      rmSync(other.base, { recursive: true, force: true });
+    }
+  }));
+
+test("a restore removes the staging files a killed restore left behind", () =>
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    const stale = [`${REGISTRY_FILE_NAME}.tmp-restore-111-aaaaaa`, `${REGISTRY_FILE_NAME}.tmp-restore-audit-111-aaaaaa`];
+    for (const name of stale) {
+      writeFileSync(path.join(env.root, name), "left behind");
+      chmodSync(path.join(env.root, name), 0o600);
+    }
+    // the reader ignores them
+    assert.equal(readIdentityRegistry({ root: env.root }).registry.schema, V2);
+    restoreWith(env, backup.dir);
+    assert.deepEqual(rootEntries(env.root), [AUDIT_FILE_NAME, REGISTRY_FILE_NAME].sort());
+  }));
+
+test("a restore that fails after the live files were archived says where the archive is", () =>
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    let failure = null;
+    try {
+      restoreWith(env, backup.dir, { faultHook: (stage) => { if (stage === "after_audit_replace") appendFileSync(path.join(env.root, REGISTRY_FILE_NAME), "\n"); } });
+    } catch (err) {
+      failure = err;
+    }
+    assert.equal(failure?.reason, "restore_verification_failed");
+    assert.ok(failure.archive?.dir && existsSync(failure.archive.dir), "the error names the archive");
+    assert.equal(readIdentityRegistry({ root: failure.archive.dir }).registry.schema, V2);
+  }));
+
+test("planning retries a read that raced a writer, and only calls the live registry unreadable if it stays unreadable", () =>
+  withEnv((env) => {
+    const backup = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 });
+    const truncatedFirst = (limit) => {
+      let reads = 0;
+      return {
+        reads: () => reads,
+        hooks: {
+          readFileSync(fd, filePath, original) {
+            const buffer = original(fd);
+            if (!filePath.endsWith(AUDIT_FILE_NAME)) return buffer;
+            reads += 1;
+            return reads <= limit ? buffer.subarray(0, buffer.indexOf("\n") + 1) : buffer; // the audit log "behind" the registry
+          },
+        },
+      };
+    };
+    const once = truncatedFirst(1);
+    const settled = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir, fsHooks: once.hooks });
+    assert.deepEqual([settled.live.state, once.reads() >= 2], ["ok", true], "one raced read, then a clean one");
+    const always = truncatedFirst(Infinity);
+    const stuck = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir, fsHooks: always.hooks });
+    assert.equal(stuck.live.state, "unreadable");
+    assert.match(stuck.live.errorCode, /^registry_chain_broken:audit_log_behind_registry$/);
+    assert.equal(always.reads(), 6, "five retries and the last attempt");
+  }));
+
+test("the overlap check does not tell two spellings of one directory apart on a case-insensitive volume", { skip: process.platform !== "darwin" }, () =>
+  withEnv((env) => {
+    expectError(
+      () => backupIdentityRegistry({ root: env.root, backupParent: path.join(env.root.toUpperCase(), "inside"), now: T1 }),
+      "invalid_registry",
+      "backup_parent_overlaps_registry_root",
+    );
   }));
 
 test("a stray directory inside the registry root stops a restore: replacing the two files would not make the registry readable", () =>
@@ -674,7 +787,8 @@ test("a crash at any stage of a restore leaves nothing lost, and running the res
       }
 
       // run it again from a fresh plan
-      const out = restoreWith(env, backup.dir, { now: "2026-11-07T10:16:00.000Z" });
+      // (a half-restored registry is unreadable, so nothing routed meanwhile, and the rerun brings the backup's bindings back)
+      const out = restoreWith(env, backup.dir, { now: "2026-11-07T10:16:00.000Z", acceptRoutingChanges: true });
       assert.deepEqual(livePair(env.root), { registry: bytesOf(backup.dir, REGISTRY_FILE_NAME), audit: bytesOf(backup.dir, AUDIT_FILE_NAME) }, stage);
       assert.equal(readIdentityRegistry({ root: env.root }).registry.sequence, 3);
       assert.ok(out.restored.sequence === 3, stage);
@@ -712,3 +826,98 @@ test("the registry lock is held through a restore", () =>
     });
     assert.equal(sawBusy, true);
   }));
+
+// ---- other processes ------------------------------------------------------------------------------------------------------------
+function runChild(script, config) {
+  return spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, CFG: JSON.stringify(config) }, encoding: "utf8" });
+}
+
+const WRITER_SCRIPT = `
+  import { updateIdentityRegistry } from ${JSON.stringify(REGISTRY_URL)};
+  const cfg = JSON.parse(process.env.CFG);
+  try {
+    updateIdentityRegistry({ root: cfg.root, expectedSequence: cfg.sequence, now: cfg.now, action: "revoke", subject: cfg.subject, mutate: (r) => r, lockTimeoutMs: 200 });
+    console.log("wrote");
+  } catch (err) {
+    console.log(err.code + ":" + (err.reason ?? ""));
+  }
+`;
+
+test("a writer in another process cannot get the registry while it is being backed up or restored", () =>
+  withEnv((env) => {
+    const subject = agentBindingV1("ghost").profile_instance_id;
+    const tryWrite = () => runChild(WRITER_SCRIPT, { root: env.root, sequence: readIdentityRegistry({ root: env.root }).registry.sequence, now: T4, subject }).stdout.trim();
+    let duringBackup = null;
+    const backup = backupIdentityRegistry({
+      root: env.root,
+      backupParent: env.backupParent,
+      now: T1,
+      faultHook: (stage) => { if (stage === "after_backup_verify") duringBackup = tryWrite(); },
+    });
+    assert.equal(duringBackup, "registry_busy:lock_timeout");
+    bindV1(env.root);
+    let betweenRenames = null;
+    restoreWith(env, backup.dir, { faultHook: (stage) => { if (stage === "after_registry_replace") betweenRenames = tryWrite(); } });
+    assert.equal(betweenRenames, "registry_busy:lock_timeout");
+  }));
+
+const RESTORE_SCRIPT = `
+  import { restoreIdentityRegistry } from ${JSON.stringify(REGISTRY_URL)};
+  const cfg = JSON.parse(process.env.CFG);
+  const { killAt, ...options } = cfg;
+  restoreIdentityRegistry({ ...options, faultHook: (stage) => { if (stage === killAt) process.kill(process.pid, "SIGKILL"); } });
+`;
+
+test("a restore killed outright (SIGKILL, no cleanup runs) loses nothing, leaves only staging files, and the next restore sweeps them", () => {
+  for (const killAt of ["after_archive", "before_registry_replace", "after_registry_replace", "after_audit_replace"]) {
+    withEnv((env) => {
+      const backup = upgradedWithBackup(env);
+      const live = livePair(env.root);
+      const inspected = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+      const child = runChild(RESTORE_SCRIPT, {
+        root: env.root,
+        backupDir: backup.dir,
+        archiveParent: env.backupParent,
+        expectedLiveFingerprint: inspected.live.fingerprint,
+        expectedBackup: { registrySha256: inspected.backup.registrySha256, auditSha256: inspected.backup.auditSha256 },
+        acceptRoutingChanges: true,
+        now: T3,
+        killAt,
+      });
+      assert.equal(child.signal, "SIGKILL", killAt);
+
+      // the previous pair is in the archive from the moment the archive step was reached, whatever happened after
+      const archives = readdirSync(env.backupParent).filter((n) => n.startsWith("before-restore-"));
+      assert.equal(archives.length, 1, killAt);
+      assert.deepEqual({ registry: bytesOf(path.join(env.backupParent, archives[0]), REGISTRY_FILE_NAME), audit: bytesOf(path.join(env.backupParent, archives[0]), AUDIT_FILE_NAME) }, live, killAt);
+      // what a kill leaves behind in the registry root: staging files, which the reader ignores
+      const staging = readdirSync(env.root).filter((n) => n.includes(".tmp-restore-"));
+      assert.equal(staging.length, { after_archive: 0, before_registry_replace: 2, after_registry_replace: 1, after_audit_replace: 0 }[killAt], `${killAt}: ${staging}`);
+
+      // run it again from a fresh plan: it ends at the backup's exact bytes and the staging files are gone
+      restoreWith(env, backup.dir, { now: "2026-11-07T10:16:00.000Z", acceptRoutingChanges: true });
+      assert.deepEqual(livePair(env.root), { registry: bytesOf(backup.dir, REGISTRY_FILE_NAME), audit: bytesOf(backup.dir, AUDIT_FILE_NAME) }, killAt);
+      assert.deepEqual(rootEntries(env.root), [AUDIT_FILE_NAME, REGISTRY_FILE_NAME].sort(), killAt);
+    });
+  }
+});
+
+test("a backup killed outright leaves a directory the restore refuses, and the next backup is not blocked by it", () =>
+  withEnv((env) => {
+    const script = `
+      import { backupIdentityRegistry } from ${JSON.stringify(REGISTRY_URL)};
+      const cfg = JSON.parse(process.env.CFG);
+      backupIdentityRegistry({ root: cfg.root, backupParent: cfg.backupParent, now: cfg.now, faultHook: (stage) => { if (stage === "before_backup_write") process.kill(process.pid, "SIGKILL"); } });
+    `;
+    const child = runChild(script, { root: env.root, backupParent: env.backupParent, now: T1 });
+    assert.equal(child.signal, "SIGKILL");
+    const [leftover] = readdirSync(env.backupParent);
+    assert.equal(leftover, "backup-v1-20261107T100500Z");
+    assert.deepEqual(readdirSync(path.join(env.backupParent, leftover)), [], "an empty directory, not a backup");
+    expectError(() => inspectIdentityRegistryRestore({ root: env.root, backupDir: path.join(env.backupParent, leftover) }), "invalid_registry", "restore_backup_unreadable");
+    // the live registry is untouched and a new backup (same second) gets its own directory
+    const next = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 });
+    assert.equal(path.basename(next.dir), "backup-v1-20261107T100500Z-2");
+    assert.equal(readIdentityRegistry({ root: next.dir }).registry.sequence, 3);
+  }));
+

@@ -578,6 +578,11 @@ test("Server wiring: kill switch, invalid config diagnostics, per-request statca
     const status1 = await client.localStatus();
     assert.equal(status1.router.enabled, false);
     assert.equal(status1.router.error, undefined);
+    // with no router.json the directory it would read is the default one, beside the state root's parent
+    assert.equal(
+      status1.router.registry.rootSha256,
+      crypto.createHash("sha256").update(path.resolve(f.stateRoot, "../../identity"), "utf8").digest("hex"),
+    );
     // the process says which registry schemas it can read even while the router is off (the registry upgrade asks this)
     assert.deepEqual(status1.router.registry.supportedSchemas, ["identity_registry_v1", "identity_registry_v2"]);
     assert.equal(status1.router.registry.schema, null);
@@ -610,6 +615,8 @@ test("Server wiring: kill switch, invalid config diagnostics, per-request statca
     assert.equal(status2.router.registry.state, "ok");
     assert.equal(status2.router.registry.schema, "identity_registry_v1");
     assert.deepEqual(status2.router.registry.supportedSchemas, ["identity_registry_v1", "identity_registry_v2"]);
+    // it also says which registry directory it reads, as a digest of the path (the registry upgrade compares it)
+    assert.equal(status2.router.registry.rootSha256, crypto.createHash("sha256").update(f.identityRoot, "utf8").digest("hex"));
 
     // Principal send now succeeds!
     const principalReceipt = await client.sendMessage({
@@ -937,6 +944,8 @@ test("A v2 registry through the real server: local_status reports it, the same p
 
     const before = (await client.localStatus()).router.registry;
     assert.deepEqual([before.state, before.schema, before.sequence], ["ok", "identity_registry_v1", 2]);
+    const rootDigest = crypto.createHash("sha256").update(f.identityRoot, "utf8").digest("hex");
+    assert.equal(before.rootSha256, rootDigest);
     const first = await client.sendMessage({ to: bob.principal_id, text: "before the upgrade" });
     assert.equal(first.target.principal, bob.principal_id);
 
@@ -951,8 +960,8 @@ test("A v2 registry through the real server: local_status reports it, the same p
     // the running server re-reads the replaced file: same principals, new schema, one sequence further
     const after = (await client.localStatus()).router.registry;
     assert.deepEqual(
-      [after.state, after.schema, after.sequence, after.supportedSchemas],
-      ["ok", "identity_registry_v2", 3, ["identity_registry_v1", "identity_registry_v2"]],
+      [after.state, after.schema, after.sequence, after.supportedSchemas, after.rootSha256],
+      ["ok", "identity_registry_v2", 3, ["identity_registry_v1", "identity_registry_v2"], rootDigest],
     );
     const second = await client.sendMessage({ to: bob.principal_id, text: "after the upgrade" });
     assert.deepEqual(second.target, first.target);

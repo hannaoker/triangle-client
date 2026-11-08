@@ -1,6 +1,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   validatePrivateDirectory,
   validatePrivateSocket,
@@ -306,9 +307,13 @@ export function createLocalControlServer({
   let currentSnapshotRoot = null;
   let snapshotProvider = null;
 
+  // The registry directory this process reads (or would read once the router is enabled): router.json, else beside the state root.
+  function effectiveRegistryRoot() {
+    return routerStatCache.get().registryRoot || path.resolve(effectiveStateRoot, "../../identity");
+  }
+
   function getSnapshotProvider() {
-    const config = routerStatCache.get();
-    const effectiveRoot = config.registryRoot || path.resolve(effectiveStateRoot, "../../identity");
+    const effectiveRoot = effectiveRegistryRoot();
     if (snapshotProvider && currentSnapshotRoot === effectiveRoot) {
       return snapshotProvider;
     }
@@ -432,7 +437,12 @@ export function createLocalControlServer({
           if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
           const baseStatus = await statusProvider();
           const routerConf = routerStatCache.get();
-          const statusBlock = activeRouter.statusBlock();
+          const routerStatus = activeRouter.statusBlock();
+          // Which registry this process reads, as a digest of its path (not the path): the registry upgrade compares it with the
+          // directory it is about to upgrade, so the answer to "can the running supervisor read v2" is about the right registry.
+          const statusBlock = routerStatus?.registry && typeof routerStatus.registry === "object"
+            ? { ...routerStatus, registry: { ...routerStatus.registry, rootSha256: createHash("sha256").update(effectiveRegistryRoot(), "utf8").digest("hex") } }
+            : routerStatus;
           const routerBlock = routerConf.error ? { ...statusBlock, error: routerConf.error } : statusBlock;
           const decoratedStatus = {
             ...baseStatus,

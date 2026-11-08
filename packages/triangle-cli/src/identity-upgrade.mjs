@@ -7,8 +7,8 @@
 // exact plan id; applying needs a terminal (the gate `identity migrate --confirm` has). Neither grants authority or creates an
 // identity, and neither changes how any send is routed.
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { canonicalJson } from "./canonical.mjs";
@@ -65,9 +65,22 @@ export function backupParentOf(clientRoot) {
   return path.join(applicationRootOf(clientRoot), BACKUP_DIRECTORY_NAME);
 }
 
+// The names in the backup folder. They are in the plan id: an upgrade followed by a restore brings the registry back to the
+// same bytes, but there are then new directories here, so a plan id from before the round trip (shell history, say) is stale.
+function listBackupFolder(backupParent) {
+  try {
+    return readdirSync(backupParent).sort().slice(0, 500);
+  } catch {
+    return [];
+  }
+}
+
 // ---- the floor ----------------------------------------------------------------------------------------------------------------
 
-function readPrivateJsonFile(file) {
+async function readPrivateJsonFile(file) {
+  // the file, and every directory above it, must be the owner's and closed to others
+  const { ancestors } = await import("../../agent-worker/src/delivery-private-path.mjs");
+  ancestors(path.dirname(file));
   const st = lstatSync(file);
   if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.uid !== process.getuid() || (st.mode & 0o077) !== 0 || st.size > MANIFEST_MAX_BYTES) {
     fail("unsafe_file", "The file is not a private regular file.");
@@ -76,11 +89,11 @@ function readPrivateJsonFile(file) {
 }
 
 /** The version of the supervisor runtime manifest installed under the application root. */
-export function readSupervisorManifestVersion(applicationRoot) {
+export async function readSupervisorManifestVersion(applicationRoot) {
   const file = path.join(applicationRoot, "worker-runtime", "supervisor.manifest.json");
   let manifest;
   try {
-    manifest = readPrivateJsonFile(file);
+    manifest = await readPrivateJsonFile(file);
   } catch (error) {
     fail(error?.code === "ENOENT" ? "runtime_manifest_missing" : "runtime_manifest_unreadable", "The supervisor runtime manifest could not be read.");
   }
@@ -94,7 +107,7 @@ export function readSupervisorManifestVersion(applicationRoot) {
  * Asks the running supervisor for its local status the way the owner would: by running the installed `triangle-local status`
  * (which keeps its own credential handling). Returns the parsed status object. Never reads or prints a credential.
  */
-export async function runTriangleLocalStatus({ applicationRoot, clientRoot = path.join(applicationRoot, "client"), execFileImpl = execFile, timeoutMs = STATUS_TIMEOUT_MS, env = process.env }) {
+export async function runTriangleLocalStatus({ applicationRoot, clientRoot = path.join(applicationRoot, "client"), spawnImpl = spawn, timeoutMs = STATUS_TIMEOUT_MS, env = process.env }) {
   const unreachable = (detail, message) => Object.assign(new Error(message), { code: "supervisor_unreachable", detail });
   const executable = path.join(applicationRoot, "bin", "triangle-local");
   let st;
@@ -118,19 +131,70 @@ export async function runTriangleLocalStatus({ applicationRoot, clientRoot = pat
   for (const key of ["HOME", "PATH", "LANG", "TMPDIR", "USER", "LOGNAME"]) if (env[key] !== undefined) childEnv[key] = env[key];
   const config = path.join(path.resolve(clientRoot), "local-messaging.json");
   return await new Promise((resolve, reject) => {
-    execFileImpl(executable, ["status", "--config", config], { timeout: timeoutMs, maxBuffer: STATUS_MAX_BYTES, env: childEnv, windowsHide: true }, (error, stdout) => {
-      if (error) {
-        const detail = error.killed ? "timeout" : typeof error.code === "number" ? `exit_${error.code}` : String(error.code ?? "failed");
-        reject(Object.assign(new Error("The supervisor did not answer"), { code: "supervisor_unreachable", detail }));
+    // Its own process group, killed as a whole: the limit is hard even for a child that ignores TERM or hands the pipe to a
+    // grandchild. Standard error is never read or shown.
+    const child = spawnImpl(executable, ["status", "--config", config], { env: childEnv, detached: true, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    let output = "";
+    let size = 0;
+    let settled = false;
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }
+    };
+    const settle = (action, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.stdout?.destroy();
+      } catch {}
+      action(value);
+    };
+    const finish = () => {
+      try {
+        const status = JSON.parse(output);
+        if (status === null || typeof status !== "object" || Array.isArray(status)) throw new Error("not an object");
+        settle(resolve, status);
+      } catch {
+        settle(reject, unreachable("status_not_json", "The supervisor status was not JSON"));
+      }
+    };
+    const timer = setTimeout(() => {
+      killGroup();
+      settle(reject, unreachable("timeout", "The supervisor did not answer in time"));
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      size += Buffer.byteLength(chunk);
+      if (size > STATUS_MAX_BYTES) {
+        killGroup();
+        settle(reject, unreachable("status_too_large", "The supervisor status was too large"));
         return;
       }
-      try {
-        const status = JSON.parse(String(stdout));
-        if (status === null || typeof status !== "object" || Array.isArray(status)) throw new Error("not an object");
-        resolve(status);
-      } catch {
-        reject(Object.assign(new Error("The supervisor status was not JSON"), { code: "supervisor_unreachable", detail: "status_not_json" }));
+      output += chunk;
+    });
+    child.on("error", () => settle(reject, unreachable("spawn_failed", "triangle-local could not be started")));
+    let ended = false;
+    let exitedCleanly = false;
+    child.stdout.on("end", () => {
+      ended = true;
+      if (exitedCleanly) finish();
+    });
+    child.on("exit", (code) => {
+      if (code !== 0) {
+        settle(reject, unreachable(typeof code === "number" ? `exit_${code}` : "killed", "The supervisor did not answer"));
+        return;
       }
+      exitedCleanly = true;
+      // the answer is whole when the process has exited and its output has ended; a grandchild that keeps the pipe open is not
+      // waited for beyond a short grace
+      if (ended) finish();
+      else setTimeout(finish, 500);
     });
   });
 }
@@ -177,7 +241,7 @@ async function checkManifest(readManifestVersion, applicationRoot) {
 // Text that came from the supervisor's answer is shown to the owner, so only plain tokens of bounded length get through.
 const safeToken = (value) => String(value).replace(/[^A-Za-z0-9_.:-]/g, "?").slice(0, 64);
 
-async function checkSupervisor(runStatus, applicationRoot, clientRoot) {
+async function checkSupervisor(runStatus, applicationRoot, clientRoot, registryRoot) {
   const none = { supportedSchemas: null, routerEnabled: null, observedRegistry: null };
   let status;
   try {
@@ -203,6 +267,14 @@ async function checkSupervisor(runStatus, applicationRoot, clientRoot) {
   if (!supported.includes(SCHEMA_V2)) {
     return { ok: false, code: "supervisor_cannot_read_v2", detail: "v2_not_supported", supportedSchemas: shown, routerEnabled, observedRegistry };
   }
+  // "can read v2" has to be about the registry being upgraded: the supervisor says which directory it reads, as a digest
+  const reported = registry.rootSha256;
+  if (typeof reported !== "string" || !/^[a-f0-9]{64}$/.test(reported)) {
+    return { ok: false, code: "supervisor_cannot_read_v2", detail: "registry_root_not_reported", supportedSchemas: shown, routerEnabled, observedRegistry };
+  }
+  if (reported !== sha256Hex(registryRoot)) {
+    return { ok: false, code: "supervisor_reads_another_registry", detail: null, supportedSchemas: shown, routerEnabled, observedRegistry };
+  }
   return { ok: true, code: null, detail: null, supportedSchemas: shown, routerEnabled, observedRegistry };
 }
 
@@ -223,7 +295,7 @@ export async function planRegistryUpgrade({ clientRoot, registryRoot, ...deps } 
 
   const registry = await checkRegistry(readRegistry, registryRoot);
   const manifest = await checkManifest(readManifestVersion, applicationRoot);
-  const supervisor = await checkSupervisor(runStatus, applicationRoot, path.resolve(clientRoot));
+  const supervisor = await checkSupervisor(runStatus, applicationRoot, path.resolve(clientRoot), registryRoot);
 
   const refusals = [];
   if (!registry.ok) refusals.push(registry.code);
@@ -235,6 +307,7 @@ export async function planRegistryUpgrade({ clientRoot, registryRoot, ...deps } 
     schema: UPGRADE_PLAN_SCHEMA,
     registryRoot,
     backupParent,
+    existingBackups: listBackupFolder(backupParent),
     registry,
     floor: { manifest, supervisor: supervisorFloor },
     ready: refusals.length === 0,
@@ -270,7 +343,7 @@ export async function applyRegistryUpgrade({ clientRoot, registryRoot, confirm, 
   const backup = backupIdentityRegistry({ root: registryRoot, backupParent: plan.backupParent, now: at });
   if (backup.sequence !== plan.registry.sequence || backup.auditHead.hash !== plan.registry.auditHead.hash) {
     // someone wrote between the plan and the backup: nothing was upgraded, and the backup directory stays where it is
-    fail("plan_stale", "The registry changed while the backup was taken. Nothing was upgraded.", { backup });
+    fail("plan_stale", "The registry changed while the backup was taken. Nothing was upgraded.", { backup, nothingUpgraded: true });
   }
   let written;
   try {
@@ -280,10 +353,20 @@ export async function applyRegistryUpgrade({ clientRoot, registryRoot, confirm, 
       now: at,
       action: "upgrade",
       subject: null,
-      mutate: (registry) => worker.upgradeRegistryV1ToV2(registry),
+      mutate: (registry) => {
+        // restores make sequence numbers non-monotonic, so the sequence alone does not say it is the registry that was backed up
+        if (registry.auditHead.hash !== backup.auditHead.hash) {
+          fail("registry_sequence_conflict", "The registry is not the one that was backed up. Nothing was upgraded.", { nothingUpgraded: true });
+        }
+        return worker.upgradeRegistryV1ToV2(registry);
+      },
       faultHook,
     });
   } catch (error) {
+    if (error?.code === "registry_sequence_conflict" && error.nothingUpgraded !== true) {
+      // the writer's own compare-and-set: it refused before writing anything
+      fail("registry_sequence_conflict", "The registry changed after the backup was taken. Nothing was upgraded.", { backup, nothingUpgraded: true });
+    }
     error.backup = backup;
     throw error;
   }
@@ -304,22 +387,28 @@ export async function applyRegistryUpgrade({ clientRoot, registryRoot, confirm, 
 // ---- restore ------------------------------------------------------------------------------------------------------------------
 
 /** Describes what restoring the backup would do. Read-only. A backup that cannot be restored throws with the reason. */
-export async function planRegistryRestore({ clientRoot, registryRoot, from, discardV2Data = false, ...deps } = {}) {
+export async function planRegistryRestore({ clientRoot, registryRoot, from, discardV2Data = false, acceptRoutingChanges = false, ...deps } = {}) {
   const worker = await loadRegistryModule(deps);
   const inspect = deps.inspectIdentityRegistryRestore ?? worker.inspectIdentityRegistryRestore;
   const inspected = inspect({ root: registryRoot, backupDir: from });
   const refusals = [];
   if (inspected.willLoseV2Data && discardV2Data !== true) refusals.push("restore_would_lose_v2_data");
+  if (inspected.routingAcknowledgement.length > 0 && acceptRoutingChanges !== true) refusals.push("restore_would_change_routing");
+  const archiveParent = backupParentOf(clientRoot);
   const body = {
     schema: RESTORE_PLAN_SCHEMA,
     registryRoot,
-    archiveParent: backupParentOf(clientRoot),
+    archiveParent,
+    existingBackups: listBackupFolder(archiveParent),
     backup: inspected.backup,
     live: inspected.live,
     relation: inspected.relation,
+    commonPrefix: inspected.commonPrefix,
     discarded: inspected.discarded,
     routing: inspected.routing,
+    routingAcknowledgement: inspected.routingAcknowledgement,
     discardV2Data: discardV2Data === true,
+    acceptRoutingChanges: acceptRoutingChanges === true,
     ready: refusals.length === 0,
     refusals,
   };
@@ -327,12 +416,12 @@ export async function planRegistryRestore({ clientRoot, registryRoot, from, disc
 }
 
 /** Applies the exact restore plan under the registry lock, against the live files that were planned. */
-export async function applyRegistryRestore({ clientRoot, registryRoot, from, discardV2Data = false, confirm, now, faultHook = null, ...deps } = {}) {
+export async function applyRegistryRestore({ clientRoot, registryRoot, from, discardV2Data = false, acceptRoutingChanges = false, confirm, now, faultHook = null, ...deps } = {}) {
   if (typeof confirm !== "string" || !/^[a-f0-9]{64}$/.test(confirm)) {
     fail("confirmation_mismatch", "The confirmation is not a plan id.");
   }
   const worker = await loadRegistryModule(deps);
-  const plan = await planRegistryRestore({ clientRoot, registryRoot, from, discardV2Data, ...deps });
+  const plan = await planRegistryRestore({ clientRoot, registryRoot, from, discardV2Data, acceptRoutingChanges, ...deps });
   if (plan.planId !== confirm) {
     fail("plan_stale", "That plan id does not match what is true now. Make a fresh plan and use its id.");
   }
@@ -347,6 +436,7 @@ export async function applyRegistryRestore({ clientRoot, registryRoot, from, dis
     expectedLiveFingerprint: plan.live.fingerprint,
     expectedBackup: { registrySha256: plan.backup.registrySha256, auditSha256: plan.backup.auditSha256 },
     discardV2Data: plan.discardV2Data,
+    acceptRoutingChanges: plan.acceptRoutingChanges,
     now: nowIso(now),
     faultHook,
   });
@@ -374,8 +464,10 @@ const REFUSALS = {
   runtime_manifest_unreadable: "The supervisor runtime manifest could not be read.",
   runtime_upgrade_required: `The supervisor runtime is older than v${MINIMUM_RUNTIME_MANIFEST}; install a current runtime first.`,
   supervisor_unreachable: "The running supervisor could not be asked what it can read (is it running, and is local messaging set up?).",
-  supervisor_cannot_read_v2: "The running supervisor does not say it can read identity_registry_v2; install and restart into a runtime that does, first.",
+  supervisor_cannot_read_v2: "The running supervisor does not say it can read identity_registry_v2 (or does not say which registry it reads); install and restart into a runtime that does, first.",
+  supervisor_reads_another_registry: "The running supervisor reads a different registry directory than this one (see --registry-root, or the registryRoot in its router.json), so its answer says nothing about this registry.",
   restore_would_lose_v2_data: "The live registry holds v2-only data (a serverless binding, pairing, alias or destination) that a v1 backup does not have. Pass --discard-v2-data to restore anyway; it is archived first.",
+  restore_would_change_routing: "This restore would re-activate a revoked binding, add or move a binding, or install a backup that is not an earlier state of this registry (see the routing section of the plan). Pass --accept-routing-changes to restore anyway; the live files are archived first.",
   restore_backup_unreadable: "The backup does not read or verify as a registry.",
   restore_backup_not_v1: "Only a v1 backup (the kind upgrade-registry makes) can be restored.",
   restore_backup_unfinished_write: "The backup ends in an unfinished write; it is not a clean copy.",
@@ -383,6 +475,8 @@ const REFUSALS = {
   registry_changed: "The registry changed after the plan was made. Make a fresh plan.",
   backup_changed_since_plan: "The backup changed after the plan was made. Make a fresh plan.",
   live_registry_changed_since_plan: "The registry changed after the plan was made. Make a fresh plan.",
+  registry_sequence_conflict: "The registry changed while the command ran (or is not the one that was backed up). Make a fresh plan.",
+  registry_busy: "Another process is writing the registry. Try again in a moment.",
   plan_stale: "That plan id does not match what is true now. Make a fresh plan and use its id.",
   confirmation_mismatch: "The confirmation must be the 64-hex plan id printed by the plan.",
 };
@@ -397,13 +491,14 @@ export const printable = (value) => String(value).replace(/[\u0000-\u001f\u007f-
 const shellQuote = (value) => (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", `'\\''`)}'`);
 
 /** The restore command for a backup, ready to paste: every path quoted, both roots named. */
-export function restoreCommand({ clientRoot, registryRoot, from, discardV2Data = false, confirm = null }) {
+export function restoreCommand({ clientRoot, registryRoot, from, discardV2Data = false, acceptRoutingChanges = false, confirm = null }) {
   return [
     "triangle identity restore-registry",
     `--client-root ${shellQuote(clientRoot)}`,
     `--registry-root ${shellQuote(registryRoot)}`,
     `--from ${shellQuote(from)}`,
     ...(discardV2Data ? ["--discard-v2-data"] : []),
+    ...(acceptRoutingChanges ? ["--accept-routing-changes"] : []),
     ...(confirm ? [`--confirm ${confirm}`] : []),
   ].join(" ");
 }
@@ -482,7 +577,8 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
     same: "The live registry is exactly this backup's history; nothing is discarded.",
     ahead: "The live registry has this backup's history and more.",
     behind: "This backup is newer than the live registry.",
-    diverged: "The live registry and this backup have different histories from some point on.",
+    diverged: `The live registry and this backup share their first ${plan.commonPrefix} audit entr${plan.commonPrefix === 1 ? "y" : "ies"} and differ after that.`,
+    unrelated: "The live registry and this backup have no audit entry in common: they are different registries, not earlier and later states of one.",
     unknown: "The live registry cannot be compared with the backup.",
   }[plan.relation];
   lines.push(`History:  ${relation}`);
@@ -508,6 +604,9 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
     for (const row of rows.slice(0, 30)) lines.push(row);
     if (rows.length > 30) lines.push(`  \u2026 and ${rows.length - 30} more`);
   }
+  if (plan.routingAcknowledgement && plan.routingAcknowledgement.length > 0 && plan.acceptRoutingChanges) {
+    lines.push("You accepted these routing changes (--accept-routing-changes); the live files are archived first.");
+  }
   for (const code of plan.refusals) {
     const text = describeRefusal(code);
     if (text) lines.push(`  - ${code}: ${text}`);
@@ -517,7 +616,7 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
   if (plan.ready && clientRoot) {
     lines.push("");
     lines.push("To apply this plan (needs a terminal):");
-    lines.push(`  ${restoreCommand({ clientRoot, registryRoot: plan.registryRoot, from: from ?? b.dir, discardV2Data: plan.discardV2Data, confirm: plan.planId })}`);
+    lines.push(`  ${restoreCommand({ clientRoot, registryRoot: plan.registryRoot, from: from ?? b.dir, discardV2Data: plan.discardV2Data, acceptRoutingChanges: plan.acceptRoutingChanges, confirm: plan.planId })}`);
   }
   return lines.map(printable).join("\n");
 }
