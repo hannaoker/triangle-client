@@ -31,7 +31,7 @@ Prerequisite F.1 of the U3 delta asks for "a registry schema version that can ho
 
 ### 3.1 File, lock and audit chain
 
-- **Same path, new schema.** The file stays `identity/identity-registry-v1.json` and carries `"schema": "identity_registry_v2"`. A v1 reader opens exactly that name, rejects the schema and reports the registry unreadable, which fails principals closed and shows as a `registry_unreadable` fault in `doctor` (`identity-view.mjs:231-236`). A new file name would make v1 readers see `absent` (a silent "no registry") and a leftover v1 file would be read as valid but stale. The name keeps its misleading "v1"; rename it only when no v1 reader remains (decision D1-2).
+- **Same path, new schema.** The file stays `identity/identity-registry-v1.json` and carries `"schema": "identity_registry_v2"`. A v1 reader opens exactly that name, rejects the unknown top-level keys (and would reject the schema too) and reports the registry unreadable, which fails principals closed and shows as a `registry_unreadable` fault in `doctor` (`identity-view.mjs:231-236`). A new file name would make v1 readers see `absent` (a silent "no registry") and a leftover v1 file would be read as valid but stale. The name keeps its misleading "v1"; rename it only when no v1 reader remains (decision D1-2).
 - **Same lock and chain.** The upgrade appends to the existing `registry-audit.jsonl`; the entry's `prevHash` is the last v1 hash, so history stays verifiable by v2 readers. A v1 reader rejects the new action name as well (`:549`), a second loud refusal.
 
 ### 3.2 Bindings (`local_profile_binding_v2`)
@@ -52,23 +52,45 @@ Identity design 4.1 fields that stay omitted: `installation_id` (one registry pe
 
 | Collection | Key | Record (closed) | Constraints | Cap |
 | :--- | :--- | :--- | :--- | :--- |
-| `pairings` | `pairing_id`, `pair_<32-hex>` | `schema` `serverless_pairing_v1`; `local_principal_id`, `remote_principal_id` (both `peer_`); `remote_principal_public_key`; `remote_endpoint_ids` (1 to 8 values of 64-hex); `petname`; `binding_generation`; `issued_at`; `expires_at` (explicit; 365-day default from identity design decision 7); `remote_invitation_sig`; `local_owner_approval_sig`; `next_key_digest` (`null`, reserved by decision 5); `revoked_at` | one unrevoked pairing per (local, remote) pair; petname unique per local principal among unrevoked; an endpoint id in at most one unrevoked pairing (one principal per endpoint, decision 3); `local_principal_id` must be a `serverless-peer` binding in this registry | 256 |
+| `pairings` | `pairing_id`, `pair_<32-hex>` | `schema` `serverless_pairing_v1`; `local_principal_id`, `remote_principal_id` (both `peer_`); `remote_principal_public_key`; `remote_endpoint_ids` (1 to 8 values of 64-hex); `petname`; `binding_generation`; `issued_at`; `expires_at` (explicit; 365-day default from identity design decision 7); `remote_invitation_sig`; `local_owner_approval_sig`; `next_key_digest` (`null`, reserved by decision 5); `pending_rotation` (`null` or pending rotation object); `pending_endpoint_update` (`null` or pending endpoint update object); `revoked_at` | one unrevoked pairing per (local, remote) pair; petname unique per local principal among unrevoked; an endpoint id may be shared by live pairings only when they have the same `remote_principal_id` (one principal per endpoint, decision 3); `local_principal_id` must be a `serverless-peer` binding in this registry. Pending approval state (October design section 6) is held in `pending_rotation` and `pending_endpoint_update`. `min_remote_binding_generation` is the pairing's own `binding_generation`, `display_collision` is derived at display time, and `trust_mode` on a pairing is implied (`serverless-peer`). Managed-Iroh proofs (`mesh_dpop_bind_proof`, workload key) are NOT reserved and require schema v3 with Slices 4/5 (so D1-4's "no second floor cycle" covers Slice 3a and the alias/destination commands only). | 256 |
 | `aliases` | alias text | `principal_id`, `set_at`, `generation` | pattern `^[a-z0-9][a-z0-9._-]{0,31}$`, never principal-, session- or 64-hex-shaped; the target must be a bound or paired principal; one alias names one principal. Collisions with local ids and labels are decided at resolve time, not storage time, because labels are not registry data (U3 3.D.2) | 256 |
 | `destinations` | `principal_id` | `harness` (`claude` or `codex`), `workspace` (absolute path, bounded), `set_at`, `generation` | one rule per principal; the principal must exist (U3 3.C.2) | 256 |
 
 ### 3.4 Audit actions
 
-v2 knows `init`, `bind`, `revoke` (unchanged), `upgrade` (implemented by D1) and the reserved names `alias_set`, `alias_clear`, `destination_set`, `destination_clear`, `pair`, `pair_update`, `pair_revoke`. Reserving matters: an audit action that a v2 reader does not know breaks its chain check exactly as in v1 (`:549`), so each later feature would force another floor cycle. In D1 `updateIdentityRegistry` refuses the reserved names with `action_not_available`, and `bind` refuses `trust_mode: serverless-peer` the same way; each later slice implements its action together with its approval gate.
+v2 knows `init`, `bind`, `revoke` (unchanged), `upgrade` (implemented by D1) and the reserved names `alias_set`, `alias_clear`, `destination_set`, `destination_clear`, `pair`, `pair_update`, `pair_revoke`. Reserving matters: an audit action that a v2 reader does not know breaks its chain check exactly as in v1 (`:549`), so each later feature would force another floor cycle. In D1.0 reserved actions in writer input are refused with `invalid_audit_action` (in D1.1 `updateIdentityRegistry` will refuse them with `action_not_available`); `bind` refuses `trust_mode: serverless-peer` the same way. Each later slice implements its action together with its approval gate.
 
 ### 3.5 Caps and closure
 
 Bindings stay at 1000, the registry at 1 MiB and the audit log at 8 MiB. A full audit log makes the registry read-only (`registry_audit_full`); rotation is not part of D1 (risk 4). Unknown schemas, keys, proof kinds and audit actions are refused everywhere, never ignored.
 
+### 3.6 Refinements made while building D1.0
+
+Details the plan left open, now fixed in code and tests (`identity-registry.mjs`, `test/identity-registry-v2.test.mjs`):
+
+- **Audit fields per action.** The entry keys stay the same; what `subject` and `bindingId` mean depends on the action.
+
+| Action | `subject` | `bindingId` |
+| :--- | :--- | :--- |
+| `init`, `upgrade` | `null` | `null` |
+| `bind`, `revoke` | 64-hex profile instance id | `bind_<32-hex>` (as in v1) |
+| `alias_set`, `alias_clear` | the alias text | `null` |
+| `destination_set`, `destination_clear` | `agent_` or `peer_` principal id | `null` |
+| `pair`, `pair_update`, `pair_revoke` | `pair_<32-hex>` | `null` |
+
+- **`upgrade` in the chain.** A v2 registry may contain at most one `upgrade` entry. A v1 registry's committed chain may contain none, but its uncommitted tail may be an `upgrade`: the audit line is appended before the registry file is replaced, so a crash in between leaves exactly that, and the registry stays readable as v1 (the next v1 write discards the tail, as for any tail). Reserved actions are structurally valid in a v2 chain; nothing writes them yet.
+- **Alias and destination targets.** An alias may name the principal of any binding or the remote principal of any pairing in the registry; revoked records still count, because the resolver ignores revoked ones at resolve time. A destination rule is keyed by the principal of a binding in this registry, since it names where the receiving identity's inbound goes, so remote paired principals are refused.
+- **One representation per value.** Endpoint ids in a pairing are stored strictly increasing; public keys and signatures are canonical unpadded base64url of exactly 32 and 64 bytes (no padding, no malleable tail bits).
+- **Endpoint ordering and signature.** Endpoint ids in a pairing are stored strictly increasing; `remote_invitation_sig` (which covers `remote_endpoint_ids`) must be signed over the sorted endpoint list.
+- **Reader permissiveness vs integrity.** Principle: the reader is permissive on policy (expiry length stays unbounded; expiry policy is enforced by writers) and strict on integrity (one key per `peer_` id across live serverless bindings and live pairings; endpoint sharing only among pairings to the same remote principal).
+- **No legacy break.** The validator still tolerates two unrevoked bindings of one principal, so an old v1 file with duplicates can be upgraded and then revoked; the D3 guard stays in the writer.
+- **Writer fence until D1.1.** `updateIdentityRegistry` refuses a stored v2 registry (`writer_requires_v1`) and refuses any mutation that changes the schema (`mutate_modified_schema`), so nothing can produce v2 on disk yet.
+
 ## 4. Compatibility and fail-closed behavior
 
 | Reader | v1 file | v2 file |
 | :--- | :--- | :--- |
-| Today (v14 and older) | reads | refuses: `registry_corrupt` (`invalid_registry_schema`); snapshot `unreadable`; `agent_` sends get `route_unavailable` / `registry_unreadable`; exact ids keep routing; `doctor` shows the fault |
+| Today (v14 and older) | reads | refuses: `registry_corrupt` (reason `unknown_registry_key`, because v2 adds top-level keys and that check runs before the schema check; proven by a test against the frozen reader); snapshot `unreadable`; `agent_` sends get `route_unavailable` / `registry_unreadable`; exact ids keep routing; `doctor` shows the fault |
 | D1 | reads (as v1; nothing added) | reads |
 | Any future schema | refuses | refuses |
 
@@ -95,7 +117,7 @@ All of these must hold, each with its own refusal code, and nothing is written o
 
 ### 5.3 The step
 
-Inside the registry lock: re-verify the chain; copy the registry file and the audit log to `identity/backup-v1-<timestamp>/` (mode 0700, files 0600, fsynced); then one `updateIdentityRegistry` call with action `upgrade`. The mutation converts each binding to v2 and adds the three empty collections, and the action check recomputes the conversion and compares it, so a mutation cannot smuggle other changes into an upgrade. `sequence` advances by one and the audit entry has no subject or binding id. A crash leaves either the v1 pair or the v2 pair (the existing append-then-rename order and fault hooks), plus a backup directory.
+Inside the registry lock: re-verify the chain; copy the registry file and the audit log to `identity/backup-v1-<timestamp>/` (mode 0700, files 0600, fsynced); then one `updateIdentityRegistry` call with action `upgrade`. The mutation converts each binding to v2 and adds the three empty collections, and the action check recomputes the conversion and compares it, so a mutation cannot smuggle other changes into an upgrade. `sequence` advances by one and the audit entry has no subject or binding id. A crash leaves either the v1 pair or the v2 pair (the existing append-then-rename order and fault hooks), plus a backup directory. Note: "leaves a readable v1 pair" holds only for D1+ readers; pre-D1 readers (such as d418fb1) throw `registry_chain_broken` / `invalid_audit_action` if an uncommitted `upgrade` tail entry is present. If rolled back to a pre-D1 supervisor after a crashed upgrade, the tail must be discarded or backup restored; D1.3 prints this repair.
 
 ### 5.4 The way back
 
@@ -107,16 +129,16 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 
 | # | Piece | Content | Verified by |
 | :--- | :--- | :--- | :--- |
-| D1.0 | Schema and codec | `identity_registry_v2`, `local_profile_binding_v2`, pairing, alias and destination validators, caps, `SUPPORTED_REGISTRY_SCHEMAS`, a pure `upgradeRegistryV1ToV2`, canonical JSON. The reader accepts v1 and v2; the writer still writes v1 only. Inside `identity-registry.mjs` (no new module). | Table-driven validator tests for every field and constraint; property test (upgrade then validate, idempotence, canonical stability); v1 fixture corpus |
+| D1.0 | Schema and codec | `identity_registry_v2`, `local_profile_binding_v2`, pairing, alias and destination validators, caps, `SUPPORTED_REGISTRY_SCHEMAS`, a pure `upgradeRegistryV1ToV2`, canonical JSON. The reader accepts v1 and v2; the writer still writes v1 only. Inside `identity-registry.mjs` (no new module). | Table-driven validator tests for every field and constraint; property test (upgrade then validate, determinism, canonical stability); generated registries |
 | D1.1 | Writer | `updateIdentityRegistry` dispatches on the stored schema; `upgrade` implemented; reserved actions and serverless `bind` refused; D2 and D3 kept and extended to `peer_` ids; audit continuity across the upgrade; fault hooks at every step | Fault injection at each hook; the 4-process stress test from #124 against v2; chain verification across the upgrade |
-| D1.2 | Readers | Snapshot provider exposes `schema`; resolver keeps its `mesh-managed` filter (explicit test that a serverless binding never resolves) and `peer_` refusal; `local_status.router.registry` gains `schema` and `supportedSchemas`; `status`/`doctor` identity view prints the schema and collection counts; `identity inventory`/`migrate` treat serverless bindings and the new collections as untouched and never propose to edit them; `identity revoke` keeps working for agent bindings | Golden tests: identical resolver, router and status output for a v1 registry and its upgraded v2 form; revoke through the approval path on a v2 agent binding |
+| D1.2 | Readers | Snapshot provider exposes `schema`; resolver keeps its `mesh-managed` filter (explicit test that a serverless binding never resolves) and `peer_` refusal; `local_status.router.registry` gains `schema` and `supportedSchemas`; `status`/`doctor` identity view prints the schema and collection counts (currently `identity-view.mjs:192-208` displays serverless bindings as `recorded_only` with a misleading `recorded_profile_missing` warning; pairings/aliases/destinations invisible); `identity inventory`/`migrate` treat serverless bindings and the new collections as untouched and never propose to edit them (`identity-mapping.mjs:313-324` currently proposes v1-shaped bindings); `identity revoke` keeps working for agent bindings (currently plans against v2 but prompts for OS authentication before `writer_requires_v1` refuses; fence should be lifted for revoke in D1.1 or checked at plan time). | Golden tests: identical resolver, router and status output for a v1 registry and its upgraded v2 form; revoke through the approval path on a v2 agent binding |
 | D1.3 | Upgrade command, floor and restore | `upgrade-registry`, `restore-registry`, the floor probe, backups, help and runbook docs | Scratch-root tests; one refusal test per floor condition; **old-reader refusal test** that extracts today's reader with `git show d418fb1:...` (the pattern `r1-integration-v13` already uses; it needs a worktree, not a history-less archive) and runs it against a v2 file |
 | D1.4 | Candidate and rehearsal | Candidate client package and supervisor bundle, scratch application root, disposable host; run the **installed v14 bundle's** reader against a scratch v2 registry to show the fail-closed behavior on real installed code | Evidence document |
 | D1.5 | Installed acceptance | Section 7 with the owner's gates | Evidence document |
 
 ## 7. Release train, gates and rollback
 
-**Shape.** Everything in D1.0 to D1.3 stays inside existing modules, so there is no manifest bump and no helper change, and the runtime installs as a supervisor-only restage like 2026-11-07's (scratch dry run, artifact diff, quiet gate, backups, automatic rollback). If review decides `identity-registry.mjs` (1602 lines now, roughly 900 more expected) should be split, the new modules join the router artifact group and force manifest v15 with the helper release path (R1 plan 5.2 and 5.3); that is decision D1-1. The CLI part ships in the client package, whose install is the same owner decision that #154 to #159 (the owner approval and revoke command) are waiting on.
+**Shape.** Everything in D1.0 to D1.3 stays inside existing modules, so there is no manifest bump and no helper change, and the runtime installs as a supervisor-only restage like 2026-11-07's (scratch dry run, artifact diff, quiet gate, backups, automatic rollback). If review decides `identity-registry.mjs` (roughly 2250-2380 lines after D1.0) should be split, the new modules join the router artifact group and force manifest v15 with the helper release path (R1 plan 5.2 and 5.3); that is decision D1-1. The CLI part ships in the client package, whose install is the same owner decision that #154 to #159 (the owner approval and revoke command) are waiting on.
 
 **Gates before merge.** The R1 plan 5.4 list: trust-boundary regression (the ACL and limit family, the router golden comparison, registry fail-closed cases), `keychain-launch-contract`, the full suite compared with the known baseline (the `ps` host-probe test fails on plain main in this environment; known timing flakes are rerun in isolation), the readiness check, a repository boundary check, and one independent review per code PR.
 
@@ -136,11 +158,11 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 | :--- | :--- |
 | D1 runtime misbehaves before G5 | Restore the saved supervisor manifest and restart, as in the 2026-11-07 install records; the registry is untouched |
 | After G5 the supervisor must go back to a bundle that cannot read v2 | Principals fail closed and exact ids keep routing; roll forward, or restore the backup (5.4) and then roll back |
-| The upgrade fails midway | The registry is v1 or v2, never half; the backup directory remains |
+| The upgrade fails midway | The registry is v1 or v2, never half (for D1+ readers; pre-D1 readers see `invalid_audit_action` if `upgrade` tail is present); the backup directory remains |
 
 ## 8. Verification and acceptance
 
-- **Unit and property:** every validator row of 3.2 and 3.3; upgrade idempotence and canonical stability; audit chain continuity across the upgrade; caps; every unknown-key, unknown-action and unknown-schema refusal.
+- **Unit and property:** every validator row of 3.2 and 3.3; upgrade determinism and canonical stability; audit chain continuity across the upgrade; caps; every unknown-key, unknown-action and unknown-schema refusal.
 - **Golden:** invariants 1 and 2 of section 4 for the resolver, router, `describeAddresses`, status and the identity view.
 - **Fail-closed:** a frozen v14 reader against a v2 file (D1.3), and the installed v14 bundle against a scratch v2 registry (D1.4).
 - **Concurrency and faults:** the writer fault hooks and the multi-process stress against both schemas; a reader racing the upgrade never sees a half state.
