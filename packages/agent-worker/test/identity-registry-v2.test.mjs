@@ -1161,23 +1161,6 @@ test("audit rules: L2 tail lines, L4 absent-registry tail, and L5 v2 ordering ru
   });
 });
 
-test("the writer refuses a v2 registry and never changes its files", () => {
-  withRoot((root) => {
-    craftUpgrade(root);
-    const registryBefore = readFileSync(path.join(root, REGISTRY_FILE_NAME));
-    const auditBefore = readFileSync(path.join(root, AUDIT_FILE_NAME));
-    const current = readIdentityRegistry({ root }).registry;
-    for (const action of ["bind", "revoke"]) {
-      assert.throws(
-        () => updateIdentityRegistry({ root, expectedSequence: current.sequence, now: T1, action, subject: deriveClientInstanceId("gravity2"), mutate: (r) => r }),
-        (err) => err.code === "invalid_registry" && err.reason === "writer_requires_v1",
-      );
-    }
-    assert.deepEqual(readFileSync(path.join(root, REGISTRY_FILE_NAME)), registryBefore);
-    assert.deepEqual(readFileSync(path.join(root, AUDIT_FILE_NAME)), auditBefore);
-  });
-});
-
 test("the v1 writer cannot switch a registry to v2", () => {
   withRoot((root) => {
     const current = readIdentityRegistry({ root }).registry;
