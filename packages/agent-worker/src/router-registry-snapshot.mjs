@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { readIdentityRegistry, REGISTRY_FILE_NAME, SUPPORTED_REGISTRY_SCHEMAS } from "./identity-registry.mjs";
 
-// The registry schemas this process can read. The router reports them in `local_status`; they are re-exported here because
-// this module is the router's only door to the registry code (see the source-level isolation test).
+// The registry schemas this process can read. The router reports them in `local_status`. They are re-exported here so the
+// router itself imports no registry code: the source-level isolation test (identity-registry.test.mjs) lets only approved
+// modules name it, and this one is among them.
 export { SUPPORTED_REGISTRY_SCHEMAS };
 
 const EMPTY_ARRAY = Object.freeze([]);

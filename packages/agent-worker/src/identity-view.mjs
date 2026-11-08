@@ -110,11 +110,11 @@ export function buildIdentityView({ inventory, registry } = {}) {
     : {};
 
   // Serverless-peer bindings (v2 only) are no MESH identity: no inventory evidence applies to them, so they get a row of
-  // their own instead of `recorded_only` with a missing-profile warning, and their profile is not `local_only`.
+  // their own instead of `recorded_only` with a missing-profile warning. (The mapping plan already leaves a profile with a
+  // live one out of `localOnly`; a profile whose only serverless binding is revoked shows as `local_only`, like an agent's.)
   const serverlessBindings = Object.values(existingBindings).filter(
     (binding) => binding && typeof binding === "object" && binding.trust_mode === "serverless-peer",
   );
-  const serverlessInstanceIds = new Set(serverlessBindings.map((binding) => binding.profile_instance_id));
 
   // Index inventory profiles for quick lookup
   const inventoryInstanceIdsSet = new Set();
@@ -204,7 +204,6 @@ export function buildIdentityView({ inventory, registry } = {}) {
   // 4. local_only = plan localOnly
   if (Array.isArray(plan.localOnly)) {
     for (const l of plan.localOnly) {
-      if (serverlessInstanceIds.has(l.profileInstanceId)) continue;
       profileRows.push({
         profile: l.profile,
         profileInstanceId: l.profileInstanceId,

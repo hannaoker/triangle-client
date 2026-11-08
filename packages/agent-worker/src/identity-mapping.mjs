@@ -116,6 +116,13 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
   // New records take the shape of the registry they are written to: v2 for a v2 registry, v1 for a v1 or absent one (the
   // writer creates v1). A plan made against one schema is stale against the other: its sequence and records differ.
   const proposeV2 = registrySchema === IDENTITY_REGISTRY_SCHEMA_V2;
+  // A profile that holds a live serverless binding has an identity of its own kind, so it is not "local only" (a revoked one
+  // is, as a profile whose only binding is revoked always was). The planner proposes nothing for it and never rewrites it.
+  const liveServerlessInstanceIds = new Set(
+    Object.entries(existingBindings)
+      .filter(([, binding]) => isPlainObject(binding) && binding.trust_mode === "serverless-peer" && binding.revoked_at === null)
+      .map(([instanceId]) => instanceId),
+  );
 
   const rawBlocked = [];
   const rawLocalOnly = [];
@@ -221,10 +228,12 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
       const bindingState = typeof u.bindingState === "string" ? u.bindingState : "";
 
       if (reasonStr === "unbound_local_profile" || (bindingState === "unbound" && u.status !== "fault")) {
-        rawLocalOnly.push({
-          profile: profileName,
-          profileInstanceId: instanceId,
-        });
+        if (instanceId === null || !liveServerlessInstanceIds.has(instanceId)) {
+          rawLocalOnly.push({
+            profile: profileName,
+            profileInstanceId: instanceId,
+          });
+        }
         continue;
       }
 

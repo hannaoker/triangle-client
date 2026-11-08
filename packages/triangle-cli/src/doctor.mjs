@@ -67,8 +67,11 @@ export function renderDoctor(report) {
     lines.push("Identity (host-local; disk observations, not live authority verification)");
     const reg = report.identity.registry ?? {};
     const root = report.identityRegistryRoot ?? "";
-    // The schema (v1 or v2) and, for v2, how many pairings, aliases and destinations the registry holds.
-    const schemaText = typeof reg.schema === "string" ? ` · ${reg.schema.replace(/^identity_registry_/, "")}` : "";
+    // A v1 registry prints exactly what it always did. Another schema (v2) is named, with how many pairings, aliases and
+    // destinations the registry holds.
+    const schemaText = typeof reg.schema === "string" && reg.schema !== "identity_registry_v1"
+      ? ` · ${reg.schema.replace(/^identity_registry_/, "")}`
+      : "";
     const collections = reg.collections;
     const collectionText = collections && typeof collections === "object"
       ? ` · pairings ${collections.pairings ?? 0} · aliases ${collections.aliases ?? 0} · destinations ${collections.destinations ?? 0}`
@@ -79,7 +82,9 @@ export function renderDoctor(report) {
         const prin = p.principalId ?? "-";
         const orig = p.authorityOrigin ?? "-";
         const gen = p.generation != null ? `gen ${p.generation}` : "-";
-        lines.push(`  - ${p.state} · ${p.profile} · ${prin} · ${orig} · ${gen}`);
+        // a serverless row has no diagnostic of its own, so a revoked one says so here
+        const revoked = p.state === "serverless" && typeof p.reason === "string" ? ` · ${p.reason}` : "";
+        lines.push(`  - ${p.state} · ${p.profile} · ${prin} · ${orig} · ${gen}${revoked}`);
       }
     }
     if (Array.isArray(report.identity.diagnostics)) {

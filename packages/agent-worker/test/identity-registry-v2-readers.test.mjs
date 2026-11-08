@@ -95,7 +95,7 @@ function seedExtras(root, { revoked = false } = {}) {
   return { peer, pair };
 }
 
-function inventoryFor({ extraUnmapped = [] } = {}) {
+function inventoryFor({ extraUnmapped = [], extraNew = [] } = {}) {
   const mesh = (name, principal = principalOf(name)) => ({
     principalId: principal,
     authorityOrigin: ORIGIN,
@@ -106,7 +106,12 @@ function inventoryFor({ extraUnmapped = [] } = {}) {
     schema: "identity_inventory_v1",
     scope: "host-local",
     summary: { identityCount: 3, unmappedProfileCount: 1 + extraUnmapped.length, sessionCount: 0, faultCount: 0, warningCount: 0, omittedHealthDiagnosticCount: 0 },
-    identities: [mesh("gravity2"), mesh("ghost"), mesh("newbie", `agent_${"7".repeat(32)}`)],
+    identities: [
+      mesh("gravity2"),
+      mesh("ghost"),
+      mesh("newbie", `agent_${"7".repeat(32)}`),
+      ...extraNew.map((name, i) => mesh(name, `agent_${String(i + 1).repeat(32)}`)),
+    ],
     unmappedProfiles: [
       { profile: "scratch", instanceId: instanceOf("scratch"), enabled: true, status: "ok", reason: "unbound_local_profile" },
       ...extraUnmapped.map((profile) => ({ profile, instanceId: instanceOf(profile), enabled: true, status: "ok", reason: "unbound_local_profile" })),
@@ -335,7 +340,12 @@ test("the identity view shows the schema and the record counts, and a serverless
       reason: null,
     }]);
     assert.equal(view.summary.serverless, 1);
+    assert.equal(view.summary.localOnly, 1, "only scratch is local-only");
     assert.ok(!view.diagnostics.some((d) => d.profile === "peerprof"), "no missing-profile warning for a serverless binding");
+    // `identity migrate` agrees with `identity status`: the profile with a live serverless binding is not local-only there either
+    const plan = planIdentityMapping({ inventory: inventoryFor({ extraUnmapped: ["peerprof"] }), registry: readIdentityRegistry({ root }) });
+    assert.deepEqual(plan.localOnly.map((l) => l.profile), ["scratch"]);
+    assert.equal(plan.summary.localOnly, 1);
     // the agent rows are what they were without the extras
     const agentRows = (v) => plain(v.profiles.filter((p) => p.profile !== "peerprof"));
     assert.deepEqual(agentRows(view), agentRows(upgraded));
@@ -354,6 +364,12 @@ test("a revoked serverless binding is shown as such and warns about nothing", ()
     const row = view.profiles.find((p) => p.profile === "peerprof");
     assert.deepEqual([row.state, row.reason, row.authorityOrigin], ["serverless", "revoked", null]);
     assert.ok(!view.diagnostics.some((d) => d.profile === "peerprof"));
+
+    // when its profile is still on disk without an identity it is local-only, as a profile with a revoked agent binding is
+    const inventory = inventoryFor({ extraUnmapped: ["peerprof"] });
+    const again = buildIdentityView({ inventory, registry: readIdentityRegistry({ root }) });
+    assert.deepEqual(again.profiles.filter((p) => p.profile === "peerprof").map((p) => p.state), ["local_only"]);
+    assert.deepEqual(planIdentityMapping({ inventory, registry: readIdentityRegistry({ root }) }).localOnly.map((l) => l.profile), ["peerprof", "scratch"]);
   }));
 
 // ---- migrate ---------------------------------------------------------------------------------------------------------------------
@@ -381,6 +397,39 @@ test("migrate proposes records in the shape of the registry it writes to, and ap
     assert.equal(after.audit.uncommittedTail, 0);
     // nothing is left to propose
     assert.equal(planIdentityMapping({ inventory, registry: after }).proposals.length, 0);
+  }));
+
+test("an upgrade in the middle of a multi-record apply stops it cleanly; the remaining plan is v2 shaped and finishes", () =>
+  withRoots(1, (root) => {
+    const inventory = inventoryFor({ extraNew: ["newbie2"] });
+    const plan = planIdentityMapping({ inventory, registry: readIdentityRegistry({ root }) });
+    assert.deepEqual(plan.proposals.map((p) => [p.profile_name, p.schema]), [["newbie", LOCAL_PROFILE_BINDING_SCHEMA], ["newbie2", LOCAL_PROFILE_BINDING_SCHEMA]]);
+
+    // the clock is read once up front and once per record: upgrade the registry just before the second record is written
+    let reads = 0;
+    const now = () => {
+      reads += 1;
+      if (reads === 3) upgradeThroughWriter(root);
+      return T2;
+    };
+    let failure = null;
+    try {
+      applyIdentityMapping({ root, confirmation: plan.planId, readInventory: () => inventory, now });
+    } catch (err) {
+      failure = err;
+    }
+    assert.ok(failure, "the apply must stop");
+    assert.equal(failure.code, "registry_sequence_conflict");
+    assert.deepEqual(failure.applied.map((b) => b.profile_name), ["newbie"]);
+    assert.equal(failure.failed.proposal.profile_name, "newbie2");
+    // what was done stays, converted by the upgrade; what is left is planned in the new shape
+    const mid = readIdentityRegistry({ root });
+    assert.deepEqual([mid.registry.schema, mid.registry.bindings[instanceOf("newbie")].schema, mid.audit.uncommittedTail], [V2, LOCAL_PROFILE_BINDING_SCHEMA_V2, 0]);
+    assert.deepEqual(failure.remaining.proposals.map((p) => [p.profile_name, p.schema]), [["newbie2", LOCAL_PROFILE_BINDING_SCHEMA_V2]]);
+
+    applyIdentityMapping({ root, confirmation: failure.remaining.planId, readInventory: () => inventory, now: T2 });
+    const done = readIdentityRegistry({ root });
+    assert.deepEqual([done.registry.schema, done.registry.bindings[instanceOf("newbie2")].schema], [V2, LOCAL_PROFILE_BINDING_SCHEMA_V2]);
   }));
 
 test("a mapping plan made against v1 is stale once the registry is v2, and nothing is written", () =>
