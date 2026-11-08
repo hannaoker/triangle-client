@@ -14,6 +14,17 @@ import {
   renderIdentityMigratePartial,
   renderIdentityMigratePlan,
 } from "./identity-migrate.mjs";
+import {
+  applyRegistryRestore,
+  applyRegistryUpgrade,
+  describeRefusal,
+  planRegistryRestore,
+  planRegistryUpgrade,
+  renderRestorePlan,
+  renderRestoreResult,
+  renderUpgradePlan,
+  renderUpgradeResult,
+} from "./identity-registry-upgrade.mjs";
 import { identityStatus } from "./identity-status.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
@@ -57,6 +68,13 @@ export const USAGE = `Usage: triangle <command> [options]
   identity revoke <profile> --registry-root DIR [--confirm PLAN_ID]
                               Plan a local binding revocation; apply needs a terminal and fresh owner authentication.
                               Does not revoke MESH credentials or messaging grants.
+  identity upgrade-registry --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
+                              Plan or apply the identity registry v1 to v2 upgrade. A backup is made first (in
+                              identity-backups/ beside the registry); refused unless the running supervisor reports it
+                              can read v2. Apply needs a terminal. Changes no identity, authority or route.
+  identity restore-registry --client-root DIR --from BACKUP_DIR [--registry-root DIR] [--discard-v2-data] [--confirm PLAN_ID]
+                              Plan or apply replacing the registry with a v1 backup; the live files are archived first.
+                              Apply needs a terminal.
   status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
                               What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
@@ -71,7 +89,7 @@ export class UsageError extends Error {}
 export function parseArgs(argv) {
   const positional = [];
   const flags = {};
-  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes", "identity-only", "identity"]);
+  const booleans = new Set(["json", "resume", "abandon", "device", "read-only", "yes", "identity-only", "identity", "discard-v2-data"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--") { positional.push(...argv.slice(i + 1)); break; }
@@ -469,6 +487,72 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           });
           await print(io, flags, plan, (p) => renderIdentityMigratePlan(p, { clientRoot, registryRoot }));
           return 0;
+        }
+        if (sub === "upgrade-registry" || sub === "restore-registry") {
+          const upgrade = sub === "upgrade-registry";
+          if (rest.length) throw new UsageError(`identity ${sub} takes no positional arguments`);
+          allowOnly(flags, upgrade ? ["client-root", "registry-root", "confirm"] : ["client-root", "registry-root", "from", "discard-v2-data", "confirm"]);
+          const clientRoot = flags["client-root"];
+          if (!clientRoot) throw new UsageError(`identity ${sub} requires --client-root ABSOLUTE_PATH`);
+          if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          if (dirname(resolve(clientRoot)) === resolve(clientRoot)) throw new UsageError("--client-root must not be the filesystem root");
+          const registryRoot = flags["registry-root"] === undefined ? defaultRegistryRoot(clientRoot) : flags["registry-root"];
+          if (typeof registryRoot !== "string" || !isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
+          const normClient = resolve(clientRoot);
+          const normRegistry = resolve(registryRoot);
+          if (normRegistry === normClient) throw new UsageError("registry root must not equal client root");
+          if (normClient.startsWith(normRegistry + sep)) throw new UsageError("registry root must not contain client root");
+          if (normRegistry.startsWith(normClient + sep)) throw new UsageError("registry root must not be inside client root");
+          let from;
+          if (!upgrade) {
+            if (!flags.from) throw new UsageError("identity restore-registry requires --from BACKUP_DIR");
+            if (typeof flags.from !== "string" || !isAbsolute(flags.from)) throw new UsageError("--from must be an absolute path");
+            from = resolve(flags.from);
+          }
+          if (flags.confirm !== undefined) {
+            if (!/^[a-f0-9]{64}$/.test(flags.confirm)) throw new UsageError("--confirm must be 64 lowercase hex characters");
+            const isTerm =
+              identityDependencies.isTerminal !== undefined
+                ? (typeof identityDependencies.isTerminal === "function"
+                    ? identityDependencies.isTerminal()
+                    : Boolean(identityDependencies.isTerminal))
+                : Boolean(
+                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
+                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
+                  );
+            if (!isTerm) {
+              io.stderr(`identity ${sub} --confirm requires standard input and output to be a terminal`);
+              return 2;
+            }
+          }
+          const common = { clientRoot, registryRoot: normRegistry, ...identityDependencies };
+          try {
+            if (flags.confirm === undefined) {
+              const plan = upgrade
+                ? await planRegistryUpgrade(common)
+                : await planRegistryRestore({ ...common, from, discardV2Data: Boolean(flags["discard-v2-data"]) });
+              await print(io, flags, plan, (p) => (upgrade ? renderUpgradePlan(p, { clientRoot }) : renderRestorePlan(p, { clientRoot, from })));
+              return plan.ready || plan.registry?.code === "registry_already_v2" ? 0 : 1;
+            }
+            const result = upgrade
+              ? await applyRegistryUpgrade({ ...common, confirm: flags.confirm })
+              : await applyRegistryRestore({ ...common, from, discardV2Data: Boolean(flags["discard-v2-data"]), confirm: flags.confirm });
+            await print(io, flags, result, upgrade ? renderUpgradeResult : renderRestoreResult);
+            return 0;
+          } catch (err) {
+            if (err instanceof LocalStateError) throw err;
+            // the registry module reports many refusals as a generic code with a specific reason; show the reason when it is one we explain
+            const code = typeof err?.reason === "string" && describeRefusal(err.reason) !== null
+              ? err.reason
+              : (typeof err?.code === "string" ? err.code : "identity_registry_failed");
+            const text = describeRefusal(code) ?? (typeof err?.message === "string" ? err.message : "The command did not complete.");
+            const backupNote = err?.backup?.dir ? { backup: err.backup.dir } : {};
+            const backupHint = err?.backup?.dir
+              ? `\nA backup was made first: ${err.backup.dir}\nTo put the clean pair back: triangle identity restore-registry --client-root ${clientRoot} --from ${err.backup.dir}`
+              : "";
+            io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...backupNote }) : `${text} (${code})${backupHint}`);
+            return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
+          }
         }
         throw new UsageError(`unknown identity command ${sub ?? ""}`);
       }
