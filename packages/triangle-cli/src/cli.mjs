@@ -25,7 +25,7 @@ import {
   renderRestoreResult,
   renderUpgradePlan,
   renderUpgradeResult,
-} from "./identity-registry-upgrade.mjs";
+} from "./identity-upgrade.mjs";
 import { identityStatus } from "./identity-status.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";

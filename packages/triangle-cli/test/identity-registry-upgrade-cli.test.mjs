@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { main } from "../src/cli.mjs";
-import { readSupervisorManifestVersion, runTriangleLocalStatus } from "../src/identity-registry-upgrade.mjs";
+import { readSupervisorManifestVersion, runTriangleLocalStatus } from "../src/identity-upgrade.mjs";
 import { bindProfileInRegistry, makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
 import { AUDIT_FILE, REGISTRY_FILE, START, V1, V2, clock, fixture, okStatus, stamp, writeManifest } from "./identity-registry-upgrade-helpers.mjs";
 import { agentBindingV2, appendAndCommit, peerBindingV2, serverlessPairing } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";

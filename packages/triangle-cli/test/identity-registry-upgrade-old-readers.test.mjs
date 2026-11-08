@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { main } from "../src/cli.mjs";
-import { planRegistryUpgrade } from "../src/identity-registry-upgrade.mjs";
+import { planRegistryUpgrade } from "../src/identity-upgrade.mjs";
 import { makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
 import { createRegistrySnapshotProvider } from "../../agent-worker/src/router-registry-snapshot.mjs";
 import { createUnifiedRouter } from "../../agent-worker/src/unified-router.mjs";
