@@ -13,6 +13,7 @@ import {
   IDENTITY_REGISTRY_SCHEMA,
   IDENTITY_REGISTRY_SCHEMA_V2,
   inspectIdentityRegistryRestore,
+  LOCAL_PROFILE_BINDING_SCHEMA,
   readIdentityRegistry,
   REGISTRY_FILE_NAME,
   restoreIdentityRegistry,
@@ -24,6 +25,7 @@ import {
   appendAndCommit,
   auditEntry,
   auditLines,
+  makeRoot,
   makeV1Root,
   peerBindingV2,
   readRaw,
@@ -456,6 +458,173 @@ test("a restore can replace an unreadable live registry, and recreate a missing 
     assert.deepEqual([again.live.state, again.archive], ["absent", null]);
     assert.equal(modeOf(env.root), 0o700);
     assert.deepEqual([readIdentityRegistry({ root: env.root }).registry.sequence, rootEntries(env.root)], [3, [AUDIT_FILE_NAME, REGISTRY_FILE_NAME].sort()]);
+  }));
+
+test("what a restore changes for routing, binding by binding: undone revokes, added, removed, revoked and changed bindings", () =>
+  withEnv((env) => {
+    const backup = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 });
+    const ghost = agentBindingV1("ghost");
+    const revokeGhost = () => updateIdentityRegistry({
+      root: env.root,
+      expectedSequence: readIdentityRegistry({ root: env.root }).registry.sequence,
+      now: T2,
+      action: "revoke",
+      subject: ghost.profile_instance_id,
+      mutate: (r) => { r.bindings[ghost.profile_instance_id].revoked_at = T2; return r; },
+    });
+    const names = (list) => list.map((x) => x.profile);
+    const same = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }).routing;
+    assert.deepEqual(Object.values(same).map((l) => l.length), [0, 0, 0, 0, 0], "an unchanged registry changes nothing");
+
+    // the live registry revoked a binding after the backup: restoring undoes the revoke
+    revokeGhost();
+    bindV1(env.root, "codex-headless");
+    const routing = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }).routing;
+    assert.deepEqual([names(routing.reactivated), names(routing.removed), names(routing.added), names(routing.revoked), names(routing.changed)], [["ghost"], ["codex-headless"], [], [], []]);
+    assert.deepEqual(routing.reactivated[0], { instanceId: ghost.profile_instance_id, profile: "ghost", principal: ghost.principal_id, trustMode: "mesh-managed", generation: 1 });
+    const out = restoreWith(env, backup.dir);
+    assert.deepEqual([names(out.routing.reactivated), names(out.routing.removed)], [["ghost"], ["codex-headless"]]);
+    assert.equal(readIdentityRegistry({ root: env.root }).registry.bindings[ghost.profile_instance_id].revoked_at, null, "the binding routes again");
+
+    // a backup that was taken after a revoke: restoring it revokes, and one with a binding the live registry lacks adds it
+    revokeGhost();
+    const later = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T3 });
+    restoreWith(env, backup.dir);
+    const forward = inspectIdentityRegistryRestore({ root: env.root, backupDir: later.dir }).routing;
+    assert.deepEqual([names(forward.revoked), names(forward.reactivated)], [["ghost"], []]);
+
+    // another registry's backup: a binding the live one has not (added), one under another principal (changed)
+    const other = makeRoot("id-reg-v2b-other-");
+    try {
+      updateIdentityRegistry({ root: other.root, expectedSequence: 0, now: T0, action: "init", subject: null, mutate: (r) => r });
+      const swapped = agentBindingV1("ghost", { principal_id: `agent_${"9".repeat(32)}`, binding_id: `bind_${"9".repeat(32)}` });
+      const extra = agentBindingV1("owner-profile");
+      for (const [i, b] of [swapped, extra].entries()) {
+        updateIdentityRegistry({ root: other.root, expectedSequence: i + 1, now: T0, action: "bind", subject: b.profile_instance_id, mutate: (r) => { r.bindings[b.profile_instance_id] = b; return r; } });
+      }
+      const foreign = backupIdentityRegistry({ root: other.root, backupParent: path.join(other.base, "identity-backups"), now: T1 });
+      const crafted = inspectIdentityRegistryRestore({ root: env.root, backupDir: foreign.dir });
+      assert.equal(crafted.relation, "diverged");
+      // owner-profile is new, ghost is bound to another principal, gravity2 is not in the other registry
+      assert.deepEqual([names(crafted.routing.added), names(crafted.routing.changed), names(crafted.routing.removed)], [["owner-profile"], ["ghost"], ["gravity2"]]);
+    } finally {
+      rmSync(other.base, { recursive: true, force: true });
+    }
+
+    // no readable live registry: every active binding of the backup is added
+    breakRegistryFile(env.root);
+    const unreadable = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir }).routing;
+    assert.deepEqual([names(unreadable.added), unreadable.reactivated.length, unreadable.removed.length], [["ghost", "gravity2"], 0, 0]);
+  }));
+
+test("an archive that does not read back, or a restore that does not verify, is an error and not a success", () =>
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    const live = livePair(env.root);
+    expectError(
+      () => restoreWith(env, backup.dir, { faultHook: (stage, ctx) => { if (stage === "after_archive_write") appendFileSync(path.join(ctx.archiveDir, REGISTRY_FILE_NAME), "x"); } }),
+      "registry_corrupt",
+      "archive_verification_failed",
+    );
+    assert.deepEqual(livePair(env.root), live, "nothing was replaced");
+    assert.deepEqual(readdirSync(env.backupParent).filter((n) => n.startsWith("before-restore-")), [], "the bad archive is removed");
+
+    expectError(
+      () => restoreWith(env, backup.dir, { faultHook: (stage) => { if (stage === "after_audit_replace") appendFileSync(path.join(env.root, REGISTRY_FILE_NAME), "\n"); } }),
+      "registry_corrupt",
+      "restore_verification_failed",
+    );
+  }));
+
+test("restoring a backup of a registry with no history removes the live audit log", () =>
+  withEnv((env) => {
+    const empty = makeRoot("id-reg-v2b-empty-");
+    try {
+      mkdirSync(empty.root, { mode: 0o700 });
+      const file = path.join(empty.root, REGISTRY_FILE_NAME);
+      writeFileSync(file, `${canonicalJson(readRaw(env.root) && { ...readRaw(env.root), sequence: 0, auditHead: { sequence: 0, hash: "0".repeat(64) }, bindings: {} })}\n`);
+      chmodSync(file, 0o600);
+      const seq0 = backupIdentityRegistry({ root: empty.root, backupParent: path.join(empty.base, "identity-backups"), now: T1 });
+      assert.deepEqual(readdirSync(seq0.dir), [REGISTRY_FILE_NAME]);
+      const out = restoreWith(env, seq0.dir);
+      assert.equal(out.restored.sequence, 0);
+      assert.deepEqual(rootEntries(env.root), [REGISTRY_FILE_NAME], "the live audit log is gone with the history it belonged to");
+      assert.ok(out.archive && out.archive.files.length === 2);
+    } finally {
+      rmSync(empty.base, { recursive: true, force: true });
+    }
+  }));
+
+test("each half of the live fingerprint counts: a change to only the registry file, or only the audit log, is a change", () => {
+  const attempt = (env, backup, planned) => restoreIdentityRegistry({
+    root: env.root,
+    backupDir: backup.dir,
+    archiveParent: env.backupParent,
+    expectedLiveFingerprint: planned.live.fingerprint,
+    expectedBackup: { registrySha256: planned.backup.registrySha256, auditSha256: planned.backup.auditSha256 },
+    now: T3,
+  });
+  // only the registry file changes (the audit log is the same bytes)
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    const planned = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+    appendFileSync(path.join(env.root, REGISTRY_FILE_NAME), "\n");
+    expectError(() => attempt(env, backup, planned), "registry_changed", "live_registry_changed_since_plan");
+  });
+  // only the audit log changes (a crashed write leaves a stale line; the registry file is untouched)
+  withEnv((env) => {
+    const backup = upgradedWithBackup(env);
+    const planned = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+    const registryBefore = readFileSync(path.join(env.root, REGISTRY_FILE_NAME));
+    const binding = agentBindingV2("half-written");
+    expectError(
+      () => updateIdentityRegistry({
+        root: env.root,
+        expectedSequence: 5,
+        now: T4,
+        action: "bind",
+        subject: binding.profile_instance_id,
+        mutate: (r) => { r.bindings[binding.profile_instance_id] = binding; return r; },
+        faultHook: (stage) => { if (stage === "after_audit_append") throw new Error("boom"); },
+      }),
+      undefined,
+    );
+    assert.ok(readFileSync(path.join(env.root, REGISTRY_FILE_NAME)).equals(registryBefore), "only the audit log differs");
+    expectError(() => attempt(env, backup, planned), "registry_changed", "live_registry_changed_since_plan");
+  });
+});
+
+test("a stale uncommitted audit line in the live registry is not counted as history that would be discarded", () =>
+  withEnv((env) => {
+    const backup = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 });
+    expectError(
+      () => updateIdentityRegistry({
+        root: env.root,
+        expectedSequence: 3,
+        now: T2,
+        action: "bind",
+        subject: agentBindingV1("codex-headless").profile_instance_id,
+        mutate: (r) => { const b = agentBindingV1("codex-headless"); r.bindings[b.profile_instance_id] = b; return r; },
+        faultHook: (stage) => { if (stage === "after_audit_append") throw new Error("boom"); },
+      }),
+      undefined,
+    );
+    const inspected = inspectIdentityRegistryRestore({ root: env.root, backupDir: backup.dir });
+    assert.deepEqual([inspected.live.uncommittedTail, inspected.relation, inspected.discarded], [1, "same", []]);
+  }));
+
+test("backups and archives are private whatever the umask", () =>
+  withEnv((env) => {
+    backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T1 }); // the parent exists now
+    const old = process.umask(0o277);
+    let backup;
+    try {
+      backup = backupIdentityRegistry({ root: env.root, backupParent: env.backupParent, now: T2 });
+    } finally {
+      process.umask(old);
+    }
+    assert.deepEqual([modeOf(backup.dir), modeOf(path.join(backup.dir, REGISTRY_FILE_NAME)), modeOf(path.join(backup.dir, AUDIT_FILE_NAME))], [0o700, 0o600, 0o600]);
+    assert.equal(readIdentityRegistry({ root: backup.dir }).registry.sequence, 3);
   }));
 
 test("a stray directory inside the registry root stops a restore: replacing the two files would not make the registry readable", () =>

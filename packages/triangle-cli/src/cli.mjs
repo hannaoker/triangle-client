@@ -20,6 +20,7 @@ import {
   describeRefusal,
   planRegistryRestore,
   planRegistryUpgrade,
+  printable,
   renderRestorePlan,
   restoreCommand,
   renderRestoreResult,
@@ -504,6 +505,8 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           if (normRegistry === normClient) throw new UsageError("registry root must not equal client root");
           if (normClient.startsWith(normRegistry + sep)) throw new UsageError("registry root must not contain client root");
           if (normRegistry.startsWith(normClient + sep)) throw new UsageError("registry root must not be inside client root");
+          // the floor check asks the supervisor of this application root and the backups go in it, so the registry must be its own
+          if (dirname(normRegistry) !== dirname(normClient)) throw new UsageError("--registry-root must be a directory beside --client-root, in the same application root (the floor check and the backups belong to it)");
           let from;
           if (!upgrade) {
             if (!flags.from) throw new UsageError("identity restore-registry requires --from BACKUP_DIR");
@@ -549,9 +552,9 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
             const text = describeRefusal(code) ?? (typeof err?.message === "string" ? err.message : "The command did not complete.");
             const backupNote = err?.backup?.dir ? { backup: err.backup.dir } : {};
             const backupHint = err?.backup?.dir
-              ? `\nA backup was made first: ${err.backup.dir}\nTo put the clean pair back: ${restoreCommand({ clientRoot, registryRoot: normRegistry, from: err.backup.dir })}`
+              ? `\nA backup was made first: ${printable(err.backup.dir)}\nTo put the clean pair back: ${printable(restoreCommand({ clientRoot, registryRoot: normRegistry, from: err.backup.dir }))}`
               : "";
-            io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...backupNote }) : `${text} (${code})${backupHint}`);
+            io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...backupNote }) : `${printable(text)} (${printable(code)})${backupHint}`);
             return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
           }
         }

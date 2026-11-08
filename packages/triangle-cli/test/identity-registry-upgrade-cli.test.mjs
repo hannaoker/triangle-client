@@ -263,6 +263,54 @@ test("a write that lands between the plan and the backup stops the upgrade; one 
   assert.deepEqual([readIdentityRegistry({ root: late.registry }).registry.schema, readIdentityRegistry({ root: late.registry }).registry.sequence], [V1, 4]);
 });
 
+test("the terminal gate needs both standard input and standard output to be terminals", async (t) => {
+  const f = fixture(t);
+  const wrong = "0".repeat(64);
+  const viaTty = (stdinIsTTY, stdoutIsTTY) => f.run("upgrade-registry", ["--confirm", wrong], { identityDependencies: { isTerminal: undefined, stdinIsTTY, stdoutIsTTY } });
+  for (const [a, b] of [[true, false], [false, true], [false, false]]) {
+    const refused = await viaTty(a, b);
+    assert.equal(refused.code, 2, `${a} ${b}`);
+    assert.match(refused.err, /requires standard input and output to be a terminal/);
+  }
+  const through = await viaTty(true, true);
+  assert.equal(through.code, 2);
+  assert.ok(through.err.includes("(plan_stale)"), through.err);
+});
+
+test("the registry has to sit beside the client directory, in the application root the floor and the backups belong to", async (t) => {
+  const f = fixture(t);
+  for (const sub of ["upgrade-registry", "restore-registry"]) {
+    const result = await f.run(sub, ["--registry-root", path.join(f.root, "elsewhere", "identity"), ...(sub === "restore-registry" ? ["--from", path.join(f.root, "b")] : [])]);
+    assert.equal(result.code, 2, sub);
+    assert.match(result.err, /--registry-root must be a directory beside --client-root/);
+  }
+  // a different name in the same application root is fine
+  const ok = await f.run("upgrade-registry", ["--registry-root", path.join(f.app, "identity-copy"), "--json"]);
+  assert.equal(JSON.parse(ok.out).refusals[0], "registry_absent");
+});
+
+test("a registry swapped for another one with the same sequence between the plan and the backup is caught by the audit head", async (t) => {
+  const f = fixture(t);
+  const other = fixture(t);
+  const plan = await f.plan();
+  const real = (await import("../../agent-worker/src/identity-registry.mjs")).backupIdentityRegistry;
+  const swapped = await f.run("upgrade-registry", ["--confirm", plan.planId], {
+    identityDependencies: {
+      backupIdentityRegistry: (args) => {
+        for (const name of [REGISTRY_FILE, AUDIT_FILE]) {
+          fs.copyFileSync(path.join(other.registry, name), path.join(f.registry, name));
+          fs.chmodSync(path.join(f.registry, name), 0o600);
+        }
+        return real(args);
+      },
+    },
+  });
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.sequence, plan.registry.sequence, "same sequence, different registry");
+  assert.equal(swapped.code, 2, swapped.err);
+  assert.ok(swapped.err.includes("(plan_stale)"), swapped.err);
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.schema, V1);
+});
+
 test("a crash during the upgrade keeps the backup, and the upgrade can be planned and applied again", async (t) => {
   const f = fixture(t);
   const plan = await f.plan();
@@ -341,6 +389,40 @@ test("the real probe reports why it could not ask", async (t) => {
   fs.rmSync(path.join(f.app, "bin", "triangle-local"));
   fs.symlinkSync("/bin/echo", path.join(f.app, "bin", "triangle-local"));
   await assert.rejects(ask, { code: "supervisor_unreachable", detail: "triangle-local_unsafe" });
+});
+
+test("the real probe refuses a triangle-local that is not executable or whose directories others can write, and reads the config beside the client root it was given", async (t) => {
+  const f = fixture(t);
+  const bin = path.join(f.app, "bin");
+  const ask = (extra = {}) => runTriangleLocalStatus({ applicationRoot: f.app, env: { HOME: "/h", PATH: "/usr/bin:/bin" }, timeoutMs: 2000, ...extra });
+  fakeTriangleLocal(f.app, "echo '{}'", 0o600);
+  await assert.rejects(ask, { code: "supervisor_unreachable", detail: "triangle-local_unsafe" }, "not executable");
+  fakeTriangleLocal(f.app, "echo '{}'", 0o700);
+  assert.deepEqual(await ask(), {});
+  for (const dir of [bin, f.app]) {
+    fs.chmodSync(dir, 0o777);
+    try {
+      await assert.rejects(ask, { code: "supervisor_unreachable", detail: "triangle-local_unsafe" }, `${dir} others can write`);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+  }
+  // the config named is the one beside the client directory that was given, whatever that directory is called
+  const dump = path.join(f.root, "args");
+  fakeTriangleLocal(f.app, `printf '%s\\n' "$@" > '${dump}'\necho '{}'`);
+  await ask({ clientRoot: path.join(f.app, "my-client") });
+  assert.deepEqual(fs.readFileSync(dump, "utf8").trim().split("\n"), ["status", "--config", path.join(f.app, "my-client", "local-messaging.json")]);
+});
+
+test("what the supervisor says is shown only as plain tokens, never as terminal control characters", async (t) => {
+  const evil = "bad\u001b[2Jname\u0007";
+  const f = fixture(t, { status: okStatus({ registry: { state: "o\u001bk", sequence: 9, schema: "identity_registry_v1\u0007", supportedSchemas: [V1, V2, evil] } }) });
+  const human = await f.run("upgrade-registry");
+  assert.equal(human.code, 0, human.out);
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(human.out), JSON.stringify(human.out));
+  const plan = await f.plan();
+  assert.ok(plan.floor.supervisor.supportedSchemas.includes("bad??2Jname?"), JSON.stringify(plan.floor.supervisor.supportedSchemas));
+  assert.equal(plan.observed.supervisorRegistry.schema, "identity_registry_v1?");
 });
 
 test("the manifest reader returns the version and refuses what is not a private file", (t) => {
@@ -432,6 +514,32 @@ test("a restore puts the backup pair back, archives what it replaced, and is the
   const human = await f.run("restore-registry", ["--from", backup, "--confirm", (JSON.parse((await f.run("restore-registry", ["--from", backup, "--json"])).out)).planId]);
   assert.equal(human.code, 0, human.err);
   assert.ok(human.out.includes("Restored the identity registry to identity_registry_v1 (sequence 3)."), human.out);
+});
+
+test("a restore says what it changes for routing: a revoke it would undo, a binding it adds or removes", async (t) => {
+  const f = fixture(t);
+  const backup = backupIdentityRegistry({ root: f.registry, backupParent: path.join(f.app, "identity-backups"), now: clock(1)() });
+  const beta = makeMeshManagedBinding("beta");
+  updateIdentityRegistry({
+    root: f.registry,
+    expectedSequence: 3,
+    action: "revoke",
+    subject: beta.profile_instance_id,
+    now: clock(2)(),
+    mutate: (r) => { r.bindings[beta.profile_instance_id].revoked_at = clock(2)(); return r; },
+  });
+  bindProfileInRegistry(f.registry, "gamma", 4);
+  const human = await f.run("restore-registry", ["--from", backup.dir]);
+  assert.equal(human.code, 0, human.err);
+  assert.ok(human.out.includes("What changes for routing (principal sends):"), human.out);
+  assert.match(human.out, /! beta \(agent_[a-f0-9]{32}\): a REVOKE IS UNDONE, this binding routes again/);
+  assert.match(human.out, /- gamma \(agent_[a-f0-9]{32}\): removed \(the live registry has it, the backup does not\)/);
+  const plan = JSON.parse((await f.run("restore-registry", ["--from", backup.dir, "--json"])).out);
+  assert.deepEqual([plan.routing.reactivated.map((x) => x.profile), plan.routing.removed.map((x) => x.profile)], [["beta"], ["gamma"]]);
+  const applied = await f.run("restore-registry", ["--from", backup.dir, "--confirm", plan.planId], { identityDependencies: { now: clock(9) } });
+  assert.equal(applied.code, 0, applied.err);
+  assert.ok(applied.out.includes("Revoked bindings that route again: beta. Revoke them again with triangle identity revoke if that is not wanted."), applied.out);
+  assert.equal(readIdentityRegistry({ root: f.registry }).registry.bindings[beta.profile_instance_id].revoked_at, null);
 });
 
 test("a restore that would lose v2-only data needs --discard-v2-data, which is part of the plan id", async (t) => {

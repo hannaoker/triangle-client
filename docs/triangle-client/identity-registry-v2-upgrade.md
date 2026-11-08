@@ -8,7 +8,9 @@ will write (serverless bindings, pairings, aliases, destination rules); nothing 
 
 Both commands are owner commands: they plan first and write nothing; applying needs the exact plan id and a terminal on
 standard input and output. Examples use the default layout; `--client-root` is the client directory
-(`~/Library/Application Support/The Triangle/client`), and the registry defaults to `identity/` beside it.
+(`~/Library/Application Support/The Triangle/client`), and the registry defaults to `identity/` beside it. An explicit
+`--registry-root` must be a directory in the same application root (the client directory's parent): the supervisor that is
+asked, and the `identity-backups/` folder, are those of that application root.
 
 ## Before you start
 
@@ -62,14 +64,18 @@ principal send still goes to the same profile.
   ```
 
   The plan shows the live registry, the backup, how their histories relate and every audit entry that would be discarded
-  (anything done since the backup, such as a new binding or a revoke, has to be redone). If the live registry holds v2-only data
+  (anything done since the backup, such as a new binding or a revoke, has to be redone). **Read the routing section:** a restore
+  replaces the whole registry, so it can undo a revoke (the plan marks it `!`, and the result repeats it: revoke the binding
+  again if that is not what you want) or add a binding the live registry does not have (`+`). If the live registry holds v2-only data
   (a serverless binding, pairing, alias or destination), which a v1 backup cannot hold, the restore is refused unless you add
   `--discard-v2-data`. Apply with `--confirm PLAN_ID` (and the same flags). Before it replaces anything it copies the live files
   into `<application root>/identity-backups/before-restore-<state>-<UTC time>/`, so nothing is lost.
 - **The registry is unreadable or missing.** Restore works then too (the live files are archived as they are).
 - **A restore stopped partway.** Run it again from a fresh plan; the previous files are already in the archive.
 - Only a v1 backup that reads and verifies, has no unfinished write and lies outside the registry directory can be restored.
-  Backups and archives are never deleted by these commands.
+  Backups and archives are never deleted by these commands. If a run is killed while a backup is being written, an incomplete
+  directory (a restore refuses it as unreadable) and, after a killed restore, staging files named `identity-registry-v1.json.tmp-restore-*`
+  in the registry directory can be left behind; the registry reader ignores the files, and both can be removed by hand.
 
 ## Refusal codes
 

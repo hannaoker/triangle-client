@@ -2699,6 +2699,50 @@ function compareHistories(live, backup) {
   return { relation, discarded };
 }
 
+function bindingSummary(instanceId, binding) {
+  return {
+    instanceId,
+    profile: binding.profile_name,
+    principal: binding.principal_id,
+    trustMode: binding.trust_mode,
+    generation: binding.binding_generation,
+  };
+}
+
+function sortSummaries(list) {
+  return list.sort((a, b) => compareCodeUnits(a.profile, b.profile) || compareCodeUnits(a.instanceId, b.instanceId));
+}
+
+/**
+ * What a restore changes for routing, binding by binding: `added` (the backup holds an active binding the live registry does
+ * not), `removed` (an active live binding the backup lacks), `reactivated` (revoked live, active in the backup: the restore
+ * undoes a revoke), `revoked` (active live, revoked in the backup) and `changed` (active in both with another principal,
+ * origin or trust mode). With no readable live registry every active backup binding is `added`.
+ */
+function compareBindings(liveRegistry, backupRegistry) {
+  const live = liveRegistry === null ? {} : liveRegistry.bindings;
+  const out = { added: [], removed: [], reactivated: [], revoked: [], changed: [] };
+  for (const [instanceId, binding] of Object.entries(backupRegistry.bindings)) {
+    const was = live[instanceId];
+    const active = binding.revoked_at === null;
+    if (!was) {
+      if (active) out.added.push(bindingSummary(instanceId, binding));
+      continue;
+    }
+    const wasActive = was.revoked_at === null;
+    if (!wasActive && active) out.reactivated.push(bindingSummary(instanceId, binding));
+    else if (wasActive && !active) out.revoked.push(bindingSummary(instanceId, binding));
+    else if (wasActive && active && (was.principal_id !== binding.principal_id || was.authority_origin !== binding.authority_origin || was.trust_mode !== binding.trust_mode)) {
+      out.changed.push(bindingSummary(instanceId, binding));
+    }
+  }
+  for (const [instanceId, was] of Object.entries(live)) {
+    if (!Object.hasOwn(backupRegistry.bindings, instanceId) && was.revoked_at === null) out.removed.push(bindingSummary(instanceId, was));
+  }
+  for (const list of Object.values(out)) sortSummaries(list);
+  return out;
+}
+
 function publicLive(live) {
   return {
     state: live.state,
@@ -2728,8 +2772,9 @@ function publicBackup(backup) {
 /**
  * Read-only description of what restoring `backupDir` over `root` would do: the live registry (or that it is absent or
  * unreadable), the backup, how their histories relate (`same`, `ahead` = the live registry has the backup's history and more,
- * `behind`, `diverged`, or `unknown` when the live registry cannot be read), the audit entries a restore would discard, the
- * v2-only data it would lose, and the fingerprint of the live files a restore must be confirmed against. Writes nothing and
+ * `behind`, `diverged`, or `unknown` when the live registry cannot be read), the audit entries a restore would discard, what it
+ * changes for routing binding by binding (including revokes it would undo), the v2-only data it would lose, and the
+ * fingerprint of the live files a restore must be confirmed against. Writes nothing and
  * creates nothing. A backup that cannot be restored is refused with the same errors `restoreIdentityRegistry` gives.
  */
 export function inspectIdentityRegistryRestore({ root, backupDir } = {}) {
@@ -2756,6 +2801,7 @@ export function inspectIdentityRegistryRestore({ root, backupDir } = {}) {
     backup: publicBackup(backup),
     relation,
     discarded,
+    routing: compareBindings(live.registry, backup.registry),
     willLoseV2Data: live.v2Data !== null && live.v2Data.any,
   });
 }
@@ -2816,6 +2862,7 @@ export function restoreIdentityRegistry({
       throw codedError("restore_refused", "restore_would_lose_v2_data");
     }
     const { relation, discarded } = compareHistories(live, backup);
+    const routing = compareBindings(live.registry, backup.registry);
 
     let archive = null;
     if (live.bytes.registryBytes !== null || live.bytes.auditBytes !== null) {
@@ -2832,6 +2879,7 @@ export function restoreIdentityRegistry({
         }
         syncDir(dir);
         syncDir(archiveParent);
+        if (typeof faultHook === "function") faultHook("after_archive_write", { root, archiveDir: dir });
         for (const { name, sha256 } of files) {
           const back = readNoFollowDescriptor(path.join(dir, name), RAW_COPY_MAX_BYTES, "registry_corrupt", "archive_oversized");
           if (back.status !== "ok" || sha256Buffer(back.buffer) !== sha256) {
@@ -2890,6 +2938,7 @@ export function restoreIdentityRegistry({
       live: { state: live.state, schema: live.registry === null ? null : live.registry.schema, sequence: live.registry === null ? null : live.registry.sequence },
       relation,
       discarded,
+      routing,
     });
   });
 }

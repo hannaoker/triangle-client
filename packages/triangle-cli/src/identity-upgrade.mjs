@@ -94,21 +94,30 @@ export function readSupervisorManifestVersion(applicationRoot) {
  * Asks the running supervisor for its local status the way the owner would: by running the installed `triangle-local status`
  * (which keeps its own credential handling). Returns the parsed status object. Never reads or prints a credential.
  */
-export function runTriangleLocalStatus({ applicationRoot, execFileImpl = execFile, timeoutMs = STATUS_TIMEOUT_MS, env = process.env }) {
+export async function runTriangleLocalStatus({ applicationRoot, clientRoot = path.join(applicationRoot, "client"), execFileImpl = execFile, timeoutMs = STATUS_TIMEOUT_MS, env = process.env }) {
+  const unreachable = (detail, message) => Object.assign(new Error(message), { code: "supervisor_unreachable", detail });
   const executable = path.join(applicationRoot, "bin", "triangle-local");
   let st;
   try {
     st = lstatSync(executable);
   } catch {
-    return Promise.reject(Object.assign(new Error("triangle-local is not installed"), { code: "supervisor_unreachable", detail: "triangle-local_missing" }));
+    throw unreachable("triangle-local_missing", "triangle-local is not installed");
   }
   if (!st.isFile() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o022) !== 0 || (st.mode & 0o100) === 0) {
-    return Promise.reject(Object.assign(new Error("triangle-local is not safe to run"), { code: "supervisor_unreachable", detail: "triangle-local_unsafe" }));
+    throw unreachable("triangle-local_unsafe", "triangle-local is not safe to run");
+  }
+  // the directories above it must not let anyone else swap the file: each one a directory of this user (or root), not
+  // writable by group or others, no symlinks
+  try {
+    const { ancestors } = await import("../../agent-worker/src/delivery-private-path.mjs");
+    ancestors(path.dirname(executable));
+  } catch {
+    throw unreachable("triangle-local_unsafe", "triangle-local is not safe to run");
   }
   const childEnv = {};
   for (const key of ["HOME", "PATH", "LANG", "TMPDIR", "USER", "LOGNAME"]) if (env[key] !== undefined) childEnv[key] = env[key];
-  const config = path.join(applicationRoot, "client", "local-messaging.json");
-  return new Promise((resolve, reject) => {
+  const config = path.join(path.resolve(clientRoot), "local-messaging.json");
+  return await new Promise((resolve, reject) => {
     execFileImpl(executable, ["status", "--config", config], { timeout: timeoutMs, maxBuffer: STATUS_MAX_BYTES, env: childEnv, windowsHide: true }, (error, stdout) => {
       if (error) {
         const detail = error.killed ? "timeout" : typeof error.code === "number" ? `exit_${error.code}` : String(error.code ?? "failed");
@@ -165,11 +174,14 @@ async function checkManifest(readManifestVersion, applicationRoot) {
   }
 }
 
-async function checkSupervisor(runStatus, applicationRoot) {
+// Text that came from the supervisor's answer is shown to the owner, so only plain tokens of bounded length get through.
+const safeToken = (value) => String(value).replace(/[^A-Za-z0-9_.:-]/g, "?").slice(0, 64);
+
+async function checkSupervisor(runStatus, applicationRoot, clientRoot) {
   const none = { supportedSchemas: null, routerEnabled: null, observedRegistry: null };
   let status;
   try {
-    status = await runStatus({ applicationRoot });
+    status = await runStatus({ applicationRoot, clientRoot });
   } catch (error) {
     return { ok: false, code: "supervisor_unreachable", detail: typeof error?.detail === "string" ? error.detail : null, ...none };
   }
@@ -177,8 +189,8 @@ async function checkSupervisor(runStatus, applicationRoot) {
   const supported = registry?.supportedSchemas;
   const observedRegistry = registry && typeof registry === "object"
     ? {
-        state: typeof registry.state === "string" ? registry.state : null,
-        schema: typeof registry.schema === "string" ? registry.schema : null,
+        state: typeof registry.state === "string" ? safeToken(registry.state) : null,
+        schema: typeof registry.schema === "string" ? safeToken(registry.schema) : null,
         sequence: Number.isSafeInteger(registry.sequence) ? registry.sequence : null,
       }
     : null;
@@ -187,10 +199,11 @@ async function checkSupervisor(runStatus, applicationRoot) {
     // a supervisor from before D1 does not report the field at all, which reads as "cannot read v2"
     return { ok: false, code: "supervisor_cannot_read_v2", detail: "supportedSchemas_not_reported", supportedSchemas: null, routerEnabled, observedRegistry };
   }
+  const shown = supported.map(safeToken).sort();
   if (!supported.includes(SCHEMA_V2)) {
-    return { ok: false, code: "supervisor_cannot_read_v2", detail: "v2_not_supported", supportedSchemas: [...supported].sort(), routerEnabled, observedRegistry };
+    return { ok: false, code: "supervisor_cannot_read_v2", detail: "v2_not_supported", supportedSchemas: shown, routerEnabled, observedRegistry };
   }
-  return { ok: true, code: null, detail: null, supportedSchemas: [...supported].sort(), routerEnabled, observedRegistry };
+  return { ok: true, code: null, detail: null, supportedSchemas: shown, routerEnabled, observedRegistry };
 }
 
 // ---- upgrade ------------------------------------------------------------------------------------------------------------------
@@ -210,7 +223,7 @@ export async function planRegistryUpgrade({ clientRoot, registryRoot, ...deps } 
 
   const registry = await checkRegistry(readRegistry, registryRoot);
   const manifest = await checkManifest(readManifestVersion, applicationRoot);
-  const supervisor = await checkSupervisor(runStatus, applicationRoot);
+  const supervisor = await checkSupervisor(runStatus, applicationRoot, path.resolve(clientRoot));
 
   const refusals = [];
   if (!registry.ok) refusals.push(registry.code);
@@ -305,6 +318,7 @@ export async function planRegistryRestore({ clientRoot, registryRoot, from, disc
     live: inspected.live,
     relation: inspected.relation,
     discarded: inspected.discarded,
+    routing: inspected.routing,
     discardV2Data: discardV2Data === true,
     ready: refusals.length === 0,
     refusals,
@@ -343,6 +357,7 @@ export async function applyRegistryRestore({ clientRoot, registryRoot, from, dis
     previous: result.live,
     relation: result.relation,
     discarded: result.discarded,
+    routing: result.routing,
     archive: result.archive === null ? null : Object.freeze({ dir: result.archive.dir, files: result.archive.files }),
   });
 }
@@ -377,6 +392,8 @@ export function describeRefusal(code) {
 }
 
 const short = (hash) => (typeof hash === "string" ? hash.slice(0, 12) : "-");
+// Paths and names come from the command line and the file system: control characters never reach the owner's terminal.
+export const printable = (value) => String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 const shellQuote = (value) => (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", `'\\''`)}'`);
 
 /** The restore command for a backup, ready to paste: every path quoted, both roots named. */
@@ -405,7 +422,7 @@ export function renderUpgradePlan(plan, { clientRoot } = {}) {
   if (reg.code === "registry_already_v2") {
     lines.push("Nothing to do: the registry is already identity_registry_v2.");
     lines.push(`Plan ID: ${plan.planId}`);
-    return lines.join("\n");
+    return lines.map(printable).join("\n");
   }
   lines.push("Floor (each must hold; nothing is written otherwise):");
   const mark = (ok) => (ok ? "[ok]     " : "[blocked]");
@@ -432,7 +449,7 @@ export function renderUpgradePlan(plan, { clientRoot } = {}) {
     lines.push("To apply this plan (needs a terminal):");
     lines.push(`  triangle identity upgrade-registry --client-root ${shellQuote(clientRoot)} --registry-root ${shellQuote(plan.registryRoot)} --confirm ${plan.planId}`);
   }
-  return lines.join("\n");
+  return lines.map(printable).join("\n");
 }
 
 export function renderUpgradeResult(result) {
@@ -442,7 +459,7 @@ export function renderUpgradeResult(result) {
     `Backup:   ${result.backup.dir}`,
     `          (registry ${short(result.backup.registrySha256)}…, audit ${short(result.backup.auditSha256)}…; read back and verified before the upgrade)`,
     "Check it with: triangle status --identity   (the schema and record counts are shown).",
-  ].join("\n");
+  ].map(printable).join("\n");
 }
 
 const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
@@ -478,6 +495,19 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
   if (v2 && v2.any) {
     lines.push(`Would lose v2-only data: ${plural(v2.serverlessBindings, "serverless binding")}, ${plural(v2.pairings, "pairing")}, ${plural(v2.aliases, "alias", "aliases")}, ${plural(v2.destinations, "destination")}.`);
   }
+  const routing = plan.routing;
+  if (routing && ["reactivated", "added", "changed", "revoked", "removed"].some((key) => routing[key].length > 0)) {
+    const rows = [
+      ...routing.reactivated.map((x) => `  ! ${x.profile} (${x.principal}): a REVOKE IS UNDONE, this binding routes again`),
+      ...routing.added.map((x) => `  + ${x.profile} (${x.principal}): added (the backup has it, the live registry does not)`),
+      ...routing.changed.map((x) => `  ~ ${x.profile} (${x.principal}): another principal, origin or trust mode than the live registry`),
+      ...routing.revoked.map((x) => `  - ${x.profile} (${x.principal}): revoked in the backup`),
+      ...routing.removed.map((x) => `  - ${x.profile} (${x.principal}): removed (the live registry has it, the backup does not)`),
+    ];
+    lines.push("What changes for routing (principal sends):");
+    for (const row of rows.slice(0, 30)) lines.push(row);
+    if (rows.length > 30) lines.push(`  \u2026 and ${rows.length - 30} more`);
+  }
   for (const code of plan.refusals) {
     const text = describeRefusal(code);
     if (text) lines.push(`  - ${code}: ${text}`);
@@ -489,7 +519,7 @@ export function renderRestorePlan(plan, { clientRoot, from } = {}) {
     lines.push("To apply this plan (needs a terminal):");
     lines.push(`  ${restoreCommand({ clientRoot, registryRoot: plan.registryRoot, from: from ?? b.dir, discardV2Data: plan.discardV2Data, confirm: plan.planId })}`);
   }
-  return lines.join("\n");
+  return lines.map(printable).join("\n");
 }
 
 export function renderRestoreResult(result) {
@@ -499,6 +529,9 @@ export function renderRestoreResult(result) {
   ];
   if (result.archive) lines.push(`Archive:  ${result.archive.dir}   (the files it replaced)`);
   if (result.discarded.length > 0) lines.push(`Discarded ${plural(result.discarded.length, "audit entry", "audit entries")}; redo anything that mattered.`);
+  if (result.routing && result.routing.reactivated.length > 0) {
+    lines.push(`Revoked bindings that route again: ${result.routing.reactivated.map((x) => x.profile).join(", ")}. Revoke them again with triangle identity revoke if that is not wanted.`);
+  }
   lines.push("Check it with: triangle status --identity");
-  return lines.join("\n");
+  return lines.map(printable).join("\n");
 }
