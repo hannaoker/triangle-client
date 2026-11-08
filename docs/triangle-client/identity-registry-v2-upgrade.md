@@ -29,6 +29,13 @@ The upgrade refuses unless all three hold, and the plan shows each one:
 The command asks the supervisor by running the installed `<application root>/bin/triangle-local status`; it needs local
 messaging to be set up for the owner, like that command itself.
 
+**Use a CLI that understands v2 from the moment you upgrade.** These commands come from this release's package. A client CLI
+installed before it (for example `0.2.0-identity.1`) cannot read a v2 registry: `triangle identity migrate` ends in an uncaught
+`registry_corrupt: unknown_registry_key`, and `triangle status --identity` exits 0 but shows the registry as `unreadable` with a
+blocker labelled `registry_absent`. Run the upgrade from the new package and update the installed CLI (or keep using the new
+package's CLI) before relying on those commands afterwards. The D1.4 rehearsal
+(`docs/reviews/2026-11-08-identity-registry-v2-d1-4-rehearsal.md`, findings 1 and 3) lists what a client install changes.
+
 ## Upgrade
 
 ```
@@ -75,6 +82,12 @@ principal send still goes to the same profile.
   (a serverless binding, pairing, alias or destination), which a v1 backup cannot hold, the restore is refused unless you add
   `--discard-v2-data`. Apply with `--confirm PLAN_ID` (and the same flags). Before it replaces anything it copies the live files
   into `<application root>/identity-backups/before-restore-<state>-<UTC time>/`, so nothing is lost.
+- **A supervisor that cannot read v2 is running** (it was rolled back, or a v2 write reached it without this command). Its
+  `local_status` shows `router.registry` as `{state: "unreadable", sequence: 0}` with the router still enabled; principal
+  (`agent_`) sends exit 1 with `route_unavailable` (the CLI labels that outcome `send_outcome_unknown`, but a status lookup of the
+  message id finds nothing, so nothing was queued); exact-id sends keep working, and the process keeps answering. Fix it by
+  running a supervisor that reads v2 or by restoring the backup; a running supervisor recovers as soon as the registry reads
+  again, without a restart (D1.4 rehearsal, finding 4).
 - **The registry is unreadable or missing.** Restore works then too (the live files are archived as they are).
 - **A restore stopped partway.** Run it again from a fresh plan; the previous files are already in the archive, and the next
   restore removes the staging files. A half-restored registry cannot be read, so nothing routed meanwhile and the plan shows
