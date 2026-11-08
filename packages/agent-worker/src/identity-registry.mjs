@@ -3,7 +3,8 @@
  *
  * Implements:
  * - Closed-schema validation (`identity_registry_v1` with the reduced `local_profile_binding_v1`, and since D1.0 also
- *   `identity_registry_v2`; the reader accepts both, the writer still writes v1 only)
+ *   `identity_registry_v2`; the reader accepts both. The writer creates v1 and converts it to v2 only through the
+ *   `upgrade` action, D1.1)
  * - Deterministic canonical JSON serialization (`canonicalJson`)
  * - Safe private directory/file custody checks (reusing `delivery-private-path.mjs`)
  * - Exclusive SQLite advisory lock (`<root>/.registry.lock`) with bounded wait
@@ -64,8 +65,8 @@ export const LOCK_TIMEOUT_MS = 5000;
 export const READ_MAX_RETRIES = 5;
 export const ZERO_HASH_64 = "0".repeat(64);
 
-// Registry v2 (D1.0, docs/plans/2026-11-07-identity-registry-v2-d1-plan.md). The reader accepts v1 and v2;
-// the writer still writes v1 only until D1.1, and nothing in this module mints a peer_ id or verifies a signature.
+// Registry v2 (docs/plans/2026-11-07-identity-registry-v2-d1-plan.md). The reader accepts v1 and v2. The writer creates v1
+// and converts it to v2 only through the `upgrade` action (D1.1); nothing in this module mints a peer_ id or verifies a signature.
 export const IDENTITY_REGISTRY_SCHEMA_V2 = "identity_registry_v2";
 export const LOCAL_PROFILE_BINDING_SCHEMA_V2 = "local_profile_binding_v2";
 export const SERVERLESS_PAIRING_SCHEMA = "serverless_pairing_v1";
@@ -2120,7 +2121,11 @@ function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action,
     }
     return null;
   }
-  const storedV2 = nextRegistry.schema === IDENTITY_REGISTRY_SCHEMA_V2;
+  // Past this point the schema cannot change: take it from the stored registry and insist the mutation kept it.
+  const storedV2 = oldRegistry.schema === IDENTITY_REGISTRY_SCHEMA_V2;
+  if (nextRegistry.schema !== oldRegistry.schema) {
+    throw codedError("invalid_registry", "mutate_modified_schema");
+  }
   if (storedV2) {
     // Bind and revoke leave the other collections alone; their own actions are reserved for later slices.
     for (const name of ["pairings", "aliases", "destinations"]) {
@@ -2304,6 +2309,10 @@ export function updateIdentityRegistry({
       if (storedSchema !== IDENTITY_REGISTRY_SCHEMA) {
         throw codedError("invalid_registry", "registry_already_v2");
       }
+      // Audit line 1 of a chain must be an init or a bind, so an upgrade can never be the first line.
+      if (current.registry.sequence === 0) {
+        throw codedError("invalid_registry", "upgrade_requires_history");
+      }
     }
     const resultSchema = action === "upgrade" ? IDENTITY_REGISTRY_SCHEMA_V2 : storedSchema;
     const currentSeq = current.state === "absent" ? 0 : current.registry.sequence;
@@ -2331,7 +2340,6 @@ export function updateIdentityRegistry({
           }
         : deepClonePlain(current.registry);
 
-    const oldBindings = baseRegistry.bindings;
     const cloneForMutate = deepClonePlain(baseRegistry);
 
     const rawMutated = mutate(cloneForMutate);
