@@ -222,6 +222,8 @@ test("Family 1: Disabled mode never reads registry or recipients, passes through
     registry: {
       state: "disabled",
       sequence: 0,
+      schema: null,
+      supportedSchemas: ["identity_registry_v1", "identity_registry_v2"],
     },
     resolved: {
       principal: 0,
@@ -911,6 +913,8 @@ test("Family 8: Deterministic counters and error accounting", async () => {
     registry: {
       state: "ok",
       sequence: 7,
+      schema: null, // this fake snapshot carries no schema
+      supportedSchemas: ["identity_registry_v1", "identity_registry_v2"],
     },
     resolved: {
       principal: 1,

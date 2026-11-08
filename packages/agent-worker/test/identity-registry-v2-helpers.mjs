@@ -11,6 +11,7 @@ import {
   LOCAL_PROFILE_BINDING_SCHEMA_V2,
   readIdentityRegistry,
   REGISTRY_FILE_NAME,
+  SERVERLESS_PAIRING_SCHEMA,
   updateIdentityRegistry,
   upgradeRegistryV1ToV2,
 } from "../src/identity-registry.mjs";
@@ -53,6 +54,29 @@ export function peerBindingV2(name, overrides = {}) {
     authority_origin: null,
     principal_public_key: b64u(`pk:${name}`, 32),
     proof: { kind: "local_principal_self_sig", principal_sig: b64u(`sig:${name}`, 64) },
+    ...overrides,
+  };
+}
+
+// A live serverless pairing (the writer cannot create one yet): `n` seeds every derived value.
+export function serverlessPairing(n, localPrincipal, overrides = {}) {
+  return {
+    schema: SERVERLESS_PAIRING_SCHEMA,
+    pairing_id: `pair_${hex32(`pair:${n}`)}`,
+    local_principal_id: localPrincipal,
+    remote_principal_id: `peer_${hex32(`remote:${n}`)}`,
+    remote_principal_public_key: b64u(`rpk:${n}`, 32),
+    remote_endpoint_ids: [hex64(`ep:${n}`)],
+    petname: `friend-${n}`,
+    binding_generation: 1,
+    issued_at: T0,
+    expires_at: "2027-11-07T10:00:00.000Z",
+    remote_invitation_sig: b64u(`inv:${n}`, 64),
+    local_owner_approval_sig: b64u(`app:${n}`, 64),
+    next_key_digest: null,
+    pending_rotation: null,
+    pending_endpoint_update: null,
+    revoked_at: null,
     ...overrides,
   };
 }

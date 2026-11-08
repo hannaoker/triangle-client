@@ -25,6 +25,7 @@ import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
 import { setupRouter } from "../src/local-messaging-cli.mjs";
 import {
   updateIdentityRegistry,
+  upgradeRegistryV1ToV2,
   LOCAL_PROFILE_BINDING_SCHEMA,
 } from "../src/identity-registry.mjs";
 import { deriveClientInstanceId } from "../src/identity-primitives.mjs";
@@ -577,6 +578,9 @@ test("Server wiring: kill switch, invalid config diagnostics, per-request statca
     const status1 = await client.localStatus();
     assert.equal(status1.router.enabled, false);
     assert.equal(status1.router.error, undefined);
+    // the process says which registry schemas it can read even while the router is off (the registry upgrade asks this)
+    assert.deepEqual(status1.router.registry.supportedSchemas, ["identity_registry_v1", "identity_registry_v2"]);
+    assert.equal(status1.router.registry.schema, null);
 
     // Send to principal in disabled mode -> passes through as literal id and gets rejected by ACL
     await assert.rejects(
@@ -604,6 +608,8 @@ test("Server wiring: kill switch, invalid config diagnostics, per-request statca
     assert.equal(status2.router.enabled, true);
     assert.equal(status2.router.error, undefined);
     assert.equal(status2.router.registry.state, "ok");
+    assert.equal(status2.router.registry.schema, "identity_registry_v1");
+    assert.deepEqual(status2.router.registry.supportedSchemas, ["identity_registry_v1", "identity_registry_v2"]);
 
     // Principal send now succeeds!
     const principalReceipt = await client.sendMessage({
@@ -887,6 +893,76 @@ test("Registry corruption fails closed for principal sends only; legacy sends co
       text: "hello legacy while registry is corrupt",
     });
     assert.ok(legacyReceipt.messageId);
+  } finally {
+    await cleanupFixture(f, server, client, journal);
+  }
+});
+
+test("A v2 registry through the real server: local_status reports it, the same principal send works, peer ids stay unsupported", async () => {
+  const f = makeFixture();
+  let server = null;
+  let client = null;
+  let journal = null;
+  try {
+    journal = createLocalMessagingJournal({ stateRoot: f.stateRoot });
+    const acl = createOwnerAcl({ rules: { [HEX_A]: [INSTANCE_BOB] } });
+    const dispatcher = { start() {}, stop() {}, notifyAdmission() {} };
+    const rateLimiter = createPerSenderRateLimiter({ maxRequestsPerWindow: 20, windowMs: 5000 });
+    const loopTracker = createConversationLoopTracker({ maxLoopDepth: 10, journal });
+    const pairExchangeLimiter = createPairExchangeLimiter({ maxPairExchanges: 10, windowMs: 5000, journal });
+
+    initRegistry(f.identityRoot);
+    const bob = bindProfile(f.identityRoot, "bob", 1);
+    setupRouter({ enable: true, registryRoot: f.identityRoot, stateRoot: f.stateRoot });
+
+    server = createLocalControlServer({
+      socketPath: f.socketPath,
+      journal,
+      acl,
+      credentialValidator: f.validator,
+      dispatcher,
+      statusProvider: async () => ({ ok: true, version: 1 }),
+      rateLimiter,
+      loopTracker,
+      pairExchangeLimiter,
+      stateRoot: f.stateRoot,
+      recipientDirectory: [{ id: INSTANCE_BOB, label: "bob", kind: "worker" }],
+    });
+    await server.start();
+    client = createLocalControlClient({
+      socketPath: f.socketPath,
+      senderId: HEX_A,
+      turnCredential: f.issuer.issue({ senderId: HEX_A }),
+    });
+
+    const before = (await client.localStatus()).router.registry;
+    assert.deepEqual([before.state, before.schema, before.sequence], ["ok", "identity_registry_v1", 2]);
+    const first = await client.sendMessage({ to: bob.principal_id, text: "before the upgrade" });
+    assert.equal(first.target.principal, bob.principal_id);
+
+    updateIdentityRegistry({
+      root: f.identityRoot,
+      expectedSequence: 2,
+      action: "upgrade",
+      subject: null,
+      mutate: (reg) => upgradeRegistryV1ToV2(reg),
+    });
+
+    // the running server re-reads the replaced file: same principals, new schema, one sequence further
+    const after = (await client.localStatus()).router.registry;
+    assert.deepEqual(
+      [after.state, after.schema, after.sequence, after.supportedSchemas],
+      ["ok", "identity_registry_v2", 3, ["identity_registry_v1", "identity_registry_v2"]],
+    );
+    const second = await client.sendMessage({ to: bob.principal_id, text: "after the upgrade" });
+    assert.deepEqual(second.target, first.target);
+    assert.equal(second.target.via, "principal");
+
+    // a peer id is still not a destination
+    await assert.rejects(
+      () => client.sendMessage({ to: `peer_${"1".repeat(32)}`, text: "no such route" }),
+      (err) => err instanceof LocalMessagingError && err.code === "recipient_not_found",
+    );
   } finally {
     await cleanupFixture(f, server, client, journal);
   }

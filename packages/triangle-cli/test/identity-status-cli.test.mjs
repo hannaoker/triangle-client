@@ -22,7 +22,7 @@ import {
   planIdentityMapping,
   applyIdentityMapping,
 } from "../../agent-worker/src/identity-mapping.mjs";
-import { readIdentityRegistry } from "../../agent-worker/src/identity-registry.mjs";
+import { readIdentityRegistry, updateIdentityRegistry, upgradeRegistryV1ToV2 } from "../../agent-worker/src/identity-registry.mjs";
 
 function setupJoinedFakeFixture({ profiles = ["bob"] } = {}) {
   const fake = createFakeAuthority({ authority: "https://mesh.test" });
@@ -200,6 +200,71 @@ test("doctor --identity: after applyIdentityMapping, profile is recorded, no Ide
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test("status --identity names the registry schema and, for v2, the record counts; a recorded profile stays recorded", async () => {
+  const f = setupJoinedFakeFixture();
+  try {
+    await joinAndMakeHealthy(f.fake, f.home);
+    const syncReadInv = () =>
+      buildIdentityInventory(
+        readInstallationInventory({ clientRoot: f.client, pidAlive: () => "unknown", advisoryHeldAt: () => "unknown" })
+      );
+    const plan = planIdentityMapping({ inventory: syncReadInv(), registry: readIdentityRegistry({ root: f.registry }) });
+    applyIdentityMapping({ root: f.registry, confirmation: plan.planId, readInventory: syncReadInv });
+
+    const run = async (extra = []) => {
+      const out = [];
+      const code = await main(
+        ["status", "--identity", "--client-root", f.client, "--registry-root", f.registry, "--home", f.home, ...extra],
+        { env: {}, fetchImpl: f.fake.fetchImpl, io: { stdout: (s) => out.push(s), stderr: () => {} } }
+      );
+      assert.equal(code, 0);
+      return out.join("\n");
+    };
+
+    const sequence = readIdentityRegistry({ root: f.registry }).registry.sequence;
+    const v1Text = await run();
+    // a v1 registry prints exactly the line it always did
+    assert.ok(v1Text.split("\n").includes(`Registry:  ok \u00b7 sequence ${sequence} \u00b7 ${f.registry}`), v1Text);
+
+    updateIdentityRegistry({ root: f.registry, expectedSequence: sequence, action: "upgrade", subject: null, mutate: (r) => upgradeRegistryV1ToV2(r) });
+    const v2Text = await run();
+    assert.ok(
+      v2Text.split("\n").includes(`Registry:  ok \u00b7 v2 \u00b7 sequence ${sequence + 1} \u00b7 pairings 0 \u00b7 aliases 0 \u00b7 destinations 0 \u00b7 ${f.registry}`),
+      v2Text
+    );
+    const report = JSON.parse(await run(["--json"]));
+    assert.deepEqual(
+      [report.identity.registry.schema, report.identity.registry.collections],
+      ["identity_registry_v2", { pairings: 0, aliases: 0, destinations: 0 }]
+    );
+    assert.equal(report.identity.profiles[0].state, "recorded");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("doctor text: a serverless row names its revocation, and no other row gains a word", async () => {
+  const { renderDoctor } = await import("../src/doctor.mjs");
+  const report = {
+    authority: null, transport: null, device: null, owner: null, devices: [], agents: [], warnings: [],
+    identityRegistryRoot: "/x/identity",
+    identity: {
+      registry: { state: "ok", schema: "identity_registry_v2", sequence: 9, collections: { pairings: 1, aliases: 2, destinations: 3 } },
+      profiles: [
+        { state: "serverless", profile: "live", principalId: "peer_a", authorityOrigin: null, generation: 1, reason: null },
+        { state: "serverless", profile: "gone", principalId: "peer_b", authorityOrigin: null, generation: 1, reason: "revoked" },
+        { state: "blocked", profile: "held", principalId: "agent_c", authorityOrigin: "https://o", generation: 2, reason: "conflicts_with_recorded" },
+      ],
+      diagnostics: [],
+    },
+  };
+  const lines = renderDoctor(report).split("\n");
+  assert.ok(lines.includes("Registry:  ok \u00b7 v2 \u00b7 sequence 9 \u00b7 pairings 1 \u00b7 aliases 2 \u00b7 destinations 3 \u00b7 /x/identity"));
+  assert.ok(lines.includes("  - serverless \u00b7 live \u00b7 peer_a \u00b7 - \u00b7 gen 1"));
+  assert.ok(lines.includes("  - serverless \u00b7 gone \u00b7 peer_b \u00b7 - \u00b7 gen 1 \u00b7 revoked"));
+  assert.ok(lines.includes("  - blocked \u00b7 held \u00b7 agent_c \u00b7 https://o \u00b7 gen 2"), "other rows keep their text");
 });
 
 test("identity status CLI: usage errors", async () => {

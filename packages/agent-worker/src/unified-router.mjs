@@ -13,6 +13,7 @@
  */
 
 import { AGENT_ID_PATTERN } from "./identity-primitives.mjs";
+import { SUPPORTED_REGISTRY_SCHEMAS } from "./router-registry-snapshot.mjs";
 import { resolveRecipient } from "./recipient-resolver.mjs";
 import { localState } from "./transport-adapter-contract.mjs";
 import { LocalMessagingError } from "./local-messaging-errors.mjs";
@@ -772,6 +773,10 @@ export function createUnifiedRouter({
   /**
    * Generates status block for local_status.router.
    *
+   * `registry.schema` is the schema of the registry last read (null when there is none or it cannot be read) and
+   * `registry.supportedSchemas` lists every schema this process can read, even while the router is disabled: it is what the
+   * registry upgrade asks the running process before it writes a v2 file. A supervisor that predates it omits the field.
+   *
    * @param {object} [options]
    * @param {object} [options.snapshot]
    * @returns {object} Status block.
@@ -783,6 +788,8 @@ export function createUnifiedRouter({
         registry: Object.freeze({
           state: "disabled",
           sequence: 0,
+          schema: null,
+          supportedSchemas: SUPPORTED_REGISTRY_SCHEMAS,
         }),
         resolved: Object.freeze({
           principal: counters.resolved.principal,
@@ -794,18 +801,22 @@ export function createUnifiedRouter({
 
     let state = "unknown";
     let sequence = 0;
+    let schema = null;
 
     if (options.snapshot) {
       state = options.snapshot.state ?? "unknown";
       sequence = options.snapshot.sequence ?? 0;
+      schema = typeof options.snapshot.schema === "string" ? options.snapshot.schema : null;
     } else if (snapshotProvider && typeof snapshotProvider.get === "function") {
       try {
         const snap = snapshotProvider.get();
         state = snap?.state ?? "unknown";
         sequence = snap?.sequence ?? 0;
+        schema = typeof snap?.schema === "string" ? snap.schema : null;
       } catch {
         state = "unreadable";
         sequence = 0;
+        schema = null;
       }
     }
 
@@ -814,6 +825,8 @@ export function createUnifiedRouter({
       registry: Object.freeze({
         state,
         sequence,
+        schema,
+        supportedSchemas: SUPPORTED_REGISTRY_SCHEMAS,
       }),
       resolved: Object.freeze({
         principal: counters.resolved.principal,

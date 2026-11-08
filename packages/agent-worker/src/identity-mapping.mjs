@@ -4,8 +4,11 @@
  * Provides:
  * - `planIdentityMapping`: Pure planner turning an identity inventory report into
  *   a deterministic, deep-frozen mapping plan against registry sequence.
- * - `applyIdentityMapping`: Confirmed apply step writing `local_profile_binding_v1`
- *   records to the identity registry when confirmed by the exact seen plan ID.
+ * - `applyIdentityMapping`: Confirmed apply step writing binding records to the identity
+ *   registry when confirmed by the exact seen plan ID. A new record has the shape of the
+ *   registry it is written to (`local_profile_binding_v1` in a v1 registry, `..._v2` in a
+ *   v2 one); the planner only ever adds mesh-managed agent bindings and never touches an
+ *   existing record, a serverless binding, a pairing, an alias or a destination.
  */
 
 import { createHash } from "node:crypto";
@@ -18,6 +21,10 @@ import {
 } from "./identity-primitives.mjs";
 import {
   canonicalJson,
+  IDENTITY_REGISTRY_SCHEMA,
+  IDENTITY_REGISTRY_SCHEMA_V2,
+  LOCAL_PROFILE_BINDING_SCHEMA,
+  LOCAL_PROFILE_BINDING_SCHEMA_V2,
   readIdentityRegistry,
   updateIdentityRegistry,
 } from "./identity-registry.mjs";
@@ -73,14 +80,20 @@ function isPlainObject(value) {
 /**
  * Accepts null/undefined (no registry), a `readIdentityRegistry` result, or a raw
  * registry object. Anything else fails closed instead of being read as an empty registry.
+ * `schema` is the registry's own schema (null for none, or for a raw object that names none, which is read as v1);
+ * a schema this planner does not know is refused rather than planned against.
  */
 function registryView(registry) {
-  if (registry === null || registry === undefined) return { sequence: 0, bindings: {} };
+  if (registry === null || registry === undefined) return { sequence: 0, bindings: {}, schema: null };
   if (isPlainObject(registry)) {
-    if (registry.state === "absent") return { sequence: 0, bindings: {} };
+    if (registry.state === "absent") return { sequence: 0, bindings: {}, schema: null };
     const body = registry.state === "ok" ? registry.registry : registry.state === undefined ? registry : null;
     if (isPlainObject(body) && Number.isSafeInteger(body.sequence) && body.sequence >= 0 && isPlainObject(body.bindings)) {
-      return { sequence: body.sequence, bindings: body.bindings };
+      const schema = body.schema === undefined ? null : body.schema;
+      if (schema !== null && schema !== IDENTITY_REGISTRY_SCHEMA && schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
+        throw codedError("invalid_registry", "unrecognized_registry_shape");
+      }
+      return { sequence: body.sequence, bindings: body.bindings, schema };
     }
   }
   throw codedError("invalid_registry", "unrecognized_registry_shape");
@@ -99,7 +112,17 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
     throw codedError("invalid_inventory", "inventory_must_be_object");
   }
 
-  const { sequence: registrySequence, bindings: existingBindings } = registryView(registry);
+  const { sequence: registrySequence, bindings: existingBindings, schema: registrySchema } = registryView(registry);
+  // New records take the shape of the registry they are written to: v2 for a v2 registry, v1 for a v1 or absent one (the
+  // writer creates v1). A plan made against one schema is stale against the other: its sequence and records differ.
+  const proposeV2 = registrySchema === IDENTITY_REGISTRY_SCHEMA_V2;
+  // A profile that holds a live serverless binding has an identity of its own kind, so it is not "local only" (a revoked one
+  // is, as a profile whose only binding is revoked always was). The planner proposes nothing for it and never rewrites it.
+  const liveServerlessInstanceIds = new Set(
+    Object.entries(existingBindings)
+      .filter(([, binding]) => isPlainObject(binding) && binding.trust_mode === "serverless-peer" && binding.revoked_at === null)
+      .map(([instanceId]) => instanceId),
+  );
 
   const rawBlocked = [];
   const rawLocalOnly = [];
@@ -205,10 +228,12 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
       const bindingState = typeof u.bindingState === "string" ? u.bindingState : "";
 
       if (reasonStr === "unbound_local_profile" || (bindingState === "unbound" && u.status !== "fault")) {
-        rawLocalOnly.push({
-          profile: profileName,
-          profileInstanceId: instanceId,
-        });
+        if (instanceId === null || !liveServerlessInstanceIds.has(instanceId)) {
+          rawLocalOnly.push({
+            profile: profileName,
+            profileInstanceId: instanceId,
+          });
+        }
         continue;
       }
 
@@ -358,7 +383,7 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
         // No existing binding: propose candidate binding record
         const bindingId = computeBindingId(instanceId, principalId, authorityOrigin, 1);
         rawProposals.push({
-          schema: "local_profile_binding_v1",
+          schema: proposeV2 ? LOCAL_PROFILE_BINDING_SCHEMA_V2 : LOCAL_PROFILE_BINDING_SCHEMA,
           binding_id: bindingId,
           trust_mode: "mesh-managed",
           principal_id: principalId,
@@ -367,6 +392,7 @@ export function planIdentityMapping({ inventory, registry = null } = {}) {
           authority_origin: authorityOrigin,
           binding_generation: 1,
           revoked_at: null,
+          ...(proposeV2 ? { principal_public_key: null } : {}),
           proof: {
             kind: "disk_observation",
             observed_on_disk: true,

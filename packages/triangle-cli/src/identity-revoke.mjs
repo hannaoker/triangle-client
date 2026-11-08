@@ -33,6 +33,9 @@ export function planIdentityRevoke({registryRoot,profile}) {
   const read=readIdentityRegistry({root:registryRoot});
   const profileId=deriveClientInstanceId(profile),binding=read.state==='ok'?read.registry.bindings[profileId]:null;
   if(!binding||binding.revoked_at!==null)fail('identity_binding_not_active');
+  // A serverless-peer binding (registry v2) is no MESH-managed agent binding: this command revokes only those, and says so
+  // here, before any operation is built or any OS authentication is asked for.
+  if(binding.trust_mode!=='mesh-managed')fail('identity_binding_not_supported');
   const operation=normalizeOwnerOperation({action:'profile.revoke',registryRoot,expectedSequence:read.registry.sequence,profileId,
     before:{bindingId:binding.binding_id,bindingGeneration:binding.binding_generation,principalId:binding.principal_id,authorityOrigin:binding.authority_origin,revokedAt:null}});
   const body={schema:'identity_revoke_plan_v1',scope:'local-principal-binding',profile,operation};

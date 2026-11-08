@@ -7,6 +7,7 @@ import {main} from '../src/cli.mjs';
 import {identityRevoke,planIdentityRevoke,loadPackagedRevokeProvider} from '../src/identity-revoke.mjs';
 import {initIdentityRegistry,bindProfileInRegistry} from '../../agent-worker/test/local-messaging-identity-fixtures.mjs';
 import {readIdentityRegistry,updateIdentityRegistry,upgradeRegistryV1ToV2} from '../../agent-worker/src/identity-registry.mjs';
+import {appendAndCommit,peerBindingV2} from '../../agent-worker/test/identity-registry-v2-helpers.mjs';
 
 function fixture(t){
  const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'identity-revoke-')));
@@ -159,3 +160,29 @@ test('an upgraded v2 registry revokes through the same owner flow: one audited r
  const lines=fs.readFileSync(path.join(f.registry,'registry-audit.jsonl'),'utf8').trim().split('\n').map(l=>JSON.parse(l));
  assert.deepEqual(lines.slice(-2).map(e=>e.action),['upgrade','revoke']);
 });
+
+test('a serverless peer binding is refused at plan time with its own code, before any operation or authentication',async t=>{
+ const f=fixture(t),seq=readIdentityRegistry({root:f.registry}).registry.sequence;
+ updateIdentityRegistry({root:f.registry,expectedSequence:seq,action:'upgrade',subject:null,mutate:r=>upgradeRegistryV1ToV2(r)});
+ // the fixture registry was created now, so the hand-written steps must come after it
+ const later=n=>new Date(Date.now()+n*1000).toISOString();
+ const peer=peerBindingV2('peerprof');
+ appendAndCommit(f.registry,{action:'bind',subject:peer.profile_instance_id,bindingId:peer.binding_id,at:later(1),
+  change:r=>({...r,bindings:{...r.bindings,[peer.profile_instance_id]:peer}})});
+ const before=f.bytes();let calls=0;
+ assert.throws(()=>planIdentityRevoke({registryRoot:f.registry,profile:'peerprof'}),{code:'identity_binding_not_supported'});
+ const deps={isTerminal:true,ownerApprovalProvider:{authenticate:async()=>{calls++;return 'approved';}}};
+ for(const extra of [[],['--json'],['--confirm','0'.repeat(64)]]){
+  const out=[],err=[];
+  const code=await main(['identity','revoke','peerprof','--registry-root',f.registry,...extra],{env:{},io:{stdout:s=>out.push(s),stderr:s=>err.push(s)},identityDependencies:deps});
+  assert.equal(code,2,err.join('\n'));assert.match(err.join('\n'),/serverless peer binding/);assert.match(err.join('\n'),/identity_binding_not_supported/);assert.equal(out.length,0);
+ }
+ assert.equal(calls,0);assert.deepEqual(f.bytes(),before);
+ // the agent binding next to it still plans, and a revoked serverless binding is simply not active
+ assert.equal(f.plan().operation.profileId,f.a.profile_instance_id);
+ const gone=peerBindingV2('gone',{revoked_at:'2026-11-07T10:10:00.000Z'});
+ appendAndCommit(f.registry,{action:'bind',subject:gone.profile_instance_id,bindingId:gone.binding_id,at:later(2),
+  change:r=>({...r,bindings:{...r.bindings,[gone.profile_instance_id]:gone}})});
+ assert.throws(()=>planIdentityRevoke({registryRoot:f.registry,profile:'gone'}),{code:'identity_binding_not_active'});
+});
+
