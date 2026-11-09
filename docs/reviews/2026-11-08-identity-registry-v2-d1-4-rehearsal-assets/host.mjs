@@ -3,6 +3,7 @@
 // imports modules only from that bundle, so what runs is the bundle's code and nothing from a checkout.
 //
 //   host.mjs prepare <bundle> <clientRoot> <stateRoot> <registryRoot> <profile>...   build a scratch client + v1 registry
+//                                                                                    (a registry already in place is read, not changed)
 //   host.mjs run     <bundle> <configPath>                                          the production host with echo runners
 //   host.mjs read    <bundle> <registryRoot>                                        read the registry with the bundle's reader
 //   host.mjs bind    <bundle> <registryRoot> <profile> <expectedSequence>           try a write with the bundle's writer
@@ -80,27 +81,39 @@ async function prepare([clientRoot, stateRoot, registryRoot, ...profiles]) {
 
   fs.mkdirSync(registryRoot, { recursive: true, mode: 0o700 });
   fs.chmodSync(registryRoot, 0o700);
-  registry.updateIdentityRegistry({ root: registryRoot, expectedSequence: 0, action: "init", subject: null, mutate: (r) => r });
-  let sequence = 1;
   const principals = {};
   const instances = {};
-  for (const profile of profiles) {
-    const binding = makeBinding(registry, primitives, profile);
-    registry.updateIdentityRegistry({
-      root: registryRoot,
-      expectedSequence: sequence,
-      action: "bind",
-      subject: binding.profile_instance_id,
-      mutate: (r) => {
-        r.bindings[binding.profile_instance_id] = binding;
-        return r;
-      },
-    });
-    sequence += 1;
-    principals[profile] = binding.principal_id;
-    instances[profile] = binding.profile_instance_id;
+  let sequence;
+  const existing = registry.readIdentityRegistry({ root: registryRoot });
+  if (existing.state === "ok") {
+    // A registry (a copy of a real one) is already in place: read it and change nothing.
+    sequence = existing.registry.sequence;
+    for (const profile of profiles) {
+      const binding = Object.values(existing.registry.bindings).find((b) => b.profile_name === profile);
+      principals[profile] = binding?.principal_id ?? null;
+      instances[profile] = binding?.profile_instance_id ?? null;
+    }
+  } else {
+    registry.updateIdentityRegistry({ root: registryRoot, expectedSequence: 0, action: "init", subject: null, mutate: (r) => r });
+    sequence = 1;
+    for (const profile of profiles) {
+      const binding = makeBinding(registry, primitives, profile);
+      registry.updateIdentityRegistry({
+        root: registryRoot,
+        expectedSequence: sequence,
+        action: "bind",
+        subject: binding.profile_instance_id,
+        mutate: (r) => {
+          r.bindings[binding.profile_instance_id] = binding;
+          return r;
+        },
+      });
+      sequence += 1;
+      principals[profile] = binding.principal_id;
+      instances[profile] = binding.profile_instance_id;
+    }
   }
-  out({ ok: true, configPath, senderId, sequence, principals, instances });
+  out({ ok: true, configPath, senderId, sequence, principals, instances, registryWasInPlace: existing.state === "ok" });
 }
 
 async function run([configPath]) {

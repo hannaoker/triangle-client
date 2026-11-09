@@ -1,0 +1,56 @@
+{
+  "ok": true,
+  "installedCli": "~/.local/bin/triangle",
+  "note": "scratch application root; the installed root is only read",
+  "steps": [
+    {
+      "name": "the live application root has exactly one backup-v1-* folder",
+      "ok": true,
+      "backups": 1
+    },
+    {
+      "name": "the scratch copy holds the live v2 pair and the live backup",
+      "ok": true,
+      "liveSchema": "identity_registry_v2",
+      "sequence": 4
+    },
+    {
+      "name": "the restore plan from the real backup is ready: the backup is an earlier state of this registry, only the upgrade entry is discarded, no routing changes, no v2-only data",
+      "ok": true,
+      "exit": 0,
+      "relation": "ahead",
+      "discarded": [
+        "upgrade"
+      ],
+      "refusals": []
+    },
+    {
+      "name": "the restore applies with the plan id in a terminal",
+      "ok": true,
+      "stderr": "pty-exit: 0",
+      "stdoutTail": "fb6c4b38496ed5ee9ca58d70be8af5b72a6b4\"\n      },\n      {\n        \"name\": \"registry-audit.jsonl\",\n        \"sha256\": \"c54c97bb03ea917ce107b8ee3e7e99272372e5709744eadcefc41b43a1a7eecd\"\n      }\n    ]\n  }\n}"
+    },
+    {
+      "name": "the registry is now exactly the backup's bytes",
+      "ok": true,
+      "registry": "6c637d309348…",
+      "audit": "6a4e4ff0aba1…"
+    },
+    {
+      "name": "the v2 pair was archived byte for byte before anything was replaced",
+      "ok": true,
+      "archive": "before-restore-v2-20261109T074221Z"
+    },
+    {
+      "name": "the backup folder itself is unchanged",
+      "ok": true
+    },
+    {
+      "name": "the installed reader reads the restored registry as v1 with the old sequence and the same bindings",
+      "ok": true,
+      "schema": "identity_registry_v1",
+      "sequence": 3,
+      "bindings": 3
+    }
+  ]
+}

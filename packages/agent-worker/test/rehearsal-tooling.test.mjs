@@ -87,6 +87,24 @@ test("host.mjs builds a scratch v1 registry, reads it, upgrades it without the f
   assert.deepEqual(fs.readFileSync(path.join(s.registry, "identity-registry-v1.json")), before);
 });
 
+test("host.mjs prepare reads a registry that is already in place, as for a copy of a real one, and changes nothing", async (t) => {
+  const s = scratch(t);
+  const helper = async (...args) => lastJson((await exec(process.execPath, [hostScript, ...args], { env: s.env })).stdout);
+  const first = await helper("prepare", repo, s.client, s.stateRoot, s.registry, "alpha", "beta");
+  assert.equal(first.registryWasInPlace, false);
+  const bytes = () => ["identity-registry-v1.json", "registry-audit.jsonl"].map((name) => fs.readFileSync(path.join(s.registry, name)).toString("hex"));
+  const before = bytes();
+
+  // a second client over the same registry: one profile that is bound, one that is not
+  const client2 = path.join(s.base, "c2");
+  const again = await helper("prepare", repo, client2, path.join(client2, "l"), s.registry, "alpha", "unbound");
+  assert.equal(again.registryWasInPlace, true);
+  assert.equal(again.sequence, first.sequence);
+  assert.equal(again.principals.alpha, first.principals.alpha);
+  assert.equal(again.principals.unbound, null);
+  assert.deepEqual(bytes(), before, "the registry in place is not changed by prepare");
+});
+
 test("host.mjs run starts the production host from the bundle's code, prints a ready line and stops cleanly on SIGTERM", async (t) => {
   const s = scratch(t);
   await exec(process.execPath, [hostScript, "prepare", repo, s.client, s.stateRoot, s.registry, "alpha", "beta"], { env: s.env });
