@@ -63,19 +63,22 @@ check("held, queued, queued_local and pending replies unchanged; nothing executi
   ["held", "queued", "queued_local", "pendingReplies"].every((k) => now.journal[k] === base.journal[k]) && now.journal.executing === 0 && now.dispatcher.active === 0 && now.dispatcher.queued === 0 && now.wake === "idle" && now.routerEnabled === true,
   { before: base.journal, after: now.journal });
 check("discover entries (id, principal, state, route, send permission) identical to before", same(now.discoverEntries, base.discoverEntries), { entries: now.discoverEntries.length });
-check("the supervisor was not restarted (same wrapper and node child pids)", same(now.supervisor.wrappers, base.supervisor.wrappers) && same(now.supervisor.children.map((c) => c.pid), base.supervisor.children.map((c) => c.pid)), { wrappers: now.supervisor.wrappers, children: now.supervisor.children });
+const liveBundle = path.basename(JSON.parse(fs.readFileSync(path.join(app, "worker-runtime/supervisor.manifest.json"), "utf8")).projectRoot).slice(0, 12);
+check("the supervisor was not restarted: exactly one wrapper and one node child, the same pids as before, the child running the bundle of the live manifest",
+  now.supervisor.wrappers.length === 1 && now.supervisor.children.length === 1 && same(now.supervisor.wrappers, base.supervisor.wrappers) && same(now.supervisor.children.map((c) => c.pid), base.supervisor.children.map((c) => c.pid)) && now.supervisor.children[0].bundle === liveBundle,
+  { wrappers: now.supervisor.wrappers, children: now.supervisor.children, liveManifestBundle: liveBundle });
 
 // the backup
 const backups = (now.backups ?? []).filter((n) => n.startsWith("backup-v1-"));
 const backupDir = backups.length === 1 ? path.join(app, "identity-backups", backups[0]) : null;
 check("identity-backups holds exactly one backup-v1-* folder and nothing else", backupDir !== null && now.backups.length === 1, now.backups);
 let v1 = null;
-if (backupDir) {
-  const names = fs.readdirSync(backupDir).sort();
+{
+  const names = backupDir ? fs.readdirSync(backupDir).sort() : [];
   check("the backup holds exactly the two registry files, equal to the pre-upgrade bytes, modes 0700/0600",
-    same(names, ["identity-registry-v1.json", "registry-audit.jsonl"]) && sha(path.join(backupDir, "identity-registry-v1.json")) === base.registryFiles.registry && sha(path.join(backupDir, "registry-audit.jsonl")) === base.registryFiles.audit
+    backupDir !== null && same(names, ["identity-registry-v1.json", "registry-audit.jsonl"]) && sha(path.join(backupDir, "identity-registry-v1.json")) === base.registryFiles.registry && sha(path.join(backupDir, "registry-audit.jsonl")) === base.registryFiles.audit
       && (fs.statSync(backupDir).mode & 0o777) === 0o700 && names.every((n) => (fs.statSync(path.join(backupDir, n)).mode & 0o777) === 0o600), names);
-  v1 = JSON.parse(fs.readFileSync(path.join(backupDir, "identity-registry-v1.json"), "utf8"));
+  if (backupDir) v1 = JSON.parse(fs.readFileSync(path.join(backupDir, "identity-registry-v1.json"), "utf8"));
 }
 
 // the live registry, read with the installed reader (read only; it verifies the hash chain)
@@ -101,10 +104,11 @@ check("a new plan says the registry is already v2 and the floor still passes (no
 let view = "";
 try { view = run(path.join(os.homedir(), ".local/bin/triangle"), ["status", "--identity", "--client-root", client]); } catch (error) { view = String(error.stdout ?? error.message); }
 const registryLine = view.split("\n").find((l) => /Registry:/.test(l)) ?? "";
-check("the installed `triangle status --identity` shows the registry as ok on schema v2", /ok/.test(registryLine) && /identity_registry_v2|v2/.test(registryLine), registryLine.trim().replace(os.homedir(), "~"));
+const viewMatch = /^\s*Registry:\s+ok · v2 · sequence (\d+) /.exec(registryLine);
+check("the installed `triangle status --identity` prints `Registry: ok · v2 · sequence <next>`", viewMatch !== null && Number(viewMatch[1]) === base.registry.sequence + 1, registryLine.trim().replace(os.homedir(), "~"));
 
 const ok = checks.every((c) => c.ok);
-const out = { ok, takenAt: now.takenAt, baselineTakenAt: base.takenAt, backup: backupDir ? path.basename(backupDir) : null, checks, snapshot: { ...now, discoverEntries: `${now.discoverEntries.length} entries` } };
+const out = { ok, takenAt: now.takenAt, baselineTakenAt: base.takenAt, backup: backupDir ? path.basename(backupDir) : null, checks, snapshot: { ...now, discoverEntries: `${now.discoverEntries.length} entries`, registryFiles: { registry: `${now.registryFiles.registry.slice(0, 12)}…`, audit: `${now.registryFiles.audit.slice(0, 12)}…` } } };
 fs.writeFileSync(b, JSON.stringify(out, null, 2) + "\n");
 process.stdout.write(`\nverdict: ${ok ? "pass" : "FAIL"} (${checks.filter((c) => c.ok).length}/${checks.length})\n`);
 process.exit(ok ? 0 : 1);

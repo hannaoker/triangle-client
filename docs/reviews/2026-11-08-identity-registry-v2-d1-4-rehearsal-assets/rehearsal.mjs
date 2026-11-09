@@ -200,6 +200,17 @@ async function main() {
   check(Number(process.versions.node.split(".")[0]) >= 22, "this rehearsal needs Node 22 or later");
   const live = options["installed-app-root"];
   check(fs.existsSync(path.join(live, "worker-runtime/supervisor.manifest.json")), `no installed supervisor manifest under ${live}`);
+  // Neither the registry copy (it would be read in place) nor the output directory may be inside the installed root.
+  const realish = (target) => {
+    let current = path.resolve(target);
+    const rest = [];
+    while (!fs.existsSync(current) && current !== path.dirname(current)) { rest.unshift(path.basename(current)); current = path.dirname(current); }
+    return path.join(fs.realpathSync(current), ...rest);
+  };
+  const liveReal = realish(live);
+  for (const [flag, value] of [["--registry-copy", options["registry-copy"]], ["--out", options.out]]) {
+    check(!value || (realish(value) !== liveReal && !realish(value).startsWith(liveReal + path.sep)), `${flag} must not be inside the installed application root`);
+  }
   const baselineManifestFile = options["baseline-manifest"] ?? path.join(live, "worker-runtime/supervisor.manifest.json");
   check(fs.existsSync(baselineManifestFile), `no baseline supervisor manifest at ${baselineManifestFile}`);
 
@@ -279,6 +290,13 @@ async function main() {
       outcomes[other.profile] = { exit: r.code, error: r.json?.error ?? null, reachedARunner: JSON.stringify(r.json).includes("echo[") };
     }
     return outcomes;
+  };
+  const assertOthers = (outcomes, label) => {
+    for (const other of facts.others) {
+      const expected = other.revoked ? "recipient_not_found" : "route_unavailable";
+      const o = outcomes[other.profile];
+      check(o && o.exit === 1 && o.error === expected && o.reachedARunner === false, `${label}: a principal send to ${other.profile} (${other.revoked ? "revoked" : "bound, not a local recipient"}) was not refused with ${expected}`, o);
+    }
   };
   const backupListing = () => (fs.existsSync(backupsRoot) ? fs.readdirSync(backupsRoot).sort() : []);
   const compareLive = async () => {
@@ -555,6 +573,8 @@ async function main() {
       principals = out.principals;
       const regJson = JSON.parse(fs.readFileSync(path.join(registry, "identity-registry-v1.json"), "utf8"));
       const auditLines = fs.readFileSync(path.join(registry, "registry-audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const revokedRecipients = recipients.filter((p) => Object.values(regJson.bindings).some((x) => x.profile_name === p && x.revoked_at !== null));
+      check(revokedRecipients.length === 0, `a recipient's binding is revoked in this registry: ${revokedRecipients.join(", ")}`);
       const withPrincipal = recipients.filter((p) => principals[p]);
       check(withPrincipal.length > 0, "none of the recipients has a binding with a principal in this registry", { recipients, principals });
       facts = {
@@ -565,10 +585,13 @@ async function main() {
         auditActions: auditLines.map((x) => x.action),
         recipients: withPrincipal,
         p1: withPrincipal[0],
-        p2: withPrincipal[1] ?? extraRecipient ?? withPrincipal[0],
+        p2: recipients.find((x) => x !== withPrincipal[0]) ?? withPrincipal[0],
         others: Object.values(regJson.bindings).filter((x) => !recipients.includes(x.profile_name)).map((x) => ({ profile: x.profile_name, principal: x.principal_id, revoked: x.revoked_at !== null })),
       };
-      sensitive = [...new Set(Object.values(regJson.bindings).flatMap((x) => [x.principal_id, x.profile_instance_id, x.binding_id]).concat(Object.keys(regJson.bindings)))].filter((x) => typeof x === "string" && x.length > 12);
+      check(facts.p1 !== facts.p2, "the primary and secondary recipients are the same, so the pair-exchange limit would be hit", facts);
+      // Everything of a real registry that identifies it is shortened in the results: ids, the digests of its files and of its audit chain.
+      const digests = [sha256File(path.join(registry, "identity-registry-v1.json")), sha256File(path.join(registry, "registry-audit.jsonl")), regJson.auditHead?.hash, ...auditLines.flatMap((x) => [x.hash, x.prevHash])];
+      sensitive = [...new Set(Object.values(regJson.bindings).flatMap((x) => [x.principal_id, x.profile_instance_id, x.binding_id]).concat(Object.keys(regJson.bindings), digests))].filter((x) => typeof x === "string" && x.length > 12 && x !== "0".repeat(64));
       results.inputs.registry = { mode: facts.mode, schema: regJson.schema, sequence: facts.sequence, bindings: facts.bindings, auditActions: facts.auditActions, recipients: recipients, extraRecipientWithoutBinding: extraRecipient, recipientsWithPrincipal: withPrincipal, bindingsNotLocalRecipients: facts.others.map((x) => ({ profile: x.profile, revoked: x.revoked })) };
       const read = lastJsonLine((await helper(oldBundle, ["read", registry])).stdout);
       check(read.ok && read.schema === V1 && read.sequence === facts.sequence && read.bindings === facts.bindings, "the installed reader does not see the expected v1 registry", { read, facts: { sequence: facts.sequence, bindings: facts.bindings } });
@@ -589,6 +612,7 @@ async function main() {
       check(viaProfile.code === 0, `exact send failed: ${viaProfile.stderr}`, viaProfile);
       baselineSend = { principal: viaPrincipal.json, exact: viaProfile.json, messageId: viaPrincipal.messageId };
       othersBaseline = await otherOutcomes("baseline");
+      assertOthers(othersBaseline, "baseline");
       const principalText = JSON.stringify(viaPrincipal.json);
       check(principalText.includes(`echo[${facts.p1}]: baseline principal send`), "the principal send did not reach its runner", viaPrincipal.json);
       check(JSON.stringify(viaProfile.json).includes(`echo[${facts.p2}]: baseline exact send`), "the exact send did not reach its runner", viaProfile.json);
@@ -714,6 +738,8 @@ async function main() {
       upgradeResult = parseJson(applied.stdout.trim());
       check(upgradeResult?.schema === "identity_registry_upgrade_result_v1" && upgradeResult.to.schema === V2 && upgradeResult.to.sequence === facts.sequence + 1 && upgradeResult.auditEntry === "upgrade", "unexpected result", upgradeResult);
       backupDir = upgradeResult.backup.dir;
+      sensitive.push(sha256File(path.join(registry, "identity-registry-v1.json")), sha256File(path.join(registry, "registry-audit.jsonl")), upgradeResult.to?.auditHead?.hash);
+      sensitive = sensitive.filter((x) => typeof x === "string");
       check(path.dirname(backupDir) === backupsRoot, "backup is not under identity-backups beside the registry", backupDir);
       const names = fs.readdirSync(backupDir).sort();
       check(same(names, ["identity-registry-v1.json", "registry-audit.jsonl"]), "backup does not hold exactly the two registry files", names);
@@ -760,6 +786,7 @@ async function main() {
       check(c.code === 0 && JSON.stringify(c.json).includes(`echo[${facts.p2}]: after upgrade exact`), `${facts.p2} exact failed after the upgrade`, c);
       sends[`${facts.p2}Exact`] = "reached its runner";
       const othersAfter = await otherOutcomes("after upgrade");
+      assertOthers(othersAfter, "after the upgrade");
       check(same(othersAfter, othersBaseline), "the outcome of a principal send to a binding that is not a local recipient changed", { before: othersBaseline, after: othersAfter });
       const again = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       const againJson = jsonOf(again);
@@ -820,7 +847,7 @@ async function main() {
       };
     });
 
-    await step("E3", "installed client package CLI (0.2.0-identity.1 copy) against the v2 registry: refuses loudly, changes nothing", async () => {
+    await step("E3", `installed client package CLI (${releaseVersion} copy) against the v2 registry: refuses loudly, changes nothing`, async () => {
       const migrate = await instCliRun(["identity", "migrate", "--client-root", client, "--registry-root", registry, "--json"]);
       const view = await instCliRun(["status", "--identity", "--client-root", client, "--registry-root", registry]);
       check(migrate.code === 1 && migrate.stderr.includes("registry_corrupt: unknown_registry_key"), "installed `identity migrate` did not fail with registry_corrupt: unknown_registry_key (exit 1)", migrate);
@@ -1019,6 +1046,10 @@ async function main() {
     let text = JSON.stringify(results, null, 2) + "\n";
     // A real registry's identifiers are shortened before anything is written down.
     for (const value of sensitive) text = text.split(value).join(`${value.slice(0, 8)}…`);
+    if (options["registry-copy"]) {
+      text = text.replace(/("planId": ")([0-9a-f]{8})[0-9a-f]{56}(")/g, "$1$2…$3");
+      if (base) text = text.split(base).join("<scratch>");
+    }
     fs.writeFileSync(path.join(options.out, "results.json"), text);
     if (base && !options.keep) fs.rmSync(base, { recursive: true, force: true });
     else if (base) process.stdout.write(`scratch root kept: ${base}\n`);

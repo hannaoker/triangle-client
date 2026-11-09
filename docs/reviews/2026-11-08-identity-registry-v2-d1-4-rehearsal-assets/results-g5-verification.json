@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "takenAt": "2026-11-09T07:02:23.067Z",
+  "takenAt": "2026-11-09T07:39:22.642Z",
   "baselineTakenAt": "2026-11-09T06:51:52.931Z",
   "backup": "backup-v1-20261109T070056Z",
   "checks": [
@@ -48,7 +48,7 @@
       }
     },
     {
-      "name": "the supervisor was not restarted (same wrapper and node child pids)",
+      "name": "the supervisor was not restarted: exactly one wrapper and one node child, the same pids as before, the child running the bundle of the live manifest",
       "ok": true,
       "detail": {
         "wrappers": [
@@ -59,7 +59,8 @@
             "pid": 1853,
             "bundle": "c01e78bbf404"
           }
-        ]
+        ],
+        "liveManifestBundle": "c01e78bbf404"
       }
     },
     {
@@ -116,13 +117,13 @@
       }
     },
     {
-      "name": "the installed `triangle status --identity` shows the registry as ok on schema v2",
+      "name": "the installed `triangle status --identity` prints `Registry: ok · v2 · sequence <next>`",
       "ok": true,
       "detail": "Registry:  ok · v2 · sequence 4 · pairings 0 · aliases 0 · destinations 0 · ~/Library/Application Support/The Triangle/identity"
     }
   ],
   "snapshot": {
-    "takenAt": "2026-11-09T07:02:23.067Z",
+    "takenAt": "2026-11-09T07:39:22.642Z",
     "journal": {
       "queued_local": 1,
       "executing": 0,
@@ -160,8 +161,8 @@
       ]
     },
     "registryFiles": {
-      "registry": "94782c7a0decdbed801ea40228bfb6c4b38496ed5ee9ca58d70be8af5b72a6b4",
-      "audit": "c54c97bb03ea917ce107b8ee3e7e99272372e5709744eadcefc41b43a1a7eecd"
+      "registry": "94782c7a0dec…",
+      "audit": "c54c97bb03ea…"
     },
     "backups": [
       "backup-v1-20261109T070056Z"
