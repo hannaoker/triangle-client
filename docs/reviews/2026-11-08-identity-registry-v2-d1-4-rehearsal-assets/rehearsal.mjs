@@ -4,13 +4,21 @@
 // by scripts/release/build-client-package.mjs, and a supervisor bundle staged from that package by its own installer.
 //
 //   node rehearsal.mjs --candidate-archive FILE.tar.gz [--source-commit SHA] [--installed-app-root DIR] [--repo-root DIR]
-//                       [--baseline-manifest FILE] [--out DIR] [--keep]
+//                       [--baseline-manifest FILE] [--baseline-release VERSION] [--registry-copy DIR [--recipients a,b]]
+//                       [--out DIR] [--keep]
+//
+// With --registry-copy DIR (a directory holding a COPY of a v1 registry pair, identity-registry-v1.json and
+// registry-audit.jsonl) the rehearsal runs on that registry instead of a synthetic one: the expected sequence, bindings,
+// audit actions and principals are read from the copy, the scratch client's recipients are the ones given with --recipients
+// (default: those of the installed client's config), and the identifiers of the copy are shortened in results.json.
 //
 // The package's installer script must sit beside the archive (as build-client-package.mjs leaves it).
 //
 // "Installed" means the supervisor in the live supervisor manifest. After the candidate has been installed (G2) that
 // manifest is the candidate's, so pass --baseline-manifest with the saved pre-install manifest (the install keeps one
-// under archive/); the old bundle it names stays under worker-runtime/bundles and is what gets copied.
+// under archive/); the old bundle it names stays under worker-runtime/bundles and is what gets copied. Likewise the
+// installed client package: after the candidate's client package has been installed, pass --baseline-release with the
+// previous version (its release directory stays under releases/) so that the old CLI is the one meeting the v2 registry.
 //
 // What it never does: write under the installed application root, open its journal or registry, use its credentials,
 // signal its processes, or touch launchd. Every process it starts runs with HOME, TMPDIR and every path inside the
@@ -41,7 +49,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === "--keep") options.keep = true;
-    else if (["--candidate-archive", "--installed-app-root", "--repo-root", "--out", "--source-commit", "--baseline-manifest"].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
+    else if (["--candidate-archive", "--installed-app-root", "--repo-root", "--out", "--source-commit", "--baseline-manifest", "--baseline-release", "--registry-copy", "--recipients"].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(`unknown or incomplete argument: ${flag}`);
   }
   if (!options["candidate-archive"]) throw new Error("--candidate-archive is required");
@@ -50,6 +58,7 @@ function parseArgs(argv) {
   options.out = path.resolve(options.out ?? here);
   options["candidate-archive"] = path.resolve(options["candidate-archive"]);
   if (options["baseline-manifest"]) options["baseline-manifest"] = path.resolve(options["baseline-manifest"]);
+  if (options["registry-copy"]) options["registry-copy"] = path.resolve(options["registry-copy"]);
   return options;
 }
 
@@ -243,6 +252,10 @@ async function main() {
   let configPath, oldBundle, oldNode, oldManifestBytes, oldBundleId, instCli, cand, candNode, wrapperPath, backupsRoot;
   let env;
   let principals = {};
+  // What the checks compare against: fixed for the synthetic registry, read from the copy for --registry-copy.
+  let facts = null;
+  let sensitive = [];
+  let othersBaseline = null;
   let liveBefore;
   let releaseVersion;
 
@@ -258,6 +271,15 @@ async function main() {
     registry: fs.existsSync(path.join(registry, "identity-registry-v1.json")) ? sha256File(path.join(registry, "identity-registry-v1.json")) : null,
     audit: fs.existsSync(path.join(registry, "registry-audit.jsonl")) ? sha256File(path.join(registry, "registry-audit.jsonl")) : null,
   });
+  // A principal send to a binding that is not a local recipient: only the outcome (exit, error name) is compared.
+  const otherOutcomes = async (label) => {
+    const outcomes = {};
+    for (const other of facts.others) {
+      const r = await send(other.principal, `${label} send to ${other.profile}`);
+      outcomes[other.profile] = { exit: r.code, error: r.json?.error ?? null, reachedARunner: JSON.stringify(r.json).includes("echo[") };
+    }
+    return outcomes;
+  };
   const backupListing = () => (fs.existsSync(backupsRoot) ? fs.readdirSync(backupsRoot).sort() : []);
   const compareLive = async () => {
     const after = await fingerprintLive(live, releaseVersion, oldBundleId);
@@ -328,7 +350,8 @@ async function main() {
       check(manifest.version === 14, `installed supervisor manifest is v${manifest.version}, not v14`);
       check(path.dirname(bundle) === path.join(live, "worker-runtime/bundles"), "installed projectRoot is not under the installed bundles directory");
       const install = JSON.parse(fs.readFileSync(path.join(live, "package-install.json"), "utf8"));
-      releaseVersion = install.version;
+      releaseVersion = options["baseline-release"] ?? install.version;
+      check(fs.existsSync(path.join(live, "releases", releaseVersion, "package-manifest.json")), `no release ${releaseVersion} under ${live}/releases`);
       results.inputs.installed = {
         manifestVersion: manifest.version,
         bundleId: oldBundleId,
@@ -505,32 +528,71 @@ async function main() {
 
     // ===================================================================== B. baseline: installed supervisor, v1
     await step("B1", "scratch client, router and v1 registry built with the installed bundle's code", async () => {
-      const result = await helper(oldBundle, ["prepare", client, stateRoot, registry, ...PROFILES]);
+      let recipients = PROFILES;
+      let extraRecipient = null;
+      if (options["registry-copy"]) {
+        // G4: the registry is a copy of a real one; the recipients are those of the installed client unless given.
+        const source = options["registry-copy"];
+        recipients = options.recipients
+          ? options.recipients.split(",").filter(Boolean)
+          : JSON.parse(fs.readFileSync(path.join(live, "client/local-messaging.json"), "utf8")).recipients.map((r) => r.profile);
+        // The pair-exchange limit (10 per pair per 10 minutes) would stop a run that sends everything to one recipient, so a
+        // single-recipient client gets a second recipient with no binding for the exact-id sends.
+        if (recipients.length < 2) {
+          extraRecipient = "scratch-b";
+          recipients = [...recipients, extraRecipient];
+        }
+        fs.mkdirSync(registry, { recursive: true, mode: 0o700 });
+        fs.chmodSync(registry, 0o700);
+        for (const name of ["identity-registry-v1.json", "registry-audit.jsonl"]) {
+          fs.copyFileSync(path.join(source, name), path.join(registry, name));
+          fs.chmodSync(path.join(registry, name), 0o600);
+        }
+      }
+      const result = await helper(oldBundle, ["prepare", client, stateRoot, registry, ...recipients]);
       const out = lastJsonLine(result.stdout);
       check(result.code === 0 && out?.ok, `prepare failed: ${result.stderr.slice(0, 400)}`, result);
       principals = out.principals;
+      const regJson = JSON.parse(fs.readFileSync(path.join(registry, "identity-registry-v1.json"), "utf8"));
+      const auditLines = fs.readFileSync(path.join(registry, "registry-audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const withPrincipal = recipients.filter((p) => principals[p]);
+      check(withPrincipal.length > 0, "none of the recipients has a binding with a principal in this registry", { recipients, principals });
+      facts = {
+        mode: options["registry-copy"] ? "copy of a real registry" : "synthetic registry",
+        sequence: regJson.sequence,
+        bindings: Object.keys(regJson.bindings).length,
+        auditLen: auditLines.length,
+        auditActions: auditLines.map((x) => x.action),
+        recipients: withPrincipal,
+        p1: withPrincipal[0],
+        p2: withPrincipal[1] ?? extraRecipient ?? withPrincipal[0],
+        others: Object.values(regJson.bindings).filter((x) => !recipients.includes(x.profile_name)).map((x) => ({ profile: x.profile_name, principal: x.principal_id, revoked: x.revoked_at !== null })),
+      };
+      sensitive = [...new Set(Object.values(regJson.bindings).flatMap((x) => [x.principal_id, x.profile_instance_id, x.binding_id]).concat(Object.keys(regJson.bindings)))].filter((x) => typeof x === "string" && x.length > 12);
+      results.inputs.registry = { mode: facts.mode, schema: regJson.schema, sequence: facts.sequence, bindings: facts.bindings, auditActions: facts.auditActions, recipients: recipients, extraRecipientWithoutBinding: extraRecipient, recipientsWithPrincipal: withPrincipal, bindingsNotLocalRecipients: facts.others.map((x) => ({ profile: x.profile, revoked: x.revoked })) };
       const read = lastJsonLine((await helper(oldBundle, ["read", registry])).stdout);
-      check(read.ok && read.schema === V1 && read.sequence === 3 && read.bindings === 2, "registry is not v1 at sequence 3 with 2 bindings", read);
-      return { registry: read, principals };
+      check(read.ok && read.schema === V1 && read.sequence === facts.sequence && read.bindings === facts.bindings, "the installed reader does not see the expected v1 registry", { read, facts: { sequence: facts.sequence, bindings: facts.bindings } });
+      return { registry: read, mode: facts.mode, principals: Object.fromEntries(Object.entries(principals).map(([k, v]) => [k, v ? `${v.slice(0, 12)}…` : null])) };
     });
 
     let baselineSend;
     await step("B2", "installed supervisor (copy) serves the v1 registry: status shape, principal and exact sends", async () => {
       const started = await startHost("old");
       const st = await status();
-      check(st.router?.enabled === true && st.router.registry?.state === "ok" && st.router.registry.sequence === 3, "installed supervisor does not report registry ok at sequence 3", st.router);
+      check(st.router?.enabled === true && st.router.registry?.state === "ok" && st.router.registry.sequence === facts.sequence, "installed supervisor does not report registry ok at the expected sequence", st.router);
       // The installed supervisor reports no schema information: this is what the floor refuses on.
       const keys = Object.keys(st.router.registry).sort();
       check(!keys.includes("supportedSchemas") && !keys.includes("rootSha256") && !keys.includes("schema"), "installed supervisor already reports schema fields", keys);
-      const viaPrincipal = await send(principals.alpha, "baseline principal send");
-      const viaProfile = await send("beta", "baseline exact send");
+      const viaPrincipal = await send(principals[facts.p1], "baseline principal send");
+      const viaProfile = await send(facts.p2, "baseline exact send");
       check(viaPrincipal.code === 0, `principal send failed: ${viaPrincipal.stderr}`, viaPrincipal);
       check(viaProfile.code === 0, `exact send failed: ${viaProfile.stderr}`, viaProfile);
       baselineSend = { principal: viaPrincipal.json, exact: viaProfile.json, messageId: viaPrincipal.messageId };
+      othersBaseline = await otherOutcomes("baseline");
       const principalText = JSON.stringify(viaPrincipal.json);
-      check(principalText.includes("echo[alpha]: baseline principal send"), "principal send did not reach alpha's runner", viaPrincipal.json);
-      check(JSON.stringify(viaProfile.json).includes("echo[beta]: baseline exact send"), "exact send did not reach beta's runner", viaProfile.json);
-      return { host: started, registryBlock: st.router.registry, registryBlockKeys: keys, principalSend: { exit: viaPrincipal.code, reachedRunner: "alpha" }, exactSend: { exit: viaProfile.code, reachedRunner: "beta" } };
+      check(principalText.includes(`echo[${facts.p1}]: baseline principal send`), "the principal send did not reach its runner", viaPrincipal.json);
+      check(JSON.stringify(viaProfile.json).includes(`echo[${facts.p2}]: baseline exact send`), "the exact send did not reach its runner", viaProfile.json);
+      return { host: started, registryBlock: st.router.registry, registryBlockKeys: keys, principalSend: { exit: viaPrincipal.code, reachedRunner: facts.p1 }, exactSend: { exit: viaProfile.code, reachedRunner: facts.p2 } };
     });
 
     let preUpgradeFiles;
@@ -580,13 +642,13 @@ async function main() {
       const started = await startHost("new");
       const st = await status();
       const block = st.router.registry;
-      check(block.state === "ok" && block.sequence === 3 && block.schema === V1, "candidate host does not report v1 ok at sequence 3", block);
+      check(block.state === "ok" && block.sequence === facts.sequence && block.schema === V1, "candidate host does not report v1 ok at the expected sequence", block);
       check(same(block.supportedSchemas, [V1, V2]), "supportedSchemas is not [v1, v2]", block);
       check(block.rootSha256 === sha256Text(registry), "rootSha256 is not the digest of the registry directory", block);
-      const viaPrincipal = await send(principals.alpha, "candidate principal send");
-      const viaProfile = await send("beta", "candidate exact send");
-      check(viaPrincipal.code === 0 && JSON.stringify(viaPrincipal.json).includes("echo[alpha]: candidate principal send"), "principal send failed on the candidate host", viaPrincipal);
-      check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes("echo[beta]: candidate exact send"), "exact send failed on the candidate host", viaProfile);
+      const viaPrincipal = await send(principals[facts.p1], "candidate principal send");
+      const viaProfile = await send(facts.p2, "candidate exact send");
+      check(viaPrincipal.code === 0 && JSON.stringify(viaPrincipal.json).includes(`echo[${facts.p1}]: candidate principal send`), "principal send failed on the candidate host", viaPrincipal);
+      check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes(`echo[${facts.p2}]: candidate exact send`), "exact send failed on the candidate host", viaProfile);
       // Work sent through the installed host is still there: same journal.
       const earlier = await tl(["status", "--message-id", baselineSend.messageId]);
       check(earlier.code === 0 && parseJson(earlier.stdout)?.phase === "completed", "the message sent through the installed host is not readable, completed, through the candidate host", earlier);
@@ -601,8 +663,8 @@ async function main() {
       check(!fs.existsSync(path.join(app, "worker-runtime/bundles", results.inputs.candidateBundleId)), "the candidate bundle the stage created was not removed");
       const started = await startHost("old");
       const st = await status();
-      check(st.router.registry.state === "ok" && st.router.registry.sequence === 3 && st.router.registry.supportedSchemas === undefined, "installed host does not behave as before", st.router.registry);
-      const principalSend = await send(principals.alpha, "after rollback");
+      check(st.router.registry.state === "ok" && st.router.registry.sequence === facts.sequence && st.router.registry.supportedSchemas === undefined, "installed host does not behave as before", st.router.registry);
+      const principalSend = await send(principals[facts.p1], "after rollback");
       check(principalSend.code === 0, "principal send failed after rollback", principalSend);
       await stopHost("old");
       const staged = await stageCandidate();
@@ -618,7 +680,7 @@ async function main() {
       const planRun = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       plan = jsonOf(planRun);
       check(planRun.code === 0 && plan?.ready === true && plan.refusals.length === 0, `plan is not ready (exit ${planRun.code})`, { stdout: planRun.stdout.slice(0, 800), stderr: planRun.stderr.slice(0, 300) });
-      check(plan.registry.schema === V1 && plan.registry.sequence === 3 && plan.registry.bindings === 2, "plan facts differ from the registry", plan.registry);
+      check(plan.registry.schema === V1 && plan.registry.sequence === facts.sequence && plan.registry.bindings === facts.bindings, "plan facts differ from the registry", plan.registry);
       check(!fs.existsSync(backupsRoot), "planning created the backup directory");
       check(same(registryFiles(), preUpgradeFiles), "planning changed the registry");
       const human = await candCli(["identity", "upgrade-registry", "--client-root", client]);
@@ -650,7 +712,7 @@ async function main() {
       const applied = await candPty(["identity", "upgrade-registry", "--client-root", client, "--confirm", plan.planId, "--json"]);
       check(/pty-exit: 0/.test(applied.stderr), `apply failed: ${applied.stdout.slice(0, 600)} ${applied.stderr.slice(0, 300)}`, applied);
       upgradeResult = parseJson(applied.stdout.trim());
-      check(upgradeResult?.schema === "identity_registry_upgrade_result_v1" && upgradeResult.to.schema === V2 && upgradeResult.to.sequence === 4 && upgradeResult.auditEntry === "upgrade", "unexpected result", upgradeResult);
+      check(upgradeResult?.schema === "identity_registry_upgrade_result_v1" && upgradeResult.to.schema === V2 && upgradeResult.to.sequence === facts.sequence + 1 && upgradeResult.auditEntry === "upgrade", "unexpected result", upgradeResult);
       backupDir = upgradeResult.backup.dir;
       check(path.dirname(backupDir) === backupsRoot, "backup is not under identity-backups beside the registry", backupDir);
       const names = fs.readdirSync(backupDir).sort();
@@ -658,10 +720,28 @@ async function main() {
       check(sha256File(path.join(backupDir, "identity-registry-v1.json")) === before.registry && sha256File(path.join(backupDir, "registry-audit.jsonl")) === before.audit, "backup bytes differ from the pre-upgrade registry");
       check(octal(mode(backupDir)) === "0700" && names.every((n) => octal(mode(path.join(backupDir, n))) === "0600"), "backup modes are not 0700/0600");
       const live = lastJsonLine((await helper(currentBundle(), ["read", registry])).stdout);
-      check(live.ok && live.schema === V2 && live.sequence === 4 && live.bindings === 2, "live registry is not v2 at sequence 4 with 2 bindings", live);
+      check(live.ok && live.schema === V2 && live.sequence === facts.sequence + 1 && live.bindings === facts.bindings, "live registry is not v2 at the expected next sequence with the expected bindings", live);
       const audit = fs.readFileSync(path.join(registry, "registry-audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-      check(audit.length === 4 && audit[3].action === "upgrade", "audit log does not end with the upgrade entry", audit.map((a) => a.action));
+      check(audit.length === facts.auditLen + 1 && audit[facts.auditLen].action === "upgrade" && same(audit.slice(0, facts.auditLen).map((a) => a.action), facts.auditActions), "audit log is not the old entries plus the upgrade entry", audit.map((a) => a.action));
       return { result: { from: upgradeResult.from, to: upgradeResult.to, auditEntry: upgradeResult.auditEntry }, backupDirName: path.basename(backupDir), backupFiles: names, backupEqualsPreUpgradeBytes: true, auditActions: audit.map((a) => a.action) };
+    });
+
+    await step("D2b", "every binding survives the upgrade with its identity-bearing fields unchanged", async () => {
+      const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canon(v[k])])) : v);
+      const v1 = JSON.parse(fs.readFileSync(path.join(backupDir, "identity-registry-v1.json"), "utf8"));
+      const v2 = JSON.parse(fs.readFileSync(path.join(registry, "identity-registry-v1.json"), "utf8"));
+      check(v2.schema === V2 && v2.createdAt === v1.createdAt && same(Object.keys(v2.bindings).sort(), Object.keys(v1.bindings).sort()), "the upgraded registry has other bindings than the backup", { v2Schema: v2.schema });
+      check(["pairings", "aliases", "destinations"].every((k) => v2[k] && Object.keys(v2[k]).length === 0), "the new collections are not empty");
+      const different = [];
+      for (const [id, old] of Object.entries(v1.bindings)) {
+        const expected = { ...old, schema: "local_profile_binding_v2", principal_public_key: null };
+        if (JSON.stringify(canon(v2.bindings[id])) !== JSON.stringify(canon(expected))) different.push(old.profile_name);
+      }
+      check(different.length === 0, `bindings differ from "the v1 binding plus schema and a null public key": ${different.join(", ")}`, different);
+      const revokedBefore = Object.values(v1.bindings).filter((x) => x.revoked_at !== null).length;
+      const revokedAfter = Object.values(v2.bindings).filter((x) => x.revoked_at !== null).length;
+      check(revokedBefore === revokedAfter, "the number of revoked bindings changed");
+      return { bindings: Object.keys(v2.bindings).length, eachBindingEqualsV1PlusSchemaAndNullPublicKey: true, revokedBindings: revokedAfter, newCollectionsEmpty: true, registrySequence: { before: v1.sequence, after: v2.sequence } };
     });
 
     let postUpgradeFiles;
@@ -669,26 +749,31 @@ async function main() {
       postUpgradeFiles = registryFiles();
       const st = await status();
       const block = st.router.registry;
-      check(block.state === "ok" && block.schema === V2 && block.sequence === 4, "host does not report v2 ok at sequence 4", block);
-      const a = await send(principals.alpha, "after upgrade principal");
-      const b = await send(principals.beta, "after upgrade principal beta");
-      const c = await send("alpha", "after upgrade exact");
-      for (const [name, r, needle] of [["alpha by principal", a, "echo[alpha]: after upgrade principal"], ["beta by principal", b, "echo[beta]: after upgrade principal beta"], ["alpha exact", c, "echo[alpha]: after upgrade exact"]]) {
-        check(r.code === 0 && JSON.stringify(r.json).includes(needle), `${name} failed after the upgrade`, r);
+      check(block.state === "ok" && block.schema === V2 && block.sequence === facts.sequence + 1, "host does not report v2 ok at the expected next sequence", block);
+      const sends = {};
+      for (const profile of facts.recipients) {
+        const r = await send(principals[profile], `after upgrade principal ${profile}`);
+        check(r.code === 0 && JSON.stringify(r.json).includes(`echo[${profile}]: after upgrade principal ${profile}`), `${profile} by principal failed after the upgrade`, r);
+        sends[`${profile}ByPrincipal`] = "reached its runner";
       }
+      const c = await send(facts.p2, "after upgrade exact");
+      check(c.code === 0 && JSON.stringify(c.json).includes(`echo[${facts.p2}]: after upgrade exact`), `${facts.p2} exact failed after the upgrade`, c);
+      sends[`${facts.p2}Exact`] = "reached its runner";
+      const othersAfter = await otherOutcomes("after upgrade");
+      check(same(othersAfter, othersBaseline), "the outcome of a principal send to a binding that is not a local recipient changed", { before: othersBaseline, after: othersAfter });
       const again = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       const againJson = jsonOf(again);
       check(again.code === 0 && againJson?.ready === false && againJson.refusals.includes("registry_already_v2"), "a second plan is not 'already v2'", { exit: again.code, out: again.stdout.slice(0, 300) });
-      return { registryBlock: block, sends: { alphaByPrincipal: "reached alpha", betaByPrincipal: "reached beta", alphaExact: "reached alpha" }, secondPlan: againJson.refusals };
+      return { registryBlock: block, sends, bindingsNotLocalRecipients: { baseline: othersBaseline, afterUpgrade: othersAfter }, secondPlan: againJson.refusals };
     });
 
     await step("D4", "candidate host restarted on the v2 registry keeps serving", async () => {
       await stopHost("new");
       const started = await startHost("new");
       const st = await status();
-      check(st.router.registry.state === "ok" && st.router.registry.schema === V2 && st.router.registry.sequence === 4, "restarted host does not serve v2", st.router.registry);
-      const a = await send(principals.alpha, "after restart");
-      check(a.code === 0 && JSON.stringify(a.json).includes("echo[alpha]: after restart"), "principal send failed after the restart", a);
+      check(st.router.registry.state === "ok" && st.router.registry.schema === V2 && st.router.registry.sequence === facts.sequence + 1, "restarted host does not serve v2", st.router.registry);
+      const a = await send(principals[facts.p1], "after restart");
+      check(a.code === 0 && JSON.stringify(a.json).includes(`echo[${facts.p1}]: after restart`), "principal send failed after the restart", a);
       return { host: started, registryBlock: st.router.registry };
     });
 
@@ -696,7 +781,7 @@ async function main() {
     await step("E1", "installed reader and writer (bundle copy) against the v2 registry: refuse, change nothing", async () => {
       const read = lastJsonLine((await helper(oldBundle, ["read", registry])).stdout);
       check(read.ok === false && read.code === "registry_corrupt" && /unknown_registry_key/.test(read.message), "the installed reader did not fail with registry_corrupt: unknown_registry_key", read);
-      const bind = lastJsonLine((await helper(oldBundle, ["bind", registry, "gamma", "4"])).stdout);
+      const bind = lastJsonLine((await helper(oldBundle, ["bind", registry, "gamma", String(facts.sequence + 1)])).stdout);
       check(bind.ok === false && bind.code === "registry_corrupt" && /unknown_registry_key/.test(bind.message), "the installed writer did not fail with registry_corrupt: unknown_registry_key", bind);
       check(same(registryFiles(), postUpgradeFiles), "the registry changed under the installed writer");
       return { installedReader: read, installedWriterAttempt: bind, registryUnchanged: true };
@@ -712,13 +797,13 @@ async function main() {
       const st = await status();
       const block = st.router?.registry ?? null;
       check(st.router?.enabled === true && !st.router.error && block?.state === "unreadable" && block.sequence === 0, "the installed host does not report the registry as {unreadable, 0} with the router enabled", st.router);
-      const viaPrincipal = await send(principals.alpha, "installed host on v2, principal");
+      const viaPrincipal = await send(principals[facts.p1], "installed host on v2, principal");
       check(viaPrincipal.code === 1 && viaPrincipal.json?.error === "route_unavailable", "the principal send was not refused with route_unavailable (exit 1)", viaPrincipal);
-      check(!JSON.stringify(viaPrincipal.json).includes("echo[alpha]"), "the refused principal send reached a runner", viaPrincipal);
+      check(!JSON.stringify(viaPrincipal.json).includes(`echo[${facts.p1}]`), "the refused principal send reached a runner", viaPrincipal);
       const lookup = await tl(["status", "--message-id", viaPrincipal.messageId]);
       check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
-      const viaProfile = await send("beta", "installed host on v2, exact");
-      check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes("echo[beta]: installed host on v2, exact"), "exact-id send did not keep working", viaProfile);
+      const viaProfile = await send(facts.p2, "installed host on v2, exact");
+      check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes(`echo[${facts.p2}]: installed host on v2, exact`), "exact-id send did not keep working", viaProfile);
       // positive control: the same lookup finds a message that was delivered, so the not_found above means something
       const control = await tl(["status", "--message-id", viaProfile.messageId]);
       check(control.code === 0 && parseJson(control.stdout)?.phase === "completed", "a status lookup does not find the delivered exact send", control);
@@ -730,7 +815,7 @@ async function main() {
         registryBlock: block,
         topLevelRouter: { enabled: st.router.enabled, error: st.router.error ?? null },
         principalSend: { exit: viaPrincipal.code, outcome: viaPrincipal.json, afterwards: { statusLookupExit: lookup.code, statusLookup: (lookup.stdout || lookup.stderr).trim().slice(0, 300) } },
-        exactSend: { exit: viaProfile.code, reachedRunner: "beta" },
+        exactSend: { exit: viaProfile.code, reachedRunner: facts.p2 },
         planOnV2WithInstalledHost: { exit: floor.code, refusals: floorJson?.refusals ?? null },
       };
     });
@@ -754,7 +839,7 @@ async function main() {
       const planRun = await candCli(["identity", "restore-registry", "--client-root", client, "--from", backupDir, "--json"]);
       restorePlan = jsonOf(planRun);
       check(planRun.code === 0 && restorePlan?.ready === true, `restore plan is not ready (exit ${planRun.code})`, { stdout: planRun.stdout.slice(0, 900), stderr: planRun.stderr.slice(0, 300) });
-      check(restorePlan.relation === "ahead" && restorePlan.commonPrefix === 3, "the restore plan does not see the backup as an earlier state of this registry", { relation: restorePlan.relation, commonPrefix: restorePlan.commonPrefix });
+      check(restorePlan.relation === "ahead" && restorePlan.commonPrefix === facts.auditLen, "the restore plan does not see the backup as an earlier state of this registry", { relation: restorePlan.relation, commonPrefix: restorePlan.commonPrefix });
       check(same(restorePlan.discarded.map((d) => d.action), ["upgrade"]), "the restore plan does not discard exactly the upgrade entry", restorePlan.discarded);
       check(Object.values(restorePlan.routing).every((list) => list.length === 0) && restorePlan.live.v2Data.any === false, "the restore plan changes routing or loses v2-only data", { routing: restorePlan.routing, v2Data: restorePlan.live.v2Data });
       return { plan: restorePlan };
@@ -774,36 +859,36 @@ async function main() {
 
     await step("F3", "installed host (no restart) reads the restored v1 registry again; principals route; restart keeps it", async () => {
       const st = await status();
-      check(st.router.registry.state === "ok" && st.router.registry.sequence === 3, "installed host did not recover without restart", st.router.registry);
-      const a = await send(principals.alpha, "after restore principal");
-      check(a.code === 0 && JSON.stringify(a.json).includes("echo[alpha]: after restore principal"), "principal send failed after the restore", a);
+      check(st.router.registry.state === "ok" && st.router.registry.sequence === facts.sequence, "installed host did not recover without restart", st.router.registry);
+      const a = await send(principals[facts.p1], "after restore principal");
+      check(a.code === 0 && JSON.stringify(a.json).includes(`echo[${facts.p1}]: after restore principal`), "principal send failed after the restore", a);
       await stopHost("old");
       const started = await startHost("old");
       const again = await status();
-      check(again.router.registry.state === "ok" && again.router.registry.sequence === 3, "restarted installed host does not serve the restored registry", again.router.registry);
-      const b = await send(principals.beta, "after restore and restart");
-      check(b.code === 0 && JSON.stringify(b.json).includes("echo[beta]: after restore and restart"), "principal send failed after restart", b);
-      return { recoveredWithoutRestart: st.router.registry, afterRestart: { host: started, registryBlock: again.router.registry }, principalSends: "alpha and beta reached their runners" };
+      check(again.router.registry.state === "ok" && again.router.registry.sequence === facts.sequence, "restarted installed host does not serve the restored registry", again.router.registry);
+      const b = await send(principals[facts.p2] ?? facts.p2, "after restore and restart");
+      check(b.code === 0 && JSON.stringify(b.json).includes(`echo[${facts.p2}]: after restore and restart`), "principal send failed after restart", b);
+      return { recoveredWithoutRestart: st.router.registry, afterRestart: { host: started, registryBlock: again.router.registry }, principalSends: "the recipients reached their runners" };
     });
 
     // ====================================== E4/F4: the installed host is RUNNING when the registry flips behind its back
     await step("E4", "installed host running when a v2 write lands without the floor: principals fail closed, same process keeps answering", async () => {
       const before = await status();
-      check(before.router.registry.state === "ok" && before.router.registry.sequence === 3, "precondition: the installed host serves v1 at sequence 3", before.router.registry);
+      check(before.router.registry.state === "ok" && before.router.registry.sequence === facts.sequence, "precondition: the installed host serves v1 at the expected sequence", before.router.registry);
       const forced = lastJsonLine((await helper(cand, ["force-upgrade", registry])).stdout);
-      check(forced?.ok === true && forced.schema === V2 && forced.sequence === 4, "the forced upgrade did not apply", forced);
+      check(forced?.ok === true && forced.schema === V2 && forced.sequence === facts.sequence + 1, "the forced upgrade did not apply", forced);
       const st = await status();
       const block = st.router?.registry ?? null;
       check(st.router?.enabled === true && !st.router.error && block?.state === "unreadable" && block.sequence === 0, "the running installed host does not report the registry as {unreadable, 0} with the router enabled", st.router);
-      const principal = await send(principals.alpha, "running installed host, v2 flip");
-      check(principal.code === 1 && principal.json?.error === "route_unavailable" && !JSON.stringify(principal.json).includes("echo[alpha]"), "the principal send was not refused with route_unavailable (exit 1)", principal);
+      const principal = await send(principals[facts.p1], "running installed host, v2 flip");
+      check(principal.code === 1 && principal.json?.error === "route_unavailable" && !JSON.stringify(principal.json).includes(`echo[${facts.p1}]`), "the principal send was not refused with route_unavailable (exit 1)", principal);
       const lookup = await tl(["status", "--message-id", principal.messageId]);
       check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
-      const exact = await send("beta", "running installed host, exact after flip");
-      check(exact.code === 0 && JSON.stringify(exact.json).includes("echo[beta]: running installed host, exact after flip"), "exact-id send stopped working", exact);
+      const exact = await send(facts.p2, "running installed host, exact after flip");
+      check(exact.code === 0 && JSON.stringify(exact.json).includes(`echo[${facts.p2}]: running installed host, exact after flip`), "exact-id send stopped working", exact);
       const control = await tl(["status", "--message-id", exact.messageId]);
       check(control.code === 0 && parseJson(control.stdout)?.phase === "completed", "a status lookup does not find the delivered exact send", control);
-      return { forcedWrite: forced, topLevelRouter: { enabled: st.router.enabled, error: st.router.error ?? null }, registryBlock: block, principalSend: { exit: principal.code, outcome: principal.json }, exactSend: { exit: exact.code, reachedRunner: "beta" } };
+      return { forcedWrite: forced, topLevelRouter: { enabled: st.router.enabled, error: st.router.error ?? null }, registryBlock: block, principalSend: { exit: principal.code, outcome: principal.json }, exactSend: { exit: exact.code, reachedRunner: facts.p2 } };
     });
 
     await step("F4", "restore from the backup: the running installed host recovers without a restart", async () => {
@@ -814,10 +899,10 @@ async function main() {
       check(/pty-exit: 0/.test(applied.stderr), `restore failed: ${applied.stdout.slice(0, 600)} ${applied.stderr.slice(0, 300)}`, applied);
       check(sha256File(path.join(registry, "identity-registry-v1.json")) === preUpgradeFiles.registry && sha256File(path.join(registry, "registry-audit.jsonl")) === preUpgradeFiles.audit, "live registry bytes are not the pre-upgrade bytes");
       const st = await status();
-      check(st.router.registry.state === "ok" && st.router.registry.sequence === 3, "the running installed host did not recover", st.router.registry);
-      const a = await send(principals.alpha, "after the second restore");
-      check(a.code === 0 && JSON.stringify(a.json).includes("echo[alpha]: after the second restore"), "principal send failed after the second restore", a);
-      return { relation: planJson.relation ?? null, recoveredWithoutRestart: st.router.registry, principalSend: "reached alpha", archives: backupListing() };
+      check(st.router.registry.state === "ok" && st.router.registry.sequence === facts.sequence, "the running installed host did not recover", st.router.registry);
+      const a = await send(principals[facts.p1], "after the second restore");
+      check(a.code === 0 && JSON.stringify(a.json).includes(`echo[${facts.p1}]: after the second restore`), "principal send failed after the second restore", a);
+      return { relation: planJson.relation ?? null, recoveredWithoutRestart: st.router.registry, principalSend: "reached its runner", archives: backupListing() };
     });
 
     // ===================================================================== G. client package wrapper, negatives
@@ -931,7 +1016,10 @@ async function main() {
     if (results.liveRoot && !results.liveRoot.identical) results.verdict = "fail";
     results.finishedAt = new Date().toISOString();
     fs.mkdirSync(options.out, { recursive: true });
-    fs.writeFileSync(path.join(options.out, "results.json"), JSON.stringify(results, null, 2) + "\n");
+    let text = JSON.stringify(results, null, 2) + "\n";
+    // A real registry's identifiers are shortened before anything is written down.
+    for (const value of sensitive) text = text.split(value).join(`${value.slice(0, 8)}…`);
+    fs.writeFileSync(path.join(options.out, "results.json"), text);
     if (base && !options.keep) fs.rmSync(base, { recursive: true, force: true });
     else if (base) process.stdout.write(`scratch root kept: ${base}\n`);
   }
