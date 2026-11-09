@@ -1,8 +1,8 @@
-# Identity registry v2 (D1.5): installed acceptance, G2 to G4
+# Identity registry v2 (D1.5): installed acceptance, G2 to G5
 
 - **Dates:** 2026-11-08 (Pacific); the install records are stamped 2026-11-09 UTC.
 - **Plan:** `docs/plans/2026-11-07-identity-registry-v2-d1-plan.md`, piece D1.5 and the gates of section 7.
-- **Status:** G2, G3 and G4 are done. **G5 (the upgrade of the live registry) has not been performed**: it is run from the owner's terminal and is described in section 5. This document is completed after it.
+- **Status:** G2 to G5 are done: **the live registry is v2** (sequence 4), upgraded by the owner from their own terminal and verified read only (section 5). Items 3 to 5 of plan section 8 (a live principal send, the negative set, a restart after G5) were not run (section 6).
 - **Evidence kept outside the repository:** the install records `releases/d1-g2-install-verification.json` and `releases/d1-g3-install-verification.json`, and the archives `archive/d1-g2-20261109T054623Z/`, `archive/d1-g2-20261109T054442Z/` (the aborted first attempt) and `archive/d1-g3-20261109T061059Z/`, all under the application root.
 
 ## 1. Gates
@@ -13,7 +13,7 @@
 | G2 supervisor restage | **installed** 2026-11-09 05:46Z, the owner's "Install it"; bundle `9034909d…` to `c01e78bb…` |
 | G3 client package | **installed** 2026-11-09 06:11Z, the owner's choice of the full package and "Install it"; `0.2.0-identity.1` to `0.2.0-identity.2` |
 | G4 rehearsal on a copy of the live registry | **done**, 29 of 29 steps (section 4) |
-| G5 upgrade of the live registry | **not performed**; the owner's terminal (section 5) |
+| G5 upgrade of the live registry | **done** 2026-11-09 07:00:56Z (23:00 Pacific, 2026-11-08) by the owner from their terminal; verified read only, 11 of 11 checks (section 5) |
 
 ## 2. G2: the supervisor runtime that reads v2
 
@@ -42,16 +42,19 @@ The copy: schema v1, sequence 3, three bindings (`ghost`, `gravity2`, `codex-hea
 - **The installed code fails closed on the real v2 file** (reader, writer, a restarted host, a host running when the write lands, the old client CLI), and `restore-registry` puts the v1 pair back byte for byte, archives the v2 pair, and the running installed host recovers without a restart.
 - **A harness finding:** the product's pair-exchange limit (10 exchanges per pair per 10 minutes, durable in the journal) stopped the first copy-mode run, because with one local recipient everything went to one pair. A single-recipient client now gets a second recipient without a binding (`scratch-b`) for the exact-id sends. This is the limiter doing its job, not a defect.
 
-## 5. G5: the upgrade, from the owner's terminal (not yet performed)
+## 5. G5: the upgrade of the live registry
 
-The installed `triangle` is the new CLI and the supervisor reports v2 support for the registry it reads, so the floor passes (read-only plan: `ready`, no refusals). From the owner's terminal:
+Run by the owner from their own terminal (a terminal on both standard streams is required): the plan first, which writes nothing, then the same command with its plan id. The backup `identity-backups/backup-v1-20261109T070056Z` was made first and the `upgrade` audit entry is stamped 2026-11-09T07:00:56Z. The floor had been shown to pass beforehand by a read-only plan (G3), and the whole path had been rehearsed on a copy of this registry (G4).
 
-```bash
-triangle identity upgrade-registry --client-root "$HOME/Library/Application Support/The Triangle/client"
-triangle identity upgrade-registry --client-root "$HOME/Library/Application Support/The Triangle/client" --confirm PLAN_ID
-```
+Verified afterwards by the assistant, read only, with `rehearsal-assets/verify-g5.mjs` against a baseline taken at 06:51Z (`rehearsal-assets/results-g5-verification.json`, identifiers not included): **11 of 11 checks pass**.
 
-The first command prints the plan and its id and writes nothing; the second applies it (it needs a terminal on both standard streams), makes the backup `identity-backups/backup-v1-<time>/` first and then upgrades. The way back, which a failed run also prints, is `triangle identity restore-registry --client-root … --from <that backup>`. After it, the checks are: `triangle-local status` shows the router registry as `ok`, sequence 4, schema `identity_registry_v2`; `triangle-local discover` entries are identical to before; the held, queued and pending-reply counts are unchanged; `triangle status --identity` shows the registry; and the owner's own principal checks (plan section 8, items 3 and 4) if wanted, which send real messages and run a worker.
+- The router reports the registry `ok`, sequence 4, schema `identity_registry_v2`, `supportedSchemas` `[v1, v2]`, `rootSha256` equal to the digest of the identity directory.
+- Held 2, queued 1, queued_local 1 and pending replies 14 are unchanged; nothing is executing; dispatcher and wake are idle; the router is enabled; `triangle-local discover` entries are identical to before; **the supervisor was not restarted** (same wrapper and node child), since the running process re-reads the registry.
+- `identity-backups/` holds exactly one folder, with exactly the two registry files, equal to the pre-upgrade bytes, modes 0700 and 0600.
+- Read with the installed reader (which verifies the hash chain): v2, sequence 4, three bindings, no unfinished write. The audit log is the three old `bind` entries unchanged plus one `upgrade` entry. Every binding equals its v1 form plus the new schema name and a null public key, the new collections are empty, `createdAt` is unchanged.
+- A new plan says `registry_already_v2` with the floor still passing; `triangle status --identity` prints `Registry: ok · v2 · sequence 4 · pairings 0 · aliases 0 · destinations 0`.
+
+The way back, rehearsed in G4, is `triangle identity restore-registry --client-root … --from …/identity-backups/backup-v1-20261109T070056Z` (a plan first, then the plan id). Anything written in v1 terms since the upgrade would be lost by it.
 
 ## 6. Plan section 8, item by item
 
@@ -59,10 +62,10 @@ The first command prints the plan and its id and writes nothing; the second appl
 | :--- | :--- |
 | (1) after G2 the live v1 registry resolves exactly as before | done for what can be read without sending: `discover` entries and the router block unchanged; no live send |
 | (2) the scratch rehearsal passes | done: D1.4 (28 of 28) and G4 on the copy (29 of 29) |
-| (3) after G5 the `gravity2` principal send works and its journal row is identical apart from timestamps | pending G5; needs a live send (runs a worker), so the owner's yes; no tool compares journal rows yet |
-| (4) negative set: unknown principal, a `peer_` id, a sender without permission | pending; not in the rehearsal runner |
-| (5) restart preserves state | G2 and G3 restarts preserved the backlog and the router state; after G5 pending |
-| (6) backlog isolation (14 pending replies, 2 held tasks) | unchanged through G2 and G3; after G5 pending |
+| (3) after G5 the `gravity2` principal send works and its journal row is identical apart from timestamps | **not run**: needs a live send, which runs a worker, so the owner's yes; no tool compares journal rows yet. G4 showed the send on the scratch host and the router block shows the registry in use |
+| (4) negative set: unknown principal, a `peer_` id, a sender without permission | **not run**; not in the rehearsal runner. These refusals run no worker and could be sent with the owner's yes |
+| (5) restart preserves state | G2 and G3 restarts preserved the backlog and the router state; **G5 needed no restart**, and a restart after G5 has not been made |
+| (6) backlog isolation (14 pending replies, 2 held tasks) | **done**: unchanged through G2, G3 and G5 (held 2, queued 1, queued_local 1, pending replies 14) |
 | (7) the backup restores cleanly on a scratch root | done in G4 (F1, F2, F4) |
 
 ## 7. Limits
@@ -70,4 +73,4 @@ The first command prints the plan and its id and writes nothing; the second appl
 - The hosts of the rehearsal are the production host class with echo runners in plain processes; launchd, the Swift `run-supervisor` path and real runners are exercised only by the live G2 and G3 restarts, which show the supervisor starting and the invariants holding, not message flows through real runners.
 - No live principal send has been made; the live evidence for routing is `discover`, the router block and the read-only plan.
 - The copy was taken once, on 2026-11-08, and the live registry has not changed since (its file hashes are unchanged since 2026-10-31).
-- G5 and items 3 to 6 after it are open.
+- Items 3 to 5 of plan section 8 (a live principal send, the negative set, a restart after G5) were not run; the evidence for the live registry in use is the router block, `discover` and the installed reader, not a message flow.

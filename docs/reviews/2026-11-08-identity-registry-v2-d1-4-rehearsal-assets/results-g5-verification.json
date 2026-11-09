@@ -1,0 +1,170 @@
+{
+  "ok": true,
+  "takenAt": "2026-11-09T07:02:23.067Z",
+  "baselineTakenAt": "2026-11-09T06:51:52.931Z",
+  "backup": "backup-v1-20261109T070056Z",
+  "checks": [
+    {
+      "name": "router registry block is ok at the next sequence on schema v2, reading both schemas, same registry directory",
+      "ok": true,
+      "detail": {
+        "state": "ok",
+        "sequence": 4,
+        "schema": "identity_registry_v2",
+        "supportedSchemas": [
+          "identity_registry_v1",
+          "identity_registry_v2"
+        ],
+        "rootSha256": "987e727a98d23ee054ebc33966feb12fb50bf8f98314abd9e5f2d5e8ec64a0b3"
+      }
+    },
+    {
+      "name": "held, queued, queued_local and pending replies unchanged; nothing executing; dispatcher and wake idle; router enabled",
+      "ok": true,
+      "detail": {
+        "before": {
+          "queued_local": 1,
+          "executing": 0,
+          "completed": 18,
+          "held": 2,
+          "queued": 1,
+          "pendingReplies": 14
+        },
+        "after": {
+          "queued_local": 1,
+          "executing": 0,
+          "completed": 18,
+          "held": 2,
+          "queued": 1,
+          "pendingReplies": 14
+        }
+      }
+    },
+    {
+      "name": "discover entries (id, principal, state, route, send permission) identical to before",
+      "ok": true,
+      "detail": {
+        "entries": 6
+      }
+    },
+    {
+      "name": "the supervisor was not restarted (same wrapper and node child pids)",
+      "ok": true,
+      "detail": {
+        "wrappers": [
+          1105
+        ],
+        "children": [
+          {
+            "pid": 1853,
+            "bundle": "c01e78bbf404"
+          }
+        ]
+      }
+    },
+    {
+      "name": "identity-backups holds exactly one backup-v1-* folder and nothing else",
+      "ok": true,
+      "detail": [
+        "backup-v1-20261109T070056Z"
+      ]
+    },
+    {
+      "name": "the backup holds exactly the two registry files, equal to the pre-upgrade bytes, modes 0700/0600",
+      "ok": true,
+      "detail": [
+        "identity-registry-v1.json",
+        "registry-audit.jsonl"
+      ]
+    },
+    {
+      "name": "the installed reader reads the live registry: v2, the next sequence, the same number of bindings, no unfinished write",
+      "ok": true,
+      "detail": {
+        "schema": "identity_registry_v2",
+        "sequence": 4,
+        "bindings": 3,
+        "uncommittedTail": 0
+      }
+    },
+    {
+      "name": "the audit log is the old entries unchanged plus one upgrade entry",
+      "ok": true,
+      "detail": {
+        "actions": [
+          "bind",
+          "bind",
+          "bind",
+          "upgrade"
+        ]
+      }
+    },
+    {
+      "name": "every binding equals its v1 form plus the new schema name and a null public key; the new collections are empty; createdAt unchanged",
+      "ok": true,
+      "detail": {
+        "different": []
+      }
+    },
+    {
+      "name": "a new plan says the registry is already v2 and the floor still passes (nothing to do)",
+      "ok": true,
+      "detail": {
+        "refusals": [
+          "registry_already_v2"
+        ]
+      }
+    },
+    {
+      "name": "the installed `triangle status --identity` shows the registry as ok on schema v2",
+      "ok": true,
+      "detail": "Registry:  ok · v2 · sequence 4 · pairings 0 · aliases 0 · destinations 0 · ~/Library/Application Support/The Triangle/identity"
+    }
+  ],
+  "snapshot": {
+    "takenAt": "2026-11-09T07:02:23.067Z",
+    "journal": {
+      "queued_local": 1,
+      "executing": 0,
+      "completed": 18,
+      "held": 2,
+      "queued": 1,
+      "pendingReplies": 14
+    },
+    "dispatcher": {
+      "active": 0,
+      "queued": 0
+    },
+    "wake": "idle",
+    "routerEnabled": true,
+    "registry": {
+      "state": "ok",
+      "sequence": 4,
+      "schema": "identity_registry_v2",
+      "supportedSchemas": [
+        "identity_registry_v1",
+        "identity_registry_v2"
+      ],
+      "rootSha256": "987e727a98d23ee054ebc33966feb12fb50bf8f98314abd9e5f2d5e8ec64a0b3"
+    },
+    "discoverEntries": "6 entries",
+    "supervisor": {
+      "wrappers": [
+        1105
+      ],
+      "children": [
+        {
+          "pid": 1853,
+          "bundle": "c01e78bbf404"
+        }
+      ]
+    },
+    "registryFiles": {
+      "registry": "94782c7a0decdbed801ea40228bfb6c4b38496ed5ee9ca58d70be8af5b72a6b4",
+      "audit": "c54c97bb03ea917ce107b8ee3e7e99272372e5709744eadcefc41b43a1a7eecd"
+    },
+    "backups": [
+      "backup-v1-20261109T070056Z"
+    ]
+  }
+}
