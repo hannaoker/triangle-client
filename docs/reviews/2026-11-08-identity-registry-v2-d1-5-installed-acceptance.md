@@ -2,7 +2,7 @@
 
 - **Dates:** 2026-11-08 (Pacific); the install records are stamped 2026-11-09 UTC.
 - **Plan:** `docs/plans/2026-11-07-identity-registry-v2-d1-plan.md`, piece D1.5 and the gates of section 7.
-- **Status:** G2 to G5 are done: **the live registry is v2** (sequence 4), upgraded by the owner from their own terminal and verified read only (section 5). Items 3 to 5 of plan section 8 (a live principal send, the negative set, a restart after G5) were not run (section 6).
+- **Status:** G2 to G5 are done: **the live registry is v2** (sequence 4), upgraded by the owner from their own terminal and verified read only (section 5). The negative set (plan section 8, item 4) was run on the live system afterwards (section 5); items 3 and 5 (a live principal send, a restart after G5) were not run (section 6).
 - **Evidence kept outside the repository:** the install records `releases/d1-g2-install-verification.json` and `releases/d1-g3-install-verification.json`, and the archives `archive/d1-g2-20261109T054623Z/`, `archive/d1-g2-20261109T054442Z/` (the aborted first attempt) and `archive/d1-g3-20261109T061059Z/`, all under the application root.
 
 ## 1. Gates
@@ -58,6 +58,19 @@ Verified afterwards by the assistant, read only, with `rehearsal-assets/verify-g
 
 **The way back with the real files** (added after the review). `rehearsal-assets/restore-live-backup-rehearsal.mjs` restores the real `backup-v1-20261109T070056Z` over a scratch copy of the real v2 pair with the installed `triangle` (plan, then the plan id in a pseudo-terminal): 8 of 8 checks (`results-g5-restore-rehearsal.json`). The plan is ready with relation `ahead`, only the `upgrade` entry discarded, no routing change and no v2-only data; the registry afterwards equals the backup's bytes, the v2 pair is archived byte for byte, the backup folder is unchanged, and the installed reader reads v1 at the old sequence with the same bindings. The live files were unchanged by the rehearsal.
 
+**The negative set on the live system** (added 2026-11-09 about 07:53Z, at the owner's request: "Negative set only"). Five refusals plus one extra, none of which can run a worker, sent through normal interfaces: the owner CLI as the desktop sender, and this Claude chat's own Triangle session tool. This chat is permitted to message `gravity2` (a send would run the worker), so no probe was sent to it.
+
+| Probe | Sender | Answer | Layer |
+| :--- | :--- | :--- | :--- |
+| unknown principal (`agent_` and 32 random hex) | desktop sender, owner CLI | `recipient_not_found` | server (router) |
+| unknown principal (same form) | this Claude session | `recipient_not_found: no_binding` | server |
+| a `peer_` id | desktop sender, owner CLI | `recipient_not_allowed` | the CLI, before the server |
+| a `peer_` id | this Claude session | `recipient_not_found: peer_not_supported` | server |
+| a sender without permission: an exact id outside this chat's permitted recipients | this Claude session | `recipient_not_allowed` ("Sender session-b991… is not authorized to message …") | server (ACL) |
+| (extra) the principal of a binding that is not a local recipient (`ghost`) | desktop sender, owner CLI | `route_unavailable` | server |
+
+Nothing was queued or run: the journal counts are identical before and after (held 2, queued 1, queued_local 1, pending replies 14, completed 18, nothing executing), the dispatcher and wake stay idle, a status lookup of each refused message id says `not_found`, this chat's inbox is unchanged, the `discover` entries are identical, and the registry block is still `ok`, v2, sequence 4. The router's own counters moved as expected: `recipient_not_found` 0 to 3 and `route_unavailable` 0 to 1 (the four server-side refusals other than the ACL denial), `resolved.id` 0 to 1 (the ACL denial, after resolution) and `resolved.principal` still 0, so no principal send was accepted. **Not tested:** a sender without permission addressing the `gravity2` principal itself, because no sender that lacks that permission is available without changing grants; the same ACL denied an unpermitted exact id.
+
 The way back, rehearsed in G4, is `triangle identity restore-registry --client-root … --from …/identity-backups/backup-v1-20261109T070056Z` (a plan first, then the plan id). A bind or revoke made since the upgrade would be lost by it and must be redone.
 
 ## 6. Plan section 8, item by item
@@ -67,7 +80,7 @@ The way back, rehearsed in G4, is `triangle identity restore-registry --client-r
 | (1) after G2 the live v1 registry resolves exactly as before | done for what can be read without sending: `discover` entries and the router block unchanged; no live send |
 | (2) the scratch rehearsal passes | done: D1.4 (28 of 28) and G4 on the copy (29 of 29) |
 | (3) after G5 the `gravity2` principal send works and its journal row is identical apart from timestamps | **not run**: needs a live send, which runs a worker, so the owner's yes; no tool compares journal rows yet. G4 showed the send on the scratch host and the router block shows the registry in use |
-| (4) negative set: unknown principal, a `peer_` id, a sender without permission | **not run**; not in the rehearsal runner. These refusals run no worker and could be sent with the owner's yes |
+| (4) negative set: unknown principal, a `peer_` id, a sender without permission | **done** on the live system 2026-11-09: five refusals plus one extra, nothing queued or run (section 5); the unpermitted sender was tested against an exact id, not the `gravity2` principal |
 | (5) restart preserves state | G2 and G3 restarts preserved the backlog and the router state; **G5 needed no restart**, and a restart after G5 has not been made |
 | (6) backlog isolation (14 pending replies, 2 held tasks) | **done**: unchanged through G2, G3 and G5 (held 2, queued 1, queued_local 1, pending replies 14) |
 | (7) the backup restores cleanly on a scratch root | **done**: in G4 (F1, F2, F4) on a backup made from the copy, and with the real backup over a copy of the real v2 pair (section 5) |
@@ -78,14 +91,14 @@ The way back, rehearsed in G4, is `triangle identity restore-registry --client-r
 - Fix or retire the "owner CLI only" install flow before the next install (it wrote the stale receipt).
 - The standard installer's refusal over a stale receipt is an uncaught exception with a stack trace (`scripts/release/install-client-package.mjs`); a clean message would help.
 - Open owner questions: whether `upgrade-registry` should exit 1 when the registry is already v2 but the running supervisor cannot read v2 (D1.3 behaviour), and the owner-approval provider and activation for the revoke command (a separate decision).
-- Plan section 8 items 3 to 5 (a live principal send, the negative set, a restart after G5) and the owner's acceptance of the evidence.
+- Plan section 8 items 3 and 5 (a live `gravity2` principal send, which runs a worker, and a restart after G5) and the owner's acceptance of the evidence.
 
 ## 8. Limits
 
 - The hosts of the rehearsal are the production host class with echo runners in plain processes; launchd, the Swift `run-supervisor` path and real runners are exercised only by the live G2 and G3 restarts, which show the supervisor starting and the invariants holding, not message flows through real runners.
 - No live principal send has been made; the live evidence for routing is `discover`, the router block and the read-only plan.
 - The copy was taken once, before the upgrade; the live registry did not change between the copy and G5 (its file hashes are equal from 2026-10-31 through the G5 baseline).
-- Items 3 to 5 of plan section 8 (a live principal send, the negative set, a restart after G5) were not run; the evidence for the live registry in use is the router block, `discover` and the installed reader, not a message flow.
+- Items 3 and 5 of plan section 8 (a live principal send, a restart after G5) were not run; the evidence for the live registry in use is the router block, `discover` and the installed reader, not a message flow.
 
 ## 9. Independent review
 
