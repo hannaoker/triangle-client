@@ -1,6 +1,6 @@
 {
   "schema": "identity_registry_v2_d1_4_rehearsal_v1",
-  "startedAt": "2026-11-08T23:16:14.756Z",
+  "startedAt": "2026-11-09T02:37:15.261Z",
   "runner": {
     "node": "v22.22.3",
     "platform": "darwin",
@@ -14,6 +14,7 @@
       "artifacts": 90,
       "nodeSHA256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
       "manifestSha256": "4b55e76d8614c4ffda3bcd6f0fe2d4997524afeb859eb66df6b4b4b5c86992ac",
+      "baselineManifest": "the live supervisor manifest",
       "clientPackageVersion": "0.2.0-identity.1",
       "triangleLocalSha256": "083ee43d5e421fc84147cc59e9271aebb22dea27203bfef2c9da583315d00de8"
     },
@@ -99,7 +100,7 @@
       "id": "A1",
       "title": "installed state: supervisor manifest, bundle and client package (read only)",
       "ok": true,
-      "ms": 80,
+      "ms": 59,
       "data": {
         "installed": {
           "manifestVersion": 14,
@@ -107,6 +108,7 @@
           "artifacts": 90,
           "nodeSHA256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
           "manifestSha256": "4b55e76d8614c4ffda3bcd6f0fe2d4997524afeb859eb66df6b4b4b5c86992ac",
+          "baselineManifest": "the live supervisor manifest",
           "clientPackageVersion": "0.2.0-identity.1",
           "triangleLocalSha256": "083ee43d5e421fc84147cc59e9271aebb22dea27203bfef2c9da583315d00de8"
         },
@@ -117,7 +119,7 @@
       "id": "A2",
       "title": "installed bundle copied to the scratch root, byte-checked against the live manifest",
       "ok": true,
-      "ms": 281,
+      "ms": 381,
       "data": {
         "artifactsVerified": 90,
         "nodeSha256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
@@ -134,7 +136,7 @@
       "id": "A3",
       "title": "candidate package: archive hash, contents against the commit, node, version",
       "ok": true,
-      "ms": 2648,
+      "ms": 2281,
       "data": {
         "commit": "58df2def45a0e1fadf5606b70abc93dc0b06e440",
         "version": "0.2.0-d14-rehearsal.1",
@@ -230,7 +232,7 @@
       "id": "B1",
       "title": "scratch client, router and v1 registry built with the installed bundle's code",
       "ok": true,
-      "ms": 930,
+      "ms": 1096,
       "data": {
         "registry": {
           "ok": true,
@@ -249,10 +251,10 @@
       "id": "B2",
       "title": "installed supervisor (copy) serves the v1 registry: status shape, principal and exact sends",
       "ok": true,
-      "ms": 764,
+      "ms": 734,
       "data": {
         "host": {
-          "pid": 47063,
+          "pid": 82769,
           "bundleId": "9034909d37978c2602c8f519787cad92b0200dbe86ce195b8858a4e73b059ca1",
           "node": "v22.22.3"
         },
@@ -278,7 +280,7 @@
       "id": "B3",
       "title": "candidate CLI against the installed supervisor: the floor refuses and writes nothing",
       "ok": true,
-      "ms": 1139,
+      "ms": 1188,
       "data": {
         "planRefusals": [
           "supervisor_cannot_read_v2"
@@ -294,7 +296,7 @@
       "id": "C1",
       "title": "G2 transaction: stop installed host, stage candidate supervisor bundle, validate",
       "ok": true,
-      "ms": 1180,
+      "ms": 1237,
       "data": {
         "candidateBundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
         "installedBundleId": "9034909d37978c2602c8f519787cad92b0200dbe86ce195b8858a4e73b059ca1",
@@ -306,17 +308,17 @@
           "packages/agent-worker/src/unified-router.mjs"
         ],
         "nodeUnchanged": true,
-        "rollbackRecordWritten": ".rollback-supervisor-8e082cee2ac844e483c4f94e6ff9d276.json"
+        "rollbackRecordWritten": ".rollback-supervisor-72b1170847d14ce49fe194e484388109.json"
       }
     },
     {
       "id": "C2",
       "title": "candidate host on the same v1 registry and journal: schema block, rootSha256, sends",
       "ok": true,
-      "ms": 693,
+      "ms": 684,
       "data": {
         "host": {
-          "pid": 47124,
+          "pid": 83109,
           "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
           "node": "v22.22.3"
         },
@@ -328,7 +330,7 @@
             "identity_registry_v1",
             "identity_registry_v2"
           ],
-          "rootSha256": "5a6dc4be1e4c5c4141251daf5c2af04dd99976af6b71fac802b978ba03f54fbf"
+          "rootSha256": "f9704fbb3aaaea53badc8d819e8afecdb454ec6e77099ba4d36c7696591d5679"
         },
         "principalSend": {
           "exit": 0
@@ -343,12 +345,12 @@
       "id": "C3",
       "title": "G2 rollback: restore the saved manifest, installed host serves again, then restage",
       "ok": true,
-      "ms": 1544,
+      "ms": 1738,
       "data": {
         "manifestByteIdentical": true,
         "candidateBundleRemoved": true,
         "installedHostAfterRollback": {
-          "pid": 47140,
+          "pid": 83264,
           "bundleId": "9034909d37978c2602c8f519787cad92b0200dbe86ce195b8858a4e73b059ca1",
           "node": "v22.22.3"
         },
@@ -360,9 +362,9 @@
       "id": "D1",
       "title": "candidate host running: the floor passes and the plan is ready",
       "ok": true,
-      "ms": 457,
+      "ms": 473,
       "data": {
-        "planId": "cd0c2ae2a24fb96137b662d2e3562eab6f31a81f8dc48fe381233db8f1d8fa6d",
+        "planId": "06f7887b311afae2a96548d16f14c3ddaa13059d3941f43e8f10a9b9f5bad036",
         "floor": {
           "manifest": {
             "ok": true,
@@ -389,7 +391,7 @@
           "sequence": 3,
           "auditHead": {
             "sequence": 3,
-            "hash": "4c62bd25ec2ab03e332d3dd019938284884a41c6c31b65e99f912288b2787a2b"
+            "hash": "e157a6affa4035de26d0718e8b6506c5dae3d969e59916609a9fa2cb1dfcf9eb"
           },
           "bindings": 2,
           "uncommittedTail": 0
@@ -401,7 +403,7 @@
       "id": "D1b",
       "title": "router.json without registryRoot: the default registry directory is the one reported and planned",
       "ok": true,
-      "ms": 357,
+      "ms": 336,
       "data": {
         "routerJson": "enabled, no registryRoot",
         "reportedRootEqualsDefaultDirectory": true,
@@ -412,7 +414,7 @@
       "id": "D2",
       "title": "apply with the plan id in a terminal: backup, upgrade, audit entry",
       "ok": true,
-      "ms": 321,
+      "ms": 346,
       "data": {
         "result": {
           "from": {
@@ -424,12 +426,12 @@
             "sequence": 4,
             "auditHead": {
               "sequence": 4,
-              "hash": "e99ed71d1fbd880aa4c8de6a107d6e46c51f8a55e83b0bf340adeaaa24ec4d41"
+              "hash": "ed8dd6814931efa2f9a57dd6359bcec282aa84b34d9ca7d5caa554f00c292b5c"
             }
           },
           "auditEntry": "upgrade"
         },
-        "backupDirName": "backup-v1-20261108T231625Z",
+        "backupDirName": "backup-v1-20261109T023725Z",
         "backupFiles": [
           "identity-registry-v1.json",
           "registry-audit.jsonl"
@@ -447,7 +449,7 @@
       "id": "D3",
       "title": "candidate host after the upgrade (no restart): v2 block, same principals, same routes",
       "ok": true,
-      "ms": 832,
+      "ms": 830,
       "data": {
         "registryBlock": {
           "state": "ok",
@@ -457,7 +459,7 @@
             "identity_registry_v1",
             "identity_registry_v2"
           ],
-          "rootSha256": "5a6dc4be1e4c5c4141251daf5c2af04dd99976af6b71fac802b978ba03f54fbf"
+          "rootSha256": "f9704fbb3aaaea53badc8d819e8afecdb454ec6e77099ba4d36c7696591d5679"
         },
         "sends": {
           "alphaByPrincipal": "reached alpha",
@@ -473,10 +475,10 @@
       "id": "D4",
       "title": "candidate host restarted on the v2 registry keeps serving",
       "ok": true,
-      "ms": 365,
+      "ms": 384,
       "data": {
         "host": {
-          "pid": 47197,
+          "pid": 83317,
           "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
           "node": "v22.22.3"
         },
@@ -488,7 +490,7 @@
             "identity_registry_v1",
             "identity_registry_v2"
           ],
-          "rootSha256": "5a6dc4be1e4c5c4141251daf5c2af04dd99976af6b71fac802b978ba03f54fbf"
+          "rootSha256": "f9704fbb3aaaea53badc8d819e8afecdb454ec6e77099ba4d36c7696591d5679"
         }
       }
     },
@@ -496,7 +498,7 @@
       "id": "E1",
       "title": "installed reader and writer (bundle copy) against the v2 registry: refuse, change nothing",
       "ok": true,
-      "ms": 69,
+      "ms": 71,
       "data": {
         "installedReader": {
           "ok": false,
@@ -515,10 +517,10 @@
       "id": "E2",
       "title": "G2 rollback after the upgrade: installed host on v2 fails principals closed, exact ids keep routing",
       "ok": true,
-      "ms": 926,
+      "ms": 1182,
       "data": {
         "host": {
-          "pid": 47215,
+          "pid": 83335,
           "bundleId": "9034909d37978c2602c8f519787cad92b0200dbe86ce195b8858a4e73b059ca1",
           "node": "v22.22.3"
         },
@@ -534,8 +536,8 @@
           "exit": 1,
           "outcome": {
             "senderId": "1bbf7beb95905eb096eb0edb8de76cc45ff71ffaa76054a239653818792a2e8e",
-            "messageId": "15173ee0-c56a-40c0-8e49-1a5f68992a42",
-            "requestId": "7531a7c5-c534-4966-9383-edca2707c3f0",
+            "messageId": "f4487fd5-80f5-49f5-a0c6-36fde588cdb6",
+            "requestId": "36b6c9f7-13fc-4713-8299-793b63c2c6aa",
             "state": "send_outcome_unknown",
             "error": "route_unavailable"
           },
@@ -561,23 +563,23 @@
       "id": "E3",
       "title": "installed client package CLI (0.2.0-identity.1 copy) against the v2 registry: refuses loudly, changes nothing",
       "ok": true,
-      "ms": 85,
+      "ms": 90,
       "data": {
         "migrate": {
           "exit": 1,
           "stderrHead": [
-            "file:///private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/inst-cli/packages/agent-worker/src/identity-registry.mjs:122",
+            "file:///private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/inst-cli/packages/agent-worker/src/identity-registry.mjs:122",
             "  const err = new Error(`${code}: ${reason}`);",
             "              ^",
             "",
             "Error: registry_corrupt: unknown_registry_key",
-            "    at codedError (file:///private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/inst-cli/packages/agent-worker/src/identity-registry.mjs:122:15)"
+            "    at codedError (file:///private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/inst-cli/packages/agent-worker/src/identity-registry.mjs:122:15)"
           ],
           "stdoutHead": ""
         },
         "statusIdentity": {
           "exit": 0,
-          "message": "Identity (host-local; disk observations, not live authority verification) | Registry:  unreadable · sequence 0 · /private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/a/identity |   [fault] Underlying installation blocker (registry_absent)"
+          "message": "Identity (host-local; disk observations, not live authority verification) | Registry:  unreadable · sequence 0 · /private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/a/identity |   [fault] Underlying installation blocker (registry_absent)"
         },
         "registryUnchanged": true
       }
@@ -586,26 +588,26 @@
       "id": "F1",
       "title": "restore plan from the backup: relation, discarded entries, no routing change",
       "ok": true,
-      "ms": 44,
+      "ms": 49,
       "data": {
         "plan": {
           "schema": "identity_registry_restore_plan_v1",
-          "registryRoot": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/a/identity",
-          "archiveParent": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/a/identity-backups",
+          "registryRoot": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/a/identity",
+          "archiveParent": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/a/identity-backups",
           "existingBackups": [
-            "backup-v1-20261108T231625Z"
+            "backup-v1-20261109T023725Z"
           ],
           "backup": {
-            "dir": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/a/identity-backups/backup-v1-20261108T231625Z",
+            "dir": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/a/identity-backups/backup-v1-20261109T023725Z",
             "schema": "identity_registry_v1",
             "sequence": 3,
             "auditHead": {
               "sequence": 3,
-              "hash": "4c62bd25ec2ab03e332d3dd019938284884a41c6c31b65e99f912288b2787a2b"
+              "hash": "e157a6affa4035de26d0718e8b6506c5dae3d969e59916609a9fa2cb1dfcf9eb"
             },
             "bindings": 2,
-            "registrySha256": "9aa587f9340d20b70f85aea68c10594918b78974612635fea2170fdcd8d68c5d",
-            "auditSha256": "87e5aafea39c1c5909c2f042b91602b8aa9554e3219bc5e8f14a84630fa49075"
+            "registrySha256": "7a1657975d3e3e76dd35bb041f059f18c1b90e5b698d7a1b3fc7bc85269113a0",
+            "auditSha256": "3e335da00796e480f82f9b8913699c59bb3e07296ce9e118f295c62cb175ea02"
           },
           "live": {
             "state": "ok",
@@ -614,7 +616,7 @@
             "sequence": 4,
             "auditHead": {
               "sequence": 4,
-              "hash": "e99ed71d1fbd880aa4c8de6a107d6e46c51f8a55e83b0bf340adeaaa24ec4d41"
+              "hash": "ed8dd6814931efa2f9a57dd6359bcec282aa84b34d9ca7d5caa554f00c292b5c"
             },
             "bindings": 2,
             "uncommittedTail": 0,
@@ -626,8 +628,8 @@
               "any": false
             },
             "fingerprint": {
-              "registry": "9682ce458d9b6444b4978953ac4ebb4dd50b332db611dbf161314ca25ee61a5e",
-              "audit": "783730e37807019fe12e3921e24400ceb06624d9917e56dbfc0f8e678047dffb"
+              "registry": "415d9e7243eb95e7eef401f5748bfe4a940601009de0f31f5f7ec180d76fb3c2",
+              "audit": "ed52218cab014f6a71386ef83ac98cbeb837ce440e65876df505535982701b3a"
             }
           },
           "relation": "ahead",
@@ -635,7 +637,7 @@
           "discarded": [
             {
               "sequence": 4,
-              "at": "2026-11-08T23:16:25.082Z",
+              "at": "2026-11-09T02:37:25.749Z",
               "action": "upgrade",
               "subject": null,
               "bindingId": null
@@ -653,7 +655,7 @@
           "acceptRoutingChanges": false,
           "ready": true,
           "refusals": [],
-          "planId": "9d267e491c079f74690f1b6decccdf7d24d451bdcf0298d5b4daad66d593cbb2"
+          "planId": "108e042a394fc1de088fe205d42383b8442a2dc579139e0622c9313317df3489"
         }
       }
     },
@@ -661,12 +663,12 @@
       "id": "F2",
       "title": "apply the restore in a terminal: live files equal the backup, v2 pair archived",
       "ok": true,
-      "ms": 119,
+      "ms": 106,
       "data": {
         "result": {
           "schema": "identity_registry_restore_result_v1"
         },
-        "archive": "before-restore-v2-20261108T231627Z",
+        "archive": "before-restore-v2-20261109T023728Z",
         "archivedFiles": [
           "identity-registry-v1.json",
           "registry-audit.jsonl"
@@ -679,7 +681,7 @@
       "id": "F3",
       "title": "installed host (no restart) reads the restored v1 registry again; principals route; restart keeps it",
       "ok": true,
-      "ms": 703,
+      "ms": 683,
       "data": {
         "recoveredWithoutRestart": {
           "state": "ok",
@@ -687,7 +689,7 @@
         },
         "afterRestart": {
           "host": {
-            "pid": 47246,
+            "pid": 83369,
             "bundleId": "9034909d37978c2602c8f519787cad92b0200dbe86ce195b8858a4e73b059ca1",
             "node": "v22.22.3"
           },
@@ -703,12 +705,16 @@
       "id": "E4",
       "title": "installed host running when a v2 write lands without the floor: principals fail closed, same process keeps answering",
       "ok": true,
-      "ms": 837,
+      "ms": 1001,
       "data": {
         "forcedWrite": {
           "ok": true,
           "schema": "identity_registry_v2",
           "sequence": 4
+        },
+        "topLevelRouter": {
+          "enabled": true,
+          "error": null
         },
         "registryBlock": {
           "state": "unreadable",
@@ -718,8 +724,8 @@
           "exit": 1,
           "outcome": {
             "senderId": "1bbf7beb95905eb096eb0edb8de76cc45ff71ffaa76054a239653818792a2e8e",
-            "messageId": "4d656fac-4d65-4568-8a9a-e3b9d908c417",
-            "requestId": "0f93dc09-8b0b-4649-8006-9c953c3cade3",
+            "messageId": "486f67c7-7e32-4d56-8a2f-42efc45bca7f",
+            "requestId": "77a44bd8-bab5-4913-92d8-201c0a900b1b",
             "state": "send_outcome_unknown",
             "error": "route_unavailable"
           }
@@ -734,7 +740,7 @@
       "id": "F4",
       "title": "restore from the backup: the running installed host recovers without a restart",
       "ok": true,
-      "ms": 462,
+      "ms": 453,
       "data": {
         "relation": "ahead",
         "recoveredWithoutRestart": {
@@ -743,9 +749,9 @@
         },
         "principalSend": "reached alpha",
         "archives": [
-          "backup-v1-20261108T231625Z",
-          "before-restore-v2-20261108T231627Z",
-          "before-restore-v2-20261108T231629Z"
+          "backup-v1-20261109T023725Z",
+          "before-restore-v2-20261109T023728Z",
+          "before-restore-v2-20261109T023730Z"
         ]
       }
     },
@@ -753,11 +759,12 @@
       "id": "G1",
       "title": "G3 variant: wrapper installed by the candidate installer; restaged host; plan still passes the floor",
       "ok": true,
-      "ms": 1545,
+      "ms": 1767,
       "data": {
-        "wrapperSha256": "827c0c1178b896a86dc38f66bb95778ca4048e16693cb21c7c85600e53ddd01c",
+        "wrapperSha256": "5a2fa33cea9cc9aee748ff8dbc2a635ee25f1da7c57f2f392e9aa9b51a782f14",
+        "candidateWrapperEqualsInstalledWrapperApartFromRoot": true,
         "host": {
-          "pid": 47289,
+          "pid": 83414,
           "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
           "node": "v22.22.3"
         },
@@ -785,7 +792,7 @@
       "id": "G2",
       "title": "negatives: no terminal, another registry directory, a plan id that is not the plan's",
       "ok": true,
-      "ms": 744,
+      "ms": 677,
       "data": {
         "noTerminal": {
           "exit": 2,
@@ -808,14 +815,14 @@
       "id": "G3",
       "title": "G3 variant: the candidate package installed into a scratch home by its own installer; the installed triangle runs the plan",
       "ok": true,
-      "ms": 2920,
+      "ms": 2929,
       "data": {
         "installScope": null,
         "receiptVersion": "0.2.0-d14-rehearsal.1",
         "installedWrapperPlan": {
           "exit": 0,
           "ready": true,
-          "planId": "08b258ace2e4d4aaf4aa906a28a11da2d7f9c396a97cd19108f4f4b527e8f3d7"
+          "planId": "deaac1dbe6f2bc7e0af229488a52b61013aeabab7cf70839826cfe0b78f6d328"
         },
         "helpListsNewCommands": true,
         "installerExit": 0
@@ -823,20 +830,23 @@
     },
     {
       "id": "H1",
-      "title": "the installed application root is exactly as it was",
+      "title": "the installed application root is exactly as it was (as far as it is compared)",
       "ok": true,
-      "ms": 48,
+      "ms": 50,
       "data": {
         "compared": [
           "files",
           "identityEntries",
+          "baselineBundleTree",
+          "clientFiles",
           "bundles",
           "releases",
           "backupsDirectoryExists",
           "processes"
         ],
-        "hashedFiles": 8,
+        "hashedFiles": 10,
         "identityEntriesCompared": 3,
+        "baselineBundleEntries": 101,
         "processesCompared": 2,
         "identical": true
       }
@@ -844,8 +854,22 @@
   ],
   "verdict": "pass",
   "scratch": {
-    "root": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc",
-    "applicationRoot": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-nOrncc/a"
+    "root": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM",
+    "applicationRoot": "/private/var/folders/n6/q_8vrdqj3mq7bwjs0lj06kf00000gn/T/d14r-ffGkwM/a"
   },
-  "finishedAt": "2026-11-08T23:16:34.867Z"
+  "liveRoot": {
+    "identical": true,
+    "compared": [
+      "files",
+      "identityEntries",
+      "baselineBundleTree",
+      "clientFiles",
+      "bundles",
+      "releases",
+      "backupsDirectoryExists",
+      "processes"
+    ],
+    "differences": []
+  },
+  "finishedAt": "2026-11-09T02:37:36.097Z"
 }

@@ -20,9 +20,18 @@ const V1 = "identity_registry_v1";
 const V2 = "identity_registry_v2";
 
 function scratch(t) {
-  // Short, because a unix socket path may not exceed 100 bytes.
-  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "d14t-"));
-  fs.chmodSync(base, 0o700);
+  // Short, because a unix socket path may not exceed 100 bytes: fall back to /private/tmp when TMPDIR is long.
+  let base = null;
+  for (const parent of [fs.realpathSync(os.tmpdir()), "/private/tmp"]) {
+    const candidate = fs.mkdtempSync(path.join(parent, "d14t-"));
+    fs.chmodSync(candidate, 0o700);
+    if (Buffer.byteLength(path.join(candidate, "c/l/local-control.sock")) <= 100) {
+      base = candidate;
+      break;
+    }
+    fs.rmSync(candidate, { recursive: true, force: true });
+  }
+  assert.ok(base, "no scratch directory short enough for a unix socket");
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   return {
     base,
@@ -100,5 +109,6 @@ test("host.mjs run starts the production host from the bundle's code, prints a r
   assert.ok(fs.lstatSync(path.join(s.stateRoot, "local-control.sock")).isSocket());
   const closed = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
   child.kill("SIGTERM");
-  assert.deepEqual(await closed, { code: 0, signal: null });
+  const timeout = new Promise((resolve) => setTimeout(() => resolve("the host did not stop within 15 seconds of SIGTERM"), 15000).unref());
+  assert.deepEqual(await Promise.race([closed, timeout]), { code: 0, signal: null });
 });

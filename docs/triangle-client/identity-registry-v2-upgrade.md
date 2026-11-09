@@ -87,7 +87,7 @@ principal send still goes to the same profile.
   (`agent_`) sends exit 1 with `route_unavailable` (the CLI labels that outcome `send_outcome_unknown`, but a status lookup of the
   message id finds nothing, so nothing was queued); exact-id sends keep working, and the process keeps answering. Fix it by
   running a supervisor that reads v2 or by restoring the backup; a running supervisor recovers as soon as the registry reads
-  again, without a restart (D1.4 rehearsal, finding 4).
+  again, without a restart (D1.4 rehearsal, finding 4). `upgrade-registry` itself exits 0 in that state (the registry is already v2, so there is nothing to do); read the refusals in its plan, `supervisor_cannot_read_v2` among them, not the exit status (finding 8).
 - **The registry is unreadable or missing.** Restore works then too (the live files are archived as they are).
 - **A restore stopped partway.** Run it again from a fresh plan; the previous files are already in the archive, and the next
   restore removes the staging files. A half-restored registry cannot be read, so nothing routed meanwhile and the plan shows

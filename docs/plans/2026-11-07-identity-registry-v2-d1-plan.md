@@ -152,7 +152,7 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 
 ## 7. Release train, gates and rollback
 
-**Shape.** Everything in D1.0 to D1.3 stays inside existing modules, so there is no manifest bump and no helper change, and the runtime installs as a supervisor-only restage like 2026-11-07's (scratch dry run, artifact diff, quiet gate, backups, automatic rollback). If review decides `identity-registry.mjs` (roughly 2250-2380 lines after D1.0) should be split, the new modules join the router artifact group and force manifest v15 with the helper release path (R1 plan 5.2 and 5.3); that is decision D1-1. The CLI part ships in the client package, whose install is the same owner decision that #154 to #159 (the owner approval and revoke command) are waiting on.
+**Shape.** Everything in D1.0 to D1.3 stays inside existing modules, so there is no manifest bump and no helper source change, and the runtime installs as a supervisor-only restage like 2026-11-07's (scratch dry run, artifact diff, quiet gate, backups, automatic rollback). If review decides `identity-registry.mjs` (roughly 2250-2380 lines after D1.0) should be split, the new modules join the router artifact group and force manifest v15 with the helper release path (R1 plan 5.2 and 5.3); that is decision D1-1. The CLI part ships in the client package, whose install is the same owner decision that #154 to #159 (the owner approval and revoke command) are waiting on.
 
 **Gates before merge.** The R1 plan 5.4 list: trust-boundary regression (the ACL and limit family, the router golden comparison, registry fail-closed cases), `keychain-launch-contract`, the full suite compared with the known baseline (the `ps` host-probe test fails on plain main in this environment; known timing flakes are rerun in isolation), the readiness check, a repository boundary check, and one independent review per code PR.
 
@@ -162,8 +162,8 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 | :--- | :--- | :--- |
 | G1 | Merge D1.0 to D1.3 | None |
 | G2 | Install the D1 supervisor runtime (supervisor-only) | Reads v1 exactly as before; verify `router.registry` still `ok`/3, principal canaries and backlog counts unchanged |
-| G3 | Install the client package with the new CLI | Adds `upgrade-registry` and `restore-registry`. **More than that when the package is built from `main`** (D1.4 evidence, finding 1): rebuilt helper binaries and the owner-approval and revoke modules of #154 to #159. The owner chooses: the full package, a package built with the installed helper binaries as prebuilt inputs (as `0.2.0-identity.1` was), or no client install, running the two commands from the checksum-verified extracted package |
-| G4 | Rehearse on a scratch copy of the registry | None. D1.4 rehearsed a synthetic registry; the runner needs a small change to take a copy of the live one |
+| G3 | Install the client package with the new CLI | Adds `upgrade-registry` and `restore-registry`. **More than that when the package is built from `main`** (D1.4 evidence, finding 1): helper binaries rebuilt from the same source (new hashes and signature) and the owner-approval and revoke modules of #154 to #159. The owner chooses: the full package, a package built with the installed helper binaries as prebuilt inputs (as `0.2.0-identity.1` was), or no client install, running the two commands from the checksum-verified extracted package |
+| G4 | Rehearse on a scratch copy of the registry | None. D1.4 rehearsed a synthetic registry; the runner must take its expected values from the copy instead (D1.4 evidence, section 9) |
 | G5 | Upgrade the live registry from the owner's terminal | Registry becomes v2; verify the same principals resolve, `status` shows the schema, backup exists |
 
 **Rollback.**
@@ -180,7 +180,7 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 - **Golden:** invariants 1 and 2 of section 4 for the resolver, router, `describeAddresses`, status and the identity view.
 - **Fail-closed:** a frozen v14 reader against a v2 file (D1.3), and the installed v14 bundle against a scratch v2 registry (D1.4).
 - **Concurrency and faults:** the writer fault hooks and the multi-process stress against both schemas; a reader racing the upgrade never sees a half state.
-- **Installed acceptance (D1.5):** (1) after G2 the live v1 registry resolves exactly as before; (2) the scratch rehearsal passes; (3) after G5 the `gravity2` principal send works and the journal row is identical apart from timestamps; (4) negative set: unknown principal, a `peer_` id, a sender without permission; (5) restart preserves state; (6) backlog isolation: the 14 pending replies and 2 held tasks untouched; (7) the backup restores cleanly on a scratch root.
+- **Installed acceptance (D1.5):** (1) after G2 the live v1 registry resolves exactly as before; (2) the scratch rehearsal passes (the D1.4 run before G2, or a rerun with `--baseline-manifest` after it); (3) after G5 the `gravity2` principal send works and the journal row is identical apart from timestamps; (4) negative set: unknown principal, a `peer_` id, a sender without permission; (5) restart preserves state; (6) backlog isolation: the 14 pending replies and 2 held tasks untouched; (7) the backup restores cleanly on a scratch root.
 - **D1 is done when** the above passes on the installed system, the review findings are closed and the owner has accepted the evidence. It claims no remote capability.
 
 ## 9. Risks
@@ -203,12 +203,11 @@ Each piece is its own PR. D1.0 to D1.2 touch the same file, so they stack and ca
 
 - 2026-11-07, D1-1 to D1-7: the owner accepted the recommended option, A, on all seven ("Accept all" in chat). Together: v2 stays inside the existing modules with no manifest bump; the file keeps its v1 name; the upgrade and restore commands live in `triangle identity`; the whole designed set is frozen now; the way back is backup restore only; the upgrade is gated by a terminal plus plan id with an automatic backup; the new collections are capped at 256 each.
 - 2026-11-08, restore gate (raised by the D1.3 review): a restore can undo a revoke or add or move a binding. The owner accepted the explicit `--accept-routing-changes` flag (part of the plan id, with every affected binding listed in the plan) as sufficient; OS authentication for restores is not built.
-- 2026-11-08, D1.4: the candidate package and supervisor bundle were built and rehearsed on a scratch application root (28 of 28 steps, nothing installed, the installed root unchanged). Nothing was decided for G3, whose content is larger than this plan assumed; the options are in the evidence, finding 1.
 - These are design decisions, not authorization to build or install. D1.0 starts on a separate go-ahead, and every production step stays behind the gates G1 to G5 in section 7.
 
 Options as proposed, with the chosen one marked:
 
-1. **D1-1 Release shape.** **A (chosen):** keep v2 inside the existing modules, so D1 installs as a supervisor-only restage plus the client package, with no manifest bump and no helper change. **B:** split the v2 code into new modules (cleaner) and bump to v15 with the helper release path.
+1. **D1-1 Release shape.** **A (chosen):** keep v2 inside the existing modules, so D1 installs as a supervisor-only restage plus the client package, with no manifest bump and no helper source change. **B:** split the v2 code into new modules (cleaner) and bump to v15 with the helper release path.
 2. **D1-2 File name.** **A (chosen):** keep `identity-registry-v1.json` and put the v2 schema inside, so v1 readers refuse loudly. **B:** use `identity-registry-v2.json`, which leaves v1 readers seeing a stale file or none, silently.
 3. **D1-3 Command home.** **A (chosen):** `triangle identity upgrade-registry` and `restore-registry` beside `inventory`, `migrate` and `revoke` (needs the client package install). **B:** `triangle-local` offline commands, installable with the supervisor like `grant-session-class`, at the price of splitting identity commands across two CLIs.
 4. **D1-4 Reserved shapes.** **A (chosen):** freeze the whole designed set now (serverless binding fields, pairing, alias, destination, reserved audit actions) so Slice 3a and the alias and destination commands need no second floor cycle. **B:** ship agent bindings plus empty collections and add shapes as they are built, each one another schema version and floor event.

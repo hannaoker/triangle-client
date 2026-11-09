@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 
 const [mode, bundleArg, ...args] = process.argv.slice(2);
 if (!mode || !bundleArg) {
-  process.stderr.write("usage: host.mjs <prepare|run|read|bind> <bundleRoot> ...\n");
+  process.stderr.write("usage: host.mjs <prepare|run|read|bind|force-upgrade> <bundleRoot> ...\n");
   process.exit(64);
 }
 const bundleRoot = fs.realpathSync(bundleArg);

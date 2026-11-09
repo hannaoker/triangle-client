@@ -4,14 +4,21 @@
 // by scripts/release/build-client-package.mjs, and a supervisor bundle staged from that package by its own installer.
 //
 //   node rehearsal.mjs --candidate-archive FILE.tar.gz [--source-commit SHA] [--installed-app-root DIR] [--repo-root DIR]
-//                       [--out DIR] [--keep]
+//                       [--baseline-manifest FILE] [--out DIR] [--keep]
 //
 // The package's installer script must sit beside the archive (as build-client-package.mjs leaves it).
 //
+// "Installed" means the supervisor in the live supervisor manifest. After the candidate has been installed (G2) that
+// manifest is the candidate's, so pass --baseline-manifest with the saved pre-install manifest (the install keeps one
+// under archive/); the old bundle it names stays under worker-runtime/bundles and is what gets copied.
+//
 // What it never does: write under the installed application root, open its journal or registry, use its credentials,
 // signal its processes, or touch launchd. Every process it starts runs with HOME, TMPDIR and every path inside the
-// scratch root and with a clean environment. It records the installed root's file fingerprints and process list before
-// and after, and fails if they differ.
+// scratch root and with a clean environment, with one exception: the package's own installer verifies its archive in
+// /private/tmp/triangle-package-verify.XXXXXX, which its exit trap removes. The runner records fingerprints of the
+// installed root (file hashes, stat data including ctime, a digest of the baseline bundle's tree, the supervisor wrapper
+// and node process) before and after, and fails if they differ. The journal, credentials and other client files are not
+// compared.
 //
 // Output: results.json next to this file (or --out) and a one-line verdict per step on stdout. Exit 0 only when every
 // step passed.
@@ -34,7 +41,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === "--keep") options.keep = true;
-    else if (["--candidate-archive", "--installed-app-root", "--repo-root", "--out", "--source-commit"].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
+    else if (["--candidate-archive", "--installed-app-root", "--repo-root", "--out", "--source-commit", "--baseline-manifest"].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(`unknown or incomplete argument: ${flag}`);
   }
   if (!options["candidate-archive"]) throw new Error("--candidate-archive is required");
@@ -42,6 +49,7 @@ function parseArgs(argv) {
   options["repo-root"] = path.resolve(options["repo-root"] ?? path.join(here, "../../.."));
   options.out = path.resolve(options.out ?? here);
   options["candidate-archive"] = path.resolve(options["candidate-archive"]);
+  if (options["baseline-manifest"]) options["baseline-manifest"] = path.resolve(options["baseline-manifest"]);
   return options;
 }
 
@@ -103,7 +111,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function briefStat(file) {
   try {
     const s = fs.lstatSync(file);
-    return { size: s.size, mtimeMs: s.mtimeMs, mode: octal(s.mode & 0o7777), ino: s.ino };
+    return { size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, mode: octal(s.mode & 0o7777), ino: s.ino };
   } catch (error) {
     return { error: error.code ?? "error" };
   }
@@ -124,8 +132,8 @@ async function processList(live) {
   return [...wrappers, ...children].map((r) => `${r.pid} ${r.ppid} ${r.command.replace(/\s+/g, " ").slice(0, 200)}`).sort();
 }
 
-async function fingerprintLive(live, releaseVersion) {
-  // Content hashes only for files that carry no secret; names and stat data for everything else.
+async function fingerprintLive(live, releaseVersion, bundleId) {
+  // Content hashes only for files that carry no secret; names and stat data (ctime included) for everything else.
   const hashed = [
     "worker-runtime/supervisor.manifest.json",
     "worker-runtime/codex.manifest.json",
@@ -133,6 +141,8 @@ async function fingerprintLive(live, releaseVersion) {
     "worker-runtime/antigravity.manifest.json",
     "bin/triangle-local",
     "bin/triangle",
+    "bin/triangle-mailbox",
+    "bin/triangle-client",
     "package-install.json",
     `releases/${releaseVersion}/package-manifest.json`,
   ];
@@ -144,9 +154,26 @@ async function fingerprintLive(live, releaseVersion) {
   const listing = (rel) => (fs.existsSync(path.join(live, rel)) ? fs.readdirSync(path.join(live, rel)).sort() : null);
   const identity = {};
   for (const name of listing("identity") ?? []) identity[name] = briefStat(path.join(live, "identity", name));
+  // The baseline supervisor bundle: one digest over every entry's path, size, mtime, ctime and mode (reading changes none).
+  const bundleRoot = path.join(live, "worker-runtime/bundles", bundleId);
+  const treeLines = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = path.join(dir, entry.name);
+      const info = fs.lstatSync(full);
+      treeLines.push([path.relative(bundleRoot, full), info.size, info.mtimeMs, info.ctimeMs, info.mode & 0o7777].join("\0"));
+      if (entry.isDirectory()) walk(full);
+    }
+  };
+  walk(bundleRoot);
+  // Configuration files the rehearsal must not touch (stat only).
+  const clientFiles = {};
+  for (const rel of ["client/local-messaging.json", "client/local/router.json"]) clientFiles[rel] = briefStat(path.join(live, rel));
   return {
     files,
     identityEntries: identity,
+    baselineBundleTree: { entries: treeLines.length, sha256: sha256Text(treeLines.join("\n")) },
+    clientFiles,
     bundles: listing("worker-runtime/bundles"),
     releases: listing("releases"),
     backupsDirectoryExists: fs.existsSync(path.join(live, "identity-backups")),
@@ -158,10 +185,14 @@ async function fingerprintLive(live, releaseVersion) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  // Any exit that does not pass through the verdict below, a silent one included, counts as a failure.
+  process.exitCode = 1;
   check(process.platform === "darwin", "this rehearsal needs macOS");
   check(Number(process.versions.node.split(".")[0]) >= 22, "this rehearsal needs Node 22 or later");
   const live = options["installed-app-root"];
   check(fs.existsSync(path.join(live, "worker-runtime/supervisor.manifest.json")), `no installed supervisor manifest under ${live}`);
+  const baselineManifestFile = options["baseline-manifest"] ?? path.join(live, "worker-runtime/supervisor.manifest.json");
+  check(fs.existsSync(baselineManifestFile), `no baseline supervisor manifest at ${baselineManifestFile}`);
 
   const results = {
     schema: "identity_registry_v2_d1_4_rehearsal_v1",
@@ -219,7 +250,7 @@ async function main() {
   const candCli = (args, opts = {}) => run(candNode, [path.join(cand, "packages/triangle-cli/src/cli.mjs"), ...args], { env, ...opts });
   const instCliRun = (args, opts = {}) => run(oldNode, [path.join(instCli, "packages/triangle-cli/src/cli.mjs"), ...args], { env, ...opts });
   const candPty = (args) => run("/usr/bin/python3", ["-I", path.join(here, "pty-run.py"), candNode, path.join(cand, "packages/triangle-cli/src/cli.mjs"), ...args], { env });
-  const installer = (args, opts = {}) => run("/usr/bin/python3", [path.join(cand, "scripts/triangle-worker-install.py"), ...args], { env, ...opts });
+  const installer = (args, opts = {}) => run("/usr/bin/python3", ["-I", path.join(cand, "scripts/triangle-worker-install.py"), ...args], { env, ...opts });
   const helper = (bundle, args, opts = {}) => run(path.join(bundle, "bin/node"), [path.join(here, "host.mjs"), args[0], bundle, ...args.slice(1)], { env, ...opts });
   const manifestPath = () => path.join(app, "worker-runtime/supervisor.manifest.json");
   const currentBundle = () => JSON.parse(fs.readFileSync(manifestPath(), "utf8")).projectRoot;
@@ -228,13 +259,27 @@ async function main() {
     audit: fs.existsSync(path.join(registry, "registry-audit.jsonl")) ? sha256File(path.join(registry, "registry-audit.jsonl")) : null,
   });
   const backupListing = () => (fs.existsSync(backupsRoot) ? fs.readdirSync(backupsRoot).sort() : []);
+  const compareLive = async () => {
+    const after = await fingerprintLive(live, releaseVersion, oldBundleId);
+    const strip = (x) => JSON.parse(JSON.stringify(x));
+    const differences = Object.keys(liveBefore).filter((key) => !same(strip(liveBefore[key]), strip(after[key])));
+    return { identical: differences.length === 0, compared: Object.keys(liveBefore), differences, ...(differences.length ? { before: strip(liveBefore), after: strip(after) } : {}) };
+  };
 
   const startHost = async (label) => {
     check(!hosts.has(label), `host ${label} is already running`);
     const bundle = currentBundle();
     const child = spawn(path.join(bundle, "bin/node"), [path.join(here, "host.mjs"), "run", bundle, configPath], { env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    // The close promise exists from the moment of the spawn, so a host that dies early or late is never waited on forever.
+    const closed = new Promise((resolve) => {
+      child.on("close", (code, signal) => resolve({ code, signal }));
+      child.on("error", (error) => resolve({ code: -1, signal: null, error: String(error) }));
+    });
+    let exited = false;
+    closed.then(() => { exited = true; });
     let stderr = "";
     child.stderr.on("data", (d) => { stderr += d; });
+    hosts.set(label, { child, bundle, closed, hasExited: () => exited });
     const ready = await new Promise((resolve, reject) => {
       let buffer = "";
       const timer = setTimeout(() => reject(new CheckFailed(`host ${label} did not become ready: ${stderr.slice(0, 500)}`)), 30000);
@@ -243,20 +288,22 @@ async function main() {
         const line = buffer.split("\n").find((l) => l.includes('"ready"'));
         if (line) { clearTimeout(timer); resolve(parseJson(line)); }
       });
-      child.on("close", (code) => { clearTimeout(timer); reject(new CheckFailed(`host ${label} exited early (${code}): ${stderr.slice(0, 500)}`)); });
+      closed.then((result) => { clearTimeout(timer); reject(new CheckFailed(`host ${label} exited before it was ready (${result.code ?? result.signal}): ${stderr.slice(0, 500)}`)); });
     });
-    hosts.set(label, { child, bundle });
     return { pid: ready.pid, bundleId: path.basename(bundle), node: ready.node };
   };
   const stopHost = async (label) => {
     const host = hosts.get(label);
-    if (!host) return;
+    if (!host) return undefined;
     hosts.delete(label);
-    const closed = new Promise((resolve) => host.child.on("close", (code, signal) => resolve({ code, signal })));
-    try { process.kill(host.child.pid, "SIGTERM"); } catch { /* gone */ }
-    const timer = setTimeout(() => { try { process.kill(-host.child.pid, "SIGKILL"); } catch { /* gone */ } }, 10000);
-    const result = await closed;
-    clearTimeout(timer);
+    if (host.hasExited()) return host.closed;
+    try { process.kill(host.child.pid, "SIGTERM"); } catch { /* already gone */ }
+    const killTimer = setTimeout(() => { try { process.kill(-host.child.pid, "SIGKILL"); } catch { /* already gone */ } }, 10000);
+    let giveUp;
+    const gaveUp = new Promise((resolve) => { giveUp = setTimeout(() => resolve(null), 20000); });
+    const result = await Promise.race([host.closed, gaveUp]);
+    clearTimeout(killTimer);
+    clearTimeout(giveUp);
     return result;
   };
 
@@ -275,7 +322,7 @@ async function main() {
   try {
     // =========================================================================================== A. inputs
     await step("A1", "installed state: supervisor manifest, bundle and client package (read only)", async () => {
-      const manifest = JSON.parse(fs.readFileSync(path.join(live, "worker-runtime/supervisor.manifest.json"), "utf8"));
+      const manifest = JSON.parse(fs.readFileSync(baselineManifestFile, "utf8"));
       oldBundleId = path.basename(manifest.projectRoot);
       const bundle = manifest.projectRoot;
       check(manifest.version === 14, `installed supervisor manifest is v${manifest.version}, not v14`);
@@ -287,15 +334,18 @@ async function main() {
         bundleId: oldBundleId,
         artifacts: Object.keys(manifest.artifacts).length,
         nodeSHA256: manifest.nodeSHA256,
-        manifestSha256: sha256File(path.join(live, "worker-runtime/supervisor.manifest.json")),
+        manifestSha256: sha256File(baselineManifestFile),
+        baselineManifest: options["baseline-manifest"] ? "a saved manifest given with --baseline-manifest" : "the live supervisor manifest",
         clientPackageVersion: releaseVersion,
         triangleLocalSha256: sha256File(path.join(live, "bin/triangle-local")),
       };
-      liveBefore = await fingerprintLive(live, releaseVersion);
+      liveBefore = await fingerprintLive(live, releaseVersion, oldBundleId);
       return { installed: results.inputs.installed, supervisorProcesses: liveBefore.processes.length };
     });
 
     base = makeBase();
+    const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+    check(!inside(base, live) && !inside(live, base), "the scratch root and the installed root overlap");
     app = path.join(base, "a");
     client = path.join(app, "client");
     stateRoot = path.join(client, "l");
@@ -313,7 +363,7 @@ async function main() {
     results.scratch = { root: base, applicationRoot: app };
 
     await step("A2", "installed bundle copied to the scratch root, byte-checked against the live manifest", async () => {
-      const manifest = JSON.parse(fs.readFileSync(path.join(live, "worker-runtime/supervisor.manifest.json"), "utf8"));
+      const manifest = JSON.parse(fs.readFileSync(baselineManifestFile, "utf8"));
       const source = manifest.projectRoot;
       oldBundle = path.join(app, "worker-runtime/bundles", oldBundleId);
       fs.cpSync(source, oldBundle, { recursive: true, mode: fs.constants.COPYFILE_FICLONE, preserveTimestamps: false });
@@ -339,8 +389,11 @@ async function main() {
       const wrapper = fs.readFileSync(path.join(live, "bin/triangle-local"), "utf8");
       const constant = /^TRIANGLE_LOCAL_APPLICATION_ROOT = .*$/m;
       check(constant.test(wrapper), "installed triangle-local has no application-root constant");
-      fs.writeFileSync(wrapperPath, wrapper.replace(constant, () => `TRIANGLE_LOCAL_APPLICATION_ROOT = ${JSON.stringify(app).replace(/"/g, "'")}`), { mode: 0o700 });
+      check(!/['\\\n]/.test(app), "the scratch application root path must not contain quotes, backslashes or newlines");
+      const rootLine = `TRIANGLE_LOCAL_APPLICATION_ROOT = '${app}'`;
+      fs.writeFileSync(wrapperPath, wrapper.replace(constant, () => rootLine), { mode: 0o700 });
       fs.chmodSync(wrapperPath, 0o700);
+      check(fs.readFileSync(wrapperPath, "utf8").split("\n").includes(rootLine), "the scratch triangle-local does not name the scratch application root");
       // The installed client package's CLI code (its own node is the bundle's: same hash).
       const release = path.join(live, "releases", releaseVersion);
       fs.cpSync(path.join(release, "packages"), path.join(instCli, "packages"), { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
@@ -414,7 +467,7 @@ async function main() {
 
     await step("A4", "supervisor artifact diff, installed bundle versus candidate package", async () => {
       const wa = JSON.parse(fs.readFileSync(path.join(cand, "worker-artifacts.json"), "utf8"));
-      const installed = JSON.parse(fs.readFileSync(path.join(live, "worker-runtime/supervisor.manifest.json"), "utf8")).artifacts;
+      const installed = JSON.parse(fs.readFileSync(baselineManifestFile, "utf8")).artifacts;
       const candidate = new Set(wa.kinds.supervisor);
       const changed = [];
       for (const rel of wa.kinds.supervisor) {
@@ -642,9 +695,9 @@ async function main() {
     // ============================================================ E. the installed code meets a v2 registry
     await step("E1", "installed reader and writer (bundle copy) against the v2 registry: refuse, change nothing", async () => {
       const read = lastJsonLine((await helper(oldBundle, ["read", registry])).stdout);
-      check(read.ok === false && typeof read.code === "string", "the installed reader accepted the v2 registry", read);
+      check(read.ok === false && read.code === "registry_corrupt" && /unknown_registry_key/.test(read.message), "the installed reader did not fail with registry_corrupt: unknown_registry_key", read);
       const bind = lastJsonLine((await helper(oldBundle, ["bind", registry, "gamma", "4"])).stdout);
-      check(bind.ok === false && typeof bind.code === "string", "the installed writer accepted a write on the v2 registry", bind);
+      check(bind.ok === false && bind.code === "registry_corrupt" && /unknown_registry_key/.test(bind.message), "the installed writer did not fail with registry_corrupt: unknown_registry_key", bind);
       check(same(registryFiles(), postUpgradeFiles), "the registry changed under the installed writer");
       return { installedReader: read, installedWriterAttempt: bind, registryUnchanged: true };
     });
@@ -658,7 +711,7 @@ async function main() {
       const started = await startHost("old");
       const st = await status();
       const block = st.router?.registry ?? null;
-      check(st.router?.enabled !== true || !block || block.state !== "ok", "the installed host reports the v2 registry as ok", st.router);
+      check(st.router?.enabled === true && !st.router.error && block?.state === "unreadable" && block.sequence === 0, "the installed host does not report the registry as {unreadable, 0} with the router enabled", st.router);
       const viaPrincipal = await send(principals.alpha, "installed host on v2, principal");
       check(viaPrincipal.code === 1 && viaPrincipal.json?.error === "route_unavailable", "the principal send was not refused with route_unavailable (exit 1)", viaPrincipal);
       check(!JSON.stringify(viaPrincipal.json).includes("echo[alpha]"), "the refused principal send reached a runner", viaPrincipal);
@@ -666,8 +719,12 @@ async function main() {
       check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
       const viaProfile = await send("beta", "installed host on v2, exact");
       check(viaProfile.code === 0 && JSON.stringify(viaProfile.json).includes("echo[beta]: installed host on v2, exact"), "exact-id send did not keep working", viaProfile);
+      // positive control: the same lookup finds a message that was delivered, so the not_found above means something
+      const control = await tl(["status", "--message-id", viaProfile.messageId]);
+      check(control.code === 0 && parseJson(control.stdout)?.phase === "completed", "a status lookup does not find the delivered exact send", control);
       const floor = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       const floorJson = jsonOf(floor);
+      check(floor.code === 0 && same(floorJson?.refusals?.slice().sort(), ["registry_already_v2", "supervisor_cannot_read_v2"]), "the plan on a v2 registry with the installed host does not list exactly the two refusals", { exit: floor.code, out: floor.stdout.slice(0, 400) });
       return {
         host: started,
         registryBlock: block,
@@ -697,6 +754,9 @@ async function main() {
       const planRun = await candCli(["identity", "restore-registry", "--client-root", client, "--from", backupDir, "--json"]);
       restorePlan = jsonOf(planRun);
       check(planRun.code === 0 && restorePlan?.ready === true, `restore plan is not ready (exit ${planRun.code})`, { stdout: planRun.stdout.slice(0, 900), stderr: planRun.stderr.slice(0, 300) });
+      check(restorePlan.relation === "ahead" && restorePlan.commonPrefix === 3, "the restore plan does not see the backup as an earlier state of this registry", { relation: restorePlan.relation, commonPrefix: restorePlan.commonPrefix });
+      check(same(restorePlan.discarded.map((d) => d.action), ["upgrade"]), "the restore plan does not discard exactly the upgrade entry", restorePlan.discarded);
+      check(Object.values(restorePlan.routing).every((list) => list.length === 0) && restorePlan.live.v2Data.any === false, "the restore plan changes routing or loses v2-only data", { routing: restorePlan.routing, v2Data: restorePlan.live.v2Data });
       return { plan: restorePlan };
     });
 
@@ -708,7 +768,7 @@ async function main() {
       const archives = backupListing().filter((n) => n.startsWith("before-restore-"));
       check(archives.length === 1, "expected exactly one before-restore archive", backupListing());
       const archived = fs.readdirSync(path.join(backupsRoot, archives[0])).sort();
-      check(sha256File(path.join(backupsRoot, archives[0], "identity-registry-v1.json")) === postUpgradeFiles.registry, "the archived pair is not the v2 pair");
+      check(sha256File(path.join(backupsRoot, archives[0], "identity-registry-v1.json")) === postUpgradeFiles.registry && sha256File(path.join(backupsRoot, archives[0], "registry-audit.jsonl")) === postUpgradeFiles.audit, "the archived pair is not the v2 pair");
       return { result: result && { schema: result.schema, from: result.from, to: result.to }, archive: archives[0], archivedFiles: archived, liveEqualsBackupBytes: true, archiveEqualsV2Pair: true };
     });
 
@@ -734,14 +794,16 @@ async function main() {
       check(forced?.ok === true && forced.schema === V2 && forced.sequence === 4, "the forced upgrade did not apply", forced);
       const st = await status();
       const block = st.router?.registry ?? null;
-      check(st.router?.enabled !== true || !block || block.state !== "ok", "the running installed host still reports the registry as ok", st.router);
+      check(st.router?.enabled === true && !st.router.error && block?.state === "unreadable" && block.sequence === 0, "the running installed host does not report the registry as {unreadable, 0} with the router enabled", st.router);
       const principal = await send(principals.alpha, "running installed host, v2 flip");
       check(principal.code === 1 && principal.json?.error === "route_unavailable" && !JSON.stringify(principal.json).includes("echo[alpha]"), "the principal send was not refused with route_unavailable (exit 1)", principal);
       const lookup = await tl(["status", "--message-id", principal.messageId]);
       check(lookup.code !== 0 && /not_found/.test(lookup.stdout + lookup.stderr), "the refused principal send left a journal row", lookup);
       const exact = await send("beta", "running installed host, exact after flip");
       check(exact.code === 0 && JSON.stringify(exact.json).includes("echo[beta]: running installed host, exact after flip"), "exact-id send stopped working", exact);
-      return { forcedWrite: forced, registryBlock: block, principalSend: { exit: principal.code, outcome: principal.json }, exactSend: { exit: exact.code, reachedRunner: "beta" } };
+      const control = await tl(["status", "--message-id", exact.messageId]);
+      check(control.code === 0 && parseJson(control.stdout)?.phase === "completed", "a status lookup does not find the delivered exact send", control);
+      return { forcedWrite: forced, topLevelRouter: { enabled: st.router.enabled, error: st.router.error ?? null }, registryBlock: block, principalSend: { exit: principal.code, outcome: principal.json }, exactSend: { exit: exact.code, reachedRunner: "beta" } };
     });
 
     await step("F4", "restore from the backup: the running installed host recovers without a restart", async () => {
@@ -761,8 +823,19 @@ async function main() {
     // ===================================================================== G. client package wrapper, negatives
     await step("G1", "G3 variant: wrapper installed by the candidate installer; restaged host; plan still passes the floor", async () => {
       await stopHost("old");
+      // The candidate installer's frozen wrapper can be byte-identical to the installed one (apart from the root), so a
+      // no-op install must not pass: dirty the file first and require the install to remove the mark.
+      const wrapperClean = sha256File(wrapperPath);
+      fs.appendFileSync(wrapperPath, "\n# rehearsal mark: install-local-wrapper must replace this file\n");
       const wrapperInstall = await installer(["install-local-wrapper", "--application-root", app]);
       check(wrapperInstall.code === 0, `install-local-wrapper failed: ${wrapperInstall.stderr.slice(0, 300)}`, wrapperInstall);
+      const wrapperBytes = fs.readFileSync(wrapperPath);
+      const installerSource = fs.readFileSync(path.join(cand, "scripts/triangle-worker-install.py"));
+      const shebang = Buffer.from("#!/usr/bin/env python3\n");
+      const frozenTail = installerSource.subarray(0, shebang.length).equals(shebang) ? installerSource.subarray(shebang.length) : installerSource;
+      check(!wrapperBytes.toString("utf8").includes("rehearsal mark"), "install-local-wrapper did not replace the wrapper");
+      check(wrapperBytes.subarray(wrapperBytes.length - frozenTail.length).equals(frozenTail) && wrapperBytes.toString("utf8").includes("# TRIANGLE_MANAGED_LOCAL_WRAPPER_V1"), "the wrapper is not a frozen copy of the candidate installer");
+      check(wrapperBytes.toString("utf8").split("\n").includes(`TRIANGLE_LOCAL_APPLICATION_ROOT = '${app}'`), "the wrapper does not name the scratch application root");
       // The earlier rollback record was consumed by the rollback in E2; this is a fresh, committed install.
       const staged = await stageCandidate();
       const committed = await installer(["commit-runtime", staged.record]);
@@ -772,7 +845,7 @@ async function main() {
       const planRun = await candCli(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       const planJson = jsonOf(planRun);
       check(planRun.code === 0 && planJson?.ready === true, "plan is not ready with the candidate wrapper", { out: planRun.stdout.slice(0, 600) });
-      return { wrapperSha256: sha256File(wrapperPath), host: started, planReady: true, floor: planJson.floor };
+      return { wrapperSha256: sha256File(wrapperPath), candidateWrapperEqualsInstalledWrapperApartFromRoot: sha256Buffer(wrapperBytes) === wrapperClean, host: started, planReady: true, floor: planJson.floor };
     });
 
     await step("G2", "negatives: no terminal, another registry directory, a plan id that is not the plan's", async () => {
@@ -829,13 +902,11 @@ async function main() {
       }
     });
 
-    await step("H1", "the installed application root is exactly as it was", async () => {
-      const after = await fingerprintLive(live, releaseVersion);
-      const strip = (x) => JSON.parse(JSON.stringify(x));
-      const diffs = [];
-      for (const key of Object.keys(liveBefore)) if (!same(strip(liveBefore[key]), strip(after[key]))) diffs.push(key);
-      check(diffs.length === 0, `installed root changed: ${diffs.join(", ")}`, { before: strip(liveBefore), after: strip(after) });
-      return { compared: Object.keys(liveBefore), hashedFiles: Object.keys(liveBefore.files).length, identityEntriesCompared: Object.keys(liveBefore.identityEntries).length, processesCompared: liveBefore.processes.length, identical: true };
+    await step("H1", "the installed application root is exactly as it was (as far as it is compared)", async () => {
+      const comparison = await compareLive();
+      results.liveRoot = { identical: comparison.identical, compared: comparison.compared, differences: comparison.differences };
+      check(comparison.identical, `installed root changed: ${comparison.differences.join(", ")}`, { before: comparison.before, after: comparison.after });
+      return { compared: comparison.compared, hashedFiles: Object.keys(liveBefore.files).length, identityEntriesCompared: Object.keys(liveBefore.identityEntries).length, baselineBundleEntries: liveBefore.baselineBundleTree.entries, processesCompared: liveBefore.processes.length, identical: true };
     });
 
     results.verdict = steps.every((s) => s.ok) ? "pass" : "fail";
@@ -843,7 +914,21 @@ async function main() {
     results.verdict = "fail";
     results.failure = { step: current?.id ?? null, message: error.message };
   } finally {
-    for (const label of [...hosts.keys()]) await stopHost(label);
+    try {
+      for (const label of [...hosts.keys()]) await stopHost(label);
+    } catch (error) {
+      results.cleanupError = String(error?.message ?? error);
+    }
+    // The comparison also runs when a step failed before H1, which is exactly when it matters.
+    if (liveBefore && !results.liveRoot) {
+      try {
+        const comparison = await compareLive();
+        results.liveRoot = { identical: comparison.identical, compared: comparison.compared, differences: comparison.differences };
+      } catch (error) {
+        results.liveRoot = { identical: false, error: String(error?.message ?? error) };
+      }
+    }
+    if (results.liveRoot && !results.liveRoot.identical) results.verdict = "fail";
     results.finishedAt = new Date().toISOString();
     fs.mkdirSync(options.out, { recursive: true });
     fs.writeFileSync(path.join(options.out, "results.json"), JSON.stringify(results, null, 2) + "\n");
@@ -851,7 +936,8 @@ async function main() {
     else if (base) process.stdout.write(`scratch root kept: ${base}\n`);
   }
   process.stdout.write(`\nverdict: ${results.verdict}  (${steps.filter((s) => s.ok).length}/${steps.length} steps)\n`);
-  process.exit(results.verdict === "pass" ? 0 : 1);
+  process.exitCode = results.verdict === "pass" ? 0 : 1;
+  process.exit(process.exitCode);
 }
 
 main().catch((error) => {
