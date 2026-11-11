@@ -84,12 +84,20 @@ for the calling credential (no send is resolved, no counter moves, nothing is en
 | `route` | `local`, the only route in this release. |
 | `send.permitted` | Whether the owner's policy and this credential's scope allow this caller to message this exact id. It is authorization, not reachability and not a promise that the entry can receive: for the bound conversation and attached chats, whose credential scope is issued from the live ACL and so cannot yet contain a chat that was down, a chat the receiver policy allows but that has no MCP child is `true` here and says `attachment: "not-attached"` in its own fields. Any other reader (the legacy paired Claude, Grok) holds a fixed credential scope, which decides at all times. The bound Codex thread's own chat row can read `true` although that address never receives (its hint says to use the existing identity and inbox). |
 | `send.addressKinds` | The address forms that name exactly this entry: `id`, and `principal` only when the registry maps that principal to exactly this one local recipient. Empty when `permitted` is false. Whether the route is up is in `capabilities`, `attachment` and `delivery`. |
+| `send.aliases` | Owner-set names (at most eight, sorted) that name exactly this entry for this caller, present only when `permitted` is true and there are some. Use one as `to` instead of the id. A name that is also a label this caller may message, or whose principal is bound to several local recipients, is not listed. `triangle_list_recipients` passes the field on after checking it; `sessions` rows are passed through as the host sent them. |
 
 `send` accepts a listed principal in place of the id only when the registry maps it to
 exactly one local recipient. A principal bound to several local recipients is refused
 as `recipient_ambiguous`, even when the caller may message only one of them; the entry
 now says so without naming the others (`addressKinds` lacks `principal`), and the exact
-id still works. These fields exist only while principal routing is enabled: with it off
+id still works. An owner-set alias is accepted the same way, only when it appears in that
+entry's `send.aliases`: to a caller that cannot see the alias the name is an unknown id and
+fails as any unknown id does, and to one that can, a name that is also a label this caller
+may message, or whose principal is bound to several local recipients, fails as
+`alias_unresolved` (reason `alias_collides_with_label` or `ambiguous_binding`) while the
+exact id still works. `local_status` counts them (`router.resolved.alias`,
+`router.errors.alias_unresolved`, the global counters) and lists the forms this process
+resolves in `router.registry.addressForms`. These fields exist only while principal routing is enabled: with it off
 (the default) `sessions` and `discover` keep exactly their previous shapes, and so does
 the `not_permitted` delivery state, which needs `send`. An older host sends `principal`
 on `sessions` rows once routing is enabled but none of the other fields. Absence means

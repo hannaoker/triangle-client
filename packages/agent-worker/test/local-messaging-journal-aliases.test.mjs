@@ -73,9 +73,14 @@ test("a principal send and an alias send of the same principal are one intent; a
     [{ principal: null, via: "id" }, { principal: null, via: "id" }, true],
     [{ principal: null, via: null }, { principal: null, via: "id" }, true],
     [{ principal: null, via: "id" }, { principal: null, via: null }, true],
-    // an unknown marker is not an intent
+    // an unknown marker is not an intent, on either side
     [{ principal: P, via: "weird" }, { principal: P, via: "alias" }, false],
     [{ principal: P, via: null }, { principal: P, via: "alias" }, false],
+    [{ principal: P, via: "alias" }, { principal: P, via: "id" }, false],
+    [{ principal: P, via: "principal" }, { principal: P, via: "id" }, false],
+    [{ principal: P, via: "alias" }, { principal: P, via: null }, false],
+    [{ principal: P, via: "principal" }, { principal: P, via: "weird" }, false],
+    [{ principal: P, via: "id" }, { principal: P, via: "alias" }, false],
   ];
   await withJournal(async (journal) => {
     for (const [index, [stored, incoming, expected]] of cases.entries()) {

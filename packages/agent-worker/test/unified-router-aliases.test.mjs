@@ -221,6 +221,26 @@ test("a visible alias whose principal is bound to several local profiles fails a
   assert.equal(router.getCounters().resolved.id, 0);
 });
 
+test("an alias named like its own recipient's label collides as well: the label of any recipient the sender may message counts", async () => {
+  const snap = snapshot({ bindings: BINDINGS, aliases: { bob: P_BOB } });
+  const asked = [];
+  const failure = await send(routerWith({ snap, canMessage: async (sender, id) => { asked.push(id); return id === BOB; } }), "bob");
+  assert.deepEqual([failure.ok, failure.code, failure.reason], [false, "alias_unresolved", "alias_collides_with_label"]);
+  assert.deepEqual(asked, [BOB], "one question: the label's recipient is the alias's own target, which was just asked about");
+  const entry = plain(routerWith({ snap }).describeAddresses([BOB], { permitted: (id) => id === BOB }))[0];
+  assert.equal(Object.hasOwn(entry.send, "aliases"), false, "discovery does not offer the unusable name");
+});
+
+test("a send reads the registry snapshot once, whichever way the name turns out", async () => {
+  const names = ["builder", "reviewer", "charlie", "twin", "faraway", "retired", "nobody", "x".repeat(40), BOB, `session-${"7".repeat(64)}`, P_BOB, P_SHARED, P_REMOTE, `peer_${"1".repeat(32)}`];
+  for (const to of names) {
+    let reads = 0;
+    const router = routerWith({ canMessage: allow(BOB, CHARLIE, DAVE), onGet: () => { reads += 1; } });
+    await send(router, to);
+    assert.equal(reads, to.startsWith("peer_") ? 0 : 1, `${to}: ${reads} reads (a peer id is refused before the registry is touched)`);
+  }
+});
+
 test("a disabled router passes every name through untouched and reads nothing", async () => {
   let reads = 0;
   const asked = [];

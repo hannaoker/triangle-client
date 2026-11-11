@@ -1,5 +1,6 @@
-// AD.1: a Grok bot learns from the CLI's `state` whether a send was refused or its outcome is unknown. Every way the router can fail a
-// send before admitting it must be on the refused side; before aliases the list lacked the router's resolution codes.
+// AD.1: a Grok bot learns from the CLI's `state` whether a send was refused or its outcome is unknown. A resolution failure that stays
+// true until the owner changes something is on the refused side; before aliases the list lacked them. `route_unavailable` is not: it also
+// covers a registry that could not be read for a moment, and a retry of a send that was admitted meets the same resolution first.
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -31,7 +32,7 @@ function snapshot(state = "ok") {
   };
 }
 
-test("every way the router can fail a send before admitting it counts as a rejection for a Grok bot", async () => {
+test("every durable way the router can fail a send before admitting it counts as a rejection for a Grok bot; an unreadable route does not", async () => {
   const router = (snap) => createUnifiedRouter({ enabled: true, snapshotProvider: { get: () => snap }, recipients: RECIPIENTS, canMessage: async () => true });
   const codes = new Set();
   const attempts = [
@@ -48,14 +49,15 @@ test("every way the router can fail a send before admitting it counts as a rejec
     codes.add(result.code);
   }
   assert.deepEqual([...codes].sort(), ["alias_unresolved", "recipient_ambiguous", "recipient_not_found", "route_unavailable"]);
-  for (const code of codes) assert.ok(GROK_REJECTED_CODES.includes(code), code);
+  for (const code of ["alias_unresolved", "recipient_ambiguous", "recipient_not_found"]) assert.ok(GROK_REJECTED_CODES.includes(code), code);
+  assert.equal(GROK_REJECTED_CODES.includes("route_unavailable"), false, "may be a registry read that fails once: the bot keeps the ids and asks again");
 });
 
 test("the codes that were refusals before stay refusals, and an unknown or transport error is still an unknown outcome", () => {
   for (const code of ["recipient_not_allowed", "invalid_params", "invalid_request", "payload_too_large", "rate_limit_exceeded", "loop_limit_exceeded", "session_disabled", "session_offline", "generation_fenced"]) {
     assert.ok(GROK_REJECTED_CODES.includes(code), code);
   }
-  for (const code of ["send_failed", "connection_timeout", "internal_error", "unknown_error", "duplicate_id_conflict"]) {
+  for (const code of ["send_failed", "connection_timeout", "internal_error", "unknown_error", "duplicate_id_conflict", "route_unavailable"]) {
     assert.equal(GROK_REJECTED_CODES.includes(code), false, code);
   }
   assert.equal(Object.isFrozen(GROK_REJECTED_CODES), true);

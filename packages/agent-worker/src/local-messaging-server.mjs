@@ -550,10 +550,12 @@ export function createLocalControlServer({
             recipients = recipients.filter((r) => allowedSet.has(r));
           }
           const payload = { recipients };
-          // Every listed id passed the send gate above (owner policy, then credential scope), so each is permitted.
+          // Every listed id passed the send gate above (owner policy, then credential scope), so each is permitted, and every other
+          // directory id is not: alias discovery asks the gate about recipients that are not listed (those labelled like an alias).
           // Entries exist only while the router is enabled; without them the metadata is unavailable.
           try {
-            const explained = activeRouter.describeAddresses?.(recipients, { permitted: () => true });
+            const authorized = new Set(recipients);
+            const explained = activeRouter.describeAddresses?.(recipients, { permitted: (recipientId) => authorized.has(recipientId) });
             if (explained) {
               payload.entries = explained.map(({ id: rId, principal, principalState, route, send }) => ({ id: rId, principal, principalState, route, send }));
             }

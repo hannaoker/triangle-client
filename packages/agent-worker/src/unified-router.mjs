@@ -746,7 +746,9 @@ export function createUnifiedRouter({
    * @param {string[]} ids Exact addresses to explain.
    * @param {object} [options]
    * @param {(id: string) => boolean} [options.permitted] The caller's send gate for an address (owner policy and
-   *   credential scope). Without it nothing is claimed about sending and `send` is omitted.
+   *   credential scope). Without it nothing is claimed about sending and `send` is omitted. It is also asked about directory
+   *   recipients that are not in `ids` (those labelled like an alias, which decide whether the name collides), so it must
+   *   answer correctly for any directory id, not only for the ones listed.
    * @param {object} [options.snapshot]
    * @returns {ReadonlyArray<object>|null} One frozen explanation per id, in order.
    */

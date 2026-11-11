@@ -48,7 +48,8 @@ function projectEntryExplanation(entry, principal) {
     const consistent = (send.permitted ? kinds.includes("id") : kinds.length === 0) && (!kinds.includes("principal") || principal !== null);
     if (wellFormed && consistent) {
       explanation.send = { permitted: send.permitted, addressKinds: [...kinds] };
-      const aliases = projectAliases(send.aliases, send.permitted);
+      // an alias names a principal, so an entry without one has none to pass on
+      const aliases = projectAliases(send.aliases, send.permitted && principal !== null);
       if (aliases !== null) explanation.send.aliases = aliases;
     }
   }

@@ -13,7 +13,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ALIAS_PATTERN, deriveClientInstanceId } from "../src/identity-primitives.mjs";
 import { clearIdentityAlias, readIdentityRegistry, setIdentityAlias } from "../src/identity-registry.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
-import { setupLocalMessaging, setupRouter } from "../src/local-messaging-cli.mjs";
+import { setupInteractiveSession, setupLocalMessaging, setupRouter } from "../src/local-messaging-cli.mjs";
+import { setupGrok } from "../src/grok-local-session.mjs";
 import { createTurnCapabilityIssuer, createTurnCapabilityValidator } from "../src/local-messaging-credentials.mjs";
 import { coded } from "../src/local-messaging-errors.mjs";
 import { sessionAddress } from "../src/local-messaging-interactive-session.mjs";
@@ -87,6 +88,7 @@ async function withAliasWorld(options, run) {
     bound = ["bob", "charlie"],
     aliases = {},
     allowed = [BOB],
+    scope = null,
     directory = DEFAULT_DIRECTORY,
     sessionRows = () => [],
     upgrade = true,
@@ -142,7 +144,8 @@ async function withAliasWorld(options, run) {
     },
   });
   await server.start();
-  const credential = createTurnCapabilityIssuer({ secret }).issue({ senderId: SENDER });
+  // `scope`: the recipients the turn credential itself is limited to (the second half of the send gate, after the access list)
+  const credential = createTurnCapabilityIssuer({ secret }).issue({ senderId: SENDER, ...(scope ? { allowedRecipients: scope } : {}) });
   const client = createLocalControlClient({ socketPath, senderId: SENDER, turnCredential: credential });
   try {
     return await run({ client, socketPath, credential, bindings, journal, admitted, identityRoot });
@@ -179,8 +182,8 @@ test("a send by an alias the sender can see is admitted for the aliased recipien
     assert.deepEqual([record.recipient, record.to_principal, record.resolved_via], [BOB, bindings.bob.principal_id, "alias"]);
     assert.equal(JSON.stringify(record).includes("builder"), false, "the alias name is not stored: the principal is the fact");
 
-    const status = await client.getMessageStatus?.({ messageId: "m-alias" });
-    if (status) assert.deepEqual(status.target, { via: "principal", principal: bindings.bob.principal_id, profile: "bob" });
+    const status = await client.getMessageStatus({ messageId: "m-alias" });
+    assert.deepEqual(status.target, { via: "principal", principal: bindings.bob.principal_id, profile: "bob" });
 
     const router = await routerStatus({ socketPath, credential });
     assert.deepEqual([router.resolved.alias, router.resolved.id, router.errors.alias_unresolved], [1, 0, 0]);
@@ -216,12 +219,17 @@ test("a visible alias that cannot be used as it stands fails as alias_unresolved
     const details = await client.discoverRecipientDetails();
     assert.equal(Object.hasOwn(entryOf(details, BOB).send, "aliases"), false);
   });
-  // a sender that may not message the label's recipient has no collision: the alias is just usable
-  await withAliasWorld({ aliases: { charlie: "bob" }, allowed: [BOB] }, async ({ client, admitted }) => {
-    const receipt = await client.sendMessage({ to: "charlie", text: "x", messageId: "m-no-collision" });
-    assert.equal(receipt.accepted, true);
-    assert.deepEqual(admitted.map((job) => job.recipient), [BOB]);
-  });
+  // a sender that may not message the label's recipient has no collision: the alias is just usable, and discovery says so in both
+  // tools, whichever half of the send gate (the access list, or the credential's own scope) keeps that recipient out of reach
+  for (const world of [{ allowed: [BOB] }, { allowed: [BOB, CHARLIE], scope: [BOB] }]) {
+    await withAliasWorld({ aliases: { charlie: "bob" }, ...world }, async ({ client, admitted }) => {
+      const receipt = await client.sendMessage({ to: "charlie", text: "x", messageId: "m-no-collision" });
+      assert.equal(receipt.accepted, true);
+      assert.deepEqual(admitted.map((job) => job.recipient), [BOB]);
+      assert.deepEqual(entryOf(await client.discoverRecipientDetails(), BOB).send.aliases, ["charlie"], JSON.stringify(world));
+      assert.deepEqual((await client.listSessions()).find((row) => row.id === BOB).send.aliases, ["charlie"], JSON.stringify(world));
+    });
+  }
   // a principal bound to two local profiles (a legacy duplicate) is ambiguous
   await withAliasWorld({ bound: ["bob", { profile: "erin", principalOf: "bob" }], aliases: { twin: "bob" }, allowed: [BOB], directory: [...DEFAULT_DIRECTORY, { id: ERIN, label: "erin", kind: "worker" }] }, async ({ client }) => {
     assert.deepEqual(await rejection(client.sendMessage({ to: "twin", text: "x", messageId: "m-twin" })), { code: "alias_unresolved", message: "ambiguous_binding" });
@@ -257,8 +265,8 @@ test("a retry of an alias send is a duplicate, by the alias or by the principal;
     clearIdentityAlias({ root: identityRoot, expectedSequence: readIdentityRegistry({ root: identityRoot }).registry.sequence, alias: "builder" });
     await assert.rejects(client.sendMessage({ to: "builder", ...sent }), { code: "recipient_not_allowed" });
     // the message is still there to ask about
-    const status = await client.getMessageStatus?.({ messageId: "m-retry" });
-    if (status) assert.equal(status.messageId, "m-retry");
+    const status = await client.getMessageStatus({ messageId: "m-retry" });
+    assert.equal(status.messageId, "m-retry");
   });
 });
 
@@ -274,8 +282,7 @@ test("discovery lists the aliases of an entry the caller may message, in the rec
     const bob = rows.find((row) => row.id === BOB);
     assert.deepEqual(bob.send, { permitted: true, addressKinds: ["id", "principal"], aliases: ["alpha", "builder"] });
     // a recipient the caller may not message shows no alias, in either tool
-    const charlie = rows.find((row) => row.id === CHARLIE);
-    if (charlie) assert.equal(Object.hasOwn(charlie.send ?? {}, "aliases"), false);
+    assert.equal(rows.some((row) => row.id === CHARLIE && row.send?.aliases !== undefined), false);
     // the raw frames carry the same field
     const raw = await rawRpc(socketPath, { method: "discover_recipients", credential });
     assert.deepEqual(raw.entries.find((entry) => entry.id === BOB).send.aliases, ["alpha", "builder"]);
@@ -291,6 +298,16 @@ test("an alias that is set or cleared shows up in discovery as soon as the regis
     clearIdentityAlias({ root: identityRoot, expectedSequence: seq(), alias: "builder" });
     clearIdentityAlias({ root: identityRoot, expectedSequence: seq(), alias: "second" });
     assert.equal(Object.hasOwn(entryOf(await client.discoverRecipientDetails(), BOB).send, "aliases"), false);
+  });
+});
+
+test("alias names with punctuation reach the client in the order it checks, so the list is not dropped", async () => {
+  const names = ["a_b", "ab", "a-b", "b", "a9", "a.b", "a0"];
+  const sorted = ["a-b", "a.b", "a0", "a9", "a_b", "ab", "b"]; // by code unit; a locale order would put a_b first and the client would drop the list
+  await withAliasWorld({ aliases: Object.fromEntries(names.map((name) => [name, "bob"])), allowed: [BOB] }, async ({ client, socketPath, credential }) => {
+    assert.deepEqual(entryOf(await client.discoverRecipientDetails(), BOB).send.aliases, sorted);
+    assert.deepEqual((await client.listSessions()).find((row) => row.id === BOB).send.aliases, sorted);
+    assert.deepEqual((await rawRpc(socketPath, { method: "discover_recipients", credential })).entries.find((entry) => entry.id === BOB).send.aliases, sorted);
   });
 });
 
@@ -319,11 +336,11 @@ test("a client from before aliases (62b75c1) keeps its whole send explanation wh
 });
 
 // ---- the client's projection ----------------------------------------------------------------------------------------------------------
-async function viaFakeHost(entrySend, run) {
+async function viaFakeHost(entrySend, run, entryOverrides = {}) {
   const dir = privateTmp("tri-alias-fake-");
   const socketPath = path.join(dir, "host.sock");
   const principal = `agent_${"1".repeat(32)}`;
-  const payload = { recipients: [BOB], entries: [{ id: BOB, principal, principalState: "bound", route: "local", send: entrySend }] };
+  const payload = { recipients: [BOB], entries: [{ id: BOB, principal, principalState: "bound", route: "local", send: entrySend, ...entryOverrides }] };
   const server = net.createServer((socket) => {
     const parser = createMessageParser({
       onMessage: (message) => socket.write(encodeFrame({ protocol_version: PROTOCOL_VERSION, id: message.id, result: payload })),
@@ -363,6 +380,9 @@ test("the client passes on a well-formed alias list for a permitted entry, and d
   }
   // an entry the caller may not message carries no alias, whatever the host says
   assert.deepEqual(await projected({ permitted: false, addressKinds: [], aliases: ["alpha"] }), { permitted: false, addressKinds: [] });
+  // an alias names a principal: an entry that has none keeps no alias list, whatever the host says
+  const unbound = await viaFakeHost({ permitted: true, addressKinds: ["id"], aliases: ["alpha"] }, (client) => client.discoverRecipientDetails(), { principal: null, principalState: "unbound" });
+  assert.deepEqual(unbound.entries[0].send, { permitted: true, addressKinds: ["id"] });
   // an address kind this client does not know still drops the whole explanation, which is why aliases are not a kind
   assert.equal(Object.hasOwn((await viaFakeHost({ permitted: true, addressKinds: ["id", "alias"], aliases: ["alpha"] }, (client) => client.discoverRecipientDetails())).entries[0], "send"), false);
 });
@@ -456,8 +476,12 @@ test("no id this host mints is shaped like an alias", () => {
     setupLocalMessaging({ config: configPath, "desktop-binding": bindingPath, "thread-id": "new-thread", recipients: ["gravity2"] });
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     const integration = JSON.parse(fs.readFileSync(config.integrationPath, "utf8"));
+    const interactive = setupInteractiveSession({ configPath, stateRoot: path.join(dir, "local") });
+    const grok = setupGrok({ alias: "researcher", senders: [], recipients: [] }, configPath, {});
     const minted = {
       "the desktop integration's sender id": integration.senderId,
+      "the interactive Claude conversation's sender id": interactive.senderId,
+      "a Grok conversation's sender id": grok.senderId,
       "a configured recipient's instance id": config.recipients[0].instanceId,
       "a profile instance id": deriveClientInstanceId("gravity2"),
       "a chat's session address": sessionAddress("a".repeat(32), "/workspace", "chat-1"),

@@ -55,6 +55,14 @@ test("alias names are sorted by code unit, not in the order a JavaScript object 
   });
 });
 
+test("alias names with punctuation are ordered by code unit too, which is the order the client checks", () => {
+  withRoot((root) => {
+    for (const name of ["a_b", "ab", "a-b", "b", "a9", "a.b", "a0"]) setAlias(root, name, GRAVITY);
+    const snapshot = createRegistrySnapshotProvider({ root }).get();
+    assert.deepEqual([...snapshot.aliasesFor(GRAVITY)], ["a-b", "a.b", "a0", "a9", "a_b", "ab", "b"], "'-' < '.' < digits < '_' < letters; a locale order would put a_b first");
+  });
+});
+
 test("a v1 registry has no aliases, and neither has an absent or unreadable one", () => {
   withRoot((root) => {
     const snapshot = createRegistrySnapshotProvider({ root }).get();
