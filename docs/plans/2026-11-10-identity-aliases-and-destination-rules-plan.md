@@ -1,6 +1,6 @@
 # Identity aliases and destination rules (AD): implementation plan
 
-Status: plan, 2026-11-10, revised the same day after an independent model review (not a human or Codex review; section 12). No code. The eight owner decisions (AD-1 to AD-8, section 10) are proposals with a recommended option; none is settled. Written by Claude Code. It turns the first two items of "After D1" in `2026-11-07-identity-registry-v2-d1-plan.md` (section 11) into buildable pieces: owner-set aliases (U3 3.D.2, interface design 4.2) and the destination rule (U3 3.F.3, interface design 4.5). It authorizes no code, install, alias, destination rule, `peer_` id, pairing or inbound path; every production step stays behind the gates in section 6. Baseline: client main `62b75c1` (PR #170). Every claim about shipped behavior cites source at that baseline; paths are under `packages/agent-worker/src/` unless they start with `docs/`, `test/`, `packages/` or `scripts/`.
+Status: plan, 2026-11-10, revised the same day after an independent model review (not a human or Codex review; section 12). No code. All eight owner decisions (AD-1 to AD-8) were settled the same day at the recommended options (section 10); the plan as a whole still awaits the owner's go-ahead to start building. Written by Claude Code. It turns the first two items of "After D1" in `2026-11-07-identity-registry-v2-d1-plan.md` (section 11) into buildable pieces: owner-set aliases (U3 3.D.2, interface design 4.2) and the destination rule (U3 3.F.3, interface design 4.5). It authorizes no code, install, alias, destination rule, `peer_` id, pairing or inbound path; every production step stays behind the gates in section 6. Baseline: client main `62b75c1` (PR #170). Every claim about shipped behavior cites source at that baseline; paths are under `packages/agent-worker/src/` unless they start with `docs/`, `test/`, `packages/` or `scripts/`.
 
 ## 1. What AD is
 
@@ -12,7 +12,7 @@ D1 froze the shapes: the v2 registry already holds an `aliases` map and a `desti
 | An `alias` address form in the router that a sender sees only if it may message one of the alias's recipients; for every other sender the name behaves exactly as it does today | `peer_` ids, pairing, a pairing's `petname` (a different field), MESH handles, anything that crosses a transport |
 | Discovery of usable alias names (`send.aliases`), a journal marker, counters | New approval kinds in the Swift provider (only if AD-2 chooses OS authentication) |
 | `triangle identity alias set\|clear` (plan first, apply with the plan id and a terminal) and alias rows in `status`/`doctor` | Any change to the owner ACL, class grants or session policy: an alias never grants a send |
-| The destination-rule writer, command and view, **designed here but deferred by recommendation** (AD-1, section 4) | Per-sender alias maps (they need a new schema version) |
+| The destination-rule writer, command and view, **designed here but deferred** (AD-1 A, section 4) | Per-sender alias maps (they need a new schema version) |
 
 ## 2. Starting point (checked)
 
@@ -209,16 +209,21 @@ Each piece is its own PR. AD.0 starts with the small shared change to `identity-
 
 ## 10. Owner decisions
 
-**Decision log.** None yet. These are proposals, not authorization to build or install; AD.0 starts on a separate go-ahead and every production step stays behind the gates of section 6.
+**Decision log**
 
-1. **AD-1 Scope.** **A (recommended):** aliases now (AD.0 to AD.4); the destination-rule writer, command and view with the inbound slice (4.1). **B:** build both now; the rule is inert until inbound exists.
-2. **AD-2 Gate for alias set and clear.** **A (recommended):** terminal plus plan id (D5-B), as for `identity migrate` and `upgrade-registry`, taken as a new exception to the settled U3 D5-C in the way D1-6 was for the upgrade: an alias grants no send and moves no authority. The cost is risk 1. **B:** OS authentication, consistent with D5-C, which needs new action kinds in `owner-approval.mjs` and the Swift provider, a helper rebuild and the owner's live prompt acceptance.
-3. **AD-3 What a sender learns.** **A (recommended):** an alias is visible only to a sender that may message one of its recipients; everyone else gets today's answer; the specific `alias_unresolved` reasons go to senders that can see the alias; no candidate list on the wire (a deviation from interface design 4.2, 3.3). **B:** as A, plus the authorized candidates in a new error field through the protocol, client, MCP adapters and CLIs. **C:** distinct codes for unknown, not allowed and ambiguous: simplest, and it tells any local sender which owner-chosen names exist.
-4. **AD-4 Names.** **A (recommended):** the lowercase pattern; the writer refuses `claude` and the look-alikes of 3.6; set time refuses a name equal, ignoring case, to a profile name in the client configuration; resolve time compares exactly. **B:** the pattern only, with resolve-time checks.
-5. **AD-5 Changing a target.** **A (recommended):** create only; `clear` then `set`. **B:** an in-place change with the plan showing the old and new target.
-6. **AD-6 Targets.** **A (recommended):** the principal of an active `mesh-managed` binding whose profile is a local recipient now. **B:** any principal the validator accepts (revoked, not local, or a paired remote one once pairing exists).
-7. **AD-7 Discovery.** **A (recommended):** `send.aliases`, up to 8 names per entry the caller may message, `addressKinds` unchanged. **B:** no names in discovery; `status --identity` only.
-8. **AD-8 Revoke and aliases.** **A (recommended):** no cascade; the view flags `dangling` and `moved`. **B:** `identity revoke` also clears the profile's aliases, so the revoke adapter and the writer's revoke check change two collections.
+- 2026-11-10, AD-1 to AD-8: the owner accepted the recommended option, A, on all eight ("Accept all" in chat), after the independent review of this plan. Together: aliases now and the destination rule with the inbound slice; a terminal plus plan id for alias writes, taken as a new exception to the settled U3 D5-C; an alias visible only to a sender that may message one of its recipients, today's answer for everyone else, and no candidate list on the wire; lowercase names with reserved words and look-alikes refused and profile names refused at set time; create-only aliases; targets that are active local `mesh-managed` principals; `send.aliases` in discovery; no cascade on revoke.
+- These are design decisions, not authorization to build or install. AD.0 starts on a separate go-ahead and every production step stays behind the gates of section 6.
+
+Options as proposed, with the chosen one marked:
+
+1. **AD-1 Scope.** **A (chosen):** aliases now (AD.0 to AD.4); the destination-rule writer, command and view with the inbound slice (4.1). **B:** build both now; the rule is inert until inbound exists.
+2. **AD-2 Gate for alias set and clear.** **A (chosen):** terminal plus plan id (D5-B), as for `identity migrate` and `upgrade-registry`, taken as a new exception to the settled U3 D5-C in the way D1-6 was for the upgrade: an alias grants no send and moves no authority. The cost is risk 1. **B:** OS authentication, consistent with D5-C, which needs new action kinds in `owner-approval.mjs` and the Swift provider, a helper rebuild and the owner's live prompt acceptance.
+3. **AD-3 What a sender learns.** **A (chosen):** an alias is visible only to a sender that may message one of its recipients; everyone else gets today's answer; the specific `alias_unresolved` reasons go to senders that can see the alias; no candidate list on the wire (a deviation from interface design 4.2, 3.3). **B:** as A, plus the authorized candidates in a new error field through the protocol, client, MCP adapters and CLIs. **C:** distinct codes for unknown, not allowed and ambiguous: simplest, and it tells any local sender which owner-chosen names exist.
+4. **AD-4 Names.** **A (chosen):** the lowercase pattern; the writer refuses `claude` and the look-alikes of 3.6; set time refuses a name equal, ignoring case, to a profile name in the client configuration; resolve time compares exactly. **B:** the pattern only, with resolve-time checks.
+5. **AD-5 Changing a target.** **A (chosen):** create only; `clear` then `set`. **B:** an in-place change with the plan showing the old and new target.
+6. **AD-6 Targets.** **A (chosen):** the principal of an active `mesh-managed` binding whose profile is a local recipient now. **B:** any principal the validator accepts (revoked, not local, or a paired remote one once pairing exists).
+7. **AD-7 Discovery.** **A (chosen):** `send.aliases`, up to 8 names per entry the caller may message, `addressKinds` unchanged. **B:** no names in discovery; `status --identity` only.
+8. **AD-8 Revoke and aliases.** **A (chosen):** no cascade; the view flags `dangling` and `moved`. **B:** `identity revoke` also clears the profile's aliases, so the revoke adapter and the writer's revoke check change two collections.
 
 ## 11. After AD
 
