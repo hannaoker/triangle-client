@@ -109,6 +109,19 @@ An alias send is journalled with `to_principal` = the resolved principal and `re
 - `status --identity` and `doctor` list alias rows (name, principal, profile, state): `active`; `dangling` (the principal has no active binding); `unroutable` (an active binding whose profile is not a local recipient); `moved` (the principal's active binding is on a different profile than its revoked one); `collides` (a directory label equals the name); `ambiguous`. `doctor` warns on every state except `active`. The view stays `identity_view_v1` and gains rows, as it did for serverless bindings (D1 plan 3.6).
 - The owner CLI keeps mapping a profile name, then `agent_`, `claude`, `session-` and Grok ids first, and passes an alias-shaped name that none of those claims through to the server, after `local-messaging-cli.mjs:680` and before the refusal at `:681`. A profile added after an alias of the same name wins on the owner CLI (documented, first match) while the server answers `alias_unresolved` to a sender that can see the alias; that asymmetry is why `doctor` flags `collides`.
 
+### 3.8 Refinements made while building AD.0
+
+Details the plan left open, now fixed in code and tests (`identity-registry.mjs`, `identity-primitives.mjs`, `test/identity-registry-aliases.test.mjs`, `test/identity-registry-aliases-old-readers.test.mjs`):
+
+- **Entry points.** `setIdentityAlias` and `clearIdentityAlias` wrap `updateIdentityRegistry`: they fix `now` once and use `expectedSequence + 1` as the generation. The generic writer insists on the same two values, so no caller can choose `set_at` or `generation`.
+- **Shared pieces.** `ALIAS_PATTERN` and `isReservedAliasName` live in `identity-primitives.mjs`; the registry module imports them from there, and AD.1's resolver and router can use them without importing the registry module.
+- **Refusals, in the order they happen.** Before the lock: `invalid_audit_subject` (a name outside the pattern, or an instance id given to an alias action), `subject_required_for_action`, `alias_name_reserved` (`alias_set` only). Inside the lock and before the sequence check: `registry_absent`, and `action_not_available` for a stored v1 registry. Then the registry validator's own reasons (`alias_target_unknown`, `invalid_alias_principal`, `too_many_aliases`, the shape reasons), then the action check: `alias_conflict` / `alias_exists`, `alias_not_found`, `alias_target_not_active`, `mutation_does_not_match_action`.
+- **Clear is not held to the reserved names**, so an alias that already has one (the reader accepts it) can be removed.
+- **Names that are properties of `Object.prototype`** (`constructor`) are ordinary names; existence is an own-property test.
+- **Today's code and aliases.** The `62b75c1` reader reads a registry with aliases and keeps them, its router treats an alias-shaped `to` as an exact id that nothing routes, and its writer still binds and revokes in such a registry and leaves the aliases alone while refusing the alias actions (`action_not_available`). So a supervisor rolled back to that bundle needs no registry change.
+- **One existing test changed:** the reserved-names list in `identity-registry-v2-writer.test.mjs` no longer holds the alias actions.
+- **The new tests were mutation-checked** on a scratch copy: twelve deliberate defects in the new code (create-only, the time and generation rule, the target rule, own-property tests, the v1 and absent refusals, the reserved names, the subject shape, the other-collections rule, the other-aliases rule, the wrapper's generation, the not-found rule) were each caught.
+
 ## 4. Destination rules
 
 ### 4.1 Why they wait (AD-1 A)

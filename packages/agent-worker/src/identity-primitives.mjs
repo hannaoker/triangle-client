@@ -9,6 +9,23 @@ export const PEER_ID_PATTERN = /^peer_[a-f0-9]{32}$/;
 export const INSTANCE_ID_PATTERN = /^[a-f0-9]{64}$/;
 export const SESSION_ID_PATTERN = /^session-[a-f0-9]{64}$/;
 
+// Alias names (docs/plans/2026-11-10-identity-aliases-and-destination-rules-plan.md, 3.1 and 3.6). The shape is the registry's
+// closed pattern: at most 32 characters of [a-z0-9._-]. That is shorter than any id the host mints, so no instance id, session
+// address, agent_ or peer_ id can match it, and the resolver and router can tell an alias-shaped string from an id without
+// importing the registry module.
+export const ALIAS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
+// What a writer refuses as the name of a NEW alias, on top of the shape: the owner CLI's local mapping `claude`, and look-alikes of
+// the id forms the resolver and the registry use (they would reach the alias path because only full ids are recognized as ids).
+// The reader accepts such names, so an alias that already exists under one can still be cleared.
+const RESERVED_ALIAS_WORDS = new Set(["claude"]);
+const RESERVED_ALIAS_PREFIXES = ["agent_", "peer_", "session-", "bind_", "pair_"];
+
+export function isReservedAliasName(value) {
+  return typeof value === "string"
+    && (RESERVED_ALIAS_WORDS.has(value) || RESERVED_ALIAS_PREFIXES.some((prefix) => value.startsWith(prefix)));
+}
+
 const PROFILE_MAX_UTF8_BYTES = 64;
 // Swift `CharacterSet.controlCharacters` is Unicode general categories Cc + Cf.
 const PROFILE_CONTROL_CHARACTER = /[\p{Cc}\p{Cf}]/u;
