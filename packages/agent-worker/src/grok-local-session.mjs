@@ -11,6 +11,9 @@ import {coded} from './local-messaging-errors.mjs';
 import {privateDir,privateFile} from './delivery-private-path.mjs';
 
 const ALIAS = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$/;
+// Answers of the server that mean a send was NOT admitted, so the bot can tell a refusal from an unknown outcome. The router's resolution
+// failures (an unknown or unroutable principal, an ambiguous one, an unresolved alias) happen before anything is admitted.
+export const GROK_REJECTED_CODES = Object.freeze(['recipient_not_allowed','recipient_not_found','route_unavailable','recipient_ambiguous','alias_unresolved','invalid_params','invalid_request','payload_too_large','rate_limit_exceeded','loop_limit_exceeded','session_disabled','session_offline','generation_fenced']);
 const ADDRESS = /^(session-)?[a-f0-9]{64}$/;
 const KEYS = ['version','type','alias','contextHash','senderId','sessionId','generation','bindingId','secret','enabled','revoked','allowedSenders','allowedRecipients'];
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -250,7 +253,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
       if (!options['message-id'] || !options['request-id'] || !options.to) throw coded('invalid_arguments','Exact to, stable message-id and request-id required');
       const text=await messageText();
       try {result=await client.sendMessage({to:options.to,text,messageId:options['message-id'],requestId:options['request-id']},rpc);}
-      catch(error){const rejected=['recipient_not_allowed','invalid_params','invalid_request','payload_too_large','rate_limit_exceeded','loop_limit_exceeded','session_disabled','session_offline','generation_fenced'].includes(error.code);output.write(JSON.stringify({messageId:options['message-id'],requestId:options['request-id'],state:rejected?'rejected':'send_outcome_unknown',error:error.code||'send_failed'})+'\n');return 1;}
+      catch(error){const rejected=GROK_REJECTED_CODES.includes(error.code);output.write(JSON.stringify({messageId:options['message-id'],requestId:options['request-id'],state:rejected?'rejected':'send_outcome_unknown',error:error.code||'send_failed'})+'\n');return 1;}
     }
     if (operation==='claim') {
       if (!options['message-id'] || !options['claim-id'] || !options['claim-file']) throw coded('invalid_arguments','Stable message-id, claim-id and private claim-file required');

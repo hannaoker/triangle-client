@@ -15,6 +15,8 @@ import {readSessionMessagingPolicy,validateInteractiveIntegration,CLASS_GRANT_DI
 import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
 import {setupGrok,disableGrok,runGrokCommand} from './grok-local-session.mjs';
+// An owner-set alias (AD.1): the same shape as ALIAS_PATTERN in identity-primitives.mjs, kept inline so this CLI needs no other module (a test pins the two together).
+const ALIAS_NAME_PATTERN=/^[a-z0-9][a-z0-9._-]{0,31}$/;
 
 export function defaultLocalConfigPath(env=process.env){return path.join(env.HOME||os.homedir(),'Library/Application Support/The Triangle/client/local-messaging.json');}
 function parse(argv){
@@ -678,6 +680,9 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
     if(sessions.some(row=>row.id===options.to&&row.capabilities?.reachable===true))to=options.to;
    }
    if(!to&&config.grok?.enabled){const sessions=await client.listSessions(rpcOptions);if(sessions.some(row=>row.id===options.to&&row.harness==='grok'&&row.capabilities?.queueable))to=options.to;}
+   // An owner-set alias is used only if discovery lists it for this sender (the check the session and Grok forms above make); the server then resolves it.
+   // Any other alias-shaped name is refused below as it always was, without a round trip and without the 'outcome unknown' of a server error.
+   if(!to&&ALIAS_NAME_PATTERN.test(options.to||'')){const details=await client.discoverRecipientDetails(rpcOptions);if(details.entries?.some(entry=>entry.send?.aliases?.includes(options.to)))to=options.to;}
    if(!to)throw coded('recipient_not_allowed','Choose an explicitly authorized reachable recipient');
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;

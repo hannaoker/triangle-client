@@ -745,7 +745,7 @@ export function createLocalControlServer({
             };
             const duplicateResolution = record.isDuplicate
               ? {
-                  resolved: record.resolved_via === "principal",
+                  resolved: record.resolved_via === "principal" || record.resolved_via === "alias",
                   via: record.resolved_via,
                   principal: record.to_principal,
                   resolvedTo: record.recipient,

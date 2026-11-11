@@ -12,14 +12,20 @@
  * - canMessage: async function(senderId, candidateRecipientId)
  */
 
-import { AGENT_ID_PATTERN } from "./identity-primitives.mjs";
+import { AGENT_ID_PATTERN, ALIAS_PATTERN } from "./identity-primitives.mjs";
 import { SUPPORTED_REGISTRY_SCHEMAS } from "./router-registry-snapshot.mjs";
-import { resolveRecipient } from "./recipient-resolver.mjs";
+import { decideAlias, findAliasTargets, resolveAliasFor, resolveRecipient } from "./recipient-resolver.mjs";
 import { localState } from "./transport-adapter-contract.mjs";
 import { LocalMessagingError } from "./local-messaging-errors.mjs";
 
 const PEER_ID_PATTERN = /^peer_[a-f0-9]{32}$/;
 const RAW_JOURNAL_FIELDS = Object.freeze(["to_principal", "resolved_via"]);
+// Discovery names at most this many aliases per entry; the full list is for the owner (`status --identity`).
+const MAX_ALIAS_NAMES_PER_ENTRY = 8;
+// The address forms this process resolves, for `local_status`. Exact ids always pass; principals and aliases resolve only while the
+// router is enabled. A supervisor from before aliases omits the field, which reads as "no alias form".
+const ADDRESS_FORMS_ENABLED = Object.freeze(["alias", "id", "principal"]);
+const ADDRESS_FORMS_DISABLED = Object.freeze(["id"]);
 
 /**
  * Error thrown when recipient resolution fails.
@@ -184,11 +190,13 @@ export function createUnifiedRouter({
     resolved: {
       principal: 0,
       id: 0,
+      alias: 0,
     },
     errors: {
       recipient_not_found: 0,
       route_unavailable: 0,
       recipient_ambiguous: 0,
+      alias_unresolved: 0,
     },
   };
 
@@ -239,26 +247,82 @@ export function createUnifiedRouter({
     const isAgent = AGENT_ID_PATTERN.test(to);
     const isPeer = PEER_ID_PATTERN.test(to);
 
-    // 2. Non-principal legacy identifier: passes through with via: "id"
+    // 2. Non-principal identifier. The registry is read once for this call, and an unreadable registry is "no snapshot": legacy
+    // delivery must not fail even if the registry is unreadable or absent.
     if (!isAgent && !isPeer) {
+      let passSnapshot = null;
+      if (snapshotProvider && typeof snapshotProvider.get === "function") {
+        try {
+          passSnapshot = callOptions.snapshot ?? snapshotProvider.get();
+        } catch {
+          // Ignore registry errors for legacy delivery
+          passSnapshot = null;
+        }
+      }
+
+      // 2a. An owner-set alias that this sender can see (AD.1; recipient-resolver.mjs says what "see" means). For anyone else
+      // the name falls through to 2b and is treated exactly as an unknown name is, so nothing about which aliases exist shows.
+      if (ALIAS_PATTERN.test(to)) {
+        const found = findAliasTargets({ name: to, recipients: effectiveRecipients, snapshot: passSnapshot });
+        if (found !== null) {
+          const permittedIds = new Set();
+          for (const target of found.targets) {
+            if (await evaluateCanMessage(effectiveCanMessage, senderId, target.id)) permittedIds.add(target.id);
+          }
+          if (permittedIds.size > 0) {
+            for (const match of found.labelMatches) {
+              if (!permittedIds.has(match.id) && (await evaluateCanMessage(effectiveCanMessage, senderId, match.id))) {
+                permittedIds.add(match.id);
+              }
+            }
+            const decision = decideAlias(found, permittedIds);
+            if (decision.kind === "resolved") {
+              counters.resolved.alias += 1;
+              return Object.freeze({
+                ok: true,
+                resolvedTo: decision.recipientId,
+                to,
+                resolved: true,
+                via: "alias",
+                principal: decision.principalId,
+                profile: decision.profile,
+                bindingId: decision.bindingId,
+                route: "local",
+              });
+            }
+            if (decision.kind === "error") {
+              recordError(decision.code);
+              const err = new RouterResolutionError(decision.code, decision.reason);
+              if (throwOnError) {
+                throw err;
+              }
+              return Object.freeze({
+                ok: false,
+                code: decision.code,
+                reason: decision.reason,
+                candidates: Object.freeze([]),
+                error: err,
+              });
+            }
+          }
+        }
+      }
+
+      // 2b. Everything else passes through with via: "id".
       counters.resolved.id += 1;
 
       let boundPrincipal = null;
       let boundProfile = null;
 
-      // Legacy delivery must not fail even if registry is unreadable or absent.
-      if (snapshotProvider && typeof snapshotProvider.get === "function") {
-        try {
-          const snapshot = callOptions.snapshot ?? snapshotProvider.get();
-          if (snapshot?.state === "ok") {
-            const binding = snapshot.bindingForInstance(to);
-            if (binding?.principal_id) {
-              boundPrincipal = binding.principal_id;
-            }
+      try {
+        if (passSnapshot?.state === "ok") {
+          const binding = passSnapshot.bindingForInstance(to);
+          if (binding?.principal_id) {
+            boundPrincipal = binding.principal_id;
           }
-        } catch {
-          // Ignore registry errors for legacy delivery
         }
+      } catch {
+        // Ignore registry errors for legacy delivery
       }
 
       for (const r of effectiveRecipients) {
@@ -425,9 +489,10 @@ export function createUnifiedRouter({
     const state = localState(phase);
 
     let target;
+    // An alias send is reported as the principal it resolved to: the public target has no third form (projectTarget).
     const isPrincipal = options.record
-      ? (options.record.resolved_via === "principal" || Boolean(options.record.to_principal))
-      : (options.resolution?.via === "principal");
+      ? (options.record.resolved_via === "principal" || options.record.resolved_via === "alias" || Boolean(options.record.to_principal))
+      : (options.resolution?.via === "principal" || options.resolution?.via === "alias");
 
     if (options.target !== undefined) {
       target = projectTarget(options.target);
@@ -508,7 +573,9 @@ export function createUnifiedRouter({
       target = projectTarget(options.target);
     } else if (
       options.resolution?.via === "principal" ||
+      options.resolution?.via === "alias" ||
       options.record?.resolved_via === "principal" ||
+      options.record?.resolved_via === "alias" ||
       Boolean(options.record?.to_principal)
     ) {
       const recipientId = options.resolution?.resolvedTo || options.record?.recipient;
@@ -710,6 +777,38 @@ export function createUnifiedRouter({
       }
     };
 
+    // The owner-set aliases a send by this caller would resolve to exactly this recipient (AD.1): by the same decision a send
+    // makes (recipient-resolver.mjs), so a name is listed only if it is visible to the caller, does not collide with a label the
+    // caller can see and is not shared with another recipient. Sorted (the snapshot sorts them) and bounded.
+    const aliasNamesFor = (principal, id) => {
+      if (typeof snapshot?.aliasesFor !== "function") return [];
+      let names;
+      try {
+        names = snapshot.aliasesFor(principal);
+      } catch {
+        return [];
+      }
+      const mayMessage = (candidate) => {
+        try {
+          return permitted(candidate) === true;
+        } catch {
+          return false;
+        }
+      };
+      const listed = [];
+      for (const name of names) {
+        let decision;
+        try {
+          decision = resolveAliasFor({ name, recipients: directory, snapshot, permitted: mayMessage });
+        } catch {
+          continue;
+        }
+        if (decision.kind === "resolved" && decision.recipientId === id) listed.push(name);
+        if (listed.length >= MAX_ALIAS_NAMES_PER_ENTRY) break;
+      }
+      return listed;
+    };
+
     return Object.freeze(
       ids.map((id) => {
         const { principal, state } = lookupPrincipal(snapshot, id);
@@ -722,11 +821,19 @@ export function createUnifiedRouter({
             allowed = false;
           }
           const kinds = [];
+          let aliases = [];
           if (allowed) {
             kinds.push("id");
             if (principal !== null && principalNamesOnly(principal, id)) kinds.push("principal");
+            if (principal !== null) aliases = aliasNamesFor(principal, id);
           }
-          explanation.send = Object.freeze({ permitted: allowed, addressKinds: Object.freeze(kinds) });
+          // `addressKinds` stays within id and principal: a client from before aliases drops a whole explanation that names another
+          // kind, so the alias names travel in their own field, which such a client simply does not pass on.
+          explanation.send = Object.freeze({
+            permitted: allowed,
+            addressKinds: Object.freeze(kinds),
+            ...(aliases.length > 0 ? { aliases: Object.freeze(aliases) } : {}),
+          });
         }
         return Object.freeze(explanation);
       })
@@ -790,10 +897,12 @@ export function createUnifiedRouter({
           sequence: 0,
           schema: null,
           supportedSchemas: SUPPORTED_REGISTRY_SCHEMAS,
+          addressForms: ADDRESS_FORMS_DISABLED,
         }),
         resolved: Object.freeze({
           principal: counters.resolved.principal,
           id: counters.resolved.id,
+          alias: counters.resolved.alias,
         }),
         errors: Object.freeze({ ...counters.errors }),
       });
@@ -827,10 +936,12 @@ export function createUnifiedRouter({
         sequence,
         schema,
         supportedSchemas: SUPPORTED_REGISTRY_SCHEMAS,
+        addressForms: ADDRESS_FORMS_ENABLED,
       }),
       resolved: Object.freeze({
         principal: counters.resolved.principal,
         id: counters.resolved.id,
+        alias: counters.resolved.alias,
       }),
       errors: Object.freeze({ ...counters.errors }),
     });
@@ -846,6 +957,7 @@ export function createUnifiedRouter({
   function resetCounters() {
     counters.resolved.principal = 0;
     counters.resolved.id = 0;
+    counters.resolved.alias = 0;
     for (const key of Object.keys(counters.errors)) {
       counters.errors[key] = 0;
     }
