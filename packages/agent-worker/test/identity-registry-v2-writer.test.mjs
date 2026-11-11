@@ -82,7 +82,7 @@ function bindOn(root, binding, { expectedSequence, now = T2 } = {}) {
   });
 }
 
-// A v2 root that also holds records the writer cannot create yet: a serverless binding, a pairing, an alias, a destination.
+// A v2 root that also holds records the writer cannot create (a serverless binding, a pairing, a destination) and an alias placed by hand.
 function withSeededV2Root(fn) {
   return withV2Root((root) => {
     const peer = peerBindingV2("peerprof");

@@ -2375,6 +2375,15 @@ export function updateIdentityRegistry({
   }
   const nowIso = resolveNowIso(now, "invalid_registry");
 
+  // An alias action on a root that does not exist is refused before anything is created. A root that exists but holds no registry
+  // is refused under the lock below, as the other actions would find it.
+  if (aliasAction) {
+    assertRootPathSyntax(root);
+    if (lstatSync(root, { throwIfNoEntry: false }) === undefined) {
+      throw codedError("invalid_registry", "registry_absent");
+    }
+  }
+
   ensureSafeRootForWrite(root);
 
   return withRegistryLock(root, lockTimeoutMs, () => {
@@ -2550,7 +2559,11 @@ export function updateIdentityRegistry({
 // once, so the record's `set_at` is the audit entry's time, and use `expectedSequence + 1` as the generation, the sequence the
 // entry commits at. `updateIdentityRegistry` insists on both, so a caller of the generic writer cannot choose either.
 
-/** Creates the alias `alias` for `principalId`. Refused if the name exists (clear it first) or the target is not an active mesh-managed principal. */
+/**
+ * Creates the alias `alias` for `principalId`. Refused if the name exists (clear it first) or the target is not an active
+ * mesh-managed principal of this registry. The checks that need the client configuration, which the registry does not hold (a name
+ * equal to a profile name, a target whose profile is a local recipient), belong to the `identity alias` command (AD.2), not here.
+ */
 export function setIdentityAlias({
   root,
   expectedSequence,

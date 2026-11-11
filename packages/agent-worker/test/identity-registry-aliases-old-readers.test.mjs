@@ -28,14 +28,15 @@ const RECIPIENTS = [{ id: GRAVITY_ID, label: "gravity2" }];
 async function loadFrozenRuntime(t) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "frozen-d1-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Only a missing commit skips the test; a failure to extract it is a failure.
   try {
     execFileSync("git", ["cat-file", "-e", `${BASELINE_COMMIT}^{commit}`], { cwd: REPO_ROOT, stdio: "ignore" });
-    const tarball = execFileSync("git", ["archive", "--format=tar", BASELINE_COMMIT, SRC], { cwd: REPO_ROOT, maxBuffer: 256 * 1024 * 1024 });
-    execFileSync("tar", ["-x", "-C", dir], { input: tarball });
   } catch {
     t.skip(`git history for ${BASELINE_COMMIT} is not available here`);
     return null;
   }
+  const tarball = execFileSync("git", ["archive", "--format=tar", BASELINE_COMMIT, SRC], { cwd: REPO_ROOT, maxBuffer: 256 * 1024 * 1024 });
+  execFileSync("tar", ["-x", "-C", dir], { input: tarball });
   const url = (name) => pathToFileURL(path.join(dir, SRC, name)).href;
   return {
     registry: await import(url("identity-registry.mjs")),
@@ -74,7 +75,7 @@ test("today's reader reads a registry with aliases, keeps them, and verifies the
   });
 });
 
-test("today's router ignores aliases: the name is an exact id that nothing routes, and principal and exact-id sends are unchanged", async (t) => {
+test("today's router ignores aliases: the name stays an exact id, which the server's ACL and not the registry decides, and principal and exact-id sends are unchanged", async (t) => {
   const frozen = await loadFrozenRuntime(t);
   if (!frozen) return;
   await withAliasedRoot(async (root) => {

@@ -4,13 +4,15 @@
 // repeats, and `set_at` is the entry's own time.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 
 import { ALIAS_PATTERN, deriveClientInstanceId, isReservedAliasName } from "../src/identity-primitives.mjs";
 import {
+  AUDIT_FILE_NAME,
   canonicalJson,
   clearIdentityAlias,
   MAX_REGISTRY_ALIASES,
@@ -22,6 +24,7 @@ import {
   agentBindingV1,
   agentBindingV2,
   appendAndCommit,
+  auditEntry,
   auditLines,
   hex32,
   hex64,
@@ -82,6 +85,27 @@ function rawWrite(root, action, subject, mutate, { now = T3, expectedSequence } 
   return updateIdentityRegistry({ root, expectedSequence: expectedSequence ?? seqOf(root), now, action, subject, mutate });
 }
 
+// A v2 root that also holds records the writer cannot create (a serverless binding with a pairing) and two aliases.
+function withSeededRoot(fn) {
+  return withV2Root((root) => {
+    const peer = peerBindingV2("peerprof");
+    const pair = pairing(1, peer.principal_id);
+    appendAndCommit(root, {
+      action: "bind",
+      subject: peer.profile_instance_id,
+      bindingId: peer.binding_id,
+      change: (r) => ({
+        ...r,
+        bindings: { ...r.bindings, [peer.profile_instance_id]: peer },
+        pairings: { [pair.pairing_id]: pair },
+      }),
+    });
+    setOn(root, "builder", GRAVITY, { now: T2 });
+    setOn(root, "other", GHOST, { now: T2 });
+    return fn(root, { peer, pair });
+  });
+}
+
 // ---- names ---------------------------------------------------------------------------------------------------------------
 test("the alias pattern accepts short lowercase names and nothing else", () => {
   for (const ok of ["a", "0", "builder", "gravity2", "a.b_c-d", "x".repeat(32)]) assert.equal(ALIAS_PATTERN.test(ok), true, ok);
@@ -94,7 +118,11 @@ test("reserved words and look-alikes of id forms are not allowed as new alias na
   for (const name of ["claude", "agent_", "agent_x", `agent_${hex32("p")}`, "peer_x", "session-x", "bind_x", "pair_x"]) {
     assert.equal(isReservedAliasName(name), true, name);
   }
-  for (const name of ["claude2", "claudette", "my-claude", "claude-2", "agent", "agents", "peer", "session", "bound", "pairing", "builder", "gravity2"]) {
+  // only a name that BEGINS with a look-alike prefix, or is exactly the word, is reserved
+  for (const name of [
+    "claude2", "claudette", "my-claude", "claude-2", "preclaude", "agent", "agents", "peer", "session", "bound", "pairing", "builder", "gravity2",
+    "xagent_1", "my-peer_x", "a.session-b", "unbind_x", "xpair_1",
+  ]) {
     assert.equal(isReservedAliasName(name), false, name);
   }
 });
@@ -271,6 +299,7 @@ test("a mutation that is not exactly the action is refused and writes nothing", 
       "a destination added as well": (r) => { r.aliases.fresh = record(); r.destinations[GRAVITY] = { harness: "claude", workspace: "/w", set_at: T3, generation: seq + 1 }; return r; },
       "an existing alias changed as well": (r) => { r.aliases.fresh = record(); r.aliases.other.generation = 99; return r; },
       "an existing alias removed as well": (r) => { r.aliases.fresh = record(); delete r.aliases.other; return r; },
+      "a second alias named like an inherited property": (r) => { r.aliases.fresh = record(); r.aliases.constructor = record(); return r; },
     };
     for (const [label, mutate] of Object.entries(setCases)) {
       expectError(() => rawWrite(root, "alias_set", "fresh", mutate), ...mismatch);
@@ -314,13 +343,40 @@ test("alias actions need a stored v2 registry: v1 and absent are refused and not
     expectError(() => setIdentityAlias({ root, expectedSequence: seq + 5, now: T3, alias: "builder", principalId: GRAVITY }), "invalid_registry", "action_not_available");
     assert.deepEqual(snapshotFiles(root), filesBefore);
   });
+  // no registry and no root: nothing is created, and the sequence is not looked at
   const { base, root } = makeRoot();
   try {
-    expectError(() => setIdentityAlias({ root, expectedSequence: 0, now: T3, alias: "builder", principalId: GRAVITY }), "invalid_registry", "registry_absent");
-    expectError(() => clearIdentityAlias({ root, expectedSequence: 0, now: T3, alias: "builder" }), "invalid_registry", "registry_absent");
+    for (const expectedSequence of [0, 5]) {
+      expectError(() => setIdentityAlias({ root, expectedSequence, now: T3, alias: "builder", principalId: GRAVITY }), "invalid_registry", "registry_absent");
+      expectError(() => clearIdentityAlias({ root, expectedSequence, now: T3, alias: "builder" }), "invalid_registry", "registry_absent");
+    }
+    assert.equal(existsSync(root), false, "the root was not created");
+    // a root that exists but holds no registry: refused under the lock, again before the sequence is looked at
+    mkdirSync(root, { mode: 0o700 });
+    for (const expectedSequence of [0, 5]) {
+      expectError(() => setIdentityAlias({ root, expectedSequence, now: T3, alias: "builder", principalId: GRAVITY }), "invalid_registry", "registry_absent");
+      expectError(() => clearIdentityAlias({ root, expectedSequence, now: T3, alias: "builder" }), "invalid_registry", "registry_absent");
+    }
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("a v1 registry with an uncommitted alias line is still refused with a coded error by both wrappers", () => {
+  withV1Root((root) => {
+    // a v1 chain may end in an uncommitted line of a later action, which the reader accepts as a tail
+    const raw = readRaw(root);
+    const entry = auditEntry({ sequence: raw.sequence + 1, at: T3, action: "alias_set", subject: "builder", prevHash: raw.auditHead.hash });
+    appendFileSync(path.join(root, AUDIT_FILE_NAME), `${canonicalJson(entry)}\n`);
+    const read = readIdentityRegistry({ root });
+    assert.equal(read.registry.schema, "identity_registry_v1");
+    assert.equal(read.audit.uncommittedTail, 1);
+    const filesBefore = snapshotFiles(root);
+    const seq = read.registry.sequence;
+    expectError(() => setIdentityAlias({ root, expectedSequence: seq, now: T3, alias: "builder", principalId: GRAVITY }), "invalid_registry", "action_not_available");
+    expectError(() => clearIdentityAlias({ root, expectedSequence: seq, now: T3, alias: "builder" }), "invalid_registry", "action_not_available");
+    assert.deepEqual(snapshotFiles(root), filesBefore);
+  });
 });
 
 test("a stale expected sequence is a conflict on v2", () => {
@@ -396,6 +452,82 @@ test("set and clear sit in the same audit chain as bind, revoke and upgrade", ()
   });
 });
 
+test("alias actions cannot touch pairings or serverless bindings, whichever way they try", () => {
+  withSeededRoot((root, { peer, pair }) => {
+    const filesBefore = snapshotFiles(root);
+    const seq = seqOf(root);
+    const record = () => ({ principal_id: GRAVITY, set_at: T3, generation: seq + 1 });
+    const second = pairing(2, peer.principal_id);
+    const sideEffects = {
+      "a pairing revoked": (r) => { r.pairings[pair.pairing_id].revoked_at = T3; },
+      "a pairing's petname changed": (r) => { r.pairings[pair.pairing_id].petname = "renamed"; },
+      "a pairing removed": (r) => { delete r.pairings[pair.pairing_id]; },
+      "a second pairing added": (r) => { r.pairings[second.pairing_id] = second; },
+      "the serverless binding's issue time changed": (r) => { r.bindings[peer.profile_instance_id].issued_at = T3; },
+    };
+    for (const [label, side] of Object.entries(sideEffects)) {
+      expectError(() => rawWrite(root, "alias_set", "fresh", (r) => { r.aliases.fresh = record(); side(r); return r; }), "invalid_registry", "mutation_does_not_match_action");
+      assert.deepEqual(snapshotFiles(root), filesBefore, `set: ${label}`);
+      expectError(() => rawWrite(root, "alias_clear", "builder", (r) => { delete r.aliases.builder; side(r); return r; }), "invalid_registry", "mutation_does_not_match_action");
+      assert.deepEqual(snapshotFiles(root), filesBefore, `clear: ${label}`);
+    }
+    // an alias step that touches nothing else still works on this root, and leaves the pairing and the serverless binding as they were
+    const out = clearOn(root, "other");
+    assert.equal(canonicalJson(out.registry.pairings[pair.pairing_id]), canonicalJson(pair));
+    assert.equal(canonicalJson(out.registry.bindings[peer.profile_instance_id]), canonicalJson(peer));
+  });
+});
+
+test("a stored alias named constructor cannot be removed or changed as a side effect of another alias action", () => {
+  withV2Root((root) => {
+    setOn(root, "constructor", GRAVITY, { now: T2 });
+    setOn(root, "builder", GHOST, { now: T2 });
+    const filesBefore = snapshotFiles(root);
+    const seq = seqOf(root);
+    const mismatch = ["invalid_registry", "mutation_does_not_match_action"];
+    expectError(
+      () => rawWrite(root, "alias_set", "fresh", (r) => { r.aliases.fresh = { principal_id: GRAVITY, set_at: T3, generation: seq + 1 }; delete r.aliases.constructor; return r; }),
+      ...mismatch,
+    );
+    expectError(() => rawWrite(root, "alias_clear", "builder", (r) => { delete r.aliases.builder; delete r.aliases.constructor; return r; }), ...mismatch);
+    expectError(() => rawWrite(root, "alias_clear", "builder", (r) => { delete r.aliases.builder; r.aliases.constructor.generation = 99; return r; }), ...mismatch);
+    assert.deepEqual(snapshotFiles(root), filesBefore);
+  });
+});
+
+test("a principal whose binding was revoked and that is bound again on another profile is a valid target, whichever binding sorts first", () => {
+  // two profile names whose instance ids sort in a known order, so each role assignment is tried both ways round
+  const [low, high] = ["moved-a", "moved-b"].sort((x, y) => (deriveClientInstanceId(x) < deriveClientInstanceId(y) ? -1 : 1));
+  for (const [retired, successor] of [[low, high], [high, low]]) {
+    withV2Root((root) => {
+      const first = agentBindingV2(retired);
+      const again = agentBindingV2(successor, { principal_id: first.principal_id });
+      rawWrite(root, "bind", first.profile_instance_id, (r) => { r.bindings[first.profile_instance_id] = first; return r; }, { now: T2 });
+      rawWrite(root, "revoke", first.profile_instance_id, (r) => { r.bindings[first.profile_instance_id].revoked_at = T2; return r; }, { now: T2 });
+      rawWrite(root, "bind", again.profile_instance_id, (r) => { r.bindings[again.profile_instance_id] = again; return r; }, { now: T3 });
+      const out = setOn(root, "moved", first.principal_id, { now: T4 });
+      assert.equal(out.registry.aliases.moved.principal_id, first.principal_id, `${retired} retired, ${successor} active`);
+    });
+  }
+});
+
+test("the wrappers read the clock once, so set_at is the entry's time whether now is omitted or a function", () => {
+  withV2Root((root) => {
+    const omitted = setIdentityAlias({ root, expectedSequence: seqOf(root), alias: "one", principalId: GRAVITY });
+    assert.equal(omitted.registry.aliases.one.set_at, omitted.auditEntry.at);
+    assert.equal(omitted.registry.updatedAt, omitted.auditEntry.at);
+    let calls = 0;
+    const clock = () => { calls += 1; return new Date(Date.UTC(2030, 0, 1, 9, 0, calls)); };
+    const viaFunction = setIdentityAlias({ root, expectedSequence: seqOf(root), now: clock, alias: "two", principalId: GHOST });
+    assert.equal(calls, 1, "the clock was read once");
+    assert.equal(viaFunction.registry.aliases.two.set_at, "2030-01-01T09:00:01.000Z");
+    assert.equal(viaFunction.auditEntry.at, "2030-01-01T09:00:01.000Z");
+    const cleared = clearIdentityAlias({ root, expectedSequence: seqOf(root), now: clock, alias: "one" });
+    assert.equal(calls, 2, "one read per call");
+    assert.equal(cleared.auditEntry.at, "2030-01-01T09:00:02.000Z");
+  });
+});
+
 // ---- crashes ------------------------------------------------------------------------------------------------------------
 test("a crash at any stage of an alias write leaves the registry as it was or committed, and a retry finishes it", () => {
   const stages = [
@@ -452,6 +584,57 @@ test("a crashed alias write is discarded by the next write of any kind", () => {
   });
 });
 
+test("the wrappers pass lockTimeoutMs on: with the lock held they give up with registry_busy after about that long", async () => {
+  const registryUrl = pathToFileURL(path.join(HERE, "../src/identity-registry.mjs")).href;
+  const { base, root } = makeV1Root(["gravity2", "ghost"]);
+  try {
+    upgradeThroughWriter(root);
+    const seq = seqOf(root);
+    const sab = new SharedArrayBuffer(4);
+    const holder = new Worker(`
+      import { parentPort, workerData } from "node:worker_threads";
+      import { updateIdentityRegistry } from ${JSON.stringify(registryUrl)};
+      try {
+        updateIdentityRegistry({
+          root: workerData.root, expectedSequence: workerData.seq, now: workerData.now, action: "bind", subject: workerData.binding.profile_instance_id,
+          mutate: (reg) => {
+            parentPort.postMessage({ locked: true });
+            Atomics.wait(new Int32Array(workerData.sab), 0, 0, 20000);
+            reg.bindings[workerData.binding.profile_instance_id] = workerData.binding;
+            return reg;
+          },
+        });
+        parentPort.postMessage({ done: true });
+      } catch (err) {
+        parentPort.postMessage({ error: err.code });
+      }
+    `, { eval: true, workerData: { root, seq, now: T3, binding: agentBindingV2("held"), sab } });
+    await new Promise((resolve, reject) => {
+      holder.on("message", (m) => { if (m.locked) resolve(); });
+      holder.on("error", reject);
+    });
+    try {
+      const calls = [
+        () => setIdentityAlias({ root, expectedSequence: seq, now: T4, alias: "builder", principalId: GRAVITY, lockTimeoutMs: 150 }),
+        () => clearIdentityAlias({ root, expectedSequence: seq, now: T4, alias: "builder", lockTimeoutMs: 150 }),
+      ];
+      for (const call of calls) {
+        const started = Date.now();
+        expectError(call, "registry_busy");
+        assert.ok(Date.now() - started < 3000, "gave up after about the timeout, not after the default 5 s");
+      }
+    } finally {
+      Atomics.store(new Int32Array(sab), 0, 1);
+      Atomics.notify(new Int32Array(sab), 0);
+    }
+    await new Promise((resolve) => {
+      holder.on("message", (m) => { if (m.done || m.error) resolve(); });
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 // ---- processes racing -----------------------------------------------------------------------------------------------------------
 test("alias writers, a binder and a reader racing end with one consistent registry", async () => {
   const registryUrl = pathToFileURL(path.join(HERE, "../src/identity-registry.mjs")).href;
@@ -471,6 +654,7 @@ test("alias writers, a binder and a reader racing end with one consistent regist
       };
     }
     const out = { role: cfg.role, done: 0, retries: 0, reads: 0, errors: 0, regressions: 0 };
+    while (Date.now() < cfg.startAt) { /* every process starts at the same moment */ }
     const deadline = Date.now() + 90000;
     if (cfg.role === "reader") {
       let last = -1;
@@ -508,15 +692,18 @@ test("alias writers, a binder and a reader racing end with one consistent regist
     }
     console.log(JSON.stringify(out));
   `;
-  const run = (cfg) => new Promise((resolve, reject) => {
+  const spawnProc = (cfg) => {
     const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, AD0_CFG: JSON.stringify(cfg) }, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => { err += d; });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, out: out.trim(), err: err.trim() }));
-  });
+    const done = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal, out: out.trim(), err: err.trim() }));
+    });
+    return { child, done };
+  };
 
   const { base, root } = makeV1Root(["gravity2", "ghost"]);
   try {
@@ -525,14 +712,23 @@ test("alias writers, a binder and a reader racing end with one consistent regist
     const perAliaser = 8;
     const binds = 8;
     const finalSequence = baseSeq + 3 * perAliaser + binds;
-    const results = await Promise.all([
-      run({ root, now: T3, role: "aliaser", prefix: "a", count: perAliaser, principal: GRAVITY }),
-      run({ root, now: T3, role: "aliaser", prefix: "b", count: perAliaser, principal: GRAVITY }),
-      run({ root, now: T3, role: "aliaser", prefix: "c", count: perAliaser, principal: GHOST }),
-      run({ root, now: T3, role: "binder", prefix: "p", count: binds }),
-      run({ root, role: "reader", finalSequence }),
-    ]);
-    for (const r of results) assert.equal(r.code, 0, `${r.out} ${r.err}`);
+    // every process waits for the same instant, so the writers really start together
+    const startAt = Date.now() + 2500;
+    const common = { root, now: T3, startAt };
+    const writers = [
+      spawnProc({ ...common, role: "aliaser", prefix: "a", count: perAliaser, principal: GRAVITY }),
+      spawnProc({ ...common, role: "aliaser", prefix: "b", count: perAliaser, principal: GRAVITY }),
+      spawnProc({ ...common, role: "aliaser", prefix: "c", count: perAliaser, principal: GHOST }),
+      spawnProc({ ...common, role: "binder", prefix: "p", count: binds }),
+    ];
+    const readerProc = spawnProc({ root, startAt, role: "reader", finalSequence });
+    const writerResults = await Promise.all(writers.map((w) => w.done));
+    // the reader ends by itself once it has seen the final sequence; if a writer failed it never will, so do not wait out its deadline
+    const killTimer = setTimeout(() => readerProc.child.kill(), 15000);
+    const readerResult = await readerProc.done;
+    clearTimeout(killTimer);
+    const results = [...writerResults, readerResult];
+    for (const r of results) assert.equal(r.code, 0, `${r.out} ${r.err} signal=${r.signal}`);
     const reports = results.map((r) => JSON.parse(r.out));
     const reader = reports.find((r) => r.role === "reader");
     assert.deepEqual([reader.errors, reader.regressions], [0, 0], `the reader never saw a broken or regressing registry: ${reader.lastError ?? ""}`);
