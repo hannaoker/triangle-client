@@ -1,0 +1,236 @@
+# Identity aliases and destination rules (AD): implementation plan
+
+Status: plan, 2026-11-10, revised the same day after an independent model review (not a human or Codex review; section 12). No code. All eight owner decisions (AD-1 to AD-8) were settled the same day at the recommended options (section 10); the plan as a whole still awaits the owner's go-ahead to start building. Written by Claude Code. It turns the first two items of "After D1" in `2026-11-07-identity-registry-v2-d1-plan.md` (section 11) into buildable pieces: owner-set aliases (U3 3.D.2, interface design 4.2) and the destination rule (U3 3.F.3, interface design 4.5). It authorizes no code, install, alias, destination rule, `peer_` id, pairing or inbound path; every production step stays behind the gates in section 6. Baseline: client main `62b75c1` (PR #170). Every claim about shipped behavior cites source at that baseline; paths are under `packages/agent-worker/src/` unless they start with `docs/`, `test/`, `packages/` or `scripts/`.
+
+## 1. What AD is
+
+D1 froze the shapes: the v2 registry already holds an `aliases` map and a `destinations` map, and its audit vocabulary already has the four action names. AD gives them behavior. It changes no schema and needs no floor cycle (D1-4); the costs are ordinary ones: a writer, a resolver path, two commands, one supervisor restage and one client package.
+
+| In AD | Not in AD |
+| :--- | :--- |
+| Writer support for `alias_set` (create only) and `alias_clear` | Using a destination rule: inbound admission (`admitInbound`), hold-after-receipt, chat mapping (D4), any remote adapter |
+| An `alias` address form in the router that a sender sees only if it may message one of the alias's recipients; for every other sender the name behaves exactly as it does today | `peer_` ids, pairing, a pairing's `petname` (a different field), MESH handles, anything that crosses a transport |
+| Discovery of usable alias names (`send.aliases`), a journal marker, counters | New approval kinds in the Swift provider (only if AD-2 chooses OS authentication) |
+| `triangle identity alias set\|clear` (plan first, apply with the plan id and a terminal) and alias rows in `status`/`doctor` | Any change to the owner ACL, class grants or session policy: an alias never grants a send |
+| The destination-rule writer, command and view, **designed here but deferred** (AD-1 A, section 4) | Per-sender alias maps (they need a new schema version) |
+
+## 2. Starting point (checked)
+
+- **The shapes exist and are validated.** `aliases`: key is the alias text, record `principal_id`, `set_at`, `generation`, pattern `^[a-z0-9][a-z0-9._-]{0,31}$` (`identity-registry.mjs:156`, `:199`, `validateAliasRecord` `:941`; any safe integer from 1 is a valid `generation`, `:962`), at most 256 (`:76`). `destinations`: key is a principal, record `harness` (`claude` or `codex`), `workspace`, `set_at`, `generation` (`:157`, `:200`, `validateDestinationRecord` `:968`), at most 256 (`:77`). The registry validator requires an alias target to be the principal of a binding or pairing of the same registry (`alias_target_unknown`, `:1152`) and a destination key to be the principal of a binding (`destination_principal_unbound`, `:1169`). Revoked records still count as targets, because the resolver ignores revoked bindings at resolve time (D1 plan 3.6).
+- **The audit names exist.** `alias_set`, `alias_clear`, `destination_set` and `destination_clear` are structurally valid in a v2 chain: the subject is the alias text or a principal id and the binding id is null (`:1265-1277`). An audit entry is `{sequence, at, action, subject, bindingId, prevHash, hash}` (`:1238-1251`), so it never records an alias's target. Every reader from D1.0 on accepts a chain that contains these entries.
+- **Nothing can write them.** `updateIdentityRegistry` refuses the reserved names with `action_not_available` (`:2279-2281`) and requires the subject to be a 64-hex instance id (`:2285-2287`). `assertMutationMatchesAction` knows `init`, `upgrade`, `bind` and `revoke`, and for `bind` and `revoke` on a v2 registry it insists that `pairings`, `aliases` and `destinations` stay equal (`:2133-2139`), so `revoke` does not cascade to aliases.
+- **Nothing routes on them.** The snapshot provider copies only unrevoked `mesh-managed` bindings (`router-registry-snapshot.mjs:80-82`, `:85-131`). The resolver passes every string that is not `agent_` or `peer_` shaped through unchanged (`recipient-resolver.mjs:86-92`) and the router counts it as `resolved.id` with `via: "id"` (`unified-router.mjs:239-281`). Only the view, `doctor` and the upgrade/restore code count the collections (`identity-view.mjs:77`, `packages/triangle-cli/src/doctor.mjs:70-77`, `packages/triangle-cli/src/identity-upgrade.mjs:592`).
+- **The agent-facing text says "exact id, never a label".** The send tool's `to` argument and the discovery texts (`local-messaging-protocol.mjs:23-27`).
+- **The owner CLI maps names locally.** In order: a worker's profile name or instance id, an `agent_` id, the literal `claude` (or the Claude conversation's sender id) when interactive messaging is on, a reachable `session-` address, a queueable Grok id; everything else is refused client-side with `recipient_not_allowed` (`local-messaging-cli.mjs:665-681`). Any server error then prints `send_outcome_unknown` (`:689-693`). The Grok commands treat only a fixed list of codes as a rejection and lack the router's resolution codes (`grok-local-session.mjs:253`).
+- **A send resolves before it is authorized.** The server hands the router the sender and a `canMessage` closure (turn claims and ACL) and only afterwards runs the ACL check on the resolved id (`local-messaging-server.mjs:581-605`); `resolveSend` has that one call site. Today the router uses `canMessage` only to filter the candidates of `recipient_ambiguous` (`unified-router.mjs:145`, `:347-355`); a missing or throwing `canMessage` counts as false (`:145-158`). By that order an unknown principal is `recipient_not_found` and a bound one the sender may not message is `recipient_not_allowed`. That difference is harmless for 128-bit random principal ids and stops being harmless for guessable alias names; the R1 plan (3.2) says to revisit it when aliases arrive.
+- **Errors carry a code and a message only.** `sanitizeError` and `createErrorResponse` emit `{code, message}` (`local-messaging-errors.mjs:19-29`, `local-messaging-protocol.mjs:128-135`) and the client rejects with the same pair (`local-messaging-client.mjs:121`). R1's `recipient_ambiguous` already reaches an agent without its candidates.
+- **The discovery client keeps only known address kinds.** `ADDRESS_KINDS` is `id` and `principal` (`local-messaging-client.mjs:14`); an entry whose `addressKinds` holds anything else loses its whole `send` explanation, and nothing else the host sends is passed on (`:19-33`). `triangle_list_recipients` goes through that projection (`discoverRecipientDetails`, `:304-309`); `triangle_list_sessions` passes the host's rows on as they are (`:292-295`). The host falls back to the unexplained directory when the explained one exceeds the payload limit (`local-messaging-server.mjs:541-542`).
+- **The journal can carry a new marker.** `resolved_via` is a free TEXT column (`local-messaging-journal.mjs:470-471`, added by ALTER at `:572-576`). `isRouteIntentMatch` (`:320`) requires a principal send's stored and incoming `resolved_via` to be `principal`; the duplicate path in the server reads `resolved_via === "principal"` too (`local-messaging-server.mjs:748`). The agent-visible `target.via` is `principal` or `id` and the projection throws on anything else (`unified-router.mjs:55-63`).
+- **Status.** `local_status.router.registry` is `{state, sequence, schema, supportedSchemas}` (`unified-router.mjs:792`, `:829`) plus `rootSha256` added by the server (`local-messaging-server.mjs:444`); `router.errors` and `router.resolved` are counters (`unified-router.mjs:794-798`, `:831-835`).
+- **Directory labels.** Worker entries are labelled with their profile names; the two paired conversations have fixed display labels that are not alias-shaped (`local-messaging-host.mjs:114-118`). A profile name may be any well-formed string without `/` or `\` and without control characters, uppercase included (`identity-primitives.mjs:35-43`), and a worker profile named `claude` is refused when interactive messaging is on (`local-messaging-host.mjs:105-107`).
+- **Another "alias" already exists.** A Grok binding has an `alias` (pattern `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$`, `grok-local-session.mjs:13`) that selects a Grok conversation in the Grok commands and shows in its directory label (`:112`). The router does not resolve it, since it takes exact ids; the two share a word only, and AD.2's help text and runbook say so.
+- **Owner CLI and gates.** `triangle identity migrate`, `revoke`, `upgrade-registry` and `restore-registry` plan first and apply with the exact plan id and a terminal (`packages/triangle-cli/src/cli.mjs:342` onward). Only `revoke` uses OS authentication, and the Swift provider knows two action kinds, `profile.move` and `profile.revoke` (`packages/triangle-cli/src/owner-approval.mjs:24`; `scripts/probes/owner-approval-provider.swift:42`). The settled U3 decision D5 (option C) puts chat mappings and the move or revoke of a profile's principal behind OS authentication and leaves the terminal gate for first-time inventory bindings.
+- **Module boundaries.** A source-level test lets only approved identity modules import `identity-registry.mjs` (`test/identity-registry.test.mjs:1641`); the resolver and router get their patterns from `identity-primitives.mjs`.
+- **Release mechanics.** A change inside modules the supervisor bundle already lists installs as a supervisor-only restage (D1 plan 7); the client package carries its own copy of the registry module; loaded harness chats keep their tool descriptions until they restart (release checkpoint of 2026-10-30 in `2026-10-29-unified-messaging-next-slices.md`).
+- **Live state, last checked read only on 2026-11-09 (D1.5 evidence).** Supervisor manifest v14, bundle `c01e78bb…`; client package 0.2.0-identity.2; registry v2 at sequence 4 with three bindings (`ghost`, `gravity2`, `codex-headless`), no alias and no destination; router enabled. Of the three bindings only `gravity2` is a local recipient. Nothing was read live for this plan.
+
+## 3. Aliases
+
+### 3.1 Contract
+
+U3 3.D.2 and interface design 4.2, as adopted here:
+
+- An alias is an owner-set name in this registry for one principal. One alias names one principal; one principal may have several aliases. The map is installation-wide, not per sender (per-sender maps would need a new schema version): a sender sees an alias only through its own permissions (3.2).
+- It is a *sending* address, resolved by the router for agents (MCP) and for the owner CLI (through the server). It is not a label (labels never route), never an inbound address, and never leaves the host: no outbound envelope, reply route or provenance record carries it (identity design 3, rule 5).
+- It cannot be shaped like an id the host mints: the registry pattern allows at most 32 characters of `[a-z0-9._-]`, so no instance id, session address, `agent_` or `peer_` id can match it. A test pins that for every id the host can mint (`deriveClientInstanceId`, `sessionAddress`, the paired-conversation, desktop and Grok sender ids); the review ran that probe and found none. The writer also refuses look-alikes and one reserved word (3.6).
+
+### 3.2 Resolution
+
+An alias is **visible** to a sender when the sender may message at least one recipient the alias resolves to. For a sender to whom the name names no visible alias, the name is not an alias at all: it passes through as an exact id, exactly as an alias-shaped string does today, and the server's ACL answers it with the same `recipient_not_allowed`, the same counter (`resolved.id`) and the same text.
+
+| `to` | Today | With AD (router enabled) |
+| :--- | :--- | :--- |
+| `agent_` + 32 hex | principal resolution | unchanged |
+| `peer_` + 32 hex | `recipient_not_found` / `peer_not_supported` | unchanged |
+| alias-shaped, no visible alias of that name | exact id; ACL answers `recipient_not_allowed` | unchanged |
+| alias-shaped, a visible alias | exact id; ACL answers `recipient_not_allowed` | alias resolution, below |
+| anything else | exact id | unchanged |
+
+With the router disabled (`router.json`) nothing changes, which is the kill switch.
+
+The alias path, in order:
+
+1. Snapshot not `ok`, or no alias of that name: pass through, as today. (An unreadable registry does not turn into `route_unavailable` here: an alias-shaped string already fails today, and an error that differs by registry state would tell a sender something.)
+2. T = the recipients the alias's principal resolves to by the existing principal resolution. T empty (no active binding, or the profile is not a local recipient): pass through.
+3. Ask `canMessage(sender, id)` for each member of T. None permitted: the alias is not visible, pass through.
+4. L = the directory recipients labelled with the name that the sender may message (the router's labels: workers' profile names and the two conversation labels, never discovered chat titles). Counting only recipients the sender may message means a sender never learns of a label it could not already see in discovery.
+5. Visible. If |T| = 1 and L is empty: success, `via: "alias"`, `resolvedTo` the recipient. If L is not empty: `alias_unresolved` / `alias_collides_with_label`. If |T| > 1 (a legacy duplicate binding that D3 no longer allows to be created): `alias_unresolved` / `ambiguous_binding`.
+6. After success the server's own ACL check still runs on `resolvedTo` (`local-messaging-server.mjs:605`), so an alias can never make a denied send succeed.
+
+### 3.3 What a sender can learn
+
+| Case | Sender | Answer |
+| :--- | :--- | :--- |
+| No such alias; alias target unbound, revoked or not a local recipient; registry absent or unreadable | anyone | pass through (`recipient_not_allowed`, `resolved.id`), as today |
+| Alias exists, sender may message none of its recipients | that sender | the same |
+| Alias visible, unique target, no label collision | that sender | success (`resolved.alias`) |
+| Alias visible, name equals the label of a recipient that sender may message | that sender | `alias_unresolved` / `alias_collides_with_label` |
+| Alias visible, target bound to several local profiles | that sender | `alias_unresolved` / `ambiguous_binding` |
+
+So "no such alias" and "exists, but not yours" are the same answer by code, reason, text and counter; `alias_unresolved` is only ever shown to a sender who can already see the alias in discovery. `alias_unresolved` is a new router code (the October name); `router.errors` gains it and `router.resolved` gains `alias`.
+
+Signals that remain, stated so nobody has to find them: timing (an invisible alias costs one `canMessage` call per recipient, an unknown name none; not equalized); the registry `sequence` in `status`, which rises when an alias is set or cleared and is visible to the desktop credential and the bound Codex conversation, without names; and what discovery shows to a sender who may message the target, by design. Failed sends are neither rate limited nor logged today, and that does not change; probing for invisible aliases yields nothing. The protection is against an agent probing through the send tool; it does not cover a same-user process reading the registry file (D1 risk 9, accepted).
+
+**Candidates.** Interface design 4.2 and U3 3.D.2 ask the error to list the candidates the sender is authorized to see. The wire cannot carry them (errors are `{code, message}`; R1's `recipient_ambiguous` already lacks them), so with AD-3 A the usable names are in discovery (3.4) and the owner reads the specifics in `status --identity` (3.7). AD-3 B adds a field through the protocol, the client, both MCP adapters and the CLIs.
+
+### 3.4 Discovery
+
+`send.addressKinds` stays within `id` and `principal`: today's client drops a whole `send` explanation that names any other kind (section 2), so a new kind would blind every chat loaded before the restage. Instead an entry the caller may message gains `send.aliases`: at most 8 names, sorted, unique, for aliases that resolve to exactly that entry through the same resolver a send uses and are visible to the caller (AD-7 A). Entries the caller may not message show none, matching U2's rule that discovery never names what the caller cannot see. The client's `projectEntryExplanation` passes the field on after validating it (alias pattern, at most 8, sorted, unique), so `triangle_list_recipients`, `triangle_list_sessions` and the owner CLI `discover` agree. The `to` argument text and the discovery texts change (`local-messaging-protocol.mjs:23-27`); a chat that has not restarted keeps the old text, which says exact ids only, and a client from before the restage keeps its `send` explanation and silently drops the new field. Eight names per row make the payload fallback (`local-messaging-server.mjs:541-542`) likelier, so it gets a test.
+
+### 3.5 Journal and retries
+
+An alias send is journalled with `to_principal` = the resolved principal and `resolved_via` = `alias`; the alias name is not stored, because the principal is the fact. `isRouteIntentMatch` and the server's duplicate path treat `principal` and `alias` as one intent: a retry matches when the principals are equal and each side's `resolved_via` is `principal` or `alias`. So a retry by principal id of an alias send is accepted, and a retry with the same message id after the owner cleared and re-created the alias for a *different* principal is refused as a changed intent. The server resolves the recipient before it looks for the duplicate (`:581` before the duplicate check), so a retry after `alias clear` passes through and is refused as `recipient_not_allowed` instead of returning the original receipt; the sender asks `triangle_get_status` with the message id. The agent-visible `target.via` stays `principal` for an alias send (the projection accepts nothing else), so `decorateSend` treats `alias` like `principal`. No schema change; older code reads rows marked `alias` and refuses a retry on them, which fails closed.
+
+### 3.6 The writer (AD.0)
+
+- `alias_set` and `alias_clear` leave the reserved set. The subject check becomes per action: the alias pattern for alias actions, a 64-hex instance id for `bind` and `revoke`; `bindingId` is null. On a v1 or absent registry both are refused (`action_not_available`, `registry_absent`).
+- The action check for either action requires `bindings`, `pairings` and `destinations` to equal the stored ones and `aliases` to differ from the stored map at the subject key only.
+- `alias_set` **creates**: an existing name is refused (`alias_conflict` / `alias_exists`, whether or not the target is the same), so a target changes only by `clear` then `set` (AD-5 A), each step audited. The target must be the principal of an *active* `mesh-managed` binding (writer policy; the reader stays permissive, D1 plan 3.6) (AD-6 A); the 256 cap stays `too_many_aliases`. The record's `set_at` is the audit entry's `at` and its `generation` is the sequence the entry commits at, which never repeats, so a set after a clear is distinguishable from the alias it replaced.
+- Names: the registry pattern, in lowercase. The writer also refuses `claude` (the owner CLI's local mapping) and any name starting `agent_`, `peer_`, `session-`, `bind_` or `pair_` (look-alikes of ids the resolver and registry use), because the resolver recognizes only full ids and these would otherwise reach the alias path (AD-4 A). The pattern and the check live in `identity-primitives.mjs`, which the resolver and router may import; `identity-registry.mjs` imports them from there.
+- `alias_clear` requires the alias to exist (`alias_not_found`) and removes it.
+- `revoke` does not cascade: an alias to a revoked principal stays in the map, resolves to nothing and shows as dangling until cleared (AD-8 A). A later rebind of the same profile to the same principal revives it (D2 forbids another principal for that profile). D3 only forbids two *unrevoked* bindings of one principal, so the inventory could later bind that principal to a different profile, and the old alias would then deliver there; the view flags that case as `moved` (3.7).
+
+### 3.7 Commands and view (AD.2)
+
+- `triangle identity alias set NAME TARGET --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]`, TARGET being an `agent_` id or a profile name whose binding is active; `triangle identity alias clear NAME ...`. Same placement as the D1 commands (D1-3 A). The plan prints the registry sequence and audit head, the alias, the target principal and profile, and what a sender will see; it writes nothing. The plan id covers every fact the decision rests on, including the profile names and recipient list used for the collision check, and applying re-evaluates all of it (`plan_stale` otherwise).
+- Refusals at plan time, before any write: a name outside the pattern or a reserved word or look-alike; a name equal, ignoring case, to a profile name in the client configuration (`alias_collides_with_label`, AD-4 A; the resolver repeats the check exactly at resolve time); an existing alias; a target that is not an active binding or whose profile is not a local recipient in that configuration (`alias_target_not_local`: `ghost` and `codex-headless` would never resolve); a full map; a v1 registry.
+- Apply needs stdin and stdout to be terminals, the D5-B gate of `identity migrate` and `upgrade-registry` (AD-2 A).
+- The plan also asks the running supervisor, through the installed `triangle-local status` with the same safe-file, timeout and clean-environment handling as the D1 floor, which address forms it resolves: `router.registry.addressForms`, a new additive list that lacks `alias` when the router is disabled (nothing resolves then) and on a supervisor from before AD. The answer counts only when `rootSha256` matches the registry being changed. If `alias` is missing the plan warns that the alias will be recorded but not honored until the supervisor is restaged. That is advice, not a fact the write depends on, so it is not part of the plan id, and not a floor: an alias a supervisor ignores fails closed.
+- `status --identity` and `doctor` list alias rows (name, principal, profile, state): `active`; `dangling` (the principal has no active binding); `unroutable` (an active binding whose profile is not a local recipient); `moved` (the principal's active binding is on a different profile than its revoked one); `collides` (a directory label equals the name); `ambiguous`. `doctor` warns on every state except `active`. The view stays `identity_view_v1` and gains rows, as it did for serverless bindings (D1 plan 3.6).
+- The owner CLI keeps mapping a profile name, then `agent_`, `claude`, `session-` and Grok ids first, and passes an alias-shaped name that none of those claims through to the server, after `local-messaging-cli.mjs:680` and before the refusal at `:681`. A profile added after an alias of the same name wins on the owner CLI (documented, first match) while the server answers `alias_unresolved` to a sender that can see the alias; that asymmetry is why `doctor` flags `collides`.
+
+## 4. Destination rules
+
+### 4.1 Why they wait (AD-1 A)
+
+- **No consumer.** A destination rule decides where a *remote* principal's inbound message lands. No remote inbound exists; the only readers of `destinations` count them (section 2).
+- **No principal it could apply to.** The recorded rule order is: a runner profile uses the runner, a bound conversation uses that conversation, and only otherwise the rule applies (U3 3.C.2 and 3.C.3; the inventory's delivery modes are in `installation-inventory.mjs:43`). All three live bindings are, per the workspace `_context.md`, runner-style workers, so a rule set on any of them would never be consulted. To be re-checked when the piece starts; the review could not check live state.
+- **A different gate.** Where a remote principal's content lands is an authority decision (D4, D5-C), and the Swift provider has no action kind for it.
+- **A silent command invites mistakes.** An accepted rule would show no effect anywhere.
+
+So AD records the design below and builds the command with the inbound slice, where it can be exercised end to end.
+
+### 4.2 Shape when built (AD.5)
+
+Key: the principal of an *active* local `mesh-managed` binding (writer policy; the validator needs only a binding). Record: `harness` (`claude` or `codex`), `workspace` (absolute, resolved with `realpath` at set time as the session policy does, `local-messaging-interactive-session.mjs:185-188`, and bounded by the validator), `set_at`, `generation` as for aliases. One rule per principal; `destination_set` creates, `destination_clear` removes, the audit subject is the principal id. `status --identity` lists the rules. The approval gate is decided with the inbound slice, where D5-C probably applies.
+
+## 5. Compatibility and fail-closed behavior
+
+| Reader | Registry with aliases |
+| :--- | :--- |
+| Installed D1 supervisor and client package (`c01e78bb…`, 0.2.0-identity.2) | reads it; the validator and audit chain accept the entries; sends ignore aliases, so an alias-shaped `to` is an exact id that no ACL permits (`recipient_not_allowed`) |
+| Pre-D1 readers | already refuse any v2 file |
+| AD | resolves aliases as in section 3 |
+
+Invariants that tests must pin:
+
+1. With no aliases in the registry, every sender-visible result, every counter and every status field equals today's, except the new additive `addressForms`; an alias-shaped `to` still fails as `recipient_not_allowed`.
+2. A registry with aliases leaves `agent_` and exact-id sends unchanged.
+3. An alias never makes a send succeed that the ACL denies.
+4. An alias the sender may not use gives the same code, text, counters and discovery as a name that is not an alias (3.3).
+5. No outbound envelope, reply route or provenance record carries an alias.
+6. No id the host can mint is alias-shaped.
+7. A target changes only by `clear` then `set`; a name that is reserved, a look-alike or equal to a profile name is refused.
+8. With the router disabled, alias-shaped strings pass through as today.
+9. A client from `62b75c1` reading the new discovery output keeps its `send` explanation.
+
+## 6. Release train, gates and rollback
+
+**Shape.** Everything stays inside existing modules: `identity-primitives`, `identity-registry`, `recipient-resolver`, `router-registry-snapshot`, `unified-router`, `local-messaging-protocol`, `local-messaging-client`, `local-messaging-server`, the journal's intent match, `local-messaging-cli`, `grok-local-session` (its rejected-code list) and `identity-view`, plus `packages/triangle-cli`. The review found every one of them but `identity-view` and the CLI package in a supervisor artifact group (`scripts/triangle-worker-install.py`), so there is no manifest bump and no helper source change: the runtime installs as a supervisor-only restage (the owner CLI pass-through ships with it, because `triangle-local` is the bundle's `local-messaging-cli.mjs`) and the `alias` commands and the view ship in the client package. **Order matters.** The supervisor goes first, so that an alias, once set, is honored; the package with the commands second.
+
+**Gates before merge.** The D1 list: trust-boundary regression, `keychain-launch-contract`, the full suite compared with the known baseline (the `ps` host-probe test fails on plain main here; known timing flakes are rerun in isolation), the readiness check, the repository boundary check, and one independent read-only review per code PR.
+
+**Owner gates, each a separate yes.**
+
+| Gate | Step | Live effect |
+| :--- | :--- | :--- |
+| H1 | Merge AD.0 to AD.2 | None |
+| H2 | Install the supervisor restage; first diff the bundle against the installed one and against every merge since, so the artifact list is exactly AD's modules | Alias resolution exists but there are no aliases. Verify with the D1.5 negative set and the read-only status and backlog checks, and `addressForms`; **no positive send**, because the only local recipient is a worker that would run |
+| H3 | Install the client package with the `alias` commands | Commands available. As in G3, the package build from `main` brings more than the commands (rebuilt helper binaries); check the install receipt first (D1.5 finding) |
+| H4 | The owner sets the first alias from their own terminal; read-only checks; the negative probes | An alias exists and is honored. A positive canary needs its own yes (`gravity2` would run) |
+
+**Rollback.**
+
+| Fault | Action |
+| :--- | :--- |
+| AD runtime misbehaves before H4 | Restore the saved supervisor manifest and restart, as in the D1 install records; the registry is untouched |
+| An alias is wrong | `alias clear` (audited); nothing else changes |
+| The supervisor must go back to a bundle without alias resolution | Aliases fail closed as in section 5; no registry restore is needed |
+| The client package must go back | Reinstall the previous package (the D1.5 receipt handling applies); aliases already set stay in the registry, inert for the old package |
+| The registry itself must go back to the pre-D1 v1 backup | `restore-registry` now loses the aliases and needs `--discard-v2-data`, with the plan listing them (D1 plan 5.4) |
+
+## 7. Work breakdown
+
+Each piece is its own PR. AD.0 starts with the small shared change to `identity-primitives.mjs` (the alias pattern and the reserved-name check) because the resolver may not import the registry module; AD.1 builds on it. AD.2 needs both. Each code PR gets one independent read-only review (a model review, not a human or Codex review) with my own probes, and CLI pieces are verified from a built package in a no-write, no-network sandbox.
+
+| # | Piece | Content | Verified by |
+| :--- | :--- | :--- | :--- |
+| AD.0 | Writer | The shared pattern and reserved names; `alias_set` (create only) and `alias_clear` in `updateIdentityRegistry` and `assertMutationMatchesAction`, per-action subject check, the rules of 3.6 | Table-driven tests per rule and refusal code; fault injection at every writer stage; concurrent binders and alias writers; chain verification across set and clear; a frozen reader from `62b75c1` (`git archive`, as D1.3 did with `d418fb1`) reads a registry with aliases and ignores them; v1 and absent registries refuse both actions |
+| AD.1 | Resolution | Snapshot `aliasFor` and a principal-to-names map (one snapshot per call); the pure alias path in `recipient-resolver.mjs`; the router's `resolveSend` branch with `canMessage` before anything is revealed; counters; `describeAddresses` names; `addressForms` in `local_status`; journal intent match, the server's duplicate path and `decorateSend`; protocol texts; the client's `send.aliases` projection; owner-CLI pass-through; the router codes added to the Grok rejected list | Golden tests: invariant 1 for resolver, router, discovery and status; the table of 3.3 for a sender with and without permission; the indistinguishability test on the real wire response; the id-shape test; router disabled passes through; a frozen `62b75c1` client against the new discovery output; the payload fallback with 8 names per row |
+| AD.2 | Commands and view | `identity alias set\|clear`, the checks of 3.7, the supervisor warning, alias rows and states in `status`/`doctor`, help text and a runbook `docs/triangle-client/identity-aliases.md` (which also tells aliases from Grok aliases) | Scratch-root CLI tests per refusal code; plan-id stability and `plan_stale`; terminal requirement; package run in a no-write sandbox |
+| AD.3 | Candidate and rehearsal | Candidate package and bundle; extend the D1.4 runner with alias steps (set, honored send, a sender without permission, collision, reserved names, create-only refusal, retry across clear and set, the installed bundle ignoring aliases), using D1.5's second unbound recipient (`scratch-b`) so the pair-exchange limit of 10 per pair per 10 minutes is not hit | Evidence document under `docs/reviews/` |
+| AD.4 | Installed acceptance | Section 6, gates H2 to H4 | Evidence document |
+| AD.5 | Destination rules | Section 4.2: writer actions, command, view; no consumer. **Only if AD-1 is B, or with the inbound slice** | As AD.0 and AD.2 |
+
+## 8. Verification and acceptance
+
+- **Unit and golden:** every rule of 3.2, 3.3 and 3.6; invariants 1 to 9 of section 5.
+- **Fail-closed:** a frozen `62b75c1` reader against a registry with aliases (AD.0); the installed bundle against a scratch registry with aliases (AD.3).
+- **Concurrency and faults:** the writer fault hooks and the multi-process stress with alias writers added.
+- **Installed acceptance (AD.4):** (1) after H2, with no aliases, the D1.5 negative set and the read-only status and backlog checks give today's results, and `addressForms` is reported; (2) the scratch rehearsal passes (AD.3); (3) after H3 and H4, a read-only `discover` shows the name in `send.aliases` of exactly the one entry, which proves the supervisor loaded the alias and resolves it through the send resolver while running no worker; (4) negative probes through normal interfaces, none of which can run a worker: an unknown alias-shaped name (today's `recipient_not_allowed`, counter `resolved.id`), and `alias set` refusals for a name equal to a profile name, `claude`, an existing alias and a non-local target such as `ghost`; (5) one positive canary, with its own yes; (6) backlog isolation (held 2, queued 1, queued_local 1, pending replies 14 as of D1.5) and an unchanged journal; (7) `alias clear` returns to the starting state; (8) a restart keeps the alias.
+- **A known gap, again:** an invisible alias is by design indistinguishable from an unknown name, so a sender without permission cannot show anything live, and the only local recipient is one this chat may message. The rehearsal (AD.3) covers it.
+- **AD is done when** the above passes on the installed system, the review findings are closed and the owner has accepted the evidence. It claims no remote capability.
+
+## 9. Risks
+
+| # | Risk | Handling |
+| :--- | :--- | :--- |
+| 1 | A same-user process (or an agent with a pseudo-terminal) creates or clears an alias; the audit records the name but never the target | The D5-B residual risk of `identity migrate`, as an exception to D5-C (AD-2); create-only, `generation` that never repeats, the plan and `status` showing the target, and the ACL still deciding every send, so an alias redirects a message only among recipients the sender may already message, for example from a chat to a worker that runs. AD-2 B closes it at the price of a new Swift action kind |
+| 2 | An alias shadows a name an owner expects to be a profile | Refused at set time; `alias_unresolved` at resolve time for senders that can see the alias; never silently first-match on the server |
+| 3 | Alias existence leaks to an agent | 3.3: an alias a sender cannot use is the same as a name that is not an alias; the remaining signals are listed there |
+| 4 | Loaded chats and clients from before the restage | `addressKinds` is unchanged, so they keep their `send` explanation and drop `send.aliases` silently (invariant 9); the old tool text says exact ids only |
+| 5 | A supervisor rollback or an unrestaged supervisor ignores aliases | Fails closed (section 5); the plan warns when `addressForms` lacks `alias` |
+| 6 | The two copies of the registry code (package and bundle) drift | `addressForms` is asked of the running supervisor, as `supportedSchemas` was for D1 |
+| 7 | A retry after a change of target or after `alias clear` is refused | By design (3.5); the sender uses a new message id or asks `triangle_get_status` |
+| 8 | An alias to a revoked principal sits unused, or moves with a principal that is rebound to another profile | The view shows `dangling` and `moved`; `doctor` warns (AD-8) |
+| 9 | The owner CLI and the server treat a name differently (`claude`, a profile added later) | `claude` and look-alikes are reserved; the set-time refusal; `doctor` flags `collides`; documented in the runbook |
+| 10 | An old caller meets `alias_unresolved` (visible collision or ambiguity only) and reports `send_outcome_unknown` | The Grok rejected list gets the router's codes; the owner CLI already prints every server error that way |
+| 11 | A destination rule is built without a consumer and misleads | Deferred (AD-1 A) |
+
+## 10. Owner decisions
+
+**Decision log**
+
+- 2026-11-10, AD-1 to AD-8: the owner accepted the recommended option, A, on all eight ("Accept all" in chat), after the independent review of this plan. Together: aliases now and the destination rule with the inbound slice; a terminal plus plan id for alias writes, taken as a new exception to the settled U3 D5-C; an alias visible only to a sender that may message one of its recipients, today's answer for everyone else, and no candidate list on the wire; lowercase names with reserved words and look-alikes refused and profile names refused at set time; create-only aliases; targets that are active local `mesh-managed` principals; `send.aliases` in discovery; no cascade on revoke.
+- These are design decisions, not authorization to build or install. AD.0 starts on a separate go-ahead and every production step stays behind the gates of section 6.
+
+Options as proposed, with the chosen one marked:
+
+1. **AD-1 Scope.** **A (chosen):** aliases now (AD.0 to AD.4); the destination-rule writer, command and view with the inbound slice (4.1). **B:** build both now; the rule is inert until inbound exists.
+2. **AD-2 Gate for alias set and clear.** **A (chosen):** terminal plus plan id (D5-B), as for `identity migrate` and `upgrade-registry`, taken as a new exception to the settled U3 D5-C in the way D1-6 was for the upgrade: an alias grants no send and moves no authority. The cost is risk 1. **B:** OS authentication, consistent with D5-C, which needs new action kinds in `owner-approval.mjs` and the Swift provider, a helper rebuild and the owner's live prompt acceptance.
+3. **AD-3 What a sender learns.** **A (chosen):** an alias is visible only to a sender that may message one of its recipients; everyone else gets today's answer; the specific `alias_unresolved` reasons go to senders that can see the alias; no candidate list on the wire (a deviation from interface design 4.2, 3.3). **B:** as A, plus the authorized candidates in a new error field through the protocol, client, MCP adapters and CLIs. **C:** distinct codes for unknown, not allowed and ambiguous: simplest, and it tells any local sender which owner-chosen names exist.
+4. **AD-4 Names.** **A (chosen):** the lowercase pattern; the writer refuses `claude` and the look-alikes of 3.6; set time refuses a name equal, ignoring case, to a profile name in the client configuration; resolve time compares exactly. **B:** the pattern only, with resolve-time checks.
+5. **AD-5 Changing a target.** **A (chosen):** create only; `clear` then `set`. **B:** an in-place change with the plan showing the old and new target.
+6. **AD-6 Targets.** **A (chosen):** the principal of an active `mesh-managed` binding whose profile is a local recipient now. **B:** any principal the validator accepts (revoked, not local, or a paired remote one once pairing exists).
+7. **AD-7 Discovery.** **A (chosen):** `send.aliases`, up to 8 names per entry the caller may message, `addressKinds` unchanged. **B:** no names in discovery; `status --identity` only.
+8. **AD-8 Revoke and aliases.** **A (chosen):** no cascade; the view flags `dangling` and `moved`. **B:** `identity revoke` also clears the profile's aliases, so the revoke adapter and the writer's revoke check change two collections.
+
+## 11. After AD
+
+Not authorized by this plan, in dependency order (from D1 plan 11 and U3 3.F): the destination-rule command with chat mapping (D4) and the approval kinds it needs; identity Slice 3a (`peer_` ids and keys, pairing, endpoint binding, the OS re-authentication feasibility check); then `admitInbound`, hold-after-receipt and the Iroh and MESH adapters (U3 3.F.2, 3.F.4 to 3.F.7). None of them is started by AD.
+
+## 12. Evidence and limits
+
+Read at the baseline: the files cited above; the D1 plan and the U3 delta in full; the interface design (4.2, 4.5), the identity design (rule 5, the registry shapes) and the R1 plan (3.2, decision 3) where they mention aliases and destination rules. Not read or verified: the live registry (nothing was queried for this plan; the live facts are those of the D1.5 evidence of 2026-11-09, and whether `ghost` and `codex-headless` are runner-style rests on the workspace `_context.md`), the Swift provider beyond the cited line, the MESH server and the Rust peer engine, how a given harness caches tool descriptions (taken from the 2026-10-30 release checkpoint), and any timing difference between the answers of 3.3 (not measured). No code was run for this document; the claims of section 5 and the id-shape claim of 3.1 are exactly what AD.0, AD.1 and AD.3 must prove by running them.
+
+**Independent review, 2026-11-10** (a read-only model review, not a human or Codex review; about 46 citations checked, the id-shape probe and two registry test files run, the client and router probed with scratch inputs). It found one High, six Medium, nine Low and a set of nits, and no citation that was false apart from line shifts. This revision changes the design in answer: a new address kind would have blinded today's discovery client (so `send.aliases` is a separate field); a sender-visible `alias_unresolved` for unknown names would have broken invariant 1, confused Grok bots and revealed alias existence through the label-collision path (so an alias is visible only to a sender that may message its recipient, and every other name passes through as today); errors cannot carry candidates (AD-3); AD-2 ignored the settled D5-C (now argued as an exception); the owner CLI's local mappings (`claude`, `session-`, Grok ids) and a profile added later made it disagree with the server (reserved names, `collides`); H2 and the acceptance list would have run the `gravity2` worker (now read-only proofs); aliases to non-local targets never resolve (`alias_target_not_local`, `unroutable`); a revoked principal can move to another profile (`moved`, AD-8); the audit never records a target (`generation` never repeats); a retry by principal id of an alias send is accepted; same-target renewal is gone (create-only); name rules and reserved words, the rollback rows, the `addressForms` conditions, the module list and the citations were fixed. **These fixes were checked against source but not re-reviewed.**
