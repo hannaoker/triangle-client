@@ -152,10 +152,13 @@ test("command runner abort terminates and reaps a real child that ignores SIGTER
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const pidPath = path.join(directory, "pid");
   const secret = "request-secret-must-not-leak";
+  // The child publishes its pid atomically, and the reader below waits for a whole pid as well: a file that is visible but still
+  // empty reads as pid 0, and process.kill(0, 0) signals this process's own group instead of throwing ESRCH.
   const script = [
     "const fs=require('node:fs');",
     "process.on('SIGTERM',()=>{});",
-    `fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid));`,
+    `fs.writeFileSync(${JSON.stringify(`${pidPath}.tmp`)},String(process.pid));`,
+    `fs.renameSync(${JSON.stringify(`${pidPath}.tmp`)},${JSON.stringify(pidPath)});`,
     "setInterval(()=>{},1000);",
   ].join("");
   const runner = createCommandRunner({
@@ -165,16 +168,20 @@ test("command runner abort terminates and reaps a real child that ignores SIGTER
   });
   const controller = new AbortController();
   const running = runner.run({ ...request, text: secret }, { signal: controller.signal });
-  let pid;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Whatever fails before the abort below, the child (it ignores SIGTERM) must not be left running, and a rejection of the run must
+  // not surface later as an unhandled one.
+  running.catch(() => {});
+  t.after(async () => {
+    controller.abort();
+    await running.catch(() => {});
+  });
+  const pid = await pollFor(async () => {
     try {
-      pid = Number(await fs.readFile(pidPath, "utf8"));
-      break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-  }
-  assert.equal(Number.isSafeInteger(pid), true);
+      const text = (await fs.readFile(pidPath, "utf8")).trim();
+      return /^[1-9]\d*$/.test(text) ? Number(text) : undefined; // skip an empty or partly written file
+    } catch { return undefined; }
+  }, { timeoutMs: 5_000, intervalMs: 5 });
+  assert.equal(Number.isSafeInteger(pid), true, "the child did not publish its pid");
   controller.abort();
   await assert.rejects(running, (error) => (
     error?.name === "AbortError"
