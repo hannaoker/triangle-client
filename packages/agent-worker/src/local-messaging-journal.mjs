@@ -317,6 +317,10 @@ export function readHeldLateResult({ stateRoot, messageId } = {}) {
   };
 }
 
+// How a principal send was addressed: by the principal itself or by an owner-set alias that resolved to it. For a retry they are one
+// intent, the principal (AD.1): the alias name is not stored, and a retry by principal id of an alias send is the same send.
+const PRINCIPAL_INTENT_VIA = new Set(["principal", "alias"]);
+
 function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
   const storedPrincipal = existing.to_principal ?? null;
   const storedVia = existing.resolved_via ?? null;
@@ -329,9 +333,9 @@ function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
     return false;
   }
 
-  // 2. If both are principal sends, resolved_via must be 'principal'
+  // 2. If both are principal sends, resolved_via must be 'principal' or 'alias' on both sides
   if (storedPrincipal !== null) {
-    return storedVia === "principal" && normIncomingVia === "principal";
+    return PRINCIPAL_INTENT_VIA.has(storedVia) && PRINCIPAL_INTENT_VIA.has(normIncomingVia);
   }
 
   // 3. Neither is a principal send (both storedPrincipal and normIncomingPrincipal are null).
@@ -339,8 +343,8 @@ function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
   // - If either storedVia or normIncomingVia is null (legacy v12 row or disabled mode),
   //   the other may be null or 'id' (both indicate non-principal / ID addressing).
   // - If both are non-null, they must match ('id' === 'id').
-  // In no case may via be 'principal' when principal is null.
-  if (storedVia === "principal" || normIncomingVia === "principal") {
+  // In no case may via be 'principal' or 'alias' when principal is null.
+  if (PRINCIPAL_INTENT_VIA.has(storedVia) || PRINCIPAL_INTENT_VIA.has(normIncomingVia)) {
     return false;
   }
   if (storedVia === null || normIncomingVia === null) {

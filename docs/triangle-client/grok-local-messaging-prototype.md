@@ -101,8 +101,12 @@ Claim tokens go directly to the private file, never stdout. Claim-file reuse for
 another operation and symlinks are refused before claiming the new message.
 
 Keep the same message/request IDs and body when retrying an ambiguous send.
-Explicit authorization denials return `rejected`; transport uncertainty returns
-`send_outcome_unknown`. Neither means the receiver executed. Replies are retrieved
+Explicit authorization denials return `rejected`, and so do names that do not
+resolve (`recipient_not_found`, `recipient_ambiguous`, `alias_unresolved`);
+transport uncertainty and an unreadable route (`route_unavailable`) return
+`send_outcome_unknown`. Neither means the receiver executed. A `rejected` answer
+to a retry does not prove the first attempt was refused: if it may have been
+admitted, ask `status --message-id` before sending the text again under new IDs. Replies are retrieved
 by correlation and consumed separately. Never reply merely to acknowledge a reply.
 
 ## Wait for a reply without polling (`grok wait`)

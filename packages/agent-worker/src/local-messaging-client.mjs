@@ -13,6 +13,24 @@ const PRINCIPAL_PATTERN = /^agent_[a-f0-9]{32}$/;
 const PRINCIPAL_STATES = new Set(["bound", "unbound", "unknown"]);
 const ADDRESS_KINDS = new Set(["id", "principal"]);
 
+// Owner-set alias names (AD.1): the same shape as ALIAS_PATTERN in identity-primitives.mjs, kept inline for the same reason as
+// PRINCIPAL_PATTERN (a test pins the two together). The host lists at most MAX_ALIAS_NAMES per entry, sorted and unique, and only
+// for an entry the caller may message.
+const ALIAS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+const MAX_ALIAS_NAMES = 8;
+
+// The alias names of an explanation, or null when there are none to pass on: absent, the caller may not send to the entry, or the
+// list is malformed (an unusable list is simply absent, like any other optional field).
+function projectAliases(value, permitted) {
+  if (permitted !== true || !Array.isArray(value) || value.length === 0 || value.length > MAX_ALIAS_NAMES) return null;
+  for (let index = 0; index < value.length; index += 1) {
+    const name = value[index];
+    if (typeof name !== "string" || !ALIAS_PATTERN.test(name)) return null;
+    if (index > 0 && !(value[index - 1] < name)) return null; // strictly increasing: sorted, and no repeats
+  }
+  return [...value];
+}
+
 // The optional explanation of an entry: what the principal state is, the route, and the caller's send gate. Each field
 // is kept only when it is well formed and consistent with the entry's principal; otherwise it is simply absent, which
 // reads as "not stated". Nothing else the host sends is passed on.
@@ -28,7 +46,12 @@ function projectEntryExplanation(entry, principal) {
     // A refused caller has no address form, a permitted one always has the exact id, and a principal form needs both a
     // principal and the exact id beside it.
     const consistent = (send.permitted ? kinds.includes("id") : kinds.length === 0) && (!kinds.includes("principal") || principal !== null);
-    if (wellFormed && consistent) explanation.send = { permitted: send.permitted, addressKinds: [...kinds] };
+    if (wellFormed && consistent) {
+      explanation.send = { permitted: send.permitted, addressKinds: [...kinds] };
+      // an alias names a principal, so an entry without one has none to pass on
+      const aliases = projectAliases(send.aliases, send.permitted && principal !== null);
+      if (aliases !== null) explanation.send.aliases = aliases;
+    }
   }
   return explanation;
 }

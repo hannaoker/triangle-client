@@ -196,8 +196,8 @@ test("the snapshot reports the schema it read: v1, v2, none and unreadable", () 
     upgradeThroughWriter(root);
     const after = provider.get(); // the replaced file has a new stat key, so the provider reads again
     assert.deepEqual([after.state, after.schema, after.sequence], ["ok", V2, before.sequence + 1]);
-    // the snapshot hands out agent bindings and nothing else from a v2 file
-    assert.deepEqual(Object.keys(after).sort(), ["bindingForInstance", "bindingsFor", "errorCode", "readAt", "schema", "sequence", "state"]);
+    // the snapshot hands out agent bindings and, since AD.1, the alias names of a v2 file, and nothing else
+    assert.deepEqual(Object.keys(after).sort(), ["aliasFor", "aliasesFor", "bindingForInstance", "bindingsFor", "errorCode", "readAt", "schema", "sequence", "state"]);
 
     const absent = createRegistrySnapshotProvider({ root: path.join(root, "nowhere") }).get();
     assert.deepEqual([absent.state, absent.schema], ["absent", null]);
@@ -210,20 +210,21 @@ test("the snapshot reports the schema it read: v1, v2, none and unreadable", () 
 test("local_status reports the schema and the schemas this process can read, also while the router is disabled", () =>
   withRoots(1, (root) => {
     const { router } = readersFor(root);
-    assert.deepEqual(plain(router.statusBlock()).registry, { state: "ok", sequence: 4, schema: V1, supportedSchemas: [V1, V2] });
+    const forms = ["alias", "id", "principal"]; // AD.1: the address forms an enabled router resolves
+    assert.deepEqual(plain(router.statusBlock()).registry, { state: "ok", sequence: 4, schema: V1, supportedSchemas: [V1, V2], addressForms: forms });
     upgradeThroughWriter(root);
-    assert.deepEqual(plain(router.statusBlock()).registry, { state: "ok", sequence: 5, schema: V2, supportedSchemas: [V1, V2] });
+    assert.deepEqual(plain(router.statusBlock()).registry, { state: "ok", sequence: 5, schema: V2, supportedSchemas: [V1, V2], addressForms: forms });
 
     // the upgrade asks the running process what it can read, so a disabled router still answers
     const disabled = plain(readersFor(root, { enabled: false }).router.statusBlock());
     assert.equal(disabled.enabled, false);
-    assert.deepEqual(disabled.registry, { state: "disabled", sequence: 0, schema: null, supportedSchemas: [V1, V2] });
+    assert.deepEqual(disabled.registry, { state: "disabled", sequence: 0, schema: null, supportedSchemas: [V1, V2], addressForms: ["id"] });
 
     const none = plain(readersFor(path.join(root, "nowhere")).router.statusBlock());
-    assert.deepEqual(none.registry, { state: "absent", sequence: 0, schema: null, supportedSchemas: [V1, V2] });
+    assert.deepEqual(none.registry, { state: "absent", sequence: 0, schema: null, supportedSchemas: [V1, V2], addressForms: forms });
 
     const failing = createUnifiedRouter({ enabled: true, snapshotProvider: { get() { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } }, recipients: () => RECIPIENTS });
-    assert.deepEqual(plain(failing.statusBlock()).registry, { state: "unreadable", sequence: 0, schema: null, supportedSchemas: [V1, V2] });
+    assert.deepEqual(plain(failing.statusBlock()).registry, { state: "unreadable", sequence: 0, schema: null, supportedSchemas: [V1, V2], addressForms: forms });
   }));
 
 // ---- golden: v1 and its upgraded v2 form -----------------------------------------------------------------------------------------
@@ -266,7 +267,7 @@ test("golden: a v1 registry and its upgraded v2 form give the same resolver, rou
   }));
 
 // ---- nothing else in a v2 file reaches a send ------------------------------------------------------------------------------------
-test("serverless bindings, pairings, aliases and destinations change no send; peer ids stay unsupported", () =>
+test("serverless bindings, pairings and destinations change no send, an alias only what AD.1 says; peer ids stay unsupported", () =>
   withRoots(2, async (plainRoot, extrasRoot) => {
     upgradeThroughWriter(plainRoot);
     upgradeThroughWriter(extrasRoot);
@@ -279,15 +280,34 @@ test("serverless bindings, pairings, aliases and destinations change no send; pe
     const b = readersFor(extrasRoot, { recipients });
     const plainTranscript = await routerTranscript(a.router, a.provider, { targets: TARGETS, recipients });
     const extrasTranscript = await routerTranscript(b.router, b.provider, { targets: TARGETS, recipients });
-    // every answer is unchanged, even the address explanation of the serverless profile itself
-    assert.deepEqual(extrasTranscript, plainTranscript);
+    // every answer is unchanged, even the address explanation of the serverless profile itself, except what AD.1 adds on purpose:
+    // the alias names the owner set for an entry
+    const withoutAliasNames = (transcript) => ({
+      ...transcript,
+      addresses: transcript.addresses.map((entry) => {
+        if (!entry.send) return entry;
+        const { aliases, ...send } = entry.send;
+        return { ...entry, send };
+      }),
+    });
+    assert.deepEqual(withoutAliasNames(extrasTranscript), withoutAliasNames(plainTranscript));
+    const listedAliases = (transcript, id) => transcript.addresses.find((entry) => entry.id === id).send.aliases;
+    assert.deepEqual(listedAliases(extrasTranscript, instanceOf("gravity2")), ["gravity"]);
+    assert.equal(listedAliases(plainTranscript, instanceOf("gravity2")), undefined);
 
     const extraSends = await sendTranscript(b.router, extraTargets);
     const [peerSend, remoteSend, aliasSend, exactSend] = extraSends;
     assert.deepEqual([peerSend.ok, peerSend.code, peerSend.reason], [false, "recipient_not_found", "peer_not_supported"]);
     assert.deepEqual([remoteSend.ok, remoteSend.code, remoteSend.reason], [false, "recipient_not_found", "peer_not_supported"]);
-    // an alias is only text: it is not an address and no alias table is consulted
+    // a router that cannot ask whether the sender may message the target sees an alias as any other name; with the permission it
+    // resolves, to the principal's recipient, and the registry still holds nothing else a send could use
     assert.deepEqual([aliasSend.ok, aliasSend.via, aliasSend.resolved, aliasSend.principal], [true, "id", false, null]);
+    const permitting = createUnifiedRouter({ enabled: true, snapshotProvider: b.provider, recipients, canMessage: () => true });
+    const viaAlias = plain(await permitting.resolveSend({ senderId: "s1", to: "gravity" }, { throwOnError: false }));
+    assert.deepEqual(
+      [viaAlias.ok, viaAlias.via, viaAlias.resolved, viaAlias.resolvedTo, viaAlias.principal],
+      [true, "alias", true, instanceOf("gravity2"), principalOf("gravity2")],
+    );
     // the serverless profile's exact id carries no principal: the router skips the binding
     assert.deepEqual([exactSend.ok, exactSend.via, exactSend.principal, exactSend.profile], [true, "id", null, "peerprof"]);
     const explained = plain(b.router.describeAddresses([peer.profile_instance_id], { permitted: () => true }))[0];
