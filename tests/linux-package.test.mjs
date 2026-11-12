@@ -72,7 +72,8 @@ test('native Linux serializes parallel versions and a crashed lock holder releas
  const f=fixture(), next=fixture('1.2.4');let holder,children=[];
  try {
   const lock=join(f.root,'home/.triangle-package-install.sqlite');writeFileSync(lock,'',{mode:0o600});
-  const script=`import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(${JSON.stringify(lock)});db.exec('BEGIN IMMEDIATE');process.stdout.write('locked');setInterval(()=>{},1000);`;
+  // The connection is kept on globalThis: once the module has run nothing else references it, and a garbage-collected connection closes and releases the lock this test depends on.
+  const script=`import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync(${JSON.stringify(lock)});db.exec('BEGIN IMMEDIATE');globalThis.accountLockHolder=db;process.stdout.write('locked');setInterval(()=>{},1000);`;
   holder=spawn(process.execPath,['--input-type=module','--eval',script],{stdio:['ignore','pipe','pipe']});await once(holder.stdout,'data');
   let closed=0;
   children=[f.stage,next.stage].map(stage=>{const child=spawn(process.execPath,[installer,'--verified-stage',stage,'--test-root',f.root],{stdio:['ignore','pipe','pipe']});child.on('close',()=>closed++);return child;});
