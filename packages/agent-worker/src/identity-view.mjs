@@ -44,6 +44,85 @@ const EXCLUDED_INVENTORY_CODES = new Set([
   "custody_fault",
 ]);
 
+const MESH_MANAGED = "mesh-managed";
+
+// Whether a binding became active after the alias was set. A time that cannot be read counts as "after": the row is flagged for a look.
+function issuedAfter(issuedAt, setAt) {
+  const issued = Date.parse(issuedAt);
+  const set = Date.parse(setAt);
+  return Number.isNaN(issued) || Number.isNaN(set) ? true : issued > set;
+}
+
+/**
+ * What each alias of a v2 registry means right now, one row per alias sorted by name (code units). Reads only what the registry file
+ * holds, plus the local recipients of the client configuration when the caller has them (`localRecipients`: `[{ profile,
+ * instanceId }]`, or null when they could not be read, in which case `unroutable` and `collides` are not evaluated).
+ *
+ * `state`, first match wins:
+ * - `dangling`: the principal has no active mesh-managed binding, so the alias resolves to nothing;
+ * - `unroutable`: it has one, but its profile is not a local recipient, so the alias resolves to nothing;
+ * - `ambiguous`: the principal is bound to several local profiles (a legacy duplicate), so a sender that can see the alias gets
+ *   alias_unresolved;
+ * - `collides`: a local profile has the alias's name (ignoring case): a sender that may message that profile gets
+ *   alias_unresolved, and the owner CLI sends to the profile;
+ * - `moved`: the principal's active binding is on another profile than a revoked binding of the same principal, and it was
+ *   issued after the alias was set: the alias now delivers somewhere else than when it was set;
+ * - `active`: none of the above.
+ *
+ * @param {object} options
+ * @param {object} options.aliases - The registry's alias map (name -> { principal_id, set_at, generation }).
+ * @param {object} options.bindings - The registry's binding map.
+ * @param {Array<{ profile: string, instanceId: string }>|null} [options.localRecipients]
+ * @returns {Array<object>} Frozen rows.
+ */
+export function describeAliases({ aliases, bindings, localRecipients = null } = {}) {
+  const map = aliases !== null && typeof aliases === "object" && !Array.isArray(aliases) ? aliases : {};
+  const all = bindings !== null && typeof bindings === "object" && !Array.isArray(bindings)
+    ? Object.values(bindings).filter((binding) => binding !== null && typeof binding === "object")
+    : [];
+  const recipients = Array.isArray(localRecipients) ? localRecipients : null;
+  const rows = [];
+  for (const name of Object.keys(map).sort(compareCodeUnits)) {
+    const record = map[name] !== null && typeof map[name] === "object" ? map[name] : {};
+    const principalId = typeof record.principal_id === "string" ? record.principal_id : null;
+    const mine = all.filter((binding) => binding.principal_id === principalId && binding.trust_mode === MESH_MANAGED);
+    const active = mine.filter((binding) => binding.revoked_at === null);
+    const revoked = mine.filter((binding) => binding.revoked_at !== null);
+    const local = recipients === null
+      ? active
+      : active.filter((binding) => recipients.some((recipient) => recipient.instanceId === binding.profile_instance_id));
+    const collides = recipients !== null && recipients.some((recipient) => String(recipient.profile).toLowerCase() === name);
+    const moved = active.length === 1
+      && revoked.some((binding) => binding.profile_instance_id !== active[0].profile_instance_id)
+      && issuedAfter(active[0].issued_at, record.set_at);
+    let state = "active";
+    if (active.length === 0) state = "dangling";
+    else if (local.length === 0) state = "unroutable";
+    else if (local.length > 1) state = "ambiguous";
+    else if (collides) state = "collides";
+    else if (moved) state = "moved";
+    rows.push({
+      name,
+      principalId,
+      profile: active.length === 1 ? active[0].profile_name : null,
+      profiles: active.map((binding) => binding.profile_name).sort(compareCodeUnits),
+      profileInstanceId: active.length === 1 ? active[0].profile_instance_id : null,
+      state,
+      setAt: typeof record.set_at === "string" ? record.set_at : null,
+      generation: Number.isSafeInteger(record.generation) ? record.generation : null,
+    });
+  }
+  return rows.map((row) => deepFreeze({ ...row, profiles: [...row.profiles] }));
+}
+
+const ALIAS_DIAGNOSTICS = {
+  dangling: (row) => ({ message: `Alias ${row.name} points at a principal that has no active binding, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name}, or bind the profile again.` }),
+  unroutable: (row) => ({ message: `Alias ${row.name} points at ${row.profile ?? "a profile"} that is not a local recipient in this client configuration, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name}, or add the profile to local messaging.` }),
+  ambiguous: (row) => ({ message: `Alias ${row.name} points at a principal bound to several local profiles (${row.profiles.join(", ")}); a sender that can see it gets alias_unresolved.`, action: `Clear it with triangle identity alias clear ${row.name}.` }),
+  collides: (row) => ({ message: `Alias ${row.name} has the same name as a local profile; a sender that may message that profile gets alias_unresolved, and the owner CLI sends to the profile.`, action: `Clear it with triangle identity alias clear ${row.name}.` }),
+  moved: (row) => ({ message: `Alias ${row.name} now reaches ${row.profile}, a different profile than when it was set.`, action: `Check that this is wanted; otherwise clear it with triangle identity alias clear ${row.name}.` }),
+};
+
 /**
  * Builds a secret-free, deterministic identity view from an identity inventory report
  * and an identity registry read result.
@@ -51,9 +130,11 @@ const EXCLUDED_INVENTORY_CODES = new Set([
  * @param {object} options
  * @param {object} options.inventory - Output of buildIdentityInventory.
  * @param {object} [options.registry] - Output of readIdentityRegistry or { state: "unreadable", code }.
- * @returns {object} Deep-frozen identity view.
+ * @param {Array<{ profile: string, instanceId: string }>|null} [options.localRecipients] - The client configuration's local
+ *   recipients, for the alias rows (null or absent: not known).
+ * @returns {object} Deep-frozen identity view. A v2 registry adds `aliases` (see describeAliases); any other registry has no such key.
  */
-export function buildIdentityView({ inventory, registry } = {}) {
+export function buildIdentityView({ inventory, registry, localRecipients = null } = {}) {
   if (!inventory || typeof inventory !== "object") {
     throw new TypeError("inventory must be a non-null object");
   }
@@ -70,7 +151,7 @@ export function buildIdentityView({ inventory, registry } = {}) {
     if (registry.state === "ok") {
       registryState = "ok";
       registrySchema = typeof registry.registry?.schema === "string" ? registry.registry.schema : null;
-      // Record counts of the v2 collections (nothing in them is shown yet: no command reads or writes them).
+      // Record counts of the v2 collections; the aliases are shown row by row below.
       if (registrySchema === REGISTRY_SCHEMA_V2) {
         registryCollections = {
           pairings: countRecords(registry.registry.pairings),
@@ -347,6 +428,25 @@ export function buildIdentityView({ inventory, registry } = {}) {
     }
   }
 
+  // Alias rows (v2 only) and one warning for each that does not simply work
+  let aliasRows = null;
+  if (registryState === "ok" && registrySchema === REGISTRY_SCHEMA_V2) {
+    aliasRows = describeAliases({ aliases: registry.registry.aliases, bindings: existingBindings, localRecipients });
+    for (const row of aliasRows) {
+      if (row.state === "active") continue;
+      diagnostics.push({ severity: "warning", code: `alias_${row.state}`, profile: row.profile, ...ALIAS_DIAGNOSTICS[row.state](row) });
+    }
+    if (aliasRows.length > 0 && !Array.isArray(localRecipients)) {
+      diagnostics.push({
+        severity: "warning",
+        code: "alias_routing_unchecked",
+        profile: null,
+        message: "The client configuration could not be read, so whether the aliases reach a local recipient was not checked.",
+        action: null,
+      });
+    }
+  }
+
   // Sort diagnostics by severity (faults first), then code, then profile, then message
   diagnostics.sort((a, b) => {
     const sevA = a.severity === "fault" ? 0 : 1;
@@ -370,6 +470,7 @@ export function buildIdentityView({ inventory, registry } = {}) {
     registry: viewRegistry,
     summary,
     profiles: profileRows,
+    ...(aliasRows !== null ? { aliases: aliasRows } : {}),
     diagnostics,
   };
 
