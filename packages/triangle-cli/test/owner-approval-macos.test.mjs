@@ -17,7 +17,9 @@ function fixture(t,mode='approved',{ttlMs=5000}={}){
 import sys,json,os,time,signal
 mode=${JSON.stringify(mode)}
 if mode=='ignore': signal.signal(signal.SIGTERM,signal.SIG_IGN)
-with open(${JSON.stringify(pidfile)},'w') as f: f.write(str(os.getpid()))
+# published atomically: a reader that sees the file sees the whole pid (open(...,'w') makes it visible while it is still empty)
+with open(${JSON.stringify(pidfile + '.tmp')},'w') as f: f.write(str(os.getpid()))
+os.replace(${JSON.stringify(pidfile + '.tmp')},${JSON.stringify(pidfile)})
 r=json.load(sys.stdin)
 if mode in ['wait','ignore']: time.sleep(20)
 outcome=mode if mode in ['approved','denied','cancelled','unavailable'] else 'approved'
@@ -81,6 +83,7 @@ test('cancellation waits for helper exit, including a helper ignoring SIGTERM',a
  const until=Date.now()+3000;
  while(!fs.existsSync(f.pidfile)&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
  assert.ok(fs.existsSync(f.pidfile));const pid=Number(fs.readFileSync(f.pidfile,'utf8'));
+ assert.ok(Number.isSafeInteger(pid)&&pid>1,'the pid file holds a process id (pid 0 would signal this test\'s own process group)');
  controller.abort();assert.equal(await pending,'cancelled');
  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
