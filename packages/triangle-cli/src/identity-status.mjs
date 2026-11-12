@@ -76,7 +76,8 @@ export async function identityStatus({
   }
 
   // The alias rows say whether each alias reaches a local recipient, which only the client configuration knows. It is read only when
-  // there are aliases to judge, so a registry without any is viewed exactly as before.
+  // there are aliases to judge, so a registry without any needs no configuration (its human output is what it always was; a v2
+  // registry's JSON gains an empty `aliases` array).
   let localRecipients = null;
   const aliases = registry?.state === "ok" ? registry.registry?.aliases : null;
   if (aliases !== null && typeof aliases === "object" && Object.keys(aliases).length > 0) {

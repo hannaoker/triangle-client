@@ -8,22 +8,33 @@ import path from "node:path";
 import test from "node:test";
 
 import { main } from "../src/cli.mjs";
-import { readLocalRecipients } from "../src/identity-alias.mjs";
+import { aliasCommand, applyIdentityAlias, MAX_ALIASES, readLocalRecipients, renderAliasResult } from "../src/identity-alias.mjs";
+import { LocalStateError } from "../src/errors.mjs";
 import { identityStatus } from "../src/identity-status.mjs";
 import { shellQuote } from "../src/identity-upgrade.mjs";
 import { deriveClientInstanceId } from "../../agent-worker/src/identity-primitives.mjs";
-import { clearIdentityAlias, readIdentityRegistry, setIdentityAlias, updateIdentityRegistry } from "../../agent-worker/src/identity-registry.mjs";
+import { clearIdentityAlias, MAX_REGISTRY_ALIASES, readIdentityRegistry, setIdentityAlias, updateIdentityRegistry } from "../../agent-worker/src/identity-registry.mjs";
 import { bindProfileInRegistry, initIdentityRegistry, makeMeshManagedBinding, seedLegacyProfileBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
-import { appendAndCommit, peerBindingV2, upgradeThroughWriter } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";
+import { agentBindingV2, appendAndCommit, peerBindingV2, upgradeThroughWriter } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";
 
 const REGISTRY_FILE = "identity-registry-v1.json";
 const AUDIT_FILE = "registry-audit.jsonl";
-const START = Date.now() + 60_000; // after the fixture registry was created, as the writer requires
 const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 const principalOf = (profile) => makeMeshManagedBinding(profile).principal_id;
 const recipientsOf = (...profiles) => profiles.map((profile) => ({ profile, instanceId: deriveClientInstanceId(profile) }));
 
 // What a supervisor of the aliases release reports, and the variants the plan must tell apart
+// a configuration the supervisor's own loader accepts (the command uses that loader), with the given recipients
+const configFor = (recipients, extra = {}) => ({
+  version: 1,
+  enabled: true,
+  stateRoot: "/tmp/alias-cli-state",
+  bindingPath: "/tmp/alias-cli-state/binding.json",
+  integrationPath: "/tmp/alias-cli-state/integration.json",
+  recipients,
+  ...extra,
+});
+
 const reportsFor = (registryRoot, over = {}) => ({
   ok: true,
   router: { enabled: true, registry: { state: "ok", sequence: 3, schema: "identity_registry_v2", supportedSchemas: ["identity_registry_v1", "identity_registry_v2"], rootSha256: sha256Hex(registryRoot), addressForms: ["alias", "id", "principal"], ...over.registry }, ...over.router },
@@ -39,11 +50,13 @@ function fixture(t, { profiles = ["alpha", "beta"], recipients = profiles, confi
   const reg = path.join(app, "identity");
   const configFile = path.join(client, "local-messaging.json");
   if (config === "ok") {
-    fs.writeFileSync(configFile, JSON.stringify({ version: 1, enabled: true, recipients: recipientsOf(...recipients) }), { mode: 0o600 });
+    fs.writeFileSync(configFile, JSON.stringify(configFor(recipientsOf(...recipients))), { mode: 0o600 });
   } else if (config === "loose") {
-    fs.writeFileSync(configFile, JSON.stringify({ version: 1, recipients: recipientsOf(...recipients) }), { mode: 0o644 });
+    fs.writeFileSync(configFile, JSON.stringify(configFor(recipientsOf(...recipients))), { mode: 0o644 });
   } else if (config === "no-recipients") {
-    fs.writeFileSync(configFile, JSON.stringify({ version: 1 }), { mode: 0o600 });
+    fs.writeFileSync(configFile, JSON.stringify({ ...configFor([]), recipients: undefined }), { mode: 0o600 });
+  } else if (config === "disabled") {
+    fs.writeFileSync(configFile, JSON.stringify(configFor(recipientsOf(...recipients), { enabled: false })), { mode: 0o600 });
   } else if (config === "garbage") {
     fs.writeFileSync(configFile, "{not json", { mode: 0o600 });
   }
@@ -53,11 +66,13 @@ function fixture(t, { profiles = ["alpha", "beta"], recipients = profiles, confi
     if (twin) seedLegacyProfileBinding(reg, "twin", profiles.length + 1, { principal_id: principalOf(profiles[0]) });
     if (registry === "v2") upgradeThroughWriter(reg, { now: new Date(Date.now() + 1000).toISOString() });
   }
+  // after this fixture's registry was created, as the writer requires; each fixture has its own base, so a slow run cannot overtake it
+  const start = Date.now() + 60_000;
   let tick = 0;
   const state = { status: reportsFor(reg), terminal: true };
   const dependencies = (extra = {}) => ({
     isTerminal: () => state.terminal,
-    now: () => new Date(START + ++tick * 1000).toISOString(),
+    now: () => new Date(start + ++tick * 1000).toISOString(),
     runSupervisorStatus: async () => {
       if (state.status instanceof Error) throw state.status;
       return state.status;
@@ -90,7 +105,7 @@ function fixture(t, { profiles = ["alpha", "beta"], recipients = profiles, confi
   };
   const registryNow = () => readIdentityRegistry({ root: reg });
   const seq = () => registryNow().registry.sequence;
-  return { root, app, client, registry: reg, configFile, state, run, plan, files, listing, registryNow, seq, dependencies };
+  return { root, app, client, registry: reg, configFile, state, run, plan, files, listing, registryNow, seq, dependencies, start };
 }
 
 const apply = async (f, action, args, extra) => {
@@ -110,7 +125,7 @@ test("a set plan writes nothing, names the registry state, the target and what a
   assert.match(human.out, /Current:  v2 · sequence \d+ · 0 aliases · audit head [0-9a-f]{12}/);
   assert.match(human.out, /Alias:    builder\n/);
   assert.ok(human.out.includes(`Target:   alpha · ${principalOf("alpha")} · binding `));
-  assert.match(human.out, /\[ok\]\s+the target is the one active MESH-managed binding of its principal, on a local recipient/);
+  assert.match(human.out, /\[ok\]\s+the target is an active MESH-managed binding on exactly one local recipient/);
   assert.match(human.out, /a sender that may message alpha sees `builder` among that entry's send\.aliases/);
   assert.match(human.out, /cannot tell the alias exists/);
   assert.match(human.out, /Supervisor: The running supervisor resolves aliases/);
@@ -129,11 +144,21 @@ test("the target may be a profile name or the agent_ id, and both plan the same 
   const byName = await f.plan("set", "builder", "alpha");
   const byId = await f.plan("set", "builder", principalOf("alpha"));
   assert.deepEqual([byId.ready, byId.target.profile, byId.target.principalId], [true, "alpha", principalOf("alpha")]);
-  assert.deepEqual({ ...byName, target: { ...byName.target, given: 0 }, planId: 0, advice: 0 }, { ...byId, target: { ...byId.target, given: 0 }, planId: 0, advice: 0 }, "the same facts but for how the target was given");
+  assert.deepEqual({ ...byName, targetGiven: 0, target: { ...byName.target, given: 0 }, planId: 0, advice: 0 }, { ...byId, targetGiven: 0, target: { ...byId.target, given: 0 }, planId: 0, advice: 0 }, "the same facts but for how the target was given");
+  assert.deepEqual([byName.targetGiven, byId.targetGiven], ["alpha", principalOf("alpha")]);
   assert.notEqual(byName.planId, byId.planId, "the plan id covers how it was asked, so the apply command repeats the same words");
 });
 
 // ---- apply --------------------------------------------------------------------------------------------------------------------
+test("the printed apply command repeats the target as it was given", async (t) => {
+  const f = fixture(t);
+  for (const target of ["alpha", principalOf("alpha")]) {
+    const plan = await f.plan("set", "builder", target);
+    const human = await f.run(["set", "builder", target]);
+    assert.ok(human.out.includes(`triangle identity alias set builder ${target} --client-root ${shellQuote(f.client)} --registry-root ${shellQuote(f.registry)} --confirm ${plan.planId}`), target);
+  }
+});
+
 test("apply sets the alias through the writer: one audited step, create-only, read back", async (t) => {
   const f = fixture(t);
   const sequenceBefore = f.seq();
@@ -218,6 +243,43 @@ test("apply needs a terminal and writes nothing without one", async (t) => {
   assert.equal((await f.run(["set", "builder", "alpha", "--confirm", planned.planId])).code, 0);
 });
 
+test("the terminal gate is standard input AND standard output, when nothing stands in for it", async (t) => {
+  const f = fixture(t);
+  const planned = await f.plan("set", "builder", "alpha");
+  const before = f.files();
+  for (const [stdin, stdout] of [[true, false], [false, true], [false, false]]) {
+    const refusal = await f.run(["set", "builder", "alpha", "--confirm", planned.planId], { identityDependencies: { isTerminal: undefined, stdinIsTTY: stdin, stdoutIsTTY: stdout } });
+    assert.equal(refusal.code, 2, JSON.stringify([stdin, stdout]));
+    assert.match(refusal.err, /requires standard input and output to be a terminal/);
+  }
+  assert.deepEqual(f.files(), before);
+  const both = await f.run(["set", "builder", "alpha", "--confirm", planned.planId], { identityDependencies: { isTerminal: undefined, stdinIsTTY: true, stdoutIsTTY: true } });
+  assert.equal(both.code, 0, both.err);
+  // a function standing in for the check is asked, and its answer counts
+  const g = fixture(t);
+  const id = (await g.plan("set", "builder", "alpha")).planId;
+  assert.equal((await g.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { isTerminal: () => false } })).code, 2);
+  assert.equal((await g.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { isTerminal: () => true } })).code, 0);
+});
+
+test("with no stand-in the terminal check falls back to the streams themselves, and needs both", async (t) => {
+  const f = fixture(t);
+  const id = (await f.plan("set", "builder", "alpha")).planId;
+  const pin = (stream, value) => { const had = Object.getOwnPropertyDescriptor(stream, "isTTY"); Object.defineProperty(stream, "isTTY", { value, configurable: true }); return () => { if (had) Object.defineProperty(stream, "isTTY", had); else delete stream.isTTY; }; };
+  const run = async (stdin, stdout) => {
+    const restore = [pin(process.stdin, stdin), pin(process.stdout, stdout)];
+    try {
+      return await f.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { isTerminal: undefined } });
+    } finally {
+      restore.reverse().forEach((undo) => undo());
+    }
+  };
+  assert.equal((await run(true, false)).code, 2);
+  assert.equal((await run(false, true)).code, 2);
+  assert.equal((await run(false, false)).code, 2);
+  assert.equal((await run(true, true)).code, 0);
+});
+
 test("the confirmation must be a plan id, and a stale one is refused with nothing written", async (t) => {
   const f = fixture(t);
   for (const bad of ["", "abc", "A".repeat(64), "z".repeat(64), `${"a".repeat(63)}`]) {
@@ -234,10 +296,10 @@ test("the confirmation must be a plan id, and a stale one is refused with nothin
   assert.equal((await f.plan("set", "builder", "alpha")).planId, base, "stable while nothing changes");
   assert.notEqual((await f.plan("set", "builder2", "alpha")).planId, base, "the name");
   assert.notEqual((await f.plan("set", "builder", "beta")).planId, base, "the target");
-  fs.writeFileSync(f.configFile, JSON.stringify({ version: 1, recipients: recipientsOf("alpha", "beta", "gamma") }), { mode: 0o600 });
+  fs.writeFileSync(f.configFile, JSON.stringify(configFor(recipientsOf("alpha", "beta", "gamma"))), { mode: 0o600 });
   const withGamma = (await f.plan("set", "builder", "alpha")).planId;
   assert.notEqual(withGamma, base, "the recipients of the client configuration, which decide the collision and locality checks");
-  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 500_000).toISOString(), alias: "other", principalId: principalOf("beta") });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000).toISOString(), alias: "other", principalId: principalOf("beta") });
   assert.notEqual((await f.plan("set", "builder", "alpha")).planId, withGamma, "the registry's sequence and audit head");
   const stale = await f.run(["set", "builder", "alpha", "--confirm", withGamma]);
   assert.deepEqual([stale.code, /plan_stale/.test(stale.err)], [2, true]);
@@ -249,6 +311,7 @@ test("the supervisor's answer is advice: it changes what the plan says and never
   const variants = {
     honored: reportsFor(f.registry),
     router_disabled: reportsFor(f.registry, { router: { enabled: false }, registry: { addressForms: ["id"] } }),
+    router_off_but_lists_alias: reportsFor(f.registry, { router: { enabled: false } }),
     alias_missing: reportsFor(f.registry, { registry: { addressForms: ["id", "principal"] } }),
     not_reported: reportsFor(f.registry, { registry: { addressForms: undefined } }),
     another_registry: reportsFor(f.registry, { registry: { rootSha256: sha256Hex("/somewhere/else") } }),
@@ -265,6 +328,7 @@ test("the supervisor's answer is advice: it changes what the plan says and never
   assert.deepEqual(states, {
     honored: ["honored", null],
     router_disabled: ["not_honored", "router_disabled"],
+    router_off_but_lists_alias: ["not_honored", "router_disabled"],
     alias_missing: ["not_honored", "alias_not_among_address_forms"],
     not_reported: ["not_honored", "address_forms_not_reported"],
     another_registry: ["unknown", "supervisor_reads_another_registry"],
@@ -272,11 +336,15 @@ test("the supervisor's answer is advice: it changes what the plan says and never
     unreachable: ["unknown", "supervisor_unreachable"],
   });
   f.state.status = variants.router_disabled;
-  assert.match((await f.run(["set", "builder", "alpha"])).out, /does not resolve aliases \(router_disabled\)\. The alias would be recorded but not honored until the supervisor is restaged and principal routing is enabled/);
+  assert.match((await f.run(["set", "builder", "alpha"])).out, /Principal routing is switched off in the running supervisor \(router_disabled\), so it resolves no alias\. The alias would be recorded but not honored until routing is enabled/);
   f.state.status = variants.alias_missing;
   assert.match((await f.run(["set", "builder", "alpha"])).out, /does not resolve aliases \(alias_not_among_address_forms\)/);
   f.state.status = variants.unreachable;
   assert.match((await f.run(["set", "builder", "alpha"])).out, /could not be asked whether it resolves aliases \(supervisor_unreachable: timeout\)/);
+  f.state.status = variants.another_registry;
+  assert.match((await f.run(["set", "builder", "alpha"])).out, /answered about another registry directory \(supervisor_reads_another_registry\), so its answer says nothing about this one/);
+  f.state.status = variants.no_root;
+  assert.match((await f.run(["set", "builder", "alpha"])).out, /did not say which registry directory it reads \(registry_root_not_reported\)/);
   // applying records the alias whatever the supervisor said: it is advice, not a floor
   f.state.status = variants.router_disabled;
   assert.equal((await f.run(["set", "builder", "alpha", "--confirm", plans.honored.planId])).code, 0);
@@ -319,40 +387,104 @@ test("refusals about the name: invalid, reserved, and equal to a local profile",
   assert.deepEqual(f.files(), before);
   const text = await f.run(["set", "alpha", "gamma"]);
   assert.match(text.out, /\[blocked\]\s+no local profile has this name/);
-  assert.match(text.out, /alias_collides_with_label: A local profile has this name \(ignoring case\)/);
+  assert.match(text.out, /alias_collides_with_label: A local profile already has this name, or one that differs only in case\./);
   // a name that fits and is free is fine, including the longest and the odd punctuation
   for (const name of ["x".repeat(32), "a.b_c-d", "0", "9lives"]) assert.equal((await f.plan("set", name, "alpha")).ready, true, name);
 });
 
+test("a name that is a property of Object.prototype is an ordinary name, free to set and not there to clear", async (t) => {
+  const f = fixture(t);
+  for (const name of ["constructor", "hasownproperty", "valueof", "tostring"]) {
+    const plan = await f.plan("set", name, "alpha");
+    assert.deepEqual([plan.ready, plan.refusals], [true, []], name);
+  }
+  assert.deepEqual((await f.plan("clear", "constructor")).refusals, ["alias_not_found"]);
+  assert.equal((await apply(f, "set", ["constructor", "alpha"])).result.code, 0);
+  assert.deepEqual(aliasesOf(f), { constructor: principalOf("alpha") });
+  assert.equal((await f.plan("clear", "constructor")).ready, true);
+});
+
 test("refusals about the target: unknown, revoked, serverless, ambiguous and not a local recipient", async (t) => {
-  const f = fixture(t, { profiles: ["alpha", "beta", "gamma"], recipients: ["alpha", "beta"], twin: true });
+  const f = fixture(t, { profiles: ["alpha", "beta", "gamma"], recipients: ["alpha", "beta", "twin"], twin: true });
   // unknown profile, unknown principal, junk, and names that only look like a profile: a profile is matched whole and exactly
   await refused(f, ["set", "builder", "nobody"], "alias_target_not_found");
   for (const near of ["alp", "Alpha", "ALPHA", "alpha ", " alpha", "alph*", "alpha\n"]) await refused(f, ["set", "builder", near], "alias_target_not_found");
   await refused(f, ["set", "builder", `agent_${"0".repeat(32)}`], "alias_target_not_found");
   await refused(f, ["set", "builder", "agent_short"], "alias_target_not_found");
   // bound, but its profile is not in the client configuration's recipients
-  const local = await refused(f, ["set", "builder", "gamma"], "alias_target_not_local");
-  assert.equal(local.target.profile, "gamma");
-  // a principal with two active bindings (the legacy duplicate "twin" shares alpha's principal)
+  const notLocal = await refused(f, ["set", "builder", "gamma"], "alias_target_not_local");
+  assert.equal(notLocal.target.profile, "gamma");
+  // the same by the principal's id; and a principal none of whose bindings is local names no single profile
+  const byId = await refused(f, ["set", "builder", principalOf("gamma")], "alias_target_not_local");
+  assert.equal(byId.target.profile, "gamma");
+  const text = await f.run(["set", "builder", "gamma"]);
+  assert.match(text.out, /\[blocked\]\s+the target is an active MESH-managed binding on exactly one local recipient/);
+  assert.match(text.out, /\[ok\]\s+the name fits the pattern and is not reserved/);
+  // a principal with two active bindings on local recipients (the legacy duplicate "twin" shares alpha's principal)
   await refused(f, ["set", "builder", "alpha"], "alias_target_ambiguous");
   await refused(f, ["set", "builder", principalOf("alpha")], "alias_target_ambiguous");
   await refused(f, ["set", "builder", "twin"], "alias_target_ambiguous");
   // beta is fine
   assert.equal((await f.plan("set", "builder", "beta")).ready, true);
-  // revoked
-  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 400_000).toISOString(), action: "revoke", subject: deriveClientInstanceId("beta"), mutate: (r) => { r.bindings[deriveClientInstanceId("beta")].revoked_at = new Date(START + 400_000).toISOString(); return r; } });
+  // revoked: the profile and its principal
+  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 400_000).toISOString(), action: "revoke", subject: deriveClientInstanceId("beta"), mutate: (r) => { r.bindings[deriveClientInstanceId("beta")].revoked_at = new Date(f.start + 400_000).toISOString(); return r; } });
   await refused(f, ["set", "builder", "beta"], "alias_target_not_active");
   await refused(f, ["set", "builder", principalOf("beta")], "alias_target_not_active");
+});
+
+test("a duplicate binding on a profile that is not a local recipient does not make the principal ambiguous, and does not redirect a profile name", async (t) => {
+  const f = fixture(t, { profiles: ["alpha", "beta"], recipients: ["alpha", "beta"], twin: true });
+  // alpha and twin share a principal; only alpha is a local recipient, so a send by that principal can only reach alpha
+  for (const target of ["alpha", principalOf("alpha")]) {
+    const plan = await f.plan("set", "builder", target);
+    assert.deepEqual([plan.ready, plan.target.profile], [true, "alpha"], target);
+  }
+  // naming the other one is not the same as naming the principal: twin itself cannot be reached, and the alias would go to alpha
+  const named = await refused(f, ["set", "builder", "twin"], "alias_target_not_local");
+  assert.equal(named.target.profile, "twin");
+});
+
+test("a profile name names that profile's own binding: a revoked profile is not quietly re-aimed at the profile its principal moved to", async (t) => {
+  const f = fixture(t, { profiles: ["alpha", "beta"], recipients: ["alpha", "beta", "beta2"] });
+  const at = new Date(f.start + 400_000).toISOString();
+  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: at, action: "revoke", subject: deriveClientInstanceId("beta"), mutate: (r) => { r.bindings[deriveClientInstanceId("beta")].revoked_at = at; return r; } });
+  const moved = agentBindingV2("beta2", { principal_id: principalOf("beta"), issued_at: new Date(f.start + 500_000).toISOString() });
+  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000).toISOString(), action: "bind", subject: moved.profile_instance_id, mutate: (r) => { r.bindings[moved.profile_instance_id] = moved; return r; } });
+  // by the revoked profile's name: refused, and the plan names no target
+  const byName = await refused(f, ["set", "builder", "beta"], "alias_target_not_active");
+  assert.equal(byName.target, null);
+  const text = await f.run(["set", "builder", "beta"]);
+  assert.match(text.out, /give its agent_ id instead/);
+  assert.doesNotMatch(text.out, /To apply this plan/, "no apply command for a refused plan");
+  // by the principal's id the owner chooses the principal, and sees where it is bound now
+  const byId = await f.plan("set", "builder", principalOf("beta"));
+  assert.deepEqual([byId.ready, byId.target.profile], [true, "beta2"]);
+  // and the profile it has moved to can be named
+  assert.equal((await f.plan("set", "builder", "beta2")).ready, true);
 });
 
 test("a serverless peer binding cannot have an alias", async (t) => {
   const f = fixture(t);
   const peer = peerBindingV2("peerone");
   // the writer cannot create a serverless binding yet: commit one by hand, audit line first
-  appendAndCommit(f.registry, { action: "bind", subject: peer.profile_instance_id, bindingId: peer.binding_id, at: new Date(START + 400_000).toISOString(), change: (r) => ({ ...r, bindings: { ...r.bindings, [peer.profile_instance_id]: peer } }) });
+  appendAndCommit(f.registry, { action: "bind", subject: peer.profile_instance_id, bindingId: peer.binding_id, at: new Date(f.start + 400_000).toISOString(), change: (r) => ({ ...r, bindings: { ...r.bindings, [peer.profile_instance_id]: peer } }) });
   await refused(f, ["set", "builder", "peerone"], "alias_target_not_mesh_managed");
-  await refused(f, ["set", "builder", peer.principal_id], "alias_target_not_found");
+  await refused(f, ["set", "builder", peer.principal_id], "alias_target_not_mesh_managed");
+  await refused(f, ["set", "builder", `peer_${"0".repeat(32)}`], "alias_target_not_found");
+});
+
+test("every reason that can be judged is listed, in a fixed order", async (t) => {
+  const absent = fixture(t, { registry: "absent", config: "missing" });
+  assert.deepEqual((await absent.plan("set", "Builder", "alpha")).refusals, ["registry_absent", "local_messaging_config_missing", "alias_name_invalid"], "the registry first, then the configuration, then the name; nothing about the target can be judged");
+  const f = fixture(t);
+  assert.deepEqual((await f.plan("set", "claude", "nobody")).refusals, ["alias_name_reserved", "alias_target_not_found"], "a name refusal does not hide the target's");
+  assert.deepEqual((await f.plan("set", "Builder", "nobody")).refusals, ["alias_name_invalid", "alias_target_not_found"]);
+  const plan = await f.run(["set", "Builder", "nobody"]);
+  assert.match(plan.out, /\[blocked\]\s+the name fits the pattern and is not reserved/);
+  assert.match(plan.out, /\[blocked\]\s+the target is an active MESH-managed binding on exactly one local recipient/);
+  assert.match(plan.out, /\[ok\]\s+the registry reads and is a v2 registry/);
+  assert.match(plan.out, /\[ok\]\s+the name is free/);
+  assert.doesNotMatch(plan.out, /To apply this plan/, "no apply command for a refused plan");
 });
 
 test("refusals about the registry and the configuration, before any write", async (t) => {
@@ -382,12 +514,16 @@ test("refusals about the registry and the configuration, before any write", asyn
   await refused(damaged, ["set", "builder", "alpha"], "registry_unreadable");
 });
 
-test("the registry is at its cap of 256 aliases", async (t) => {
+test("the registry is at its cap of 256 aliases: the 256th can still be set, the 257th cannot", async (t) => {
+  assert.equal(MAX_ALIASES, MAX_REGISTRY_ALIASES, "this command's copy of the registry's cap");
   const f = fixture(t);
-  for (let index = 0; index < 256; index += 1) {
-    setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 1_000_000 + index * 1000).toISOString(), alias: `n${String(index).padStart(3, "0")}`, principalId: principalOf("alpha") });
-  }
+  const add = (index) => setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 1_000_000 + index * 1000).toISOString(), alias: `n${String(index).padStart(3, "0")}`, principalId: principalOf("alpha") });
+  for (let index = 0; index < 255; index += 1) add(index);
+  assert.equal((await f.plan("set", "builder", "beta")).ready, true, "255 aliases: one more fits");
+  add(255);
   await refused(f, ["set", "builder", "beta"], "alias_map_full");
+  // a name that is taken in a full map is both
+  assert.deepEqual((await f.plan("set", "n007", "beta")).refusals, ["alias_exists", "alias_map_full"]);
   assert.equal((await f.plan("clear", "n007")).ready, true, "a full map can still be cleared");
 });
 
@@ -396,7 +532,7 @@ test("a clear plan says what the alias is now, and refuses a name that is not th
   const f = fixture(t);
   await refused(f, ["clear", "builder"], "alias_not_found");
   await refused(f, ["clear", "Builder"], "alias_name_invalid");
-  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 500_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
   const human = await f.run(["clear", "builder"]);
   assert.equal(human.code, 0, human.err);
   assert.match(human.out, /Identity alias plan: clear/);
@@ -406,7 +542,7 @@ test("a clear plan says what the alias is now, and refuses a name that is not th
   const plan = await f.plan("clear", "builder");
   assert.deepEqual([plan.ready, plan.existing.state, plan.existing.profile], [true, "active", "alpha"]);
   // a dangling alias (its profile revoked) can be cleared, and so can one with an old, reserved-looking name
-  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 600_000).toISOString(), action: "revoke", subject: deriveClientInstanceId("alpha"), mutate: (r) => { r.bindings[deriveClientInstanceId("alpha")].revoked_at = new Date(START + 600_000).toISOString(); return r; } });
+  updateIdentityRegistry({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 600_000).toISOString(), action: "revoke", subject: deriveClientInstanceId("alpha"), mutate: (r) => { r.bindings[deriveClientInstanceId("alpha")].revoked_at = new Date(f.start + 600_000).toISOString(); return r; } });
   const dangling = await f.plan("clear", "builder");
   assert.deepEqual([dangling.ready, dangling.existing.state, dangling.existing.profile], [true, "dangling", null]);
   assert.equal((await apply(f, "clear", ["builder"])).result.code, 0);
@@ -415,7 +551,7 @@ test("a clear plan says what the alias is now, and refuses a name that is not th
 
 test("an alias whose name the writer would now refuse (it predates the reserved words) can still be cleared", async (t) => {
   const f = fixture(t);
-  const at = new Date(START + 300_000).toISOString();
+  const at = new Date(f.start + 300_000).toISOString();
   // committed by hand, audit line first: the writer itself refuses to set a reserved name
   appendAndCommit(f.registry, { action: "alias_set", subject: "claude", at, change: (r) => ({ ...r, aliases: { ...r.aliases, claude: { principal_id: principalOf("alpha"), set_at: at, generation: r.sequence + 1 } } }) });
   assert.deepEqual(Object.keys(f.registryNow().registry.aliases), ["claude"]);
@@ -426,12 +562,29 @@ test("an alias whose name the writer would now refuse (it predates the reserved 
   assert.deepEqual(aliasesOf(f), {});
 });
 
+test("a clear plan shows the alias's state judged against the configuration, without resting on it, and prints the way back", async (t) => {
+  const f = fixture(t, { profiles: ["alpha", "beta"], recipients: ["alpha"] });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000).toISOString(), alias: "builder", principalId: principalOf("beta") });
+  const record = f.registryNow().registry.aliases.builder;
+  const plan = await f.plan("clear", "builder");
+  assert.deepEqual([plan.ready, plan.existing.state, plan.advice.currentState], [true, "active", "unroutable"], "beta is not a local recipient: unroutable, but the plan itself rests on the registry alone");
+  assert.deepEqual({ ...plan.existing }, { principalId: principalOf("beta"), profile: "beta", state: "active", setAt: record.set_at, generation: record.generation });
+  const human = await f.run(["clear", "builder"]);
+  assert.ok(human.out.includes(`set ${record.set_at} · now unroutable`), human.out);
+  assert.ok(human.out.includes(`Way back: triangle identity alias set builder ${principalOf("beta")} --client-root ${shellQuote(f.client)}`), "the way back names the principal");
+  // adding a recipient moves the advice but not the plan id
+  const before = plan.planId;
+  fs.writeFileSync(f.configFile, JSON.stringify(configFor(recipientsOf("alpha", "beta"))), { mode: 0o600 });
+  const after = await f.plan("clear", "builder");
+  assert.deepEqual([after.planId, after.advice.currentState], [before, "active"]);
+});
+
 test("clear works on a registry whose client configuration is gone", async (t) => {
   const f = fixture(t);
-  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 500_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
   fs.rmSync(f.configFile);
   const plan = await f.plan("clear", "builder");
-  assert.deepEqual([plan.ready, plan.localMessaging.state], [true, "local_messaging_config_missing"]);
+  assert.deepEqual([plan.ready, plan.localMessaging], [true, null], "a clear plan does not rest on the configuration");
   assert.equal((await apply(f, "clear", ["builder"])).result.code, 0);
 });
 
@@ -439,7 +592,7 @@ test("clear works on a registry whose client configuration is gone", async (t) =
 test("a principal's ninth alias in code-unit order is not listed by discovery, and the plan says so", async (t) => {
   const f = fixture(t);
   const eight = ["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"];
-  eight.forEach((alias, index) => setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 500_000 + index * 1000).toISOString(), alias, principalId: principalOf("alpha") }));
+  eight.forEach((alias, index) => setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 500_000 + index * 1000).toISOString(), alias, principalId: principalOf("alpha") }));
   const last = await f.plan("set", "zz", "alpha");
   assert.deepEqual([last.ready, last.advice.listing.aliasesOfPrincipal, last.advice.listing.unlisted], [true, 9, ["zz"]]);
   assert.match((await f.run(["set", "zz", "alpha"])).out, /discovery lists the first 8 names of a recipient \(9 would exist for this principal\)\. Not listed, though a send by the server still resolves them: zz\. The owner CLI refuses a name that discovery does not list\./);
@@ -458,7 +611,7 @@ test("a registry that changes between the plan and the write is refused with not
   const racing = {
     setIdentityAlias: (options) => {
       // another owner command lands after the plan was re-evaluated and before the write
-      setIdentityAlias({ root: f.registry, expectedSequence: options.expectedSequence, now: new Date(START + 700_000).toISOString(), alias: "rival", principalId: principalOf("beta") });
+      setIdentityAlias({ root: f.registry, expectedSequence: options.expectedSequence, now: new Date(f.start + 700_000).toISOString(), alias: "rival", principalId: principalOf("beta") });
       return setIdentityAlias(options);
     },
   };
@@ -466,16 +619,58 @@ test("a registry that changes between the plan and the write is refused with not
   assert.equal(result.code, 1);
   const error = JSON.parse(result.err);
   assert.deepEqual([error.error, error.nothingChanged], ["registry_sequence_conflict", true]);
+  assert.equal(error.message, "The registry changed while the command ran. Nothing was changed.");
   assert.deepEqual(aliasesOf(f), { rival: principalOf("beta") }, "only the other command's alias exists");
+  // and in words
+  const g = fixture(t);
+  const id = (await g.plan("set", "builder", "alpha")).planId;
+  const spoken = await g.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { setIdentityAlias: (options) => { setIdentityAlias({ root: g.registry, expectedSequence: options.expectedSequence, now: new Date(g.start + 700_000).toISOString(), alias: "rival", principalId: principalOf("beta") }); return setIdentityAlias(options); } } });
+  assert.equal(spoken.err, "The registry changed while the command ran. Nothing was changed. (registry_sequence_conflict)");
 });
 
-test("a write that does not read back as the planned change is reported", async (t) => {
+test("a write that does not read back as the planned change is reported, and a later write by someone else is not a failure", async (t) => {
+  const readBack = (doctor) => {
+    let written = false;
+    return {
+      setIdentityAlias: (options) => { const result = setIdentityAlias(options); written = true; return result; },
+      readIdentityRegistry: (options) => { const read = readIdentityRegistry(options); return written ? doctor(structuredClone(read)) : read; },
+    };
+  };
+  const cases = {
+    "the registry reads as it was before": (read) => ({ ...read, registry: { ...read.registry, sequence: read.registry.sequence - 1 } }),
+    "the alias points at another principal": (read) => { read.registry.aliases.builder.principal_id = principalOf("beta"); return read; },
+    "the alias is missing": (read) => { delete read.registry.aliases.builder; return read; },
+    "the registry cannot be read": () => ({ state: "unreadable" }),
+  };
+  for (const [label, doctor] of Object.entries(cases)) {
+    const f = fixture(t);
+    const planned = await f.plan("set", "builder", "alpha");
+    const result = await f.run(["set", "builder", "alpha", "--confirm", planned.planId, "--json"], { identityDependencies: readBack(doctor) });
+    assert.equal(result.code, 1, label);
+    const error = JSON.parse(result.err);
+    assert.deepEqual([error.error, error.writeAttempted], ["alias_verification_failed", true], label);
+  }
+  // and for a clear: the alias still there after it
+  const g = fixture(t);
+  setIdentityAlias({ root: g.registry, expectedSequence: g.seq(), now: new Date(g.start + 600_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
+  const clearPlan = await g.plan("clear", "builder");
+  let cleared = false;
+  const stillThere = {
+    clearIdentityAlias: (options) => { const result = clearIdentityAlias(options); cleared = true; return result; },
+    readIdentityRegistry: (options) => { const read = readIdentityRegistry(options); if (!cleared) return read; const copy = structuredClone(read); copy.registry.aliases.builder = { principal_id: principalOf("alpha"), set_at: "2026-11-07T10:00:00.000Z", generation: 3 }; return copy; },
+  };
+  const notCleared = await g.run(["clear", "builder", "--confirm", clearPlan.planId, "--json"], { identityDependencies: stillThere });
+  assert.deepEqual([notCleared.code, JSON.parse(notCleared.err).error], [1, "alias_verification_failed"]);
+  // another write lands after ours: the alias is set, and the command says so
   const f = fixture(t);
   const planned = await f.plan("set", "builder", "alpha");
-  const lying = { setIdentityAlias: (options) => { const written = setIdentityAlias(options); clearIdentityAlias({ root: options.root, expectedSequence: options.expectedSequence + 1, now: new Date(START + 800_000).toISOString(), alias: "builder" }); return written; } };
-  const result = await f.run(["set", "builder", "alpha", "--confirm", planned.planId], { identityDependencies: lying });
-  assert.equal(result.code, 1);
-  assert.match(result.err, /alias_verification_failed/);
+  const sequence = f.seq();
+  const later = { setIdentityAlias: (options) => { const written = setIdentityAlias(options); setIdentityAlias({ root: options.root, expectedSequence: options.expectedSequence + 1, now: new Date(f.start + 700_000).toISOString(), alias: "rival", principalId: principalOf("beta") }); return written; } };
+  const result = await f.run(["set", "builder", "alpha", "--confirm", planned.planId, "--json"], { identityDependencies: later });
+  assert.equal(result.code, 0, result.err);
+  const done = JSON.parse(result.out);
+  assert.deepEqual([done.from.sequence, done.to.sequence, done.laterWrites], [sequence, sequence + 2, 1]);
+  assert.deepEqual(aliasesOf(f), { builder: principalOf("alpha"), rival: principalOf("beta") });
 });
 
 test("a fault at any stage of the write leaves a registry that reads, with the alias absent or complete, and the retry is told the truth", async (t) => {
@@ -528,10 +723,65 @@ test("usage errors are caught before anything is read", async (t) => {
   await bad(["set", "x", "alpha", "--client-root", "relative/path"], /--client-root must be an absolute path/, { client: false });
   await bad(["set", "x", "alpha", "--registry-root", "relative"], /--registry-root must be an absolute path/);
   await bad(["set", "x", "alpha", "--registry-root", f.client], /registry root must not equal client root/);
+  await bad(["set", "x", "alpha", "--client-root", "/"], /--client-root must not be the filesystem root/, { client: false });
+  await bad(["set", "x", "alpha", "--registry-root", "/"], /--registry-root must not be the filesystem root/);
   await bad(["set", "x", "alpha", "--registry-root", path.join(f.root, "elsewhere")], /beside --client-root/);
   await bad(["set", "x", "alpha", "--confirm", "nothex"], /--confirm must be 64 lowercase hex characters/);
   await bad(["set", "x", "alpha", "--bogus", "1"], /unknown option --bogus/);
   assert.deepEqual(f.listing(), before);
+});
+
+test("the result text and the printed commands are safe to paste and to print", async (t) => {
+  const result = renderAliasResult({ action: "set", registryRoot: "/r\u0007oot", alias: "builder", principal: "agent_x", profile: "p\u001b[31mq\u202ez", from: { sequence: 1 }, to: { sequence: 2 }, laterWrites: 0 });
+  assert.doesNotMatch(result, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e]/);
+  assert.match(renderAliasResult({ action: "clear", registryRoot: "/r", alias: "builder", principal: "agent_x", profile: null, from: { sequence: 1 }, to: { sequence: 3 }, laterWrites: 1 }), /Another write landed after this one \(1 entry\)/);
+  const command = aliasCommand({ action: "set", name: "$(touch x)", target: "it's a profile", clientRoot: "/a b/client", registryRoot: "/a b/identity", confirm: "a".repeat(64) });
+  assert.equal(command, `triangle identity alias set '$(touch x)' 'it'\\''s a profile' --client-root '/a b/client' --registry-root '/a b/identity' --confirm ${"a".repeat(64)}`);
+  assert.equal(aliasCommand({ action: "clear", name: "builder", clientRoot: "/c", registryRoot: "/i" }), "triangle identity alias clear builder --client-root /c --registry-root /i");
+  // a refused plan echoes what was typed, quoted in its way-back line, and prints no apply command
+  const f = fixture(t);
+  const refusedPlan = await f.run(["set", "$(touch /tmp/not-created)", "alpha"]);
+  assert.match(refusedPlan.out, /Way back: triangle identity alias clear '\$\(touch \/tmp\/not-created\)' --client-root /);
+  assert.doesNotMatch(refusedPlan.out, /alias clear \$\(touch/);
+  assert.equal(fs.existsSync("/tmp/not-created"), false);
+  // format characters (a bidi override) typed by the owner never reach the terminal either
+  const bidi = await f.run(["set", "ab\u202ec", "alpha"]);
+  assert.doesNotMatch(bidi.out + bidi.err, /\p{Cf}/u);
+});
+
+test("an error from the write that this command has no words for says the registry may have changed; a LocalStateError is reported as itself", async (t) => {
+  const f = fixture(t);
+  const id = (await f.plan("set", "builder", "alpha")).planId;
+  const io = new Error("input/output error");
+  io.code = "EIO";
+  const raw = await f.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { setIdentityAlias: () => { throw io; } } });
+  assert.equal(raw.code, 1);
+  assert.equal(raw.err, "input/output error (EIO) The registry may or may not have changed: make a fresh plan, or check it with triangle status --identity.");
+  const json = JSON.parse((await f.run(["set", "builder", "alpha", "--confirm", id, "--json"], { identityDependencies: { setIdentityAlias: () => { throw io; } } })).err);
+  assert.deepEqual([json.error, json.writeAttempted], ["EIO", true]);
+  assert.match(json.message, /may or may not have changed/);
+  // a reason it does have words for needs no such hint
+  const clock = Object.assign(new Error("x"), { code: "invalid_registry", reason: "updated_before_created" });
+  const known = await f.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { setIdentityAlias: () => { throw clock; } } });
+  assert.equal(known.err, "This computer's clock is earlier than the registry's last write. Check the date and time, then make a fresh plan. (updated_before_created)");
+  // a LocalStateError is passed on to the command line's own handler: its message, as itself, exit 1
+  const gone = await f.run(["set", "builder", "alpha", "--confirm", id], { identityDependencies: { setIdentityAlias: () => { throw new LocalStateError("the state directory is gone"); } } });
+  assert.deepEqual([gone.code, gone.err], [1, "the state directory is gone"]);
+});
+
+test("applying a refused plan, or with something that is not a plan id, is refused with the reasons", async (t) => {
+  const f = fixture(t);
+  const refusedPlan = await f.plan("set", "Builder", "nobody");
+  const result = await f.run(["set", "Builder", "nobody", "--confirm", refusedPlan.planId, "--json"]);
+  assert.equal(result.code, 1);
+  const error = JSON.parse(result.err);
+  assert.deepEqual([error.error, error.refusals], ["alias_name_invalid", ["alias_name_invalid", "alias_target_not_found"]]);
+  // the module's own guard, for a caller that is not the command line
+  await assert.rejects(applyIdentityAlias({ action: "set", name: "builder", target: "alpha", clientRoot: f.client, registryRoot: f.registry, confirm: "nope" }), { code: "confirmation_mismatch" });
+  // two targets that cannot be resolved are still two plans
+  const a = await f.plan("set", "builder", "ghost");
+  const b = await f.plan("set", "builder", "ghost2");
+  assert.deepEqual([a.target, b.target, a.planId === b.planId], [null, null, false]);
 });
 
 test("the help text lists both commands", async () => {
@@ -570,7 +820,7 @@ async function statusReport(f, { command = "doctor", json = true, extra = {} } =
 
 test("status --identity and doctor --identity list the aliases and warn on each that does not simply work", async (t) => {
   const f = fixture(t, { profiles: ["alpha", "beta", "gamma"], recipients: ["alpha", "beta"] });
-  const at = (offset) => new Date(START + offset).toISOString();
+  const at = (offset) => new Date(f.start + offset).toISOString();
   setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: at(100_000), alias: "builder", principalId: principalOf("alpha") });
   setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: at(101_000), alias: "reviewer", principalId: principalOf("beta") });
   setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: at(102_000), alias: "gamma-agent", principalId: principalOf("gamma") });
@@ -598,6 +848,19 @@ test("status --identity and doctor --identity list the aliases and warn on each 
   assert.doesNotMatch(doctor.out, /! Identity: Alias builder/);
 });
 
+test("an ambiguous alias is listed with every profile its principal is bound to", async (t) => {
+  const f = fixture(t, { profiles: ["alpha", "beta"], recipients: ["alpha", "beta", "twin"] });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 100_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
+  // a legacy duplicate binding appears afterwards (the writer would refuse to create it)
+  const twin = agentBindingV2("twin", { principal_id: principalOf("alpha") });
+  appendAndCommit(f.registry, { action: "bind", subject: twin.profile_instance_id, bindingId: twin.binding_id, at: new Date(f.start + 200_000).toISOString(), change: (r) => ({ ...r, bindings: { ...r.bindings, [twin.profile_instance_id]: twin } }) });
+  const text = await statusReport(f, { command: "status", json: false });
+  assert.match(text.out, new RegExp(`  - ambiguous · builder → alpha, twin · ${principalOf("alpha")}`));
+  assert.match(text.out, /\[warn\] Alias builder points at a principal bound to several profiles \(alpha, twin\)/);
+  const row = JSON.parse((await statusReport(f, { command: "status" })).out).identity.aliases[0];
+  assert.deepEqual([row.state, row.profile, [...row.profiles]], ["ambiguous", null, ["alpha", "twin"]]);
+});
+
 test("without aliases, and on a v1 registry, status prints what it always did", async (t) => {
   for (const options of [{ registry: "v1" }, { registry: "v2" }]) {
     const f = fixture(t, options);
@@ -615,7 +878,7 @@ test("the client configuration is read for the alias rows only when there are al
   const counting = { readLocalRecipients: async (clientRoot) => { reads += 1; return readLocalRecipients(clientRoot); } };
   await statusReport(f, { command: "status", extra: counting });
   assert.equal(reads, 0, "no aliases, no read");
-  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 100_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 100_000).toISOString(), alias: "builder", principalId: principalOf("alpha") });
   await statusReport(f, { command: "status", extra: counting });
   assert.equal(reads, 1);
   fs.chmodSync(f.configFile, 0o644);
@@ -627,19 +890,39 @@ test("the client configuration is read for the alias rows only when there are al
 
 test("identityStatus passes the configured recipients to the view", async (t) => {
   const f = fixture(t);
-  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(START + 100_000).toISOString(), alias: "beta", principalId: principalOf("alpha") });
+  setIdentityAlias({ root: f.registry, expectedSequence: f.seq(), now: new Date(f.start + 100_000).toISOString(), alias: "beta", principalId: principalOf("alpha") });
   const view = await identityStatus({ clientRoot: f.client, registryRoot: f.registry, identityInventory: async () => ({ schema: "identity_inventory_v1", scope: "host-local", summary: {}, identities: [], unmappedProfiles: [], sessions: [], diagnostics: [] }) });
   assert.deepEqual(view.aliases.map((row) => [row.name, row.state]), [["beta", "collides"]], "the alias has the name of the local profile beta");
 });
 
-test("readLocalRecipients reads only profile names and instance ids, sorted, from a private file", async (t) => {
+test("readLocalRecipients takes only profile names and instance ids, sorted, from a file the supervisor would load, and from no other", async (t) => {
   const f = fixture(t, { recipients: ["beta", "alpha"] });
-  fs.writeFileSync(f.configFile, JSON.stringify({ version: 1, secret: "SECRET", recipients: [...recipientsOf("beta", "alpha"), ].map((entry) => ({ ...entry, token: "SECRET" })) }), { mode: 0o600 });
+  fs.writeFileSync(f.configFile, JSON.stringify(configFor(recipientsOf("beta", "alpha"), { runnerTimeoutMs: 5000 })), { mode: 0o600 });
   const read = await readLocalRecipients(f.client);
   assert.deepEqual(read, { ok: true, code: null, recipients: recipientsOf("alpha", "beta") });
-  assert.equal(JSON.stringify(read).includes("SECRET"), false);
-  fs.writeFileSync(f.configFile, JSON.stringify({ recipients: [{ profile: "alpha", instanceId: "not-an-id" }] }), { mode: 0o600 });
-  assert.equal((await readLocalRecipients(f.client)).code, "local_messaging_config_unreadable");
-  fs.writeFileSync(f.configFile, JSON.stringify({ recipients: [{ profile: "", instanceId: deriveClientInstanceId("x") }] }), { mode: 0o600 });
-  assert.equal((await readLocalRecipients(f.client)).code, "local_messaging_config_unreadable");
+  assert.equal(JSON.stringify(read).includes("alias-cli-state"), false, "nothing else of the file is kept");
+  // the supervisor's rules, not looser ones: the same file is refused here and there
+  const refused = {
+    "not enabled": configFor(recipientsOf("alpha"), { enabled: false }),
+    "no version": { ...configFor(recipientsOf("alpha")), version: undefined },
+    "an extra key": configFor(recipientsOf("alpha"), { unexpected: 1 }),
+    "a duplicate profile": configFor([...recipientsOf("alpha"), { profile: "alpha", instanceId: deriveClientInstanceId("other") }]),
+    "a duplicate instance id": configFor([...recipientsOf("alpha"), { profile: "other", instanceId: deriveClientInstanceId("alpha") }]),
+    "a profile with a slash": configFor([{ profile: "a/b", instanceId: deriveClientInstanceId("a/b") }]),
+    "a bidi override in a profile": configFor([{ profile: "al\u202epha", instanceId: deriveClientInstanceId("x") }]),
+    "an extra recipient key": configFor([{ ...recipientsOf("alpha")[0], token: "SECRET" }]),
+    "a null recipient": configFor([null]),
+    "no recipients": configFor([]),
+    "33 recipients": configFor(Array.from({ length: 33 }, (_, i) => ({ profile: `p${i}`, instanceId: deriveClientInstanceId(`p${i}`) }))),
+    "a bad instance id": configFor([{ profile: "alpha", instanceId: "not-an-id" }]),
+  };
+  for (const [label, config] of Object.entries(refused)) {
+    fs.writeFileSync(f.configFile, JSON.stringify(config), { mode: 0o600 });
+    assert.deepEqual(await readLocalRecipients(f.client), { ok: false, code: "local_messaging_config_unreadable", recipients: null }, label);
+  }
+  fs.rmSync(f.configFile);
+  assert.deepEqual(await readLocalRecipients(f.client), { ok: false, code: "local_messaging_config_missing", recipients: null });
+  // and a plan on a configuration the supervisor would refuse is refused
+  const disabled = fixture(t, { config: "disabled" });
+  assert.equal((await disabled.plan("set", "builder", "alpha")).refusals[0], "local_messaging_config_unreadable");
 });

@@ -103,14 +103,15 @@ test("ambiguous: a principal bound to two local profiles (a legacy duplicate) is
   });
 });
 
-test("collides: a local profile has the alias's name, whatever its case", () => {
+test("collides: a local profile has exactly the alias's name; one that differs only in case is no collision, because the router compares exactly", () => {
   withRegistry({ ghost: GRAVITY }, (root, read) => {
-    for (const profile of ["ghost", "Ghost", "GHOST"]) {
-      const view = viewOf(read(), [...recipients("gravity2"), { profile, instanceId: deriveClientInstanceId(profile) }]);
-      assert.equal(states(view).ghost, "collides", profile);
-      assert.equal(aliasWarnings(view)[0].code, "alias_collides");
+    const view = viewOf(read(), [...recipients("gravity2"), { profile: "ghost", instanceId: deriveClientInstanceId("ghost") }]);
+    assert.equal(states(view).ghost, "collides");
+    assert.equal(aliasWarnings(view)[0].code, "alias_collides");
+    for (const profile of ["Ghost", "GHOST", "ghosts"]) {
+      const other = viewOf(read(), [...recipients("gravity2"), { profile, instanceId: deriveClientInstanceId(profile) }]);
+      assert.equal(states(other).ghost, "active", profile);
     }
-    assert.equal(states(viewOf(read(), recipients("gravity2", "ghosts"))).ghost, "active", "a different name is no collision");
   });
 });
 
@@ -141,7 +142,7 @@ test("the first matching state wins: dangling, unroutable, ambiguous, collides, 
     // unroutable before collides: ghost active but not local, while a profile named like the alias exists
     const other = read();
     assert.equal(states(viewOf(other, recipients("gravity2", "ghost"))).ghost, "collides");
-    assert.equal(states(viewOf(other, [...recipients("gravity2"), { profile: "GHOST", instanceId: "f".repeat(64) }])).ghost, "unroutable");
+    assert.equal(states(viewOf(other, [...recipients("gravity2"), { profile: "ghost", instanceId: "f".repeat(64) }])).ghost, "unroutable", "a profile named ghost exists, but it is not the one the principal is bound to: unroutable outranks collides");
   });
 });
 
@@ -170,6 +171,52 @@ test("a serverless binding is no MESH-managed binding: an alias whose principal 
     localRecipients: recipients("peerone"),
   });
   assert.deepEqual(rows.map((row) => [row.name, row.state, row.profile]), [["odd", "dangling", null]]);
+});
+
+test("an alias reaches the one local profile of its principal, whatever other profiles the principal has", () => {
+  withRegistry({ builder: GRAVITY }, (root, read) => {
+    const registry = read();
+    const elsewhere = agentBindingV2("zeta", { principal_id: GRAVITY });
+    registry.registry.bindings[elsewhere.profile_instance_id] = elsewhere;
+    // gravity2 is local, zeta is not: a send reaches gravity2 only
+    const view = viewOf(registry, recipients("gravity2"));
+    const [row] = view.aliases;
+    assert.deepEqual([row.state, row.profile, row.profileInstanceId, [...row.profiles]], ["active", "gravity2", GRAVITY_ID, ["gravity2", "zeta"]]);
+    // with neither local, the alias is unroutable and there are two profiles to name
+    const none = viewOf(registry, recipients("someone"));
+    assert.deepEqual([none.aliases[0].state, none.aliases[0].profile], ["unroutable", null]);
+    // with both local it is ambiguous, and no single profile is named
+    const both = viewOf(registry, recipients("gravity2", "zeta"));
+    assert.deepEqual([both.aliases[0].state, both.aliases[0].profile, [...both.aliases[0].profiles]], ["ambiguous", null, ["gravity2", "zeta"]]);
+  });
+});
+
+test("moved needs the successor to be issued strictly after the alias was set, and says it may reach another profile, not that it does", () => {
+  withRegistry({ builder: GRAVITY }, (root, read) => {
+    const movedAt = (issuedAt) => {
+      const registry = read();
+      registry.registry.bindings[GRAVITY_ID].revoked_at = T3;
+      const successor = agentBindingV2("gravity3", { principal_id: GRAVITY, issued_at: issuedAt });
+      registry.registry.bindings[successor.profile_instance_id] = successor;
+      return viewOf(registry, recipients("gravity2", "gravity3"));
+    };
+    assert.equal(states(movedAt(T3)).builder, "active", "issued at the very time the alias was set: not after");
+    assert.equal(states(movedAt("2026-11-07T10:15:00.001Z")).builder, "moved");
+    const [warning] = aliasWarnings(movedAt(T4));
+    assert.match(warning.message, /was bound again after the alias was set, and now reaches gravity3/);
+    assert.match(warning.action, /triangle identity alias clear builder --client-root DIR/);
+  });
+});
+
+test("the profiles of a row are in code-unit order whatever order the registry holds them in", () => {
+  withRegistry({ builder: GRAVITY }, (root, read) => {
+    const registry = read();
+    for (const name of ["zeta", "Alpha", "beta"]) {
+      const twin = agentBindingV2(name, { principal_id: GRAVITY });
+      registry.registry.bindings[twin.profile_instance_id] = twin;
+    }
+    assert.deepEqual([...viewOf(registry, null).aliases[0].profiles], ["Alpha", "beta", "gravity2", "zeta"]);
+  });
 });
 
 test("without the client configuration's recipients only the registry's own states are judged, and one warning says so", () => {

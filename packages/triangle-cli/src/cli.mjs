@@ -122,6 +122,20 @@ export function parseArgs(argv) {
   return { positional, flags };
 }
 
+/**
+ * Whether the command runs in the owner's terminal: standard input and output both. The gate every `--confirm` of the identity
+ * registry commands has (it keeps an agent or a script from applying an owner decision). `identityDependencies` can stand in for it in tests.
+ */
+function ownerTerminal(identityDependencies, io) {
+  if (identityDependencies.isTerminal !== undefined) {
+    return typeof identityDependencies.isTerminal === "function" ? Boolean(identityDependencies.isTerminal()) : Boolean(identityDependencies.isTerminal);
+  }
+  return Boolean(
+    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
+    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
+  );
+}
+
 function allowOnly(flags, allowed) {
   for (const name of Object.keys(flags)) if (!allowed.includes(name) && !["home", "json"].includes(name)) throw new UsageError(`unknown option --${name}`);
 }
@@ -448,15 +462,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               throw new UsageError("--confirm must be 64 lowercase hex characters");
             }
 
-            const isTerm =
-              identityDependencies.isTerminal !== undefined
-                ? (typeof identityDependencies.isTerminal === "function"
-                    ? identityDependencies.isTerminal()
-                    : Boolean(identityDependencies.isTerminal))
-                : Boolean(
-                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
-                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
-                  );
+            const isTerm = ownerTerminal(identityDependencies, io);
 
             if (!isTerm) {
               io.stderr("identity migrate --confirm requires standard input and output to be a terminal");
@@ -528,15 +534,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           }
           if (flags.confirm !== undefined) {
             if (!/^[a-f0-9]{64}$/.test(flags.confirm)) throw new UsageError("--confirm must be 64 lowercase hex characters");
-            const isTerm =
-              identityDependencies.isTerminal !== undefined
-                ? (typeof identityDependencies.isTerminal === "function"
-                    ? identityDependencies.isTerminal()
-                    : Boolean(identityDependencies.isTerminal))
-                : Boolean(
-                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
-                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
-                  );
+            const isTerm = ownerTerminal(identityDependencies, io);
             if (!isTerm) {
               io.stderr(`identity ${sub} --confirm requires standard input and output to be a terminal`);
               return 2;
@@ -595,6 +593,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           if (typeof registryRoot !== "string" || !isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
           const normClient = resolve(clientRoot);
           const normRegistry = resolve(registryRoot);
+          if (dirname(normRegistry) === normRegistry) throw new UsageError("--registry-root must not be the filesystem root");
           if (normRegistry === normClient) throw new UsageError("registry root must not equal client root");
           if (normClient.startsWith(normRegistry + sep)) throw new UsageError("registry root must not contain client root");
           if (normRegistry.startsWith(normClient + sep)) throw new UsageError("registry root must not be inside client root");
@@ -602,15 +601,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           if (dirname(normRegistry) !== dirname(normClient)) throw new UsageError("--registry-root must be a directory beside --client-root, in the same application root");
           if (flags.confirm !== undefined) {
             if (!/^[a-f0-9]{64}$/.test(flags.confirm)) throw new UsageError("--confirm must be 64 lowercase hex characters");
-            const isTerm =
-              identityDependencies.isTerminal !== undefined
-                ? (typeof identityDependencies.isTerminal === "function"
-                    ? identityDependencies.isTerminal()
-                    : Boolean(identityDependencies.isTerminal))
-                : Boolean(
-                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
-                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
-                  );
+            const isTerm = ownerTerminal(identityDependencies, io);
             if (!isTerm) {
               io.stderr("identity alias --confirm requires standard input and output to be a terminal");
               return 2;
@@ -633,7 +624,12 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               ? err.reason
               : (typeof err?.code === "string" ? err.code : "identity_alias_failed");
             const text = (err?.nothingChanged && typeof err?.message === "string" ? err.message : describeAliasRefusal(code)) ?? (typeof err?.message === "string" ? err.message : "The command did not complete.");
-            io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...(err?.nothingChanged ? { nothingChanged: true } : {}) }) : `${printable(text)} (${printable(code)})`);
+            // an error from the write itself that this command has no words for: say that the registry may have changed
+            const unexplained = err?.writeAttempted && describeAliasRefusal(code) === null;
+            const hint = unexplained ? " The registry may or may not have changed: make a fresh plan, or check it with triangle status --identity." : "";
+            io.stderr(flags.json
+              ? JSON.stringify({ error: code, message: `${text}${hint}`, ...(err?.nothingChanged ? { nothingChanged: true } : {}), ...(err?.writeAttempted ? { writeAttempted: true } : {}), ...(Array.isArray(err?.refusals) ? { refusals: err.refusals } : {}) })
+              : `${printable(text)} (${printable(code)})${hint}`);
             return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
           }
         }

@@ -14,7 +14,8 @@ not resolve it, and an identity alias cannot select a Grok conversation. They sh
 
 Both commands are owner commands: they plan first and write nothing; applying needs the exact plan id and a terminal on
 standard input and output. Examples use the default layout; `--client-root` is the client directory
-(`~/Library/Application Support/The Triangle/client`), and the registry defaults to `identity/` beside it. An explicit
+(`~/Library/Application Support/The Triangle/client`, which has a space in it: quote it, for example
+`--client-root "$HOME/Library/Application Support/The Triangle/client"`), and the registry defaults to `identity/` beside it. An explicit
 `--registry-root` must be a directory in the same application root (the client directory's parent).
 
 ## What a sender sees
@@ -34,13 +35,15 @@ standard input and output. Examples use the default layout; `--client-root` is t
 
 1. **A v2 registry.** Aliases live in `identity_registry_v2`. On a v1 registry the plan says `registry_not_v2`: run
    `triangle identity upgrade-registry` first (`docs/triangle-client/identity-registry-v2-upgrade.md`).
-2. **The client configuration.** The plan reads `<client root>/local-messaging.json` (a private file, only the profile names and
-   instance ids in its `recipients`) to know which profiles are local recipients. Without it the plan is refused
-   (`local_messaging_config_missing`, `local_messaging_config_unreadable`).
+2. **The client configuration.** The plan reads `<client root>/local-messaging.json` with the supervisor's own loader, so it accepts
+   exactly the file the supervisor would, and takes only the profile names and instance ids in its `recipients`, to know which
+   profiles are local recipients. A file the supervisor would refuse (loose permissions, not enabled, a duplicate profile, an
+   unknown key) is refused here too (`local_messaging_config_missing`, `local_messaging_config_unreadable`). Only `set` needs
+   it; `clear` reads the registry alone.
 3. **A supervisor that resolves aliases.** The plan asks the running supervisor (the installed
    `<application root>/bin/triangle-local status`) which address forms it resolves. If `alias` is not among them (a supervisor
    from before the aliases release, or principal routing switched off) the plan says so: the alias is *recorded but not honored*
-   until the supervisor is restaged, and a send to the name fails like any unknown name. That is advice, not a floor: the alias
+   until the supervisor is restaged (or routing is enabled), and a send to the name fails like any unknown name. That is advice, not a floor: the alias
    is recorded either way, and a supervisor that ignores aliases fails closed. If the supervisor cannot be asked, or reads another
    registry directory, the plan says that instead.
 4. **A CLI from this release.** These commands come from this release's client package; an older CLI has no `identity alias`.
@@ -52,9 +55,12 @@ triangle identity alias set NAME TARGET --client-root DIR
 ```
 
 `NAME` is 1 to 32 lowercase letters, digits, `.`, `_` or `-`, starting with a letter or digit. `TARGET` is an `agent_` id or the
-name of a local profile that has an active binding. The plan shows the registry's schema, sequence and audit head, the alias, the
+exact name of a local profile whose own binding is active. A profile name means that profile: if it was revoked and its principal
+is bound again under another profile, the plan says so and refuses; give the `agent_` id to choose the principal wherever it is
+bound now. The plan shows the registry's schema, sequence and audit head, the alias, the
 target (profile, principal, binding), each check, what a sender will see, the supervisor's answer, the way back and the **plan
-ID**. It refuses, naming every reason that applies:
+ID**. It refuses, naming every reason it can judge (without a readable registry it cannot judge the name's occupancy or the
+target):
 
 | Code | Meaning |
 | :--- | :--- |
@@ -62,14 +68,14 @@ ID**. It refuses, naming every reason that applies:
 | `local_messaging_config_missing`, `local_messaging_config_unreadable` | The recipients cannot be checked |
 | `alias_name_invalid` | Outside the pattern (capitals are refused, not lowered) |
 | `alias_name_reserved` | `claude`, or a name starting `agent_`, `peer_`, `session-`, `bind_` or `pair_` (look-alikes of ids) |
-| `alias_collides_with_label` | A local profile has this name, ignoring case |
+| `alias_collides_with_label` | A local profile has this name, or one that differs only in case (refused as a precaution: a profile with exactly the name would take it from the alias) |
 | `alias_exists` | The name is taken: an alias is created, never overwritten |
-| `alias_map_full` | The registry holds its maximum of 256 aliases |
+| `alias_map_full` | The registry holds its maximum of 256 aliases (a taken name in a full map is both) |
 | `alias_target_not_found` | No binding has that principal id or profile name |
 | `alias_target_not_active` | The principal's bindings are all revoked |
 | `alias_target_not_mesh_managed` | It is a serverless peer; only a MESH-managed local agent can have an alias |
-| `alias_target_ambiguous` | The principal has several active bindings (a legacy duplicate) |
-| `alias_target_not_local` | The profile is not a local recipient of this client configuration, so a sender could never reach it |
+| `alias_target_ambiguous` | The principal has several active bindings on local recipients (a legacy duplicate), so a sender could not tell which is meant; bindings on profiles that are not local recipients do not count |
+| `alias_target_not_local` | The profile named, or none of the principal's active profiles, is a local recipient of this client configuration, so a sender could never reach it |
 
 Apply, from a terminal:
 
@@ -79,8 +85,10 @@ triangle identity alias set NAME TARGET --client-root DIR --confirm PLAN_ID
 
 It re-evaluates everything (`plan_stale` if anything the plan rests on has changed, including the registry, the target and the
 client configuration), writes one audited `alias_set` step with a compare-and-set on the planned sequence
-(`registry_sequence_conflict` if another write landed in between: nothing was changed), and reads the result back. The plan
-writes nothing at all, and neither does a refused apply.
+(`registry_sequence_conflict` if another write landed in between: nothing was changed), and reads the result back. If someone
+else wrote after this command did, the result says so (`laterWrites`) and is still a success. The plan writes nothing at all, and
+neither does a refused apply. An error from the write that has no wording of its own is reported with a reminder that the registry
+may or may not have changed: make a fresh plan.
 
 Check it: `triangle-local discover` from a chat that may message that recipient lists the name in that entry's `send.aliases`
 (that proves the supervisor loaded the alias), and `triangle status --identity` shows the alias row as `active`.
@@ -97,9 +105,10 @@ triangle identity alias clear NAME --client-root DIR
 triangle identity alias clear NAME --client-root DIR --confirm PLAN_ID
 ```
 
-The plan shows what the alias is now (its target and its state, below). `alias_not_found` if there is no such alias. A dangling
-alias, or one with a name the writer would now refuse, can always be cleared; clearing needs the registry but not the client
-configuration.
+The plan shows what the alias is now (its target and its state, below, judged against the client configuration when it can be
+read) and the command that would set it again. `alias_not_found` if there is no such alias. A dangling alias, or one with a name
+the writer would now refuse, can always be cleared; clearing needs the registry but not the client configuration, and the plan id
+does not depend on it.
 
 ## Look
 
@@ -110,9 +119,9 @@ every state but `active`. The first state that applies:
 | :--- | :--- | :--- |
 | `dangling` | The principal has no active MESH-managed binding (it was revoked). The alias resolves to nothing. | Clear it, or bind the profile again. |
 | `unroutable` | The principal is bound, but its profile is not a local recipient of the client configuration. | Clear it, or add the profile to local messaging. |
-| `ambiguous` | The principal is bound to several local profiles. A sender that can see the alias gets `alias_unresolved`. | Clear it and revoke the extra binding. |
-| `collides` | A local profile has the alias's name (a profile was added after the alias). A sender that may message that profile gets `alias_unresolved`; the owner CLI sends to the profile. | Clear the alias. |
-| `moved` | The principal's active binding is on a different profile than a revoked binding of the same principal, and was issued after the alias was set: the alias now delivers somewhere else than when it was set. | Check that is wanted; otherwise clear it. |
+| `ambiguous` | The principal is bound to several local profiles (profiles that are not local recipients do not count). A sender that can see the alias gets `alias_unresolved`. | Clear it and revoke the extra binding. |
+| `collides` | A local profile has exactly the alias's name (a profile was added after the alias). A sender that may message that profile gets `alias_unresolved`; the owner CLI sends to the profile. (A profile that differs only in case is no collision: the router compares exactly.) | Clear the alias. |
+| `moved` | The principal's active binding is on a different profile than a revoked binding of the same principal, and was issued after the alias was set: the principal was bound again since, and the alias may deliver somewhere else than when it was set (the registry does not keep the profile from that time, so a principal that came back to its first profile is flagged too). | Check that is wanted; otherwise clear it. |
 | `active` | None of the above. | |
 
 A revoke does not remove an alias that points at the revoked principal; it shows as `dangling` until you clear it. If the client
@@ -122,7 +131,7 @@ configuration cannot be read, `unroutable` and `collides` are not judged and `do
 ## If something goes wrong
 
 - **A write stopped partway** (a crash, a power cut). The registry is the old one or the new one, never half; an unfinished audit
-  line left by a crash is repaired by the next write. Make a fresh plan and look at it: it says `alias_exists` if the alias did
+  line left by a crash is repaired by the next write. Make a fresh plan and look at it: for `set` it says `alias_exists` (and for `clear`, `alias_not_found`) if the change did
   get recorded.
 - **The supervisor ignores aliases** (it was rolled back to a bundle from before the aliases release). The registry keeps the
   aliases and the old supervisor reads it; sends to the names fail as unknown names. Nothing needs undoing.

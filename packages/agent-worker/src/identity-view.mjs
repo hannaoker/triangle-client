@@ -63,10 +63,11 @@ function issuedAfter(issuedAt, setAt) {
  * - `unroutable`: it has one, but its profile is not a local recipient, so the alias resolves to nothing;
  * - `ambiguous`: the principal is bound to several local profiles (a legacy duplicate), so a sender that can see the alias gets
  *   alias_unresolved;
- * - `collides`: a local profile has the alias's name (ignoring case): a sender that may message that profile gets
- *   alias_unresolved, and the owner CLI sends to the profile;
+ * - `collides`: a local profile has exactly the alias's name: a sender that may message that profile gets alias_unresolved, and
+ *   the owner CLI sends to the profile (a profile that differs only in case is no collision: the router compares exactly);
  * - `moved`: the principal's active binding is on another profile than a revoked binding of the same principal, and it was
- *   issued after the alias was set: the alias now delivers somewhere else than when it was set;
+ *   issued after the alias was set: the principal was bound again since, and the alias may deliver somewhere else than when it was
+ *   set (the registry does not keep the profile from that time, so a principal that came back to its first profile is flagged too);
  * - `active`: none of the above.
  *
  * @param {object} options
@@ -91,10 +92,11 @@ export function describeAliases({ aliases, bindings, localRecipients = null } = 
     const local = recipients === null
       ? active
       : active.filter((binding) => recipients.some((recipient) => recipient.instanceId === binding.profile_instance_id));
-    const collides = recipients !== null && recipients.some((recipient) => String(recipient.profile).toLowerCase() === name);
+    const collides = recipients !== null && recipients.some((recipient) => String(recipient.profile) === name);
     const moved = active.length === 1
       && revoked.some((binding) => binding.profile_instance_id !== active[0].profile_instance_id)
       && issuedAfter(active[0].issued_at, record.set_at);
+    const reached = local.length === 1 ? local[0] : local.length === 0 && active.length === 1 ? active[0] : null;
     let state = "active";
     if (active.length === 0) state = "dangling";
     else if (local.length === 0) state = "unroutable";
@@ -104,9 +106,11 @@ export function describeAliases({ aliases, bindings, localRecipients = null } = 
     rows.push({
       name,
       principalId,
-      profile: active.length === 1 ? active[0].profile_name : null,
+      // the one profile the alias reaches: the only local one, or (when none is local) the only active one, which is then the profile named
+      // as unroutable; `profiles` lists every active profile
+      profile: reached === null ? null : reached.profile_name,
       profiles: active.map((binding) => binding.profile_name).sort(compareCodeUnits),
-      profileInstanceId: active.length === 1 ? active[0].profile_instance_id : null,
+      profileInstanceId: reached === null ? null : reached.profile_instance_id,
       state,
       setAt: typeof record.set_at === "string" ? record.set_at : null,
       generation: Number.isSafeInteger(record.generation) ? record.generation : null,
@@ -116,11 +120,11 @@ export function describeAliases({ aliases, bindings, localRecipients = null } = 
 }
 
 const ALIAS_DIAGNOSTICS = {
-  dangling: (row) => ({ message: `Alias ${row.name} points at a principal that has no active binding, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name}, or bind the profile again.` }),
-  unroutable: (row) => ({ message: `Alias ${row.name} points at ${row.profile ?? "a profile"} that is not a local recipient in this client configuration, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name}, or add the profile to local messaging.` }),
-  ambiguous: (row) => ({ message: `Alias ${row.name} points at a principal bound to several local profiles (${row.profiles.join(", ")}); a sender that can see it gets alias_unresolved.`, action: `Clear it with triangle identity alias clear ${row.name}.` }),
-  collides: (row) => ({ message: `Alias ${row.name} has the same name as a local profile; a sender that may message that profile gets alias_unresolved, and the owner CLI sends to the profile.`, action: `Clear it with triangle identity alias clear ${row.name}.` }),
-  moved: (row) => ({ message: `Alias ${row.name} now reaches ${row.profile}, a different profile than when it was set.`, action: `Check that this is wanted; otherwise clear it with triangle identity alias clear ${row.name}.` }),
+  dangling: (row) => ({ message: `Alias ${row.name} points at a principal that has no active binding, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR, or bind the profile again.` }),
+  unroutable: (row) => ({ message: `Alias ${row.name} points at ${row.profile ?? "a profile"} that is not a local recipient in this client configuration, so it resolves to nothing.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR, or add the profile to local messaging.` }),
+  ambiguous: (row) => ({ message: `Alias ${row.name} points at a principal bound to several profiles (${row.profiles.join(", ")}); a sender that can see it gets alias_unresolved.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
+  collides: (row) => ({ message: `Alias ${row.name} has the same name as a local profile; a sender that may message that profile gets alias_unresolved, and the owner CLI sends to the profile.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
+  moved: (row) => ({ message: `Alias ${row.name}'s principal was bound again after the alias was set, and now reaches ${row.profile}.`, action: `Check that this is still what you meant; otherwise clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
 };
 
 /**

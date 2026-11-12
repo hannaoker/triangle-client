@@ -77,7 +77,7 @@ function listBackupFolder(backupParent) {
 
 // ---- the floor ----------------------------------------------------------------------------------------------------------------
 
-export async function readPrivateJsonFile(file) {
+async function readPrivateJsonFile(file) {
   // the file, and every directory above it, must be the owner's and closed to others
   const { ancestors } = await import("../../agent-worker/src/delivery-private-path.mjs");
   ancestors(path.dirname(file));
