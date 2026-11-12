@@ -40,7 +40,8 @@ if mode=='nonzero': sys.exit(1)
  const request={schema:'owner_operation_v1',...op,nonce:'9'.repeat(64),issuedAt:now,deadline:now+ttlMs};
  const challenge={request,digest:createHash('sha256').update(canonicalJson(request)).digest('hex'),summary:describeOwnerOperation(op)};
  const options={executable,sha256:createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),platform:'darwin',killGraceMs:20};
- return {root,executable,pidfile,challenge,options,provider:()=>createMacOSOwnerApprovalProvider(options)};
+ // whether the helper got as far as publishing (or starting to publish) its pid: the "never spawn" tests assert it did not
+ return {root,executable,pidfile,started:()=>fs.existsSync(pidfile)||fs.existsSync(pidfile+'.tmp'),challenge,options,provider:()=>createMacOSOwnerApprovalProvider(options)};
 }
 
 for(const mode of ['approved','denied','cancelled','unavailable'])test(`correlated ${mode} response requires a clean child exit`,async t=>{
@@ -57,12 +58,12 @@ test('unsupported platform, incorrect pin and unsafe helper paths never spawn',a
  const alias=path.join(f.root,'alias');fs.symlinkSync(f.executable,alias);
  assert.equal(await createMacOSOwnerApprovalProvider({...f.options,executable:alias}).authenticate(f.challenge),'unavailable');
  fs.chmodSync(f.executable,0o777);assert.equal(await f.provider().authenticate(f.challenge),'unavailable');
- assert.equal(fs.existsSync(f.pidfile),false);
+ assert.equal(f.started(),false);
 });
 
 test('helper modified after provider construction is refused before execution',async t=>{
  const f=fixture(t),provider=f.provider();fs.appendFileSync(f.executable,'\n# changed');
- assert.equal(await provider.authenticate(f.challenge),'unavailable');assert.equal(fs.existsSync(f.pidfile),false);
+ assert.equal(await provider.authenticate(f.challenge),'unavailable');assert.equal(f.started(),false);
 });
 
 test('changed summary or digest, expired requests and pre-cancellation never spawn',async t=>{
@@ -71,7 +72,7 @@ test('changed summary or digest, expired requests and pre-cancellation never spa
  for(const patch of [{summary:'approve something else'},{digest:'0'.repeat(64)},
   {request:{...f.challenge.request,deadline:f.challenge.request.issuedAt}}])
   assert.equal(await f.provider().authenticate({...f.challenge,...patch}),'unavailable');
- assert.equal(fs.existsSync(f.pidfile),false);
+ assert.equal(f.started(),false);
 });
 
 test('timeout never returns approval',async t=>{
@@ -80,10 +81,12 @@ test('timeout never returns approval',async t=>{
 
 test('cancellation waits for helper exit, including a helper ignoring SIGTERM',async t=>{
  const f=fixture(t,'ignore'),controller=new AbortController(),pending=f.provider().authenticate(f.challenge,{signal:controller.signal});
- const until=Date.now()+3000;
- while(!fs.existsSync(f.pidfile)&&Date.now()<until)await new Promise(r=>setTimeout(r,10));
- assert.ok(fs.existsSync(f.pidfile));const pid=Number(fs.readFileSync(f.pidfile,'utf8'));
- assert.ok(Number.isSafeInteger(pid)&&pid>1,'the pid file holds a process id (pid 0 would signal this test\'s own process group)');
+ // whatever fails below, the helper (it ignores SIGTERM) must not be left sleeping under a deleted fixture directory
+ t.after(async()=>{controller.abort();await pending;});
+ // wait for a whole pid, not just for the file: the reader does not rely on the writer being atomic (pid 0 would signal this test's own process group)
+ const until=Date.now()+3000;let text='';
+ while(Date.now()<until){try{text=fs.readFileSync(f.pidfile,'utf8');}catch{text='';}if(/^[1-9]\d*$/.test(text))break;await new Promise(r=>setTimeout(r,10));}
+ assert.match(text,/^[1-9]\d*$/,'the helper published its pid');const pid=Number(text);
  controller.abort();assert.equal(await pending,'cancelled');
  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
@@ -107,12 +110,12 @@ test('native candidate provider is selected only through the guarded owner CLI b
 test('expiry during executable verification is rechecked before spawn',async t=>{
  const f=fixture(t);let reads=0;
  const provider=createMacOSOwnerApprovalProvider({...f.options,clockMs:()=>++reads===1?f.challenge.request.issuedAt:f.challenge.request.deadline});
- assert.equal(await provider.authenticate(f.challenge),'unavailable');assert.equal(fs.existsSync(f.pidfile),false);
+ assert.equal(await provider.authenticate(f.challenge),'unavailable');assert.equal(f.started(),false);
 });
 
 
 test('nonce with a trailing newline is refused before spawning',async t=>{
  const f=fixture(t),request={...f.challenge.request,nonce:f.challenge.request.nonce+'\n'};
  const challenge={...f.challenge,request,digest:createHash('sha256').update(canonicalJson(request)).digest('hex')};
- assert.equal(await f.provider().authenticate(challenge),'unavailable');assert.equal(fs.existsSync(f.pidfile),false);
+ assert.equal(await f.provider().authenticate(challenge),'unavailable');assert.equal(f.started(),false);
 });

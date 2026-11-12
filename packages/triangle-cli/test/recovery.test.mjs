@@ -132,21 +132,31 @@ test("join: if saving local state fails after the server committed, the journal 
 });
 
 /**
- * Hold the lock on `home` from a child process until it is killed.
+ * Hold the lock on `home` from a child process until it is killed, and return as soon as the child says "held".
  *
  * `withLock` keeps the SQLite connection (and so the lock) alive only through the `.finally(release)` handler it attaches to the
  * promise the callback returns. If nothing else references that pending promise, V8 collects it, the connection goes with it and
- * the lock is released: about 20 ms after "held" on an idle machine, which is why a holder that does not keep the promise passes
- * these tests only while the parent is quicker than that. The child therefore keeps the promise on `globalThis`, and the helper
- * waits past that window before it returns, so a holder that stops holding the lock fails every run instead of some runs.
+ * the lock is released; here that happens within a few milliseconds of "held" (one scavenge follows the module load), so a holder
+ * written that way passes a test only while the parent gets to the lock first. The child therefore keeps the promise on
+ * `globalThis`, and `settled` waits past that window and checks the holder is still running, so a holder that stops holding the lock
+ * fails every run instead of some runs. The child also exits when its stdin closes, that is when this test process goes away, so
+ * a killed run cannot leave a lock holder behind.
  */
 async function holdLockInChild(home) {
   const { spawn } = await import("node:child_process");
   const custodyUrl = new URL("../src/custody.mjs", import.meta.url).href;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", `const { openCustody } = await import(${JSON.stringify(custodyUrl)}); openCustody(${JSON.stringify(home)}).withLock(() => (globalThis.holdForever = new Promise(() => { setInterval(() => {}, 60_000); console.log("held"); })));`], { stdio: ["ignore", "pipe", "inherit"] });
+  const script = `const { openCustody } = await import(${JSON.stringify(custodyUrl)}); `
+    + "process.stdin.on(\"end\", () => process.exit(0)).resume(); "
+    + `openCustody(${JSON.stringify(home)}).withLock(() => (globalThis.holdForever = new Promise(() => { setInterval(() => {}, 60_000); console.log("held"); })));`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["pipe", "pipe", "inherit"] });
   await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("exit", reject); });
-  await new Promise((resolve) => setTimeout(resolve, 300));
   return child;
+}
+
+/** Wait until a holder that let go of its lock would have done so, and check that it is still running. */
+async function settled(child) {
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(child.exitCode, null, "the lock holder is still running");
 }
 
 /** Kill a child from holdLockInChild and wait until it is gone, so a failed assertion cannot leave it keeping the test process alive. */
@@ -166,6 +176,8 @@ test("lock: OS-level exclusive lock; no re-entry; a crashed holder releases it a
   const child = await holdLockInChild(custody.root);
   try {
     assert.throws(() => custody.withLock(() => {}), /Another triangle command/);
+    await settled(child);
+    assert.throws(() => custody.withLock(() => {}), /Another triangle command/, "still held after the time a holder that lets go would have released it");
   } finally {
     await killAndWait(child);
   }
@@ -206,6 +218,7 @@ test("CLI: --help works; contradictory join modes are refused; recovery commands
   assert.equal((await run("join", "--abandon")).code, 0, "abandon on a fresh home is a no-op");
   const child = await holdLockInChild(home);
   try {
+    await settled(child);
     const abandon = await run("join", "--abandon");
     assert.equal(abandon.code, 1);
     assert.match(abandon.err, /Another triangle command/);
