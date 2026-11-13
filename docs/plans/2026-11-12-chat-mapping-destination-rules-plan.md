@@ -1,7 +1,7 @@
 # Plan: Chat Mapping (`D4`), Destination Rules (`AD.5`), and Owner-Approval Kinds (`D5-C`)
 
-Status: Plan only (`2026-11-12`). Baseline: `origin/main` at `02c768a4` (after PR `#178`).
-This document authorizes **no product code changes, no package installation, no live LaunchAgent restarts, and no mutations to live `~/.config` or `~/Library/Application Support/The Triangle` state**. Implementation starts only after the owner reviews this PR and resolves the open decisions in [§6](#6-owner-decisions-required-before-build).
+Status: Approved for build (`2026-11-12`: owner approved recommended options `CD-1=A` through `CD-7=A`). Baseline: `origin/main` at `02c768a4` (after PR `#178`).
+This document authorizes **phased source implementation + tests (`Slice 1` -> `Slice 3`) only**; packaged interactive acceptance and any live package install or mutation to live `~/.config` or `~/Library/Application Support/The Triangle` state still require explicit gate sign-off after build.
 
 Reference design and acceptance inputs:
 - [`2026-10-30-identity-destination-design-delta.md`](2026-10-30-identity-destination-design-delta.md) (`U3`: sections `3.A.3`, `3.B`, `3.C.1–3.C.5`, `3.D`, `3.F`, approved decisions `D1–D6`)
