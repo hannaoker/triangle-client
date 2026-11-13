@@ -161,14 +161,99 @@ test("alias-host.mjs run starts the production host from the bundle's code, prin
   assert.deepEqual(await Promise.race([closed, timeout]), { code: 0, signal: null });
 });
 
+test("alias-host.mjs alias-write sets and clears aliases and refuses a duplicate set", async (t) => {
+  const s = scratch(t);
+  const prepared = await s.helper("prepare", repo, s.spec(["alpha", "beta"], ["alpha", "beta"]));
+  await s.helper("force-upgrade", repo, s.registry);
+  assert.deepEqual(await s.helper("alias-write", repo, s.registry, "set", "builder", prepared.principals.alpha, "4"), { ok: true, writer: "setIdentityAlias" });
+  const afterSet = await s.helper("read", repo, s.registry);
+  assert.equal(afterSet.aliases.builder.principal_id, prepared.principals.alpha);
+  const dup = await s.helper("alias-write", repo, s.registry, "set", "builder", prepared.principals.beta, "5");
+  assert.equal(dup.ok, false);
+  assert.equal(typeof dup.code, "string");
+  assert.deepEqual(await s.helper("alias-write", repo, s.registry, "clear", "builder", "-", "5"), { ok: true, writer: "clearIdentityAlias" });
+  assert.deepEqual((await s.helper("read", repo, s.registry)).aliases, {});
+});
+
+test("alias-host.mjs grok-send sends to a granted recipient and returns code and message on denial", async (t) => {
+  const s = scratch(t);
+  const prepared = await s.helper("prepare", repo, s.spec(["alpha", "beta"], ["alpha", "beta"]));
+  const configPath = path.join(s.client, "local-messaging.json");
+  const cliPath = path.join(repo, "packages/agent-worker/src/local-messaging-cli.mjs");
+  await exec(process.execPath, [cliPath, "setup-grok", "--alias", "g", "--recipient", prepared.instances.beta, "--config", configPath], { env: s.env });
+  const child = spawn(process.execPath, [hostScript, "run", repo, configPath], { env: s.env, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => child.kill("SIGKILL"));
+  let stderr = "";
+  child.stderr.on("data", (d) => { stderr += d; });
+  await new Promise((resolve, reject) => {
+    let buffer = "";
+    const timer = setTimeout(() => reject(new Error(`no ready line: ${stderr}`)), 20000);
+    child.stdout.on("data", (d) => {
+      buffer += d;
+      const line = buffer.split("\n").find((l) => l.includes('"ready"'));
+      if (line) { clearTimeout(timer); resolve(JSON.parse(line)); }
+    });
+    child.on("close", (code) => { clearTimeout(timer); reject(new Error(`host exited early (${code}): ${stderr}`)); });
+  });
+  const okSend = await s.helper("grok-send", repo, configPath, "g", prepared.instances.beta, "msg-1", "req-1", "hello");
+  assert.equal(okSend.ok, true);
+  assert.equal(okSend.accepted, true);
+  const denied = await s.helper("grok-send", repo, configPath, "g", prepared.instances.alpha, "msg-2", "req-2", "nope");
+  assert.equal(denied.ok, false);
+  assert.equal(typeof denied.code, "string");
+  assert.ok(denied.message.length > 0);
+  const closed = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+  child.kill("SIGTERM");
+  assert.deepEqual(await closed, { code: 0, signal: null });
+});
+
+test("alias-host.mjs run exits 1 when host.stop() throws", async (t) => {
+  const s = scratch(t);
+  const fakeBundle = path.join(s.base, "fake-bundle");
+  const srcDir = path.join(fakeBundle, "packages/agent-worker/src");
+  fs.mkdirSync(srcDir, { recursive: true });
+  fs.writeFileSync(path.join(srcDir, "concurrency-gate.mjs"), "export function createProfiledReasonerGate() { return {}; }\n");
+  fs.writeFileSync(
+    path.join(srcDir, "local-messaging-host.mjs"),
+    [
+      "export function loadLocalMessagingConfig() { return { recipients: [] }; }",
+      "export function createInstalledLocalMessagingHost() {",
+      '  return { async start() {}, async stop() { throw new Error("boom"); } };',
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, [hostScript, "run", fakeBundle, path.join(s.base, "unused.json")], { env: s.env, stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => child.kill("SIGKILL"));
+  let stderr = "";
+  child.stderr.on("data", (d) => { stderr += d; });
+  await new Promise((resolve, reject) => {
+    let buffer = "";
+    const timer = setTimeout(() => reject(new Error(`no ready line: ${stderr}`)), 10000);
+    child.stdout.on("data", (d) => {
+      buffer += d;
+      if (buffer.includes('"ready"')) { clearTimeout(timer); resolve(); }
+    });
+    child.on("close", (code) => { clearTimeout(timer); reject(new Error(`host exited early (${code}): ${stderr}`)); });
+  });
+  const closed = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
+  child.kill("SIGTERM");
+  assert.deepEqual(await closed, { code: 1, signal: null });
+  assert.match(stderr, /host\.stop failed:.*boom/);
+});
+
 test("the driver's expected supervisor diff is exactly the list of modules plan section 6 names", () => {
   const driver = fs.readFileSync(path.join(assets, "rehearsal-aliases.mjs"), "utf8");
   const block = /const EXPECTED_SUPERVISOR_DIFF = \[([\s\S]*?)\];/.exec(driver)?.[1] ?? "";
   const listed = [...block.matchAll(/"([^"]+)"/g)].map((m) => path.basename(m[1], ".mjs")).sort();
-  assert.deepEqual(listed, [
-    "grok-local-session", "identity-primitives", "identity-registry", "local-messaging-cli", "local-messaging-client",
-    "local-messaging-journal", "local-messaging-protocol", "local-messaging-server", "recipient-resolver",
-    "router-registry-snapshot", "unified-router",
-  ]);
+  const plan = fs.readFileSync(path.join(repo, "docs/plans/2026-11-10-identity-aliases-and-destination-rules-plan.md"), "utf8");
+  const shape = /\*\*Shape\.\*\*([\s\S]*?)plus `packages\/triangle-cli`/.exec(plan)?.[1] ?? "";
+  const fromPlan = [...shape.matchAll(/`([^`]+)`/g)]
+    .map((m) => m[1])
+    .filter((name) => name !== "identity-view")
+    .concat("local-messaging-journal")
+    .sort();
+  assert.ok(fromPlan.length > 0, "failed to derive modules from plan section 6");
+  assert.deepEqual(listed, fromPlan);
   for (const name of listed) assert.ok(fs.existsSync(path.join(repo, "packages/agent-worker/src", `${name}.mjs`)), name);
 });

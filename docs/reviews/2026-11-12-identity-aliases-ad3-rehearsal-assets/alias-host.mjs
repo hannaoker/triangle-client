@@ -10,6 +10,14 @@
 //   alias-host.mjs ids     <bundle> <profile>...                             the instance id derived for each profile name
 //   alias-host.mjs bind    <bundle> <registryRoot> <profile> <expectedSeq>   try a bind with the bundle's writer (v2 binding on a v2 registry)
 //   alias-host.mjs force-upgrade <bundle> <registryRoot>                     the audited v1 -> v2 write WITHOUT the floor
+//   alias-host.mjs alias-write <bundle> <registryRoot> <set|clear> <name> <principal|-> <expectedSeq>
+//                                                                            try an alias write with the bundle's WRITER (its
+//                                                                            setIdentityAlias/clearIdentityAlias, or, for a bundle
+//                                                                            that has none, the generic writer with the alias action)
+//   alias-host.mjs grok-send <bundle> <configPath> <alias> <to> <messageId> <requestId> [text]
+//                                                                            send as a Grok principal with the bundle's own client
+//                                                                            and print the server's code AND message (the CLI keeps
+//                                                                            only the code)
 //
 // The spec of `prepare`: { clientRoot, stateRoot, registryRoot, local: [profile...], bound: [profile...], init?: boolean }.
 // `local` are the client's recipients (workers); `bound` are the profiles that get a mesh-managed binding in a registry made
@@ -25,7 +33,7 @@ import { pathToFileURL } from "node:url";
 
 const [mode, bundleArg, ...args] = process.argv.slice(2);
 if (!mode || !bundleArg) {
-  process.stderr.write("usage: alias-host.mjs <prepare|run|read|ids|bind|force-upgrade> <bundleRoot> ...\n");
+  process.stderr.write("usage: alias-host.mjs <prepare|run|read|ids|bind|force-upgrade|alias-write|grok-send> <bundleRoot> ...\n");
   process.exit(64);
 }
 const bundleRoot = fs.realpathSync(bundleArg);
@@ -147,11 +155,15 @@ async function runHost([configPath]) {
   await host.start();
   out({ ready: true, pid: process.pid, bundleRoot, node: process.version });
   const stop = async () => {
+    // A host that fails to stop says so in its exit status; the driver requires a clean stop.
+    let code = 0;
     try {
       await host.stop();
-    } finally {
-      process.exit(0);
+    } catch (error) {
+      process.stderr.write(`host.stop failed: ${error?.code ?? ""} ${error?.message ?? error}\n`);
+      code = 1;
     }
+    process.exit(code);
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
@@ -221,7 +233,63 @@ async function forceUpgrade([registryRoot]) {
   out({ ok: true, schema: after.registry.schema, sequence: after.registry.sequence });
 }
 
-const modes = { prepare, run: runHost, read, ids, bind, "force-upgrade": forceUpgrade };
+async function aliasWrite([registryRoot, action, name, principalId, expectedSequence]) {
+  const registry = await load("identity-registry.mjs");
+  const root = registryRoot;
+  const sequence = Number(expectedSequence);
+  try {
+    let writer;
+    if (action === "set" && typeof registry.setIdentityAlias === "function") {
+      writer = "setIdentityAlias";
+      registry.setIdentityAlias({ root, expectedSequence: sequence, alias: name, principalId });
+    } else if (action === "clear" && typeof registry.clearIdentityAlias === "function") {
+      writer = "clearIdentityAlias";
+      registry.clearIdentityAlias({ root, expectedSequence: sequence, alias: name });
+    } else {
+      // A bundle from before the alias writer: the generic writer with the alias action, as the AD.0 tests of the frozen reader did.
+      writer = "updateIdentityRegistry";
+      registry.updateIdentityRegistry({
+        root,
+        expectedSequence: sequence,
+        action: action === "set" ? "alias_set" : "alias_clear",
+        subject: name,
+        mutate: (r) => {
+          r.aliases ??= {};
+          if (action === "set") r.aliases[name] = { principal_id: principalId, set_at: new Date().toISOString(), generation: sequence + 1 };
+          else delete r.aliases[name];
+          return r;
+        },
+      });
+    }
+    out({ ok: true, writer });
+  } catch (error) {
+    out({ ok: false, code: error.code ?? null, message: String(error.message).slice(0, 240) });
+  }
+}
+
+async function grokSendRaw([configPath, alias, to, messageId, requestId, text = "raw probe"]) {
+  const broker = await load("local-messaging-auth-broker.mjs");
+  const grok = await load("grok-local-session.mjs");
+  const clientModule = await load("local-messaging-client.mjs");
+  const address = await load("local-messaging-address.mjs");
+  const config = broker.readPrivateJson(configPath);
+  const binding = grok.grokBindings(config).find((entry) => entry.alias === alias);
+  if (!binding) throw new Error(`no Grok binding named ${alias}`);
+  const client = clientModule.createLocalControlClient({ socketPath: address.resolveLocalSocketAddress({ stateRoot: config.stateRoot }).socketPath, senderId: binding.senderId });
+  try {
+    const grant = await client.exchangeInteractiveSession({ bindingId: binding.bindingId, sessionId: binding.sessionId, generation: binding.generation, secret: binding.secret, contextHash: binding.contextHash });
+    try {
+      const result = await client.sendMessage({ to, text, messageId, requestId }, { credential: grant.credential });
+      out({ ok: true, accepted: result.accepted === true, target: result.target ?? null });
+    } catch (error) {
+      out({ ok: false, code: error.code ?? null, message: String(error.message).slice(0, 400) });
+    }
+  } finally {
+    await client.close();
+  }
+}
+
+const modes = { prepare, run: runHost, read, ids, bind, "force-upgrade": forceUpgrade, "alias-write": aliasWrite, "grok-send": grokSendRaw };
 if (!modes[mode]) {
   process.stderr.write(`unknown mode ${mode}\n`);
   process.exit(64);

@@ -4,6 +4,7 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export const sha256Buffer = (buffer) => crypto.createHash("sha256").update(buffer).digest("hex");
@@ -12,15 +13,26 @@ export const sha256Text = (text) => sha256Buffer(Buffer.from(text, "utf8"));
 export const mode = (file) => fs.lstatSync(file).mode & 0o7777;
 export const octal = (value) => `0${value.toString(8)}`;
 
+// The children that run() has started and that have not finished: the driver kills them if it is interrupted.
+const running = new Set();
+export function killRunningChildren() {
+  for (const child of running) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
 // Runs a command without a shell. stdin is closed unless `input` is given. The child leads its own process group so a
-// timeout can kill everything it started.
+// timeout (or an interrupt of the driver) can kill everything it started. Output is decoded as UTF-8 across chunk borders.
 export function run(command, args, { env, cwd, timeoutMs = 60000, label, input } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(command, args, { env, cwd, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], detached: true });
+    running.add(child);
     let stdout = "";
     let stderr = "";
     let killed = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     if (input !== undefined) child.stdin.end(input);
@@ -29,10 +41,12 @@ export function run(command, args, { env, cwd, timeoutMs = 60000, label, input }
       try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
     }, timeoutMs);
     child.on("close", (code, signal) => {
+      running.delete(child);
       clearTimeout(timer);
       resolve({ code, signal, stdout, stderr, ms: Date.now() - started, timedOut: killed, label: label ?? `${path.basename(command)} ${args[0] ?? ""}` });
     });
     child.on("error", (error) => {
+      running.delete(child);
       clearTimeout(timer);
       resolve({ code: -1, signal: null, stdout, stderr: String(error), ms: Date.now() - started, timedOut: false, label });
     });
@@ -126,12 +140,29 @@ export async function fingerprintLive(live, releaseVersion, bundleId) {
   walk(bundleRoot);
   const clientFiles = {};
   for (const rel of ["client/local-messaging.json", "client/local/router.json"]) clientFiles[rel] = briefStat(path.join(live, rel));
+  // Names (not contents) of the places a stray write by a child would most plausibly land: the install directories, and the
+  // state directory's Grok pairings and router files. The rest of the client directory is volatile and is not listed.
+  const stateNames = (listing("client/l") ?? []).filter((name) => /^(grok-.*\.json|router\.json|reply-identity\.json)$/.test(name));
+  const directoryNames = {
+    bin: listing("bin"),
+    "worker-runtime": listing("worker-runtime"),
+    releases: listing("releases"),
+    [`releases/${releaseVersion}`]: listing(`releases/${releaseVersion}`),
+    "identity-backups": listing("identity-backups"),
+    "client/l (pairings and router files)": stateNames,
+  };
+  // The package installer places a symlink outside the application root; a regression in its test-root handling would replace it.
+  const outside = {};
+  const triangleLink = path.join(os.homedir(), ".local/bin/triangle");
+  outside["~/.local/bin/triangle"] = { ...briefStat(triangleLink), target: (() => { try { return fs.readlinkSync(triangleLink); } catch { return null; } })() };
   return {
     files,
     identityEntries: identity,
     backupEntries: backups,
     baselineBundleTree: { entries: treeLines.length, sha256: sha256Text(treeLines.join("\n")) },
     clientFiles,
+    directoryNames,
+    outside,
     bundles: listing("worker-runtime/bundles"),
     releases: listing("releases"),
     processes: await processList(live),

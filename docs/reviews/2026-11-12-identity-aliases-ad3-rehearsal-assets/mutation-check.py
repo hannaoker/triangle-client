@@ -68,6 +68,40 @@ MUTANTS = [
     ("restore-forgets-v2-data", CLI + "identity-upgrade.mjs",
      'if (inspected.willLoseV2Data && discardV2Data !== true) refusals.push("restore_would_lose_v2_data");',
      'if (false) refusals.push("restore_would_lose_v2_data");', "G2"),
+    # Reviewer mutants (PR #177 independent review)
+    ("r01-discovery-ignores-label-collision", SRC + "recipient-resolver.mjs",
+     "if (permitted(match.id) === true) ids.add(match.id);",
+     "if (false) ids.add(match.id);", "E8"),
+    ("r02-router-skips-label-permission", SRC + "unified-router.mjs",
+     "if (!permittedIds.has(match.id) && (await evaluateCanMessage(effectiveCanMessage, senderId, match.id))) {",
+     "if (!permittedIds.has(match.id)) {", "E8"),
+    ("r03-owner-cli-any-name-once-an-alias-is-listed", SRC + "local-messaging-cli.mjs",
+     "if(details.entries?.some(entry=>entry.send?.aliases?.includes(options.to)))to=options.to;",
+     "if(details.entries?.some(entry=>entry.send?.aliases?.length))to=options.to;", "E6"),
+    ("r06-apply-ignores-refused-plan", CLI + "identity-alias.mjs",
+     '  if (!plan.ready) fail(plan.refusals[0], "The change is refused; see the plan.", { refusals: plan.refusals });',
+     '  if (false) fail(plan.refusals[0], "The change is refused; see the plan.", { refusals: plan.refusals });', "E7"),
+    ("r07-restore-counts-zero-aliases", SRC + "identity-registry.mjs",
+     "return { serverlessBindings, pairings, aliases, destinations, any:",
+     "return { serverlessBindings, pairings, aliases: 0, destinations, any:", "G2"),
+    ("r08-advice-wrong-reason-router-disabled", CLI + "identity-alias.mjs",
+     'if (router.enabled === false) return { state: "not_honored", reason: "router_disabled", detail: null };',
+     'if (router.enabled === false) return { state: "not_honored", reason: "address_forms_not_reported", detail: null };', "E9"),
+    ("r10-writer-not-create-only", SRC + "identity-registry.mjs",
+     '  if (existed) {\n    throw codedError("alias_conflict", "alias_exists");',
+     '  if (false) {\n    throw codedError("alias_conflict", "alias_exists");', "E7"),
+    ("r19-discovery-explains-while-router-disabled", SRC + "unified-router.mjs",
+     '    if (!isEnabled()) return null;\n    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {',
+     '    if (false) return null;\n    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {', "E9"),
+    ("r12-content-address-ignores-node", "scripts/triangle-worker-install.py",
+     '    lines = [agent, node_hash] + [f"{name}={artifacts[name]}" for name in sorted(artifacts)]',
+     '    lines = [agent] + [f"{name}={artifacts[name]}" for name in sorted(artifacts)]', "C2"),
+    ("r15-client-drops-aliases", SRC + "local-messaging-client.mjs",
+     "      if (aliases !== null) explanation.send.aliases = aliases;",
+     "      if (false) explanation.send.aliases = aliases;", "E3"),
+    ("r21-address-kinds-gain-alias", SRC + "unified-router.mjs",
+     '            if (principal !== null && principalNamesOnly(principal, id)) kinds.push("principal");',
+     '            if (principal !== null && principalNamesOnly(principal, id)) kinds.push("principal");\n            if (principal !== null && aliasNamesFor(principal, id).length > 0) kinds.push("alias");', "E3"),
 ]
 
 
@@ -143,14 +177,24 @@ def build(archive, mutant, work):
 def run(archive, mutant, work):
     base, repo, packed = build(archive, mutant, work)
     results = os.path.join(base, "results")
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [shutil.which("node") or "/Users/zhenyuhou/.local/bin/node", RUNNER, "--candidate-archive", packed, "--source-commit", "HEAD",
          "--repo-root", repo, "--out", results],
-        capture_output=True, text=True, timeout=900)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=900)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        return mutant[0], "timeout", (None, stdout[-400:] + stderr[-400:])
     try:
         report = json.load(open(os.path.join(results, "results.json")))
     except Exception:
-        return mutant[0], "no results.json", proc.stdout[-400:] + proc.stderr[-400:]
+        return mutant[0], "no results.json", stdout[-400:] + stderr[-400:]
     failed = (report.get("failure") or {}).get("step")
     return mutant[0], report["verdict"], (failed, (report.get("failure") or {}).get("message", ""))
 

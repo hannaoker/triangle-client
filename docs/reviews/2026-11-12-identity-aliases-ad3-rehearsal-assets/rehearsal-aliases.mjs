@@ -40,14 +40,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CheckFailed, check, fingerprintLive, jsonOf, lastJsonLine, mode, octal, parseJson, run, same, sha256Buffer, sha256File, sha256Text } from "./lib.mjs";
+import { CheckFailed, check, fingerprintLive, jsonOf, killRunningChildren, lastJsonLine, mode, octal, parseJson, run, same, sha256Buffer, sha256File, sha256Text } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const V1 = "identity_registry_v1";
 const V2 = "identity_registry_v2";
 const LOCAL = ["alpha", "beta", "scratch-b"]; // the client's recipients; scratch-b has no binding (D1.5's second recipient)
 const BOUND = ["alpha", "beta", "ghost"]; // the profiles with a binding; ghost is bound and not a local recipient, as in the live registry
-const LATE = "late"; // a profile added to the client after an alias of that name exists (the resolve-time collision)
+const LATE = "late"; // a profile added to the client after an alias of that name exists (the resolve-time collision), one the Grok principal may message
+const HIDDEN = "hidden"; // the same, for a profile the Grok principal may NOT message: for it the label is not visible, so the alias keeps working
 const GROK = "limited"; // the Grok principal; may message beta, scratch-b and late, and not alpha
 const BASE_AUDIT = ["bind", "bind", "bind"]; // the live registry's shape: three binds and no init entry
 // The supervisor artifacts that plan section 6 lists as "exactly AD's modules".
@@ -96,7 +97,7 @@ async function main() {
     let current = path.resolve(target);
     const rest = [];
     while (!fs.existsSync(current) && current !== path.dirname(current)) { rest.unshift(path.basename(current)); current = path.dirname(current); }
-    return path.join(fs.realpathSync(current), ...rest);
+    return path.join(fs.realpathSync.native(current), ...rest); // the canonical case, as the volume is case-insensitive
   };
   const liveReal = realish(live);
   check(realish(options.out) !== liveReal && !realish(options.out).startsWith(liveReal + path.sep), "--out must not be inside the installed application root");
@@ -109,10 +110,17 @@ async function main() {
     runner: { node: process.version, platform: process.platform, arch: process.arch, script: path.basename(fileURLToPath(import.meta.url)) },
     inputs: {},
     steps: [],
+    warnings: [],
     verdict: "incomplete",
   };
   const steps = results.steps;
-  let current = null;
+  // A warning does not fail the rehearsal; it is printed, kept in results.json and counted in the verdict line.
+  const warn = (id, text) => {
+    results.warnings.push({ step: id, text });
+    process.stdout.write(`WARN ${id}  ${text}\n`);
+  };
+  let current = null; // the step in flight
+  let failedStep = null; // the step that threw
   const hosts = new Map();
   let base = null;
   let pkgTestRoot = null;
@@ -141,10 +149,12 @@ async function main() {
       process.stdout.write(`PASS ${id}  ${title}\n`);
     } catch (error) {
       record.error = { message: error.message, details: error.details ?? null };
+      failedStep = id;
       process.stdout.write(`FAIL ${id}  ${title}\n      ${error.message}\n`);
       throw error;
     } finally {
       record.ms = Date.now() - started;
+      current = null;
     }
   };
 
@@ -199,6 +209,8 @@ async function main() {
     let exited = false;
     closed.then(() => { exited = true; });
     let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stderr.on("data", (d) => { stderr += d; });
     hosts.set(label, { child, bundle, closed, hasExited: () => exited });
     const ready = await new Promise((resolve, reject) => {
@@ -213,18 +225,25 @@ async function main() {
     });
     return { pid: ready.pid, bundleId: path.basename(bundle), node: ready.node };
   };
-  const stopHost = async (label) => {
+  // A host must stop on SIGTERM with exit status 0; one that has to be killed, crashed earlier or never stops is a failure of the step
+  // (strict, the default). The cleanup after a failure is not strict: it only has to leave nothing running.
+  const stopHost = async (label, { strict = true } = {}) => {
     const host = hosts.get(label);
     if (!host) return undefined;
     hosts.delete(label);
-    if (host.hasExited()) return host.closed;
-    try { process.kill(host.child.pid, "SIGTERM"); } catch { /* already gone */ }
-    const killTimer = setTimeout(() => { try { process.kill(-host.child.pid, "SIGKILL"); } catch { /* already gone */ } }, 10000);
-    let giveUp;
-    const gaveUp = new Promise((resolve) => { giveUp = setTimeout(() => resolve(null), 20000); });
-    const result = await Promise.race([host.closed, gaveUp]);
-    clearTimeout(killTimer);
-    clearTimeout(giveUp);
+    let result;
+    if (host.hasExited()) {
+      result = await host.closed;
+    } else {
+      try { process.kill(host.child.pid, "SIGTERM"); } catch { /* already gone */ }
+      const killTimer = setTimeout(() => { try { process.kill(-host.child.pid, "SIGKILL"); } catch { /* already gone */ } }, 10000);
+      let giveUp;
+      const gaveUp = new Promise((resolve) => { giveUp = setTimeout(() => resolve(null), 20000); });
+      result = await Promise.race([host.closed, gaveUp]);
+      clearTimeout(killTimer);
+      clearTimeout(giveUp);
+    }
+    if (strict) check(result !== null && result?.code === 0 && result?.signal === null, `host ${label} did not stop cleanly`, result);
     return result;
   };
 
@@ -278,6 +297,14 @@ async function main() {
     const r = await tl(["grok", "status", "--alias", GROK, "--message-id", messageId]);
     return { code: r.code, json: parseJson(r.stdout), text: (r.stdout + r.stderr).trim().slice(0, 300) };
   };
+  // "No journal row" has to be asked by the sender that sent the message: another sender's lookup of an existing row is refused as well
+  // (foreign_access_denied), so only not_found from the owner of the id says the row is absent.
+  const noRow = async (who, messageId) => {
+    const looked = who === "grok" ? await grokStatus(messageId) : await messageStatus(messageId);
+    return { absent: looked.code !== 0 && /not_found/.test(looked.text), looked };
+  };
+  // The server's own answer to a Grok send, code and message (the Grok CLI prints only the code), through the bundle's own client.
+  const rawGrokSend = async (to, messageId = crypto.randomUUID()) => lastJsonLine((await helper(currentBundle(), ["grok-send", configPath, GROK, to, messageId, `${messageId}-r`])).stdout);
   // What a sender is told, without the ids that differ from run to run.
   const outcome = (r) => ({ exit: r.code, state: r.json?.state ?? null, error: r.json?.error ?? null });
   const reached = (r, profile, text) => JSON.stringify(r.json ?? "").includes(`echo[${profile}]: ${text}`);
@@ -316,9 +343,9 @@ async function main() {
     const answers = {};
     for (const probe of NEGATIVE_PROBES()) {
       const r = probe.who === "grok" ? await grokSend(probe.to, `negative ${probe.id}`, { count: false }) : await send(probe.to, `negative ${probe.id}`, { wait: 0, count: false });
-      const lookup = await messageStatus(r.messageId);
-      answers[probe.id] = { ...outcome(r), reachedARunner: JSON.stringify(r.json ?? "").includes("echo["), journalRow: lookup.code === 0 };
-      check(r.code !== 0 && answers[probe.id].reachedARunner === false && answers[probe.id].journalRow === false, `negative probe ${probe.id} was not refused cleanly`, { r: r.json, stderr: r.stderr, lookup: lookup.text });
+      const lookup = await noRow(probe.who, r.messageId);
+      answers[probe.id] = { ...outcome(r), reachedARunner: JSON.stringify(r.json ?? "").includes("echo["), journalRow: !lookup.absent };
+      check(r.code !== 0 && answers[probe.id].reachedARunner === false && answers[probe.id].journalRow === false, `negative probe ${probe.id} was not refused cleanly`, { r: r.json, stderr: r.stderr, lookup: lookup.looked.text });
     }
     const after = await routerBlock();
     return { answers, delta: counterDelta(before, after), deltaWithAdditive: counterDelta(before, after, { withAdditive: true }) };
@@ -356,6 +383,47 @@ async function main() {
     return { plan: planned.plan, result };
   };
 
+  // ---- the end of the run, once: by the last step, by a failure or by an interrupt. Every caller waits for the same cleanup.
+  let finalizing = null;
+  const finalize = () => (finalizing ??= finalizeOnce());
+  const finalizeOnce = async () => {
+    try {
+      for (const label of [...hosts.keys()]) await stopHost(label, { strict: false });
+    } catch (error) {
+      results.cleanupError = String(error?.message ?? error);
+    }
+    // The comparison also runs when a step failed before Z1, which is exactly when it matters.
+    if (liveBefore && !results.liveRoot) {
+      try {
+        const comparison = await compareLive();
+        results.liveRoot = { identical: comparison.identical, compared: comparison.compared, differences: comparison.differences };
+      } catch (error) {
+        results.liveRoot = { identical: false, error: String(error?.message ?? error) };
+      }
+    }
+    if (results.liveRoot && !results.liveRoot.identical) results.verdict = "fail";
+    results.finishedAt = new Date().toISOString();
+    fs.mkdirSync(options.out, { recursive: true });
+    let text = JSON.stringify(results, null, 2) + "\n";
+    // Nothing that names the machine or the installed root stays in a written result, the details of a failure included.
+    for (const [value, mask] of [[base, "<scratch>"], [live, "<installed-root>"], [os.homedir(), "<home>"]]) if (value) text = text.split(value).join(mask);
+    fs.writeFileSync(path.join(options.out, "results.json"), text);
+    if (base && !options.keep) fs.rmSync(base, { recursive: true, force: true });
+    else if (base) process.stdout.write(`scratch root kept: ${base}\n`);
+  };
+  let interrupted = false;
+  const onSignal = (signal) => {
+    if (interrupted) return;
+    interrupted = true;
+    process.stdout.write(`\ninterrupted by ${signal} during ${current?.id ?? "a pause between steps"}: stopping the scratch hosts and cleaning up\n`);
+    killRunningChildren();
+    results.verdict = "interrupted";
+    results.failure = { step: current?.id ?? null, message: `interrupted by ${signal}` };
+    finalize().finally(() => process.exit(130));
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
   try {
     // =========================================================================================== A. inputs
     await step("A1", "installed state: supervisor manifest, bundle and client package (read only)", async () => {
@@ -378,6 +446,7 @@ async function main() {
         triangleLocalSha256: sha256File(path.join(live, "bin/triangle-local")),
       };
       liveBefore = await fingerprintLive(live, releaseVersion, oldBundleId);
+      if (liveBefore.processes.length === 0) warn("A1", "no live supervisor process was found, so Z1 compares an empty process list (the supervisor is not running, or its command line does not start with the installed root)");
       return { installed: results.inputs.installed, supervisorProcesses: liveBefore.processes.length };
     });
 
@@ -566,6 +635,8 @@ async function main() {
         if (actual !== sha) mismatches.push(path.relative(live, file));
       }
       results.inputs.liveReceipt = { version: receipt.version, ownedFiles: owned.length, matchingDisk: owned.length - mismatches.length, mismatches };
+      // The candidate does not depend on it, so this does not fail the rehearsal; but H3's installer would refuse such a receipt (the D1.5 finding).
+      if (mismatches.length > 0) warn("A6", `the live install receipt does not match the disk for ${mismatches.length} of ${owned.length} owned files (${mismatches.join(", ")}): the package installer will refuse until the receipt is reconciled`);
       return results.inputs.liveReceipt;
     });
 
@@ -748,7 +819,8 @@ async function main() {
       const details = await discover();
       entriesWithAlias = strip(details.entries);
       const alpha = entriesWithAlias.find((e) => e.id === ids.alpha);
-      check(same(alpha.send, { permitted: true, addressKinds: ["id", "principal"], aliases: ["builder"] }), "alpha's entry does not carry the alias", alpha);
+      check(same(alpha.send.aliases, ["builder"]), "alpha's entry does not list the alias", alpha);
+      check(alpha.send.permitted === true && same(alpha.send.addressKinds, ["id", "principal"]), "alpha's entry names other address kinds than id and principal (the alias must stay out of addressKinds)", alpha);
       check(same(entriesWithAlias.filter((e) => e.id !== ids.alpha), baselineEntries.filter((e) => e.id !== ids.alpha)), "another entry changed", entriesWithAlias);
       // A client from before the restage (invariant 9): it keeps the entry's send explanation, drops the field it does not know,
       // and cannot send to the name, so an alias is never usable by code that predates it.
@@ -820,7 +892,7 @@ async function main() {
         auditActions: auditActions(),
       };
     });
-    await step("E6", "a sender without permission: the alias of a recipient it may not message is an unknown name, by code, text, counters and record", async () => {
+    await step("E6", "a sender without permission: the alias of a recipient it may not message is an unknown name, by code, message, counters, record and discovery", async () => {
       // builder -> alpha, which the Grok principal may not message
       const beforeUnknown = await routerBlock();
       const unknown = await grokSend("nobody", "probe unknown", { count: false });
@@ -829,10 +901,19 @@ async function main() {
       const afterInvisible = await routerBlock();
       check(unknown.code === 1 && same(outcome(unknown), outcome(invisible)) && invisible.json?.error === "recipient_not_allowed", "the invisible alias is answered differently from an unknown name", { unknown: unknown.json, invisible: invisible.json });
       check(same(counterDelta(beforeUnknown, mid, { withAdditive: true }), counterDelta(mid, afterInvisible, { withAdditive: true })) && same(counterDelta(mid, afterInvisible, { withAdditive: true }), { resolved: { id: 1 }, errors: {} }), "the counters differ between the unknown name and the invisible alias", { unknown: counterDelta(beforeUnknown, mid, { withAdditive: true }), invisible: counterDelta(mid, afterInvisible, { withAdditive: true }) });
+      // the server's own code and message, which the Grok CLI does not print, through the bundle's client: the same for both
+      const rawUnknown = await rawGrokSend("nobody");
+      const rawInvisible = await rawGrokSend("builder");
+      check(rawUnknown.ok === false && typeof rawInvisible.message === "string" && rawInvisible.message.length > 0 && rawInvisible.code === "recipient_not_allowed" && same(rawUnknown, rawInvisible), "the server's code and message for the invisible alias differ from an unknown name's", { rawUnknown, rawInvisible });
+      // no journal row, asked by the sender that sent each (another sender's lookup of an existing row is refused too)
       for (const r of [unknown, invisible]) {
-        const looked = await messageStatus(r.messageId);
-        check(looked.code !== 0 && /not_found/.test(looked.text), "a refused probe left a journal row", looked);
+        const row = await noRow("grok", r.messageId);
+        check(row.absent, "a refused probe left a journal row", row.looked);
       }
+      // the owner CLI refuses an unknown name itself, as before any alias existed, even while an alias is listed
+      const ownerUnknown = await send("nobody", "owner cli, an unknown name while an alias is listed", { wait: 0, count: false });
+      const baselineOwner = baselineNegative.answers["alias-shaped-unknown-name-owner-cli"];
+      check(same(outcome(ownerUnknown), { exit: baselineOwner.exit, state: baselineOwner.state, error: baselineOwner.error }), "the owner CLI answers an unknown name differently once an alias is listed", { now: outcome(ownerUnknown), before: baselineOwner });
       // the Grok principal's own discovery lists nothing of alpha, so the alias cannot be learned from it
       const sessions = await tl(["grok", "sessions", "--alias", GROK]);
       const text = sessions.stdout;
@@ -840,7 +921,7 @@ async function main() {
       // control: the desktop sender sees the same alias and uses it
       const visible = await send("builder", "desktop sees it", { count: true });
       check(visible.code === 0 && reached(visible, "alpha", "desktop sees it"), "the desktop sender cannot use the alias", visible);
-      return { unknownName: outcome(unknown), invisibleAlias: outcome(invisible), counterDeltaEach: { resolved: { id: 1 } }, journalRows: 0, grokDiscoveryNamesTheAlias: false, desktopCanUseIt: true };
+      return { unknownName: outcome(unknown), invisibleAlias: outcome(invisible), serverAnswerForBoth: rawInvisible, counterDeltaEach: { resolved: { id: 1 } }, journalRows: 0, grokDiscoveryNamesTheAlias: false, ownerCliUnknownNameWhileAnAliasIsListed: outcome(ownerUnknown), desktopCanUseIt: true };
     });
 
     await step("E7", "refusals at plan time, each exit 1 and nothing written: reserved names, look-alikes, bad names, labels, an existing alias, targets that cannot route", async () => {
@@ -879,46 +960,69 @@ async function main() {
       check(/pty-exit: 2\b/.test(wrongId.stderr) && wrongId.stdout.includes("plan_stale"), "apply with a wrong plan id was not refused as plan_stale (exit 2)", wrongId);
       const clearMissing = await aliasPlan("clear", "never-set");
       check(clearMissing.code === 1 && clearMissing.plan?.refusals.includes("alias_not_found"), "clearing an alias that does not exist was not refused", clearMissing);
-      // a refused plan's id cannot be applied
-      const planned = await aliasPlan("set", "claude", "alpha");
-      const forced = await pkgPty([...aliasArgs("set", "claude", "alpha"), "--confirm", planned.plan.planId]);
-      check(!/pty-exit: 0/.test(forced.stderr), "applying a refused plan succeeded", forced);
-      check(same(registryFiles(), files), "a refused plan changed the registry");
-      return { refusals: refused, clearOfMissingAlias: clearMissing.plan.refusals, applyOfRefusedPlan: forced.stderr.match(/pty-exit: (-?\d+)/)?.[1] ?? null, applyGate: { noTerminal: { exit: piped.code, message: piped.stderr.trim().slice(0, 160) }, wrongPlanId: { exit: wrongId.stderr.match(/pty-exit: (-?\d+)/)?.[1] ?? null, message: wrongId.stdout.trim().split("\n").slice(-1)[0].slice(0, 160) } }, registryUnchanged: true, cases: cases.length };
+      // A refused plan's id cannot be applied. The refusal probed here (a target that is no local recipient) is made by the command and not
+      // by the writer, so only the command's own gate stands between this plan and a write.
+      const refusedPlan = await aliasPlan("set", "fresh", "ghost");
+      check(refusedPlan.code === 1 && refusedPlan.plan?.ready === false && refusedPlan.plan.refusals.includes("alias_target_not_local"), "the plan for a non-local target is not refused", refusedPlan);
+      const forced = await pkgPty([...aliasArgs("set", "fresh", "ghost"), "--confirm", refusedPlan.plan.planId]);
+      check(/pty-exit: 1\b/.test(forced.stderr) && forced.stdout.includes("alias_target_not_local"), "applying a refused plan did not fail with the plan's refusal (exit 1)", forced);
+      // The writer's own rules, which the plan checks first and so never reaches: an alias is created, never overwritten, and only an existing one is cleared.
+      const writerSet = lastJsonLine((await helper(currentBundle(), ["alias-write", registry, "set", "builder", principals.beta, String(seq)])).stdout);
+      check(writerSet?.ok === false && writerSet.code === "alias_conflict" && /alias_exists/.test(writerSet.message), "the writer is not create-only", writerSet);
+      const writerClear = lastJsonLine((await helper(currentBundle(), ["alias-write", registry, "clear", "never-set", "-", String(seq)])).stdout);
+      check(writerClear?.ok === false && /alias_not_found/.test(writerClear.message), "the writer clears an alias that does not exist", writerClear);
+      check(same(registryFiles(), files), "a refused plan or a refused write changed the registry");
+      return { refusals: refused, clearOfMissingAlias: clearMissing.plan.refusals, applyOfRefusedPlan: { exit: forced.stderr.match(/pty-exit: (-?\d+)/)?.[1] ?? null, refusal: "alias_target_not_local" }, writerRules: { setExisting: { code: writerSet.code, message: writerSet.message }, clearMissing: { code: writerClear.code, message: writerClear.message } }, applyGate: { noTerminal: { exit: piped.code, message: piped.stderr.trim().slice(0, 160) }, wrongPlanId: { exit: wrongId.stderr.match(/pty-exit: (-?\d+)/)?.[1] ?? null, message: wrongId.stdout.trim().split("\n").slice(-1)[0].slice(0, 160) } }, registryUnchanged: true, cases: cases.length };
     });
 
-    await step("E8", "a profile added after an alias of that name: the server refuses with alias_unresolved for a sender that can see both; status --identity says collides", async () => {
+    await step("E8", "profiles added after aliases of their names: alias_unresolved only for a sender that can see both, discovery agrees with sending, status --identity says collides", async () => {
       await aliasApply("set", LATE, "beta");
+      await aliasApply("set", HIDDEN, "beta");
       await stopHost("new");
-      // the same call that built the client, with one more recipient (the registry is in place and is read, not changed)
-      fs.writeFileSync(path.join(tmp, "spec2.json"), JSON.stringify({ clientRoot: client, stateRoot, registryRoot: registry, local: [...LOCAL, LATE], bound: BOUND }), { mode: 0o600 });
+      // the same call that built the client, with two more recipients (the registry is in place and is read, not changed)
+      fs.writeFileSync(path.join(tmp, "spec2.json"), JSON.stringify({ clientRoot: client, stateRoot, registryRoot: registry, local: [...LOCAL, LATE, HIDDEN], bound: BOUND, init: false }), { mode: 0o600 });
       const filesBefore = registryFiles();
       const prepared = lastJsonLine((await helper(currentBundle(), ["prepare", path.join(tmp, "spec2.json")])).stdout);
-      check(prepared?.ok === true && prepared.registryWasInPlace === true && prepared.sequence === seq && same(registryFiles(), filesBefore), "adding the recipient changed the registry", prepared);
+      check(prepared?.ok === true && prepared.registryWasInPlace === true && prepared.sequence === seq && same(registryFiles(), filesBefore), "adding the recipients changed the registry", prepared);
+      ids[HIDDEN] = prepared.instances[HIDDEN];
       await startHost("new");
+      // `late` is a profile the Grok principal may message: it can see the alias and the label, so the name is refused as unresolved
       const before = await routerBlock();
       const collided = await grokSend(LATE, "grok to a colliding name", { count: false });
       const after = await routerBlock();
       check(collided.code === 1 && collided.json?.state === "rejected" && collided.json?.error === "alias_unresolved", "a sender that can see the alias and the profile is not told alias_unresolved", collided.json);
       check(same(counterDelta(before, after, { withAdditive: true }), { resolved: {}, errors: { alias_unresolved: 1 } }), "the counters did not record one alias_unresolved", counterDelta(before, after, { withAdditive: true }));
-      check((await messageStatus(collided.messageId)).code !== 0, "the refused send left a journal row");
-      // the owner CLI maps a profile name first, so the same word reaches the profile (the documented asymmetry)
+      check((await noRow("grok", collided.messageId)).absent, "the refused send left a journal row");
+      // `hidden` is a profile it may NOT message: it cannot see that label, so for it the alias keeps working (a sender never learns of a label it could not already see)
+      const hidden = await grokSend(HIDDEN, "grok to an alias whose name is a profile it cannot see", { requestId: "ad3-grok-hidden-r" });
+      check(hidden.code === 0 && hidden.json?.accepted === true && same(hidden.json.target, { via: "principal", principal: principals.beta, profile: "beta" }), "the alias does not work for a sender that cannot see the profile of that name", hidden);
+      check((await grokReply("ad3-grok-hidden-r")).some((x) => x.text === "echo[beta]: grok to an alias whose name is a profile it cannot see"), "the Grok send did not reach beta's runner");
+      // the owner CLI maps profile names first, so the same words reach the profiles (the documented asymmetry)
       const viaCli = await send(LATE, "owner cli to the profile", { count: true });
       check(viaCli.code === 0 && reached(viaCli, LATE, "owner cli to the profile") && target(viaCli)?.via !== "principal", "the owner CLI did not reach the profile of that name", viaCli);
+      const viaCliHidden = await send(HIDDEN, "owner cli to the hidden profile", { count: true });
+      check(viaCliHidden.code === 0 && reached(viaCliHidden, HIDDEN, "owner cli to the hidden profile"), "the owner CLI did not reach the hidden profile", viaCliHidden);
       const view = await pkgCli(["status", "--identity", "--client-root", client, "--registry-root", registry]);
-      check(view.code === 0 && /collides · late → beta/.test(view.stdout) && /active · builder → alpha/.test(view.stdout), "status --identity does not show the collision", view.stdout.slice(0, 1400));
+      check(view.code === 0 && /collides · late → beta/.test(view.stdout) && /collides · hidden → beta/.test(view.stdout) && /active · builder → alpha/.test(view.stdout), "status --identity does not show the collisions", view.stdout.slice(0, 1400));
+      // discovery decides each name by the rule a send uses, per sender: the desktop sender can see both labels, so it is offered neither alias;
+      // the Grok principal cannot see `hidden`, so it is offered that one (and `late` is refused for it, as above)
       const entries = strip((await discover()).entries);
-      check(!entries.some((e) => e.id === ids[LATE] && e.send.aliases), "discovery lists an alias on the colliding profile's entry");
+      const aliasesOf = (list, id) => list.find((e) => e.id === id)?.send.aliases ?? null;
+      check(same(aliasesOf(entries, ids.alpha), ["builder"]) && aliasesOf(entries, ids.beta) === null && aliasesOf(entries, ids[LATE]) === null && aliasesOf(entries, ids[HIDDEN]) === null, "the desktop sender's discovery lists a colliding alias or lacks builder", entries);
       const lateEntry = { id: ids[LATE], principal: null, principalState: "unbound", route: "local", send: { permitted: true, addressKinds: ["id"] } };
-      expectedEntries = [...baselineEntries, lateEntry];
-      check(same(withoutAliases(entries), expectedEntries), "discovery after adding the profile is not the baseline plus the new unbound entry", { entries });
+      const hiddenEntry = { id: ids[HIDDEN], principal: null, principalState: "unbound", route: "local", send: { permitted: true, addressKinds: ["id"] } };
+      expectedEntries = [...baselineEntries, lateEntry, hiddenEntry];
+      check(same(withoutAliases(entries), expectedEntries), "discovery after adding the profiles is not the baseline plus the two new unbound entries", { entries });
+      const sessions = parseJson((await tl(["grok", "sessions", "--alias", GROK])).stdout)?.sessions ?? [];
+      check(same(aliasesOf(sessions, ids.beta), ["hidden"]), "the Grok principal's discovery does not list exactly the alias it can use", sessions.filter((r) => r.id === ids.beta));
       await aliasApply("clear", LATE);
+      await aliasApply("clear", HIDDEN);
       // Once the alias is cleared the word is only a profile name, which the Grok principal (unlike the owner CLI) does not map to an id.
       const cleared = await grokSend(LATE, "grok after the alias is gone", { count: false });
       check(cleared.code === 1 && cleared.json?.state === "rejected" && cleared.json?.error === "recipient_not_allowed", "the cleared name is not an unknown name to the Grok principal", cleared);
       const byId = await grokSend(ids[LATE], "grok by exact id", { count: true });
       check(byId.code === 0 && byId.json?.accepted === true, "the Grok principal cannot reach the new profile by its exact id", byId);
-      return { grokAnswer: outcome(collided), counterDelta: { errors: { alias_unresolved: 1 } }, ownerCliReachedTheProfile: true, statusIdentityState: "collides", afterClear: { grokByName: outcome(cleared), grokByExactId: "accepted" } };
+      return { grokAnswerForLate: outcome(collided), counterDelta: { errors: { alias_unresolved: 1 } }, grokAnswerForHidden: "accepted, reached beta", ownerCliReachedTheProfiles: true, statusIdentityStates: ["collides: late", "collides: hidden"], discovery: { desktopBetaAliases: null, grokBetaAliases: ["hidden"] }, afterClear: { grokByName: outcome(cleared), grokByExactId: "accepted" } };
     });
 
     await step("E9", "the kill switch: with the router disabled nothing resolves, and the plan says so", async () => {
@@ -931,8 +1035,13 @@ async function main() {
       const g = await grokSend("builder", "router off", { count: false });
       const d = await send("builder", "router off", { wait: 0, count: false });
       check(g.code === 1 && g.json?.error === "recipient_not_allowed" && d.code === 1 && d.json?.error === "recipient_not_allowed", "an alias is resolved or answered differently with the router disabled", { g: g.json, d: d.json });
+      // the owner CLI's refusal is the client's own (discovery explains nothing while the router is off, so no alias is listed); the Grok one is the server's
+      const details = await discover();
+      check(!(details.entries ?? []).some((e) => e.send?.aliases) && Array.isArray(details.recipients), "discovery lists an alias while the router is disabled", details);
       const planned = await aliasPlan("set", "other", "beta");
-      check(planned.plan?.advice?.supervisor?.state === "not_honored", "the plan does not warn that a disabled router honors no alias", planned.plan?.advice);
+      check(planned.plan?.advice?.supervisor?.state === "not_honored" && planned.plan.advice.supervisor.reason === "router_disabled", "the plan does not say that a disabled router honors no alias, and why", planned.plan?.advice);
+      const human = await pkgCli(aliasArgs("set", "other", "beta"));
+      check(/Principal routing is switched off in the running supervisor \(router_disabled\)/.test(human.stdout), "the human plan does not say routing is switched off", human.stdout.slice(0, 700));
       const on = await tl(["setup-router", "--enable", "--registry-root", registry]);
       check(on.code === 0, `setup-router --enable failed: ${on.stderr.slice(0, 300)}`, on);
       await stopHost("new");
@@ -941,7 +1050,7 @@ async function main() {
       check(back.enabled === true && back.registry.addressForms.includes("alias"), "the router did not come back", back);
       const ok = await send("builder", "router on again", { wait: 5000 });
       check(ok.code === 0 && reached(ok, "alpha", "router on again"), "the alias does not work again after the router is enabled", ok);
-      return { disabled: { routerEnabled: block.enabled, addressForms: block.registry?.addressForms ?? null, grok: outcome(g), ownerCli: outcome(d), planAdvice: planned.plan.advice.supervisor }, reEnabled: { addressForms: back.registry.addressForms } };
+      return { disabled: { routerEnabled: block.enabled, addressForms: block.registry?.addressForms ?? null, grok: outcome(g), ownerCliRefusedByTheClient: outcome(d), discoveryEntriesPresent: details.entries !== undefined, planAdvice: planned.plan.advice.supervisor }, reEnabled: { addressForms: back.registry.addressForms } };
     });
 
     await step("E10", "a restart of the candidate host keeps the aliases: discovery, a send, the same registry sequence", async () => {
@@ -987,17 +1096,17 @@ async function main() {
       const after = await routerBlock();
       check([g, gs, d].every((x) => x.code === 1 && x.json?.error === "recipient_not_allowed"), "an alias is answered with something other than recipient_not_allowed by the installed supervisor", { g: g.json, gs: gs.json, d: d.json });
       check(same(counterDelta(before, after), { resolved: { id: 2 }, errors: {} }), "the installed supervisor's counters moved unexpectedly", counterDelta(before, after));
-      for (const x of [g, gs, d]) check((await messageStatus(x.messageId)).code !== 0, "a refused alias send left a journal row");
+      for (const [who, x] of [["grok", g], ["grok", gs], ["desktop", d]]) check((await noRow(who, x.messageId)).absent, "a refused alias send left a journal row", x);
       // the same negative set as before aliases existed
       const negative = await runNegativeSet();
       check(same(negative.answers, baselineNegative.answers) && same(negative.delta, baselineNegative.delta), "the negative set differs with aliases in the registry", negative);
-      return { host: started, manifestByteIdentical: true, candidateBundleRemoved: true, aliasesInRegistry: aliasesAtRollback, registryBlock: block.registry, aliasAnswers: { grokVisibleAliasOfBeta: outcome(g), grokInvisibleAlias: outcome(gs), ownerCli: outcome(d) }, counterDelta: { resolved: { id: 2 } }, discoveryHasNoAliases: true, negativeSetEqualsBaseline: true };
+      return { host: started, manifestByteIdentical: true, candidateBundleRemoved: true, aliasesInRegistry: aliasesAtRollback, registryBlock: block.registry, aliasAnswers: { grokAliasItCouldUse: outcome(g), grokAliasItCouldNot: outcome(gs), ownerCliRefusedByTheClient: outcome(d) }, counterDelta: { resolved: { id: 2 }, note: "the two Grok sends reached the server; the owner CLI refused the name itself" }, discoveryHasNoAliases: true, negativeSetEqualsBaseline: true };
     });
 
     await step("F2", "the installed client package and writer next to a registry with aliases: they read it, show the count, plan nothing wrong, and a bind leaves the aliases alone", async () => {
       const files = registryFiles();
       const view = await instCliRun(["status", "--identity", "--client-root", client, "--registry-root", registry]);
-      check(view.code === 0 && /Registry:\s+ok · v2 · sequence \d+ · pairings 0 · aliases \d+ /.test(view.stdout), "the installed status --identity does not read the registry with aliases", { exit: view.code, out: view.stdout.slice(0, 800), err: view.stderr.slice(0, 300) });
+      check(view.code === 0 && /Registry:\s+ok · v2 · sequence \d+ · pairings 0 · aliases 2 /.test(view.stdout), "the installed status --identity does not read the registry with its two aliases", { exit: view.code, out: view.stdout.slice(0, 800), err: view.stderr.slice(0, 300) });
       const upgradePlan = await instCliRun(["identity", "upgrade-registry", "--client-root", client, "--json"]);
       const planJson = jsonOf(upgradePlan);
       check(planJson?.ready === false && planJson.refusals.includes("registry_already_v2"), "the installed upgrade plan on a v2 registry with aliases does not say registry_already_v2", planJson);
@@ -1010,8 +1119,12 @@ async function main() {
       check(bound.ok === true, "the installed writer could not bind in a registry with aliases", bound);
       const after = lastJsonLine((await helper(currentBundle(), ["read", copy])).stdout);
       check(after.ok && after.sequence === seq + 1 && after.bindings === 4 && same(after.aliases, lastJsonLine((await helper(oldBundle, ["read", registry])).stdout).aliases), "the bind changed the aliases or did not add one binding", after);
+      // and refuses the alias actions themselves (plan 3.8), leaving the copy as it was
+      const copyBefore = sha256File(path.join(copy, "identity-registry-v1.json"));
+      const oldAliasWrite = lastJsonLine((await helper(oldBundle, ["alias-write", copy, "set", "extra", principals.beta, String(after.sequence)])).stdout);
+      check(oldAliasWrite?.ok === false && /action_not_available/.test(`${oldAliasWrite.code} ${oldAliasWrite.message}`) && sha256File(path.join(copy, "identity-registry-v1.json")) === copyBefore, "the installed writer does not refuse the alias action cleanly", oldAliasWrite);
       check(same(registryFiles(), files), "the probe on the copy changed the registry");
-      return { installedStatusIdentity: view.stdout.split("\n").find((l) => l.startsWith("Registry:")) ?? null, installedUpgradePlan: planJson.refusals, installedBindOnACopy: "ok, aliases untouched, chain reads", sequenceAfterBind: after.sequence };
+      return { installedStatusIdentity: view.stdout.split("\n").find((l) => l.startsWith("Registry:")) ?? null, installedUpgradePlan: planJson.refusals, installedBindOnACopy: "ok, aliases untouched, chain reads", installedWriterAliasAction: { code: oldAliasWrite.code, message: oldAliasWrite.message }, sequenceAfterBind: after.sequence };
     });
 
     await step("F3", "the candidate CLI against the installed supervisor: the plan is ready with the warning that the alias will not be honored; set anyway, it is recorded and ignored", async () => {
@@ -1027,7 +1140,7 @@ async function main() {
       const g = await grokSend("other", "recorded but not honored", { count: false });
       const after = await routerBlock();
       check(g.code === 1 && g.json?.error === "recipient_not_allowed" && same(counterDelta(block, after), { resolved: { id: 1 }, errors: {} }), "an alias set under the installed supervisor is not just an unknown name to it", { g: g.json, delta: counterDelta(block, after) });
-      check((await messageStatus(g.messageId)).code !== 0, "the refused send left a journal row");
+      check((await noRow("grok", g.messageId)).absent, "the refused send left a journal row");
       const entries = strip((await discover()).entries);
       check(same(entries, expectedEntries), "discovery changed under the installed supervisor", entries);
       return { supervisorAdvice: planned.plan.advice.supervisor, warningInHumanPlan: true, setAnyway: { alias: "other", registrySequence: seq, runningInstalledHost: "keeps serving", senderAnswer: outcome(g), discoveryUnchanged: true } };
@@ -1058,6 +1171,33 @@ async function main() {
       return { host: started, sameBundleId: true, registryUnchanged: true, aliasesHonoredWithoutAnyRegistryChange: ["builder", "reviewer", "other"], committed: true };
     });
 
+    await step("F5", "H2 rolled back by hand after the install was committed (the plan's rollback: restore the saved manifest, restart); then staged and committed again", async () => {
+      await stopHost("new");
+      const filesBefore = registryFiles();
+      fs.writeFileSync(manifestPath(), oldManifestBytes, { mode: 0o600 });
+      fs.chmodSync(manifestPath(), 0o600);
+      check(currentBundle() === oldBundle && fs.existsSync(oldBundle), "the restored manifest does not name the installed bundle, which is still there");
+      const started = await startHost("old");
+      const block = await routerBlock();
+      check(block.registry.state === "ok" && block.registry.sequence === seq && block.registry.addressForms === undefined, "the installed host does not serve the registry after the manual rollback", block.registry);
+      const p = await send(principals.beta, "after a manual rollback");
+      check(reached(p, "beta", "after a manual rollback"), "a principal send fails after the manual rollback", p.json);
+      const g = await grokSend("other", "ignored again after the rollback", { count: false });
+      check(g.code === 1 && g.json?.error === "recipient_not_allowed", "an alias is not an unknown name to the installed supervisor again", g.json);
+      check(same(registryFiles(), filesBefore), "the rollback changed the registry");
+      // and forward again, the way F4 did: stage, start, commit
+      await stopHost("old");
+      const staged = await stageCandidate();
+      record1 = staged.record;
+      check(staged.bundleId === results.inputs.candidateBundleId, "restaging after a manual rollback produced a different bundle id", staged);
+      await startHost("new");
+      const back = await routerBlock();
+      check(back.registry.sequence === seq && back.registry.addressForms.includes("alias"), "the restaged host does not serve the registry", back.registry);
+      const committed = await installer(["commit-runtime", staged.record]);
+      check(committed.code === 0, `commit-runtime failed: ${committed.stderr.slice(0, 300)}`, committed);
+      return { host: started, manifestRestoredByHand: true, installedHostAfterwards: { addressForms: null, aliasAnswer: outcome(g) }, restagedBundleId: staged.bundleId, committedAgain: true, registryUnchanged: true };
+    });
+
     // ===================================================================================== G. returning to the starting state
     await step("G1", "alias clear for every alias: the sender's view returns to the start (discovery, router block); the audit chain holds every set and clear", async () => {
       for (const name of Object.keys(registryJson().aliases).sort()) await aliasApply("clear", name);
@@ -1085,15 +1225,16 @@ async function main() {
       check(refusedPlan.code === 1 && refused?.ready === false && refused.refusals.includes("restore_would_lose_v2_data"), "a restore that would lose an alias is not refused without the flag", { exit: refusedPlan.code, plan: refused?.refusals });
       const planRun = await candCli(["identity", "restore-registry", "--client-root", client, "--from", backupDir, "--discard-v2-data", "--json"]);
       const plan = jsonOf(planRun);
-      check(planRun.code === 0 && plan?.ready === true && plan.live.v2Data.any === true, `the restore plan with the flag is not ready (exit ${planRun.code})`, { stdout: planRun.stdout.slice(0, 900), stderr: planRun.stderr.slice(0, 300) });
+      check(planRun.code === 0 && plan?.ready === true && plan.live.v2Data.any === true && plan.live.v2Data.aliases === 1, `the restore plan with the flag is not ready or does not count the one alias (exit ${planRun.code})`, { stdout: planRun.stdout.slice(0, 900), stderr: planRun.stderr.slice(0, 300), v2Data: plan?.live?.v2Data });
       const discardedActions = plan.discarded.map((d) => d.action);
       check(discardedActions.includes("alias_set") && discardedActions[0] === "upgrade", "the plan does not list the alias entries among the discarded ones", discardedActions);
       const text = JSON.stringify(plan);
-      check(!text.includes(principals.alpha), "the plan names an alias's target", text.slice(0, 200));
+      for (const principal of Object.values(principals).filter(Boolean)) check(!text.includes(principal), "the plan names a principal (an alias's target)", text.slice(0, 200));
       const applied = await candPty(["identity", "restore-registry", "--client-root", client, "--from", backupDir, "--discard-v2-data", "--confirm", plan.planId, "--json"]);
       check(/pty-exit: 0/.test(applied.stderr), `restore failed: ${applied.stdout.slice(0, 600)} ${applied.stderr.slice(0, 300)}`, applied);
       const json = registryJson();
-      check(json.schema === V1 && json.aliases === undefined && sha256File(path.join(backupDir, "identity-registry-v1.json")) === registryFiles().registry, "the live registry is not the backup's v1 file", { schema: json.schema });
+      const restored = registryFiles();
+      check(json.schema === V1 && json.aliases === undefined && sha256File(path.join(backupDir, "identity-registry-v1.json")) === restored.registry && sha256File(path.join(backupDir, "registry-audit.jsonl")) === restored.audit, "the live registry pair is not the backup's pair, byte for byte", { schema: json.schema });
       const block = await routerBlock();
       check(block.registry.state === "ok" && block.registry.schema === V1, "the running candidate host did not recover to the restored v1 registry", block.registry);
       const a = await send(principals.beta, "after the restore");
@@ -1116,34 +1257,17 @@ async function main() {
 
     results.verdict = steps.every((s) => s.ok) ? "pass" : "fail";
   } catch (error) {
-    results.verdict = "fail";
-    results.failure = { step: current?.id ?? null, message: error.message };
+    // After an interrupt the children were killed on purpose, and the step in flight fails because of it: keep the interrupt as the cause.
+    if (!interrupted) {
+      results.verdict = "fail";
+      results.failure = { step: failedStep, message: error.message };
+    }
   } finally {
-    try {
-      for (const label of [...hosts.keys()]) await stopHost(label);
-    } catch (error) {
-      results.cleanupError = String(error?.message ?? error);
-    }
-    // The comparison also runs when a step failed before Z1, which is exactly when it matters.
-    if (liveBefore && !results.liveRoot) {
-      try {
-        const comparison = await compareLive();
-        results.liveRoot = { identical: comparison.identical, compared: comparison.compared, differences: comparison.differences };
-      } catch (error) {
-        results.liveRoot = { identical: false, error: String(error?.message ?? error) };
-      }
-    }
-    if (results.liveRoot && !results.liveRoot.identical) results.verdict = "fail";
-    results.finishedAt = new Date().toISOString();
-    fs.mkdirSync(options.out, { recursive: true });
-    let text = JSON.stringify(results, null, 2) + "\n";
-    if (base) text = text.split(base).join("<scratch>");
-    fs.writeFileSync(path.join(options.out, "results.json"), text);
-    if (base && !options.keep) fs.rmSync(base, { recursive: true, force: true });
-    else if (base) process.stdout.write(`scratch root kept: ${base}\n`);
+    await finalize();
   }
-  process.stdout.write(`\nverdict: ${results.verdict}  (${steps.filter((s) => s.ok).length}/${steps.length} steps)\n`);
-  process.exitCode = results.verdict === "pass" ? 0 : 1;
+  const warned = results.warnings.length;
+  process.stdout.write(`\nverdict: ${results.verdict}  (${steps.filter((s) => s.ok).length}/${steps.length} steps${warned ? `, ${warned} warning${warned === 1 ? "" : "s"}` : ""})\n`);
+  process.exitCode = interrupted ? 130 : results.verdict === "pass" ? 0 : 1;
   process.exit(process.exitCode);
 }
 
