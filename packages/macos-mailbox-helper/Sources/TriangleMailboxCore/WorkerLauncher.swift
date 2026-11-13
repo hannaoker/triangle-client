@@ -165,7 +165,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if (5...14).contains(manifestVersion) {
+        if (5...15).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -268,6 +268,11 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                     "packages/agent-worker/src/local-reply-route-contract.mjs",
                     "packages/agent-worker/src/local-reply-route-store.mjs",
                     "packages/agent-worker/src/local-sender-authentication.mjs",
+                ])
+            }
+            if manifestVersion >= 15 {
+                artifacts.formUnion([
+                    "packages/agent-worker/src/local-chat-mapping.mjs",
                 ])
             }
             // The coordinator can run from any worker bundle and imports
@@ -464,7 +469,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
-        guard (8...14).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
+        guard (8...15).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
               manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
         else { throw WorkerLauncherError.invalidManifest }
         let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)
@@ -617,6 +622,14 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let result = lstat(policy.path, &metadata)
         if result == 0 {
             guard version >= 14 else { throw WorkerLauncherError.invalidManifest }
+        } else if errno != ENOENT {
+            throw WorkerLauncherError.unsafeInstallation
+        }
+        let chatMappings = applicationRoot.appendingPathComponent("client/local/chat-mappings-v1.json")
+        var chatMeta = stat()
+        let chatResult = lstat(chatMappings.path, &chatMeta)
+        if chatResult == 0 {
+            guard version >= 15 else { throw WorkerLauncherError.invalidManifest }
         } else if errno != ENOENT {
             throw WorkerLauncherError.unsafeInstallation
         }

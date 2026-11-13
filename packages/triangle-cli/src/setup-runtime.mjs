@@ -481,6 +481,10 @@ export function createSetupRuntime({
       fail(
         "Existing profile has no verified identity binding. Run triangle doctor.",
       );
+    if (current?.deliveryMode === "router")
+      fail(
+        "Existing profile is configured in router deliveryMode and cannot run a runner lane.",
+      );
     const headless =
       !current ||
       current.deliveryMode ===

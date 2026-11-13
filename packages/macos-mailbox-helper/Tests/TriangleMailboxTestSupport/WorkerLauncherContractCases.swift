@@ -561,7 +561,7 @@ private final class ResolverFixture {
             "packages/agent-worker/runners/codex-runner.mjs",
             "agents/codex/worker/agent-worker.json",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
+        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -577,7 +577,7 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
+        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -612,12 +612,12 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
+        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 {
+        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",
@@ -676,6 +676,9 @@ private final class ResolverFixture {
         }
         if manifestVersion >= 14 {
             artifactNames += ["packages/agent-worker/src/local-reply-route-contract.mjs", "packages/agent-worker/src/local-reply-route-store.mjs", "packages/agent-worker/src/local-sender-authentication.mjs"]
+        }
+        if manifestVersion >= 15 {
+            artifactNames += ["packages/agent-worker/src/local-chat-mapping.mjs"]
         }
         if supervisor { artifactNames.removeAll { $0 == "packages/agent-worker/runners/codex-runner.mjs" || $0 == "agents/codex/worker/agent-worker.json" } }
         var artifacts: [String: String] = [:]

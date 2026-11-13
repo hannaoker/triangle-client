@@ -319,7 +319,7 @@ public struct WatchGrantService: Sendable {
             // mcp-interactive App Server hosts are notify-only; they cannot act.
             // grok-bot may act (Bob owns post-wake claim/reply/ack outside this adapter).
             // cursor-acp may be a notify member and must never be the grant actor.
-            if actorInstance.deliveryMode == .mcpInteractive {
+            if actorInstance.deliveryMode == .mcpInteractive || actorInstance.deliveryMode == .router {
                 throw WatchGrantServiceError.interactiveDeliveryExcluded
             }
             if actorInstance.runtimeAdapter == .cursorAcp || actorInstance.deliveryMode == .headlessCursorAcp {

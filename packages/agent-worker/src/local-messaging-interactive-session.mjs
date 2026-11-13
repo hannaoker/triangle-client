@@ -4,6 +4,7 @@ import { randomUUID, timingSafeEqual, createHash } from "node:crypto";
 import { readPrivateJson, withSessionPresence } from "./local-messaging-auth-broker.mjs";
 import { createPerSenderRateLimiter } from "./local-messaging-rate-limiter.mjs";
 import { coded } from "./local-messaging-errors.mjs";
+import { lookupConfirmedChatMappingForSession } from "./local-chat-mapping.mjs";
 
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const HEX64_PATTERN = /^[a-f0-9]{64}$/;
@@ -242,7 +243,7 @@ export const ATTACH_HINT='No Triangle MCP child is attached to this chat. Chats 
 export const CODEX_ATTACH_HINT='This Codex chat has not called a Triangle tool yet, or its Triangle MCP server is not loaded. It becomes reachable on its first Triangle tool call (for example triangle_get_status). Codex loads MCP servers when a chat starts: restart the Codex app or start a new chat after setup.';
 // Codex addresses live in their own namespace, exactly as lifecycle discovery derives them (see recordDiscoveryEvent).
 export const sessionAddressKey=(harness,sessionId)=>harness==='codex'?'codex:'+sessionId:sessionId;
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,boundIntegrationPath=null,logger=null,processProbe=undefined}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,boundIntegrationPath=null,logger=null,processProbe=undefined,chatMappingStoreRoot=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -337,8 +338,15 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
     credential:issue(id,{senderType:'interactive',sessionId:identity.pseudoSessionId,generation:r.generation,bindingId:request.childId,turnId:randomUUID(),ttlMs:30000,allowedRecipients:[...c.allowedRecipients,...await sessionReceiversFor(c,id,classHarnessOf(c,harness))]})};
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
-  async describeLocalSession(id){const {r}=await current(id);
-   return Object.freeze({address:id,generation:r.generation,principal:null,authorityOrigin:null,bindingGeneration:null});},
+  async describeLocalSession(id){const {c,r}=await current(id);
+   const mapped=chatMappingStoreRoot?lookupConfirmedChatMappingForSession({storeRoot:chatMappingStoreRoot,sessionAddress:id,harness:r.harness,workspace:r.workspace??c.workspace}):null;
+   return Object.freeze({address:id,generation:r.generation,principal:mapped?.principal??null,authorityOrigin:mapped?.authorityOrigin??null,bindingGeneration:mapped?.bindingGeneration??null});},
+  async listLiveAttachedSessions(){
+   const c=policy(),scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));
+   const rows=await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace});
+   return rows.filter(row=>offlineReason(c,row,attachments.get(row.id),scope)===null)
+    .map(row=>Object.freeze({address:row.id,harness:row.harness,workspace:row.workspace??c.workspace,generation:row.generation}));
+  },
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!mayReceive(c,sender,r,await classSenderHarness(c,sender)))throw coded('recipient_not_allowed','Session receiver policy denies sender');},

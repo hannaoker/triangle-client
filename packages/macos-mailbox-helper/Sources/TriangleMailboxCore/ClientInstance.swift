@@ -16,6 +16,7 @@ public enum DeliveryMode: String, Codable, CaseIterable, Sendable {
     case grokBot = "grok-bot"
     case headlessAppServer = "headless-app-server"
     case headlessCursorAcp = "headless-cursor-acp"
+    case router
 }
 
 public struct ClientInstanceID: RawRepresentable, Codable, Equatable, Hashable, Sendable {

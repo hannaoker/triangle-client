@@ -4,6 +4,11 @@
 import { updateIdentityRegistry } from '../../agent-worker/src/identity-registry.mjs';
 import { canonicalJson } from './canonical.mjs';
 import { normalizeOwnerOperation } from './owner-approval.mjs';
+import {
+  revokeChatMappingInLock,
+  setChatMappingInLock,
+  withLockedChatMappings,
+} from '../../agent-worker/src/local-chat-mapping.mjs';
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 
@@ -100,4 +105,71 @@ export function createRegistryDestinationAdapter(value, { now } = {}) {
       }
     },
   });
+}
+
+function chatMapObservation(entry) {
+  if (!entry) return null;
+  return Object.freeze({
+    harness: entry.harness,
+    workspace: entry.workspace,
+    principalId: entry.principalId,
+    authorityOrigin: entry.authorityOrigin,
+    bindingGeneration: entry.bindingGeneration,
+  });
+}
+
+export function createChatMappingApprovalAdapter(value, { now } = {}) {
+  const op = normalizeOwnerOperation(value);
+  if (op.action !== 'chat.map.set' && op.action !== 'chat.map.revoke') {
+    fail('owner_approval_action_unavailable');
+  }
+  const exactOperation = canonicalJson(op);
+  const clock = typeof now === 'function' ? now : () => new Date().toISOString();
+  const isSet = op.action === 'chat.map.set';
+  return function withLockedRegistry(root, inspect) {
+    if (root !== op.storeRoot || typeof inspect !== 'function') fail('invalid_owner_operation');
+    return withLockedChatMappings(op.storeRoot, (current) => {
+      let open = true;
+      let committed = false;
+      try {
+        const result = inspect(Object.freeze({
+          sequence: current.sequence,
+          before: chatMapObservation(current.mappings[op.selectorId]),
+          commit(approvedOperation) {
+            if (!open || committed) fail('owner_approval_replayed');
+            if (canonicalJson(approvedOperation) !== exactOperation) fail('owner_approval_stale');
+            if (canonicalJson(chatMapObservation(current.mappings[op.selectorId])) !== canonicalJson(op.before)) {
+              fail('owner_approval_stale');
+            }
+            const store = isSet
+              ? setChatMappingInLock(current, {
+                  selectorId: op.selectorId,
+                  harness: op.harness,
+                  workspace: op.workspace,
+                  principalId: op.principalId,
+                  authorityOrigin: op.authorityOrigin,
+                  bindingGeneration: op.bindingGeneration,
+                  expectedSequence: op.expectedSequence,
+                  now: () => clock(),
+                })
+              : revokeChatMappingInLock(current, {
+                  selectorId: op.selectorId,
+                  before: op.before,
+                  expectedSequence: op.expectedSequence,
+                });
+            committed = true;
+            return { store };
+          },
+        }));
+        if (result && typeof result.then === 'function') {
+          Promise.resolve(result).catch(() => {});
+          fail('owner_approval_unavailable');
+        }
+        if (!committed) fail('owner_approval_unavailable');
+        return { registry: { sequence: op.expectedSequence + 1 } };
+      } finally {
+        open = false;
+      }
+    });
+  };
 }

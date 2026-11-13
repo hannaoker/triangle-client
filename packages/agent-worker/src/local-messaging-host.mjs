@@ -168,6 +168,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
      boundIntegrationPath:config.integrationPath,additionalPrincipals:grokIds,ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],
      codexSenderPrincipals:[integration.senderId,...recipientIds,...(interactiveIntegration?[interactiveIntegration.senderId]:[]),...grokIds],logger,
+     chatMappingStoreRoot:config.stateRoot,
      issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
     const legacy=interactiveBroker;
     interactiveBroker={

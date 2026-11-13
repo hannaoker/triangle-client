@@ -21,6 +21,7 @@ import {
 import { coded, sanitizeError } from "./local-messaging-errors.mjs";
 import { createUnifiedRouter } from "./unified-router.mjs";
 import { createRegistrySnapshotProvider } from "./router-registry-snapshot.mjs";
+import { resolveChatDestinationForPrincipal } from "./local-chat-mapping.mjs";
 
 // Presentation only. Journal phases and authorization remain authoritative.
 export function describeMessageDelivery(record,{notification='unknown',recipientAvailable=null,pullOnly=false,now=Date.now()}={}){
@@ -331,6 +332,18 @@ export function createLocalControlServer({
       },
     },
     recipients: () => Array.from(directory.values()),
+    resolveDestinationPrincipal: async ({ principalId, destination }) => {
+      if (!sessionBroker || typeof sessionBroker.listLiveAttachedSessions !== "function") {
+        return { ok: false, reason: "destination_not_configured" };
+      }
+      const attachedSessions = await sessionBroker.listLiveAttachedSessions();
+      return resolveChatDestinationForPrincipal({
+        storeRoot: effectiveStateRoot,
+        principalId,
+        destination,
+        attachedSessions,
+      });
+    },
   });
 
   const activeRouter = router || internalRouter;
@@ -648,7 +661,7 @@ export function createLocalControlServer({
             }
 
             // 5. Record to durable shared journal
-            const recipientType = (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(effectiveTo) : interactiveRecipients.includes(effectiveTo)))
+            const recipientType = (resolution.recipientType === "interactive" || effectiveTo.startsWith("session-") || (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(effectiveTo) : interactiveRecipients.includes(effectiveTo))))
               ? "interactive"
               : "runner";
 

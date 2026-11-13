@@ -744,6 +744,8 @@ export function createLocalMessagingJournal({
         checkAttachedIdentity(replyRoute.remote.address, replyRoute.remote.generation, now, options.replySenderBindingId);
         const pinned = replyRouteStore.pinInTransaction(replyRoute);
         db.prepare("UPDATE local_messages SET reply_route_key=?,sender_provenance_json=? WHERE message_id=?").run(pinned.key, options.senderProvenance ? JSON.stringify(options.senderProvenance) : null, messageId);
+      } else if (options.senderProvenance) {
+        db.prepare("UPDATE local_messages SET sender_provenance_json=? WHERE message_id=?").run(JSON.stringify(options.senderProvenance), messageId);
       }
 
       db.prepare(`
@@ -2214,6 +2216,10 @@ export function createLocalMessagingJournal({
   }
   async function getSessionAttachment(id){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments WHERE id=?').get(id)??null;}
   async function listSessionAttachments(){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments').all();}
+  async function listAllLiveAttachedSessions(now=Date.now()){
+    assertNotClosed();
+    return db.prepare("SELECT s.id AS address, s.harness, s.workspace, s.generation, a.expires_at FROM local_session_attachments a JOIN local_discovered_sessions s ON s.id = a.id WHERE a.expires_at > ? AND s.lifecycle != 'ended'").all(now);
+  }
   async function detachDiscoveredSession({id,childId}){assertNotClosed();db.prepare('UPDATE local_session_attachments SET expires_at=0 WHERE id=? AND child_id=?').run(id,childId);}
 
   // A session address exists only while its discovery row does. Once the row has aged out or been evicted nothing
@@ -2238,6 +2244,7 @@ export function createLocalMessagingJournal({
     attachDiscoveredSession,
     getSessionAttachment,
     listSessionAttachments,
+    listAllLiveAttachedSessions,
     getDiscoveredSession,
     detachDiscoveredSession,
     recordDiscoveryEvent,
