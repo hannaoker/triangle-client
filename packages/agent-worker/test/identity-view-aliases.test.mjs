@@ -250,7 +250,7 @@ test("a registry that is not a readable v2 registry has no aliases key at all, s
   }
   assert.equal(Object.hasOwn(viewOf({ state: "unreadable", code: "EACCES" }, []), "aliases"), false);
   withRegistry({ builder: GRAVITY }, (root, read) => {
-    assert.deepEqual(Object.keys(viewOf(read(), recipients("gravity2"))), ["schema", "registry", "summary", "profiles", "aliases", "diagnostics"]);
+    assert.deepEqual(Object.keys(viewOf(read(), recipients("gravity2"))), ["schema", "registry", "summary", "profiles", "aliases", "destinations", "diagnostics"]);
   });
 });
 

@@ -151,12 +151,15 @@ const AUDIT_ACTIONS_V2 = new Set([
   "pair_revoke",
 ]);
 
-// The alias actions (AD.0): implemented by the writer, on a stored v2 registry only.
+// The alias and destination actions: implemented by the writer, on a stored v2 registry only.
 const ALIAS_ACTIONS = new Set(["alias_set", "alias_clear"]);
+const DESTINATION_ACTIONS = new Set(["destination_set", "destination_clear"]);
 
 // Audit action names that exist for later slices; the writer refuses them with `action_not_available`.
 const RESERVED_AUDIT_ACTIONS = new Set(
-  [...AUDIT_ACTIONS_V2].filter((name) => !AUDIT_ACTIONS.has(name) && name !== "upgrade" && !ALIAS_ACTIONS.has(name)),
+  [...AUDIT_ACTIONS_V2].filter(
+    (name) => !AUDIT_ACTIONS.has(name) && name !== "upgrade" && !ALIAS_ACTIONS.has(name) && !DESTINATION_ACTIONS.has(name),
+  ),
 );
 
 const PAIRING_ID_PATTERN = /^pair_[a-f0-9]{32}$/;
@@ -2155,6 +2158,69 @@ function assertAliasMutation(oldRegistry, nextRegistry, action, subject) {
   return null;
 }
 
+// `destination_set` and `destination_clear` change the destinations map at the subject principal key and nothing else.
+// `destination_set` only creates: a principal that already has a rule is refused (`destination_conflict` / `destination_exists`),
+// so changing a destination requires clear then set, each step audited. The record's `set_at` is the entry's own time and its
+// `generation` the sequence the entry commits at. The principal must hold an active `mesh-managed` binding (`peer_` deferred to AD.2).
+function assertDestinationMutation(oldRegistry, nextRegistry, action, subject) {
+  const mismatch = () => codedError("invalid_registry", "mutation_does_not_match_action");
+  if (oldRegistry.schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
+    throw codedError("invalid_registry", "action_not_available");
+  }
+  for (const name of ["bindings", "pairings", "aliases"]) {
+    if (canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
+      throw mismatch();
+    }
+  }
+  const oldDestinations = oldRegistry.destinations;
+  const nextDestinations = nextRegistry.destinations;
+  for (const [principalId, record] of Object.entries(oldDestinations)) {
+    if (principalId === subject) continue;
+    if (!Object.hasOwn(nextDestinations, principalId) || canonicalJson(nextDestinations[principalId]) !== canonicalJson(record)) {
+      throw mismatch();
+    }
+  }
+  for (const principalId of Object.keys(nextDestinations)) {
+    if (principalId !== subject && !Object.hasOwn(oldDestinations, principalId)) {
+      throw mismatch();
+    }
+  }
+  const existed = Object.hasOwn(oldDestinations, subject);
+  const exists = Object.hasOwn(nextDestinations, subject);
+  if (action === "destination_clear") {
+    if (!existed) {
+      throw codedError("invalid_registry", "destination_not_found");
+    }
+    if (exists) {
+      throw mismatch();
+    }
+    return null;
+  }
+  if (existed) {
+    throw codedError("destination_conflict", "destination_exists");
+  }
+  if (!exists) {
+    throw mismatch();
+  }
+  const record = nextDestinations[subject];
+  if (record.set_at !== nextRegistry.updatedAt || record.generation !== nextRegistry.sequence) {
+    throw mismatch();
+  }
+  const ofPrincipal = Object.values(nextRegistry.bindings).filter((binding) => binding.principal_id === subject);
+  const activeMesh = ofPrincipal.some(
+    (binding) => binding.revoked_at === null && binding.trust_mode === "mesh-managed",
+  );
+  if (!activeMesh) {
+    const anyMesh = ofPrincipal.some((binding) => binding.trust_mode === "mesh-managed");
+    const anyPeer = ofPrincipal.some((binding) => binding.trust_mode === "serverless-peer");
+    if (anyPeer && !anyMesh) {
+      throw codedError("invalid_registry", "destination_target_not_mesh_managed");
+    }
+    throw codedError("invalid_registry", "destination_target_not_active");
+  }
+  return null;
+}
+
 function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action, subject) {
   const oldBindings = oldRegistry.bindings;
   const nextBindings = nextRegistry.bindings;
@@ -2189,9 +2255,12 @@ function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action,
   if (ALIAS_ACTIONS.has(action)) {
     return assertAliasMutation(oldRegistry, nextRegistry, action, subject);
   }
+  if (DESTINATION_ACTIONS.has(action)) {
+    return assertDestinationMutation(oldRegistry, nextRegistry, action, subject);
+  }
   if (storedV2) {
-    // Bind and revoke leave the other collections alone; the alias actions have their own check above and the destination
-    // and pairing actions are reserved for later slices.
+    // Bind and revoke leave the other collections alone; the alias and destination actions have their own checks above and
+    // the pairing actions are reserved for later slices.
     for (const name of ["pairings", "aliases", "destinations"]) {
       if (canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
         throw codedError("invalid_registry", "mutation_does_not_match_action");
@@ -2340,12 +2409,19 @@ export function updateIdentityRegistry({
     throw codedError("invalid_registry", "action_not_available");
   }
   const aliasAction = ALIAS_ACTIONS.has(action);
-  if (!AUDIT_ACTIONS.has(action) && action !== "upgrade" && !aliasAction) {
+  const destinationAction = DESTINATION_ACTIONS.has(action);
+  if (!AUDIT_ACTIONS.has(action) && action !== "upgrade" && !aliasAction && !destinationAction) {
     throw codedError("invalid_registry", "invalid_audit_action");
   }
-  // The subject of an alias action is the alias; of bind and revoke, a profile instance id.
+  // The subject of an alias action is the alias; of a destination action, a principal id; of bind and revoke, a profile instance id.
   if (subject !== null) {
-    const shapeOk = typeof subject === "string" && (aliasAction ? ALIAS_PATTERN.test(subject) : INSTANCE_ID_PATTERN.test(subject));
+    const shapeOk =
+      typeof subject === "string" &&
+      (aliasAction
+        ? ALIAS_PATTERN.test(subject)
+        : destinationAction
+          ? isPrincipalId(subject)
+          : INSTANCE_ID_PATTERN.test(subject));
     if (!shapeOk) {
       throw codedError("invalid_registry", "invalid_audit_subject");
     }
@@ -2356,7 +2432,7 @@ export function updateIdentityRegistry({
   if (action === "upgrade" && subject !== null) {
     throw codedError("invalid_registry", "upgrade_subject_must_be_null");
   }
-  if ((action === "bind" || action === "revoke" || aliasAction) && subject === null) {
+  if ((action === "bind" || action === "revoke" || aliasAction || destinationAction) && subject === null) {
     throw codedError("invalid_registry", "subject_required_for_action");
   }
   // Only a NEW alias is held to the reserved names; an alias that already has one can still be cleared.
@@ -2368,9 +2444,9 @@ export function updateIdentityRegistry({
   }
   const nowIso = resolveNowIso(now, "invalid_registry");
 
-  // An alias action on a root that does not exist is refused before anything is created. A root that exists but holds no registry
-  // is refused under the lock below, as the other actions would find it.
-  if (aliasAction) {
+  // Alias and destination actions on a root that does not exist are refused before anything is created. A root that exists but holds
+  // no registry is refused under the lock below, as the other actions would find it.
+  if (aliasAction || destinationAction) {
     assertRootPathSyntax(root);
     if (lstatSync(root, { throwIfNoEntry: false }) === undefined) {
       throw codedError("invalid_registry", "registry_absent");
@@ -2382,9 +2458,9 @@ export function updateIdentityRegistry({
   return withRegistryLock(root, lockTimeoutMs, () => {
     const current = readAndVerifyUnlocked(root);
     const storedSchema = current.state === "ok" ? current.registry.schema : IDENTITY_REGISTRY_SCHEMA;
-    // The alias actions exist only on a stored v2 registry. Like the upgrade preconditions below, these come before the sequence
-    // check, so a caller learns why it can never succeed instead of seeing a conflict it could retry.
-    if (aliasAction) {
+    // The alias and destination actions exist only on a stored v2 registry. Like the upgrade preconditions below, these come before
+    // the sequence check, so a caller learns why it can never succeed instead of seeing a conflict it could retry.
+    if (aliasAction || destinationAction) {
       if (current.state !== "ok") {
         throw codedError("invalid_registry", "registry_absent");
       }
@@ -2602,6 +2678,68 @@ export function clearIdentityAlias({
     faultHook,
     mutate: (registry) => {
       delete registry.aliases[alias];
+      return registry;
+    },
+  });
+}
+
+// ---- destination rules (AD.5) ----------------------------------------------------------------------------------------------------
+
+/**
+ * Creates a destination rule for `principalId` (`harness` + `workspace`). Create-only (`clear` first to change); refuses inactive
+ * or serverless-peer targets.
+ */
+export function setIdentityDestination({
+  root,
+  expectedSequence,
+  now,
+  principalId,
+  harness,
+  workspace,
+  lockTimeoutMs = LOCK_TIMEOUT_MS,
+  faultHook = null,
+} = {}) {
+  const nowIso = resolveNowIso(now, "invalid_registry");
+  return updateIdentityRegistry({
+    root,
+    expectedSequence,
+    now: nowIso,
+    action: "destination_set",
+    subject: principalId,
+    lockTimeoutMs,
+    faultHook,
+    mutate: (registry) => {
+      registry.destinations[principalId] = {
+        harness,
+        workspace,
+        set_at: nowIso,
+        generation: expectedSequence + 1,
+      };
+      return registry;
+    },
+  });
+}
+
+/** Removes the destination rule for `principalId`. Refused if none exists. */
+export function clearIdentityDestination({
+  root,
+  expectedSequence,
+  now,
+  principalId,
+  lockTimeoutMs = LOCK_TIMEOUT_MS,
+  faultHook = null,
+} = {}) {
+  const nowIso = resolveNowIso(now, "invalid_registry");
+  return updateIdentityRegistry({
+    root,
+    expectedSequence,
+    now: nowIso,
+    action: "destination_clear",
+    subject: principalId,
+    lockTimeoutMs,
+    faultHook,
+    mutate: (registry) => {
+      delete registry.destinations[principalId];
       return registry;
     },
   });

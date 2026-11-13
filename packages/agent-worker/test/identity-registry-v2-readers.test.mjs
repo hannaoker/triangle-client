@@ -196,8 +196,8 @@ test("the snapshot reports the schema it read: v1, v2, none and unreadable", () 
     upgradeThroughWriter(root);
     const after = provider.get(); // the replaced file has a new stat key, so the provider reads again
     assert.deepEqual([after.state, after.schema, after.sequence], ["ok", V2, before.sequence + 1]);
-    // the snapshot hands out agent bindings and, since AD.1, the alias names of a v2 file, and nothing else
-    assert.deepEqual(Object.keys(after).sort(), ["aliasFor", "aliasesFor", "bindingForInstance", "bindingsFor", "errorCode", "readAt", "schema", "sequence", "state"]);
+    // the snapshot hands out agent bindings, AD.1 alias names, and AD.5 destinations of a v2 file, and nothing else
+    assert.deepEqual(Object.keys(after).sort(), ["aliasFor", "aliasesFor", "bindingForInstance", "bindingsFor", "destinationFor", "destinations", "errorCode", "readAt", "schema", "sequence", "state"]);
 
     const absent = createRegistrySnapshotProvider({ root: path.join(root, "nowhere") }).get();
     assert.deepEqual([absent.state, absent.schema], ["absent", null]);

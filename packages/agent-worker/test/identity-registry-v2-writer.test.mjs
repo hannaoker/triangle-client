@@ -369,8 +369,8 @@ test("bind and revoke work on a v2 registry with the D2 and D3 guards", () => {
 
 // ---- what stays refused ----------------------------------------------------------------------------------------------------
 test("the names reserved for later slices are refused on v1 and on v2, unknown names stay invalid", () => {
-  // alias_set and alias_clear left this list with AD.0; test/identity-registry-aliases.test.mjs covers them
-  const reserved = ["destination_set", "destination_clear", "pair", "pair_update", "pair_revoke"];
+  // alias_set and alias_clear left this list with AD.0; destination_set and destination_clear left with AD.5.
+  const reserved = ["pair", "pair_update", "pair_revoke"];
   const run = (root) => {
     const seq = readIdentityRegistry({ root }).registry.sequence;
     const filesBefore = snapshotFiles(root);

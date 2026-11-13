@@ -45,6 +45,14 @@ const EXCLUDED_INVENTORY_CODES = new Set([
 ]);
 
 const MESH_MANAGED = "mesh-managed";
+const RUNNER_DELIVERY_MODES = new Set([
+  "worker",
+  "headless-app-server",
+  "headless-cursor-acp",
+  "event-driven",
+  "grok-bot",
+  "mcp-interactive",
+]);
 
 // Whether a binding became active after the alias was set. A time that cannot be read counts as "after": the row is flagged for a look.
 function issuedAfter(issuedAt, setAt) {
@@ -125,6 +133,98 @@ const ALIAS_DIAGNOSTICS = {
   ambiguous: (row) => ({ message: `Alias ${row.name} points at a principal bound to several profiles (${row.profiles.join(", ")}); a sender that can see it gets alias_unresolved.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
   collides: (row) => ({ message: `Alias ${row.name} has the same name as a local profile; a sender that may message that profile gets alias_unresolved, and the owner CLI sends to the profile.`, action: `Clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
   moved: (row) => ({ message: `Alias ${row.name}'s principal was bound again after the alias was set, and now reaches ${row.profile}.`, action: `Check that this is still what you meant; otherwise clear it with triangle identity alias clear ${row.name} --client-root DIR.` }),
+};
+
+/**
+ * What each destination rule of a v2 registry means right now, one row per principal sorted by principalId (code units).
+ *
+ * `state`, first match wins:
+ * - `not_mesh_managed`: the principal has only an active serverless-peer binding, not supported for destination routing;
+ * - `dangling`: the principal has no active mesh-managed binding;
+ * - `shadowed_by_runner`: the principal has an active runner or bound mcp-interactive profile (`inventory` or `localRecipients`),
+ *   so destination routing does not take precedence;
+ * - `active`: none of the above.
+ */
+export function describeDestinations({ destinations, bindings, inventory = null, localRecipients = null } = {}) {
+  const map = destinations !== null && typeof destinations === "object" && !Array.isArray(destinations) ? destinations : {};
+  const allBindings = bindings !== null && typeof bindings === "object" && !Array.isArray(bindings)
+    ? Object.values(bindings).filter((binding) => binding !== null && typeof binding === "object")
+    : [];
+  const recipients = Array.isArray(localRecipients) ? localRecipients : null;
+  const inventoryIdentities = Array.isArray(inventory?.identities) ? inventory.identities : [];
+
+  const rows = [];
+  for (const principalId of Object.keys(map).sort(compareCodeUnits)) {
+    const raw = map[principalId];
+    const record = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const activeMesh = allBindings.filter(
+      (b) => b.principal_id === principalId && b.trust_mode === MESH_MANAGED && b.revoked_at === null,
+    );
+    const activeServerless = allBindings.filter(
+      (b) => b.principal_id === principalId && b.trust_mode === "serverless-peer" && b.revoked_at === null,
+    );
+
+    const runnerProfiles = new Set();
+    if (activeMesh.length > 0) {
+      for (const ident of inventoryIdentities) {
+        if (!ident || typeof ident !== "object" || ident.principalId !== principalId || !Array.isArray(ident.profiles)) continue;
+        for (const prof of ident.profiles) {
+          if (!prof || typeof prof !== "object" || prof.enabled === false) continue;
+          if (RUNNER_DELIVERY_MODES.has(prof.deliveryMode)) {
+            runnerProfiles.add(typeof prof.profile === "string" ? prof.profile : prof.instanceId);
+          }
+        }
+      }
+      if (recipients !== null) {
+        for (const binding of activeMesh) {
+          const match = recipients.find((r) => r.instanceId === binding.profile_instance_id);
+          if (match) runnerProfiles.add(match.profile || binding.profile_name);
+        }
+      }
+    }
+
+    let state = "active";
+    if (activeMesh.length === 0 && activeServerless.length > 0) state = "not_mesh_managed";
+    else if (activeMesh.length === 0) state = "dangling";
+    else if (runnerProfiles.size > 0) state = "shadowed_by_runner";
+
+    const profiles = activeMesh.map((b) => b.profile_name).sort(compareCodeUnits);
+    const profile =
+      activeMesh.length === 1
+        ? activeMesh[0].profile_name
+        : activeMesh.length === 0 && activeServerless.length === 1
+          ? activeServerless[0].profile_name
+          : null;
+
+    rows.push({
+      principalId,
+      profile,
+      profiles,
+      profileInstanceId: activeMesh.length === 1 ? activeMesh[0].profile_instance_id : null,
+      harness: typeof record.harness === "string" ? record.harness : null,
+      workspace: typeof record.workspace === "string" ? record.workspace : null,
+      state,
+      runnerProfiles: [...runnerProfiles].sort(compareCodeUnits),
+      setAt: typeof record.set_at === "string" ? record.set_at : null,
+      generation: Number.isSafeInteger(record.generation) ? record.generation : null,
+    });
+  }
+  return rows.map((row) => deepFreeze({ ...row, profiles: [...row.profiles], runnerProfiles: [...row.runnerProfiles] }));
+}
+
+const DESTINATION_DIAGNOSTICS = {
+  dangling: (row) => ({
+    message: `Destination rule for ${row.principalId} points at a principal with no active binding, so it routes nothing.`,
+    action: `Clear it with triangle identity destination clear ${row.principalId} --client-root DIR.`,
+  }),
+  not_mesh_managed: (row) => ({
+    message: `Destination rule for ${row.principalId} points at a serverless peer, which destination routing does not support.`,
+    action: `Clear it with triangle identity destination clear ${row.principalId} --client-root DIR.`,
+  }),
+  shadowed_by_runner: (row) => ({
+    message: `Destination rule for ${row.profile ?? row.principalId} (${row.principalId}) is shadowed by an active runner or interactive profile (${row.runnerProfiles.join(", ") || "local recipient"}).`,
+    action: `Switch or disable that runner profile, or clear the rule with triangle identity destination clear ${row.principalId} --client-root DIR.`,
+  }),
 };
 
 /**
@@ -432,8 +532,9 @@ export function buildIdentityView({ inventory, registry, localRecipients = null 
     }
   }
 
-  // Alias rows (v2 only) and one warning for each that does not simply work
+  // Alias and destination rows (v2 only) and one warning for each that does not simply work
   let aliasRows = null;
+  let destinationRows = null;
   if (registryState === "ok" && registrySchema === REGISTRY_SCHEMA_V2) {
     aliasRows = describeAliases({ aliases: registry.registry.aliases, bindings: existingBindings, localRecipients });
     for (const row of aliasRows) {
@@ -446,6 +547,30 @@ export function buildIdentityView({ inventory, registry, localRecipients = null 
         code: "alias_routing_unchecked",
         profile: null,
         message: "The client configuration could not be read, so whether the aliases reach a local recipient was not checked.",
+        action: null,
+      });
+    }
+    destinationRows = describeDestinations({
+      destinations: registry.registry.destinations,
+      bindings: existingBindings,
+      inventory,
+      localRecipients,
+    });
+    for (const row of destinationRows) {
+      if (row.state === "active") continue;
+      diagnostics.push({
+        severity: "warning",
+        code: `destination_${row.state}`,
+        profile: row.profile,
+        ...DESTINATION_DIAGNOSTICS[row.state](row),
+      });
+    }
+    if (destinationRows.length > 0 && !Array.isArray(localRecipients)) {
+      diagnostics.push({
+        severity: "warning",
+        code: "destination_routing_unchecked",
+        profile: null,
+        message: "The client configuration could not be read, so whether destination rules are shadowed by a local recipient was not checked.",
         action: null,
       });
     }
@@ -475,6 +600,7 @@ export function buildIdentityView({ inventory, registry, localRecipients = null 
     summary,
     profiles: profileRows,
     ...(aliasRows !== null ? { aliases: aliasRows } : {}),
+    ...(destinationRows !== null ? { destinations: destinationRows } : {}),
     diagnostics,
   };
 
