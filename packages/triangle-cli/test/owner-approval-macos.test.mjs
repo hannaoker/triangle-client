@@ -97,11 +97,11 @@ test('helper receives a minimal environment rather than inherited credentials',a
  finally{delete process.env.OWNER_APPROVAL_TEST_SECRET;}
 });
 
-test('native candidate provider is selected only through the guarded owner CLI bridge',()=>{
+test('native candidate provider is selected only through the guarded package capability loader',()=>{
  const packages=path.resolve(import.meta.dirname,'../..'),offenders=[];
  function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){
   const file=path.join(dir,e.name);if(e.isDirectory())walk(file);
-  else if(e.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-macos.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-revoke.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-macos'))offenders.push(file);
+  else if(e.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-macos.mjs')&&file!==path.join(packages,'triangle-cli/src/owner-approval-package.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-macos'))offenders.push(file);
  }}
  for(const e of fs.readdirSync(packages,{withFileTypes:true})){const src=path.join(packages,e.name,'src');if(e.isDirectory()&&fs.existsSync(src))walk(src);}
  assert.deepEqual(offenders,[]);
@@ -118,4 +118,20 @@ test('nonce with a trailing newline is refused before spawning',async t=>{
  const f=fixture(t),request={...f.challenge.request,nonce:f.challenge.request.nonce+'\n'};
  const challenge={...f.challenge,request,digest:createHash('sha256').update(canonicalJson(request)).digest('hex')};
  assert.equal(await f.provider().authenticate(challenge),'unavailable');assert.equal(f.started(),false);
+});
+
+test('framing accepts destination and chat-map operations cleanly',async t=>{
+ const f=fixture(t);
+ const workspace=path.join(f.root,'ws');fs.mkdirSync(workspace,{mode:0o700});
+ for(const op of [
+  {action:'destination.set',registryRoot:f.root,expectedSequence:2,principalId:'agent_'+'c'.repeat(32),harness:'codex',workspace,before:null},
+  {action:'destination.clear',registryRoot:f.root,expectedSequence:3,principalId:'agent_'+'c'.repeat(32),before:{harness:'codex',workspace,generation:3}},
+  {action:'chat.map.set',storeRoot:f.root,expectedSequence:0,selectorId:'sel_'+'e'.repeat(32),harness:'claude',workspace,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:1,before:null},
+  {action:'chat.map.revoke',storeRoot:f.root,expectedSequence:1,selectorId:'sel_'+'e'.repeat(32),before:{harness:'claude',workspace,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:1}},
+ ]){
+  const now=Math.floor(performance.now());
+  const request={schema:'owner_operation_v1',...op,nonce:'9'.repeat(64),issuedAt:now,deadline:now+5000};
+  const challenge={request,digest:createHash('sha256').update(canonicalJson(request)).digest('hex'),summary:describeOwnerOperation(op)};
+  assert.equal(await f.provider().authenticate(challenge),'approved',op.action);
+ }
 });

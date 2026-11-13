@@ -5,56 +5,222 @@ import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { canonicalJson } from './canonical.mjs';
-import { AGENT_ID_PATTERN, INSTANCE_ID_PATTERN, isValidBareHttpsOrigin } from '../../agent-worker/src/identity-primitives.mjs';
+import {
+  AGENT_ID_PATTERN,
+  DESTINATION_HARNESSES,
+  INSTANCE_ID_PATTERN,
+  isValidBareHttpsOrigin,
+  isValidWorkspacePath,
+  SELECTOR_ID_PATTERN,
+} from '../../agent-worker/src/identity-primitives.mjs';
 
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 const invalid = () => fail('invalid_owner_operation');
+const MAX_STORE_PATH_BYTES = 4096;
+
 function keys(value, expected) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype ||
       Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) invalid();
 }
+
+function isPositiveInt(value) {
+  return Number.isSafeInteger(value) && value >= 1;
+}
+
+function isNonNegativeInt(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isAgentId(value) {
+  return typeof value === 'string' && value.length === 38 && AGENT_ID_PATTERN.test(value);
+}
+
+function isSelectorId(value) {
+  return typeof value === 'string' && value.length === 36 && SELECTOR_ID_PATTERN.test(value);
+}
+
+function isHarness(value) {
+  return typeof value === 'string' && DESTINATION_HARNESSES.includes(value);
+}
+
+function canonicalExistingDir(dirPath, maxBytes = MAX_STORE_PATH_BYTES) {
+  if (typeof dirPath !== 'string' || dirPath.length === 0 || !dirPath.isWellFormed() ||
+      Buffer.byteLength(dirPath, 'utf8') > maxBytes ||
+      /[\p{Cc}\p{Cf}\\]/u.test(dirPath) || !path.isAbsolute(dirPath) || path.resolve(dirPath) !== dirPath) {
+    invalid();
+  }
+  try {
+    if (realpathSync(dirPath) !== dirPath || !statSync(dirPath).isDirectory()) invalid();
+  } catch { invalid(); }
+  return dirPath;
+}
+
+function canonicalExistingWorkspace(workspace) {
+  if (!isValidWorkspacePath(workspace)) invalid();
+  try {
+    if (realpathSync(workspace) !== workspace || !statSync(workspace).isDirectory()) invalid();
+  } catch { invalid(); }
+  return workspace;
+}
+
 function identity(value, binding = false) {
   keys(value, binding ? ['bindingId','bindingGeneration','principalId','authorityOrigin','revokedAt'] : ['principalId','authorityOrigin']);
-  if (typeof value.principalId !== 'string' || value.principalId.length !== 38 || !AGENT_ID_PATTERN.test(value.principalId) || !isValidBareHttpsOrigin(value.authorityOrigin)) invalid();
+  if (!isAgentId(value.principalId) || !isValidBareHttpsOrigin(value.authorityOrigin)) invalid();
   if (binding && (typeof value.bindingId !== 'string' || value.bindingId.length !== 37 || !/^bind_[a-f0-9]{32}$/.test(value.bindingId) ||
-      !Number.isSafeInteger(value.bindingGeneration) || value.bindingGeneration < 1 || value.revokedAt !== null)) invalid();
+      !isPositiveInt(value.bindingGeneration) || value.revokedAt !== null)) invalid();
   return Object.freeze({ ...value });
 }
+
+function destinationState(value) {
+  keys(value, ['harness', 'workspace', 'generation']);
+  if (!isHarness(value.harness) || !isValidWorkspacePath(value.workspace) || !isPositiveInt(value.generation)) invalid();
+  return Object.freeze({ harness: value.harness, workspace: value.workspace, generation: value.generation });
+}
+
+function chatMapState(value) {
+  keys(value, ['harness', 'workspace', 'principalId', 'authorityOrigin', 'bindingGeneration']);
+  if (!isHarness(value.harness) || !isValidWorkspacePath(value.workspace) || !isAgentId(value.principalId) ||
+      !isValidBareHttpsOrigin(value.authorityOrigin) || !isPositiveInt(value.bindingGeneration)) invalid();
+  return Object.freeze({
+    harness: value.harness,
+    workspace: value.workspace,
+    principalId: value.principalId,
+    authorityOrigin: value.authorityOrigin,
+    bindingGeneration: value.bindingGeneration,
+  });
+}
+
 export function normalizeOwnerOperation(value) {
-  if (!value || !['profile.move','profile.revoke'].includes(value.action)) invalid();
-  keys(value, ['action','registryRoot','expectedSequence','profileId','before',...(value.action === 'profile.move' ? ['after'] : [])]);
-  const root = value.registryRoot;
-  if (typeof root !== 'string' || /[\p{Cc}\p{Cf}]/u.test(root) || !path.isAbsolute(root) || path.resolve(root) !== root ||
-      !Number.isSafeInteger(value.expectedSequence) || value.expectedSequence < 1 ||
-      typeof value.profileId !== 'string' || value.profileId.length !== 64 || !INSTANCE_ID_PATTERN.test(value.profileId)) invalid();
-  try { if (realpathSync(root) !== root || !statSync(root).isDirectory()) invalid(); } catch { invalid(); }
-  const before = identity(value.before, true);
-  const after = value.action === 'profile.move' ? identity(value.after) : null;
-  if (after && before.principalId === after.principalId && before.authorityOrigin === after.authorityOrigin) invalid();
-  return Object.freeze({ action: value.action, registryRoot: root, expectedSequence: value.expectedSequence,
-    profileId: value.profileId, before, ...(after ? { after } : {}) });
+  if (!value || typeof value.action !== 'string') invalid();
+  switch (value.action) {
+    case 'profile.move':
+    case 'profile.revoke': {
+      keys(value, ['action','registryRoot','expectedSequence','profileId','before',...(value.action === 'profile.move' ? ['after'] : [])]);
+      const registryRoot = canonicalExistingDir(value.registryRoot);
+      if (!isPositiveInt(value.expectedSequence) || typeof value.profileId !== 'string' ||
+          value.profileId.length !== 64 || !INSTANCE_ID_PATTERN.test(value.profileId)) invalid();
+      const before = identity(value.before, true);
+      const after = value.action === 'profile.move' ? identity(value.after) : null;
+      if (after && before.principalId === after.principalId && before.authorityOrigin === after.authorityOrigin) invalid();
+      return Object.freeze({
+        action: value.action,
+        registryRoot,
+        expectedSequence: value.expectedSequence,
+        profileId: value.profileId,
+        before,
+        ...(after ? { after } : {}),
+      });
+    }
+    case 'destination.set': {
+      keys(value, ['action','registryRoot','expectedSequence','principalId','harness','workspace','before']);
+      const registryRoot = canonicalExistingDir(value.registryRoot);
+      if (!isPositiveInt(value.expectedSequence) || !isAgentId(value.principalId) ||
+          !isHarness(value.harness) || value.before !== null) invalid();
+      const workspace = canonicalExistingWorkspace(value.workspace);
+      return Object.freeze({
+        action: value.action,
+        registryRoot,
+        expectedSequence: value.expectedSequence,
+        principalId: value.principalId,
+        harness: value.harness,
+        workspace,
+        before: null,
+      });
+    }
+    case 'destination.clear': {
+      keys(value, ['action','registryRoot','expectedSequence','principalId','before']);
+      const registryRoot = canonicalExistingDir(value.registryRoot);
+      if (!isPositiveInt(value.expectedSequence) || !isAgentId(value.principalId)) invalid();
+      // Workspace directory may already have been deleted; syntax-only check allows clearing stale rules.
+      const before = destinationState(value.before);
+      return Object.freeze({
+        action: value.action,
+        registryRoot,
+        expectedSequence: value.expectedSequence,
+        principalId: value.principalId,
+        before,
+      });
+    }
+    case 'chat.map.set': {
+      keys(value, ['action','storeRoot','expectedSequence','selectorId','harness','workspace','principalId','authorityOrigin','bindingGeneration','before']);
+      const storeRoot = canonicalExistingDir(value.storeRoot);
+      if (!isNonNegativeInt(value.expectedSequence) || !isSelectorId(value.selectorId) || !isHarness(value.harness) ||
+          !isAgentId(value.principalId) || !isValidBareHttpsOrigin(value.authorityOrigin) ||
+          !isPositiveInt(value.bindingGeneration) || value.before !== null) invalid();
+      const workspace = canonicalExistingWorkspace(value.workspace);
+      return Object.freeze({
+        action: value.action,
+        storeRoot,
+        expectedSequence: value.expectedSequence,
+        selectorId: value.selectorId,
+        harness: value.harness,
+        workspace,
+        principalId: value.principalId,
+        authorityOrigin: value.authorityOrigin,
+        bindingGeneration: value.bindingGeneration,
+        before: null,
+      });
+    }
+    case 'chat.map.revoke': {
+      keys(value, ['action','storeRoot','expectedSequence','selectorId','before']);
+      const storeRoot = canonicalExistingDir(value.storeRoot);
+      if (!isPositiveInt(value.expectedSequence) || !isSelectorId(value.selectorId)) invalid();
+      // Workspace directory may already have been deleted; syntax-only check allows revoking stale selectors.
+      const before = chatMapState(value.before);
+      return Object.freeze({
+        action: value.action,
+        storeRoot,
+        expectedSequence: value.expectedSequence,
+        selectorId: value.selectorId,
+        before,
+      });
+    }
+    default:
+      invalid();
+  }
 }
 
 export function describeOwnerOperation(op) {
-  return `${op.action}: ${op.profileId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
-    `From: ${op.before.principalId} at ${op.before.authorityOrigin}\n` +
-    (op.after ? `To: ${op.after.principalId} at ${op.after.authorityOrigin}` : 'Revoke this binding');
+  switch (op?.action) {
+    case 'profile.move':
+    case 'profile.revoke':
+      return `${op.action}: ${op.profileId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
+        `From: ${op.before.principalId} at ${op.before.authorityOrigin}\n` +
+        (op.after ? `To: ${op.after.principalId} at ${op.after.authorityOrigin}` : 'Revoke this binding');
+    case 'destination.set':
+      return `${op.action}: ${op.principalId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
+        `Target: ${op.harness} chat in ${op.workspace}`;
+    case 'destination.clear':
+      return `${op.action}: ${op.principalId}\nRegistry: ${op.registryRoot}\nSequence: ${op.expectedSequence}\n` +
+        `Clear: ${op.before.harness} chat in ${op.before.workspace} (gen ${op.before.generation})`;
+    case 'chat.map.set':
+      return `${op.action}: ${op.selectorId}\nStore: ${op.storeRoot}\nSequence: ${op.expectedSequence}\n` +
+        `Selector: ${op.harness} chat in ${op.workspace}\n` +
+        `Principal: ${op.principalId} at ${op.authorityOrigin} (gen ${op.bindingGeneration})`;
+    case 'chat.map.revoke':
+      return `${op.action}: ${op.selectorId}\nStore: ${op.storeRoot}\nSequence: ${op.expectedSequence}\n` +
+        `Selector: ${op.before.harness} chat in ${op.before.workspace}\n` +
+        `Principal: ${op.before.principalId} at ${op.before.authorityOrigin} (gen ${op.before.bindingGeneration})\n` +
+        'Revoke this chat mapping';
+    default:
+      invalid();
+  }
 }
 
 export function createUnavailableOwnerApprovalProvider() {
   return Object.freeze({ authenticate: async () => 'unavailable' });
 }
 
-// withLockedRegistry(root, callback) must hold the existing exclusive registry
-// lock synchronously while invoking callback once with { sequence, binding, commit }. `binding`
-// is this profile's exact before projection (or null). `commit(operation)` must
-// synchronously perform that exact dedicated audited mutation, retaining D2/D3
-// invariants. The separate revoke adapter supplies the real synchronous transaction;
-// this module itself neither selects an OS provider nor exposes a CLI command.
+// withLockedRegistry / withLockedStore (root, callback) must hold the exclusive
+// lock synchronously while invoking callback once with { sequence, binding|before, commit }.
+// `commit(operation)` must synchronously perform that exact audited mutation.
 export function createOwnerApprovalCoordinator({
-  provider = createUnavailableOwnerApprovalProvider(), withLockedRegistry,
+  provider = createUnavailableOwnerApprovalProvider(),
+  withLockedRegistry,
+  withLockedStore,
   clockMs = () => Math.floor(performance.now()),
 } = {}) {
+  const lockAdapter = withLockedStore ?? withLockedRegistry;
   const pending = new WeakMap();
   function now() {
     const value = clockMs();
@@ -85,7 +251,7 @@ export function createOwnerApprovalCoordinator({
     record.used = true; // one attempt, including denial, failure and concurrent calls
     fresh(record);
     if (signal?.aborted) fail('owner_approval_cancelled');
-    if (typeof provider?.authenticate !== 'function' || typeof withLockedRegistry !== 'function') fail('owner_approval_unavailable');
+    if (typeof provider?.authenticate !== 'function' || typeof lockAdapter !== 'function') fail('owner_approval_unavailable');
     const controller = new AbortController();
     let timer, onAbort;
     let outcome;
@@ -113,14 +279,16 @@ export function createOwnerApprovalCoordinator({
     }
     let entered = false, transactionOpen = true;
     let result;
+    const storeRoot = record.op.registryRoot ?? record.op.storeRoot;
     try {
-      result = withLockedRegistry(record.op.registryRoot, state => {
+      result = lockAdapter(storeRoot, state => {
         if (!transactionOpen) fail('owner_approval_unavailable');
         if (entered) fail('owner_approval_replayed');
         entered = true;
         fresh(record);
         if (signal?.aborted) fail('owner_approval_cancelled');
-        if (state?.sequence !== record.op.expectedSequence || canonicalJson(state?.binding ?? null) !== canonicalJson(record.op.before)) {
+        const currentBefore = state && Object.hasOwn(state, 'before') ? state.before : (state?.binding ?? null);
+        if (state?.sequence !== record.op.expectedSequence || canonicalJson(currentBefore) !== canonicalJson(record.op.before)) {
           fail('owner_approval_stale');
         }
         if (typeof state.commit !== 'function') fail('owner_approval_unavailable');

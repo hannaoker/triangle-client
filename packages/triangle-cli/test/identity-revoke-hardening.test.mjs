@@ -78,6 +78,12 @@ test('control: a valid revoke release selects exactly its manifest-pinned helper
  assert.equal(await load(release).authenticate(challenge),'approved','the stand-in helper ran (needs an executable temp directory)');
 });
 
+test('multi-command identity capability still authorizes identity.revoke cleanly',async t=>{
+ const f=fixture(t),release=releaseFixture(t);
+ release.policy({commands:['identity.revoke','identity.destination','identity.chat-map']});
+ assert.equal(await select(release,challengeFor(f.plan())),'cancelled');
+});
+
 test('a helper that does not match its manifest hash is not run',async t=>{
  const f=fixture(t),release=releaseFixture(t);
  release.entry({sha256:sha('another helper')}); // well formed, so the loader selects; the provider then refuses before spawning
