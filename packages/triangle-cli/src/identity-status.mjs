@@ -1,5 +1,6 @@
 import path from "node:path";
 import { LocalStateError } from "./errors.mjs";
+import { readLocalRecipients } from "./identity-alias.mjs";
 import { identityInventory } from "./identity-inventory.mjs";
 
 /**
@@ -12,6 +13,7 @@ import { identityInventory } from "./identity-inventory.mjs";
  * @param {Function} [options.readIdentityRegistry]
  * @param {Function} [options.buildIdentityView]
  * @param {Function} [options.identityInventory]
+ * @param {Function} [options.readLocalRecipients] Reads the client configuration's local recipients (for the alias rows).
  * @param {Function} [options.pidAlive]
  * @param {Function} [options.advisoryHeldAt]
  * @param {Function|string|number|Date} [options.now]
@@ -23,6 +25,7 @@ export async function identityStatus({
   readIdentityRegistry: customReadIdentityRegistry,
   buildIdentityView: customBuildIdentityView,
   identityInventory: customIdentityInventory,
+  readLocalRecipients: customReadLocalRecipients,
   pidAlive = () => "unknown",
   advisoryHeldAt = () => "unknown",
   now,
@@ -72,6 +75,16 @@ export async function identityStatus({
     };
   }
 
-  const view = buildIdentityView({ inventory, registry });
+  // The alias rows say whether each alias reaches a local recipient, which only the client configuration knows. It is read only when
+  // there are aliases to judge, so a registry without any needs no configuration (its human output is what it always was; a v2
+  // registry's JSON gains an empty `aliases` array).
+  let localRecipients = null;
+  const aliases = registry?.state === "ok" ? registry.registry?.aliases : null;
+  if (aliases !== null && typeof aliases === "object" && Object.keys(aliases).length > 0) {
+    const configured = await (customReadLocalRecipients ?? readLocalRecipients)(clientRoot);
+    localRecipients = configured?.ok ? configured.recipients : null;
+  }
+
+  const view = buildIdentityView({ inventory, registry, localRecipients });
   return view;
 }

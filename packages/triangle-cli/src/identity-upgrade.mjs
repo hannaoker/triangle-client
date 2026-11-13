@@ -488,7 +488,7 @@ export function describeRefusal(code) {
 const short = (hash) => (typeof hash === "string" ? hash.slice(0, 12) : "-");
 // Paths and names come from the command line and the file system: control characters never reach the owner's terminal.
 export const printable = (value) => String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
-const shellQuote = (value) => (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", `'\\''`)}'`);
+export const shellQuote = (value) => (/^[A-Za-z0-9_\/.:@%+=,-]+$/.test(String(value)) ? String(value) : `'${String(value).replaceAll("'", `'\\''`)}'`);
 
 /** The restore command for a backup, ready to paste: every path quoted, both roots named. */
 export function restoreCommand({ clientRoot, registryRoot, from, discardV2Data = false, acceptRoutingChanges = false, confirm = null }) {

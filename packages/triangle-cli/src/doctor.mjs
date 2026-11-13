@@ -87,6 +87,14 @@ export function renderDoctor(report) {
         lines.push(`  - ${p.state} · ${p.profile} · ${prin} · ${orig} · ${gen}${revoked}`);
       }
     }
+    // The owner-set aliases of a v2 registry, with what each one reaches now (only a v2 registry has the key)
+    if (Array.isArray(report.identity.aliases) && report.identity.aliases.length > 0) {
+      lines.push("  Aliases (owner-set sending names):");
+      for (const a of report.identity.aliases) {
+        const reaches = a.profile ?? (Array.isArray(a.profiles) && a.profiles.length > 0 ? a.profiles.join(", ") : "-");
+        lines.push(`  - ${a.state} · ${a.name} → ${reaches} · ${a.principalId ?? "-"}`);
+      }
+    }
     if (Array.isArray(report.identity.diagnostics)) {
       for (const d of report.identity.diagnostics) {
         const tag = d.severity === "fault" ? "[fault]" : "[warn]";

@@ -95,7 +95,8 @@ entry's `send.aliases`: to a caller that cannot see the alias the name is an unk
 fails as any unknown id does, and to one that can, a name that is also a label this caller
 may message, or whose principal is bound to several local recipients, fails as
 `alias_unresolved` (reason `alias_collides_with_label` or `ambiguous_binding`) while the
-exact id still works. `local_status` counts them (`router.resolved.alias`,
+exact id still works. The owner sets and clears aliases with `triangle identity alias`
+(`docs/triangle-client/identity-aliases.md`). `local_status` counts them (`router.resolved.alias`,
 `router.errors.alias_unresolved`, the global counters) and lists the forms this process
 resolves in `router.registry.addressForms`. These fields exist only while principal routing is enabled: with it off
 (the default) `sessions` and `discover` keep exactly their previous shapes, and so does

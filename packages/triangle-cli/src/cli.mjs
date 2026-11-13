@@ -27,6 +27,13 @@ import {
   renderUpgradePlan,
   renderUpgradeResult,
 } from "./identity-upgrade.mjs";
+import {
+  applyIdentityAlias,
+  describeAliasRefusal,
+  planIdentityAlias,
+  renderAliasPlan,
+  renderAliasResult,
+} from "./identity-alias.mjs";
 import { identityStatus } from "./identity-status.mjs";
 import { createInvite, inviteOutcome, renderInvite, revokeInvite } from "./invites.mjs";
 import { parseChanges, permissionHistory, readPermissions, rereadAfterConflict, RevisionConflictError, renderHistory, renderPermissions, setPermissions } from "./permissions.mjs";
@@ -78,6 +85,11 @@ export const USAGE = `Usage: triangle <command> [options]
                             [--accept-routing-changes] [--confirm PLAN_ID]
                               Plan or apply replacing the registry with a v1 backup; the live files are archived first.
                               The plan lists what changes for routing (a restore can undo a revoke). Apply needs a terminal.
+  identity alias set NAME TARGET --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
+  identity alias clear NAME --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
+                              Plan or apply an owner-set sending name for a local agent. TARGET is an agent_ id or a profile
+                              name with an active binding. An alias is created, never overwritten: clear it to change it.
+                              Needs an identity_registry_v2 registry. Apply needs a terminal.
   status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
                               What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
@@ -108,6 +120,20 @@ export function parseArgs(argv) {
     } else positional.push(arg);
   }
   return { positional, flags };
+}
+
+/**
+ * Whether the command runs in the owner's terminal: standard input and output both. The gate every `--confirm` of the identity
+ * registry commands has (it keeps an agent or a script from applying an owner decision). `identityDependencies` can stand in for it in tests.
+ */
+function ownerTerminal(identityDependencies, io) {
+  if (identityDependencies.isTerminal !== undefined) {
+    return typeof identityDependencies.isTerminal === "function" ? Boolean(identityDependencies.isTerminal()) : Boolean(identityDependencies.isTerminal);
+  }
+  return Boolean(
+    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
+    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
+  );
 }
 
 function allowOnly(flags, allowed) {
@@ -436,15 +462,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               throw new UsageError("--confirm must be 64 lowercase hex characters");
             }
 
-            const isTerm =
-              identityDependencies.isTerminal !== undefined
-                ? (typeof identityDependencies.isTerminal === "function"
-                    ? identityDependencies.isTerminal()
-                    : Boolean(identityDependencies.isTerminal))
-                : Boolean(
-                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
-                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
-                  );
+            const isTerm = ownerTerminal(identityDependencies, io);
 
             if (!isTerm) {
               io.stderr("identity migrate --confirm requires standard input and output to be a terminal");
@@ -516,15 +534,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
           }
           if (flags.confirm !== undefined) {
             if (!/^[a-f0-9]{64}$/.test(flags.confirm)) throw new UsageError("--confirm must be 64 lowercase hex characters");
-            const isTerm =
-              identityDependencies.isTerminal !== undefined
-                ? (typeof identityDependencies.isTerminal === "function"
-                    ? identityDependencies.isTerminal()
-                    : Boolean(identityDependencies.isTerminal))
-                : Boolean(
-                    (identityDependencies.stdinIsTTY ?? io?.stdin?.isTTY ?? process.stdin?.isTTY) &&
-                    (identityDependencies.stdoutIsTTY ?? io?.stdout?.isTTY ?? process.stdout?.isTTY)
-                  );
+            const isTerm = ownerTerminal(identityDependencies, io);
             if (!isTerm) {
               io.stderr(`identity ${sub} --confirm requires standard input and output to be a terminal`);
               return 2;
@@ -565,6 +575,61 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
             }
             if (err?.archive?.dir) hint += `\nThe files that were being replaced are archived in: ${printable(err.archive.dir)}`;
             io.stderr(flags.json ? JSON.stringify({ error: code, message: text, ...notes }) : `${printable(text)} (${printable(code)})${hint}`);
+            return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
+          }
+        }
+        if (sub === "alias") {
+          const [action, name, target, ...extra] = rest;
+          if (action !== "set" && action !== "clear") throw new UsageError("identity alias needs set or clear");
+          if (name === undefined || extra.length > 0 || (action === "set" ? target === undefined : target !== undefined)) {
+            throw new UsageError(action === "set" ? "identity alias set takes NAME and TARGET" : "identity alias clear takes NAME");
+          }
+          allowOnly(flags, ["client-root", "registry-root", "confirm"]);
+          const clientRoot = flags["client-root"];
+          if (!clientRoot) throw new UsageError("identity alias requires --client-root ABSOLUTE_PATH");
+          if (typeof clientRoot !== "string" || !isAbsolute(clientRoot)) throw new UsageError("--client-root must be an absolute path");
+          if (dirname(resolve(clientRoot)) === resolve(clientRoot)) throw new UsageError("--client-root must not be the filesystem root");
+          const registryRoot = flags["registry-root"] === undefined ? defaultRegistryRoot(clientRoot) : flags["registry-root"];
+          if (typeof registryRoot !== "string" || !isAbsolute(registryRoot)) throw new UsageError("--registry-root must be an absolute path");
+          const normClient = resolve(clientRoot);
+          const normRegistry = resolve(registryRoot);
+          if (dirname(normRegistry) === normRegistry) throw new UsageError("--registry-root must not be the filesystem root");
+          if (normRegistry === normClient) throw new UsageError("registry root must not equal client root");
+          if (normClient.startsWith(normRegistry + sep)) throw new UsageError("registry root must not contain client root");
+          if (normRegistry.startsWith(normClient + sep)) throw new UsageError("registry root must not be inside client root");
+          // the supervisor check asks the supervisor of this application root, so the registry must be its own
+          if (dirname(normRegistry) !== dirname(normClient)) throw new UsageError("--registry-root must be a directory beside --client-root, in the same application root");
+          if (flags.confirm !== undefined) {
+            if (!/^[a-f0-9]{64}$/.test(flags.confirm)) throw new UsageError("--confirm must be 64 lowercase hex characters");
+            const isTerm = ownerTerminal(identityDependencies, io);
+            if (!isTerm) {
+              io.stderr("identity alias --confirm requires standard input and output to be a terminal");
+              return 2;
+            }
+          }
+          const common = { ...identityDependencies, action, name, target: action === "set" ? target : undefined, clientRoot, registryRoot: normRegistry };
+          try {
+            if (flags.confirm === undefined) {
+              const plan = await planIdentityAlias(common);
+              await print(io, flags, plan, (p) => renderAliasPlan(p, { clientRoot }));
+              return plan.ready ? 0 : 1;
+            }
+            const result = await applyIdentityAlias({ ...common, confirm: flags.confirm });
+            await print(io, flags, result, renderAliasResult);
+            return 0;
+          } catch (err) {
+            if (err instanceof LocalStateError) throw err;
+            // the registry module reports many refusals as a generic code with a specific reason; show the reason when it is one we explain
+            const code = typeof err?.reason === "string" && describeAliasRefusal(err.reason) !== null
+              ? err.reason
+              : (typeof err?.code === "string" ? err.code : "identity_alias_failed");
+            const text = (err?.nothingChanged && typeof err?.message === "string" ? err.message : describeAliasRefusal(code)) ?? (typeof err?.message === "string" ? err.message : "The command did not complete.");
+            // an error from the write itself that this command has no words for: say that the registry may have changed
+            const unexplained = err?.writeAttempted && describeAliasRefusal(code) === null;
+            const hint = unexplained ? " The registry may or may not have changed: make a fresh plan, or check it with triangle status --identity." : "";
+            io.stderr(flags.json
+              ? JSON.stringify({ error: code, message: `${text}${hint}`, ...(err?.nothingChanged ? { nothingChanged: true } : {}), ...(err?.writeAttempted ? { writeAttempted: true } : {}), ...(Array.isArray(err?.refusals) ? { refusals: err.refusals } : {}) })
+              : `${printable(text)} (${printable(code)})${hint}`);
             return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
           }
         }
