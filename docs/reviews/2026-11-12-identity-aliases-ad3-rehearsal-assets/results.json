@@ -1,0 +1,1224 @@
+{
+  "schema": "identity_aliases_ad3_rehearsal_v1",
+  "startedAt": "2026-11-13T05:53:12.438Z",
+  "runner": {
+    "node": "v22.22.3",
+    "platform": "darwin",
+    "arch": "arm64",
+    "script": "rehearsal-aliases.mjs"
+  },
+  "inputs": {
+    "installed": {
+      "manifestVersion": 14,
+      "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+      "artifacts": 90,
+      "nodeSHA256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
+      "manifestSha256": "a952996fee943ca5d7db051ce6d4b4fc3fb625796dcca2713d8b9751311cbcca",
+      "baselineManifest": "the live supervisor manifest",
+      "clientPackageVersion": "0.2.0-identity.2",
+      "triangleLocalSha256": "083ee43d5e421fc84147cc59e9271aebb22dea27203bfef2c9da583315d00de8"
+    },
+    "candidate": {
+      "commit": "725f13da59c5bbb7f6ff7a6bb9fcdafb801a6511",
+      "version": "0.2.0-ad3-rehearsal.1",
+      "archiveSha256": "4bbfe13354d2bc7ae7dbea78e12588fecdff559ede07f8b68001a6e87783df94",
+      "files": 157,
+      "signingMode": "public_ad_hoc",
+      "credentialCustody": "file",
+      "testOnly": false
+    },
+    "artifactDiff": {
+      "manifestVersion": 14,
+      "supervisorArtifacts": 90,
+      "changed": [
+        "packages/agent-worker/src/grok-local-session.mjs",
+        "packages/agent-worker/src/identity-primitives.mjs",
+        "packages/agent-worker/src/identity-registry.mjs",
+        "packages/agent-worker/src/local-messaging-cli.mjs",
+        "packages/agent-worker/src/local-messaging-client.mjs",
+        "packages/agent-worker/src/local-messaging-journal.mjs",
+        "packages/agent-worker/src/local-messaging-protocol.mjs",
+        "packages/agent-worker/src/local-messaging-server.mjs",
+        "packages/agent-worker/src/recipient-resolver.mjs",
+        "packages/agent-worker/src/router-registry-snapshot.mjs",
+        "packages/agent-worker/src/unified-router.mjs"
+      ],
+      "added": [],
+      "removed": [],
+      "changedFilesInWorkerBundles": {
+        "codex": 11,
+        "hermes": 11,
+        "antigravity": 11
+      },
+      "git": {
+        "installedSourceCommit": "46c0923a76f12157974a19bd9d894c0cec509673",
+        "installedArtifactsEqualBlobs": 90,
+        "gitChangedSupervisorArtifacts": 11,
+        "equalToBundleDiff": true
+      }
+    },
+    "packageDiff": {
+      "installedVersion": "0.2.0-identity.2",
+      "installedFiles": 156,
+      "candidateFiles": 157,
+      "added": [
+        "packages/triangle-cli/src/identity-alias.mjs"
+      ],
+      "removed": [],
+      "changed": [
+        "bin/triangle-client",
+        "bin/triangle-mailbox",
+        "packages/agent-worker/src/grok-local-session.mjs",
+        "packages/agent-worker/src/identity-primitives.mjs",
+        "packages/agent-worker/src/identity-registry.mjs",
+        "packages/agent-worker/src/identity-view.mjs",
+        "packages/agent-worker/src/local-messaging-cli.mjs",
+        "packages/agent-worker/src/local-messaging-client.mjs",
+        "packages/agent-worker/src/local-messaging-journal.mjs",
+        "packages/agent-worker/src/local-messaging-protocol.mjs",
+        "packages/agent-worker/src/local-messaging-server.mjs",
+        "packages/agent-worker/src/recipient-resolver.mjs",
+        "packages/agent-worker/src/router-registry-snapshot.mjs",
+        "packages/agent-worker/src/unified-router.mjs",
+        "packages/triangle-cli/src/cli.mjs",
+        "packages/triangle-cli/src/doctor.mjs",
+        "packages/triangle-cli/src/identity-status.mjs",
+        "packages/triangle-cli/src/identity-upgrade.mjs"
+      ],
+      "unchanged": 138
+    },
+    "liveReceipt": {
+      "version": "0.2.0-identity.2",
+      "ownedFiles": 7,
+      "matchingDisk": 7,
+      "mismatches": []
+    },
+    "candidateBundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb"
+  },
+  "steps": [
+    {
+      "id": "A1",
+      "title": "installed state: supervisor manifest, bundle and client package (read only)",
+      "ok": true,
+      "ms": 53,
+      "data": {
+        "installed": {
+          "manifestVersion": 14,
+          "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+          "artifacts": 90,
+          "nodeSHA256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
+          "manifestSha256": "a952996fee943ca5d7db051ce6d4b4fc3fb625796dcca2713d8b9751311cbcca",
+          "baselineManifest": "the live supervisor manifest",
+          "clientPackageVersion": "0.2.0-identity.2",
+          "triangleLocalSha256": "083ee43d5e421fc84147cc59e9271aebb22dea27203bfef2c9da583315d00de8"
+        },
+        "supervisorProcesses": 2
+      }
+    },
+    {
+      "id": "A2",
+      "title": "installed bundle copied to the scratch root, byte-checked against the live manifest",
+      "ok": true,
+      "ms": 144,
+      "data": {
+        "artifactsVerified": 90,
+        "nodeSha256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
+        "clientPackageNodeEqualsBundleNode": true,
+        "scratchModes": {
+          "app": "0700",
+          "manifest": "0600",
+          "node": "0500",
+          "wrapper": "0700"
+        }
+      }
+    },
+    {
+      "id": "A3",
+      "title": "candidate package: archive hash, contents against the commit, node, version",
+      "ok": true,
+      "ms": 1857,
+      "data": {
+        "commit": "725f13da59c5bbb7f6ff7a6bb9fcdafb801a6511",
+        "version": "0.2.0-ad3-rehearsal.1",
+        "archiveSha256": "4bbfe13354d2bc7ae7dbea78e12588fecdff559ede07f8b68001a6e87783df94",
+        "files": 157,
+        "signingMode": "public_ad_hoc",
+        "credentialCustody": "file",
+        "testOnly": false,
+        "trackedFilesEqualCommittedBlobs": 152,
+        "nodeEqualsInstalledNode": true,
+        "codesignStrict": "passed for triangle-mailbox and triangle-client"
+      }
+    },
+    {
+      "id": "A4",
+      "title": "supervisor artifact diff, installed bundle versus candidate: exactly AD's modules, nothing added or removed",
+      "ok": true,
+      "ms": 936,
+      "data": {
+        "manifestVersion": 14,
+        "supervisorArtifacts": 90,
+        "changed": [
+          "packages/agent-worker/src/grok-local-session.mjs",
+          "packages/agent-worker/src/identity-primitives.mjs",
+          "packages/agent-worker/src/identity-registry.mjs",
+          "packages/agent-worker/src/local-messaging-cli.mjs",
+          "packages/agent-worker/src/local-messaging-client.mjs",
+          "packages/agent-worker/src/local-messaging-journal.mjs",
+          "packages/agent-worker/src/local-messaging-protocol.mjs",
+          "packages/agent-worker/src/local-messaging-server.mjs",
+          "packages/agent-worker/src/recipient-resolver.mjs",
+          "packages/agent-worker/src/router-registry-snapshot.mjs",
+          "packages/agent-worker/src/unified-router.mjs"
+        ],
+        "added": [],
+        "removed": [],
+        "changedFilesInWorkerBundles": {
+          "codex": 11,
+          "hermes": 11,
+          "antigravity": 11
+        },
+        "git": {
+          "installedSourceCommit": "46c0923a76f12157974a19bd9d894c0cec509673",
+          "installedArtifactsEqualBlobs": 90,
+          "gitChangedSupervisorArtifacts": 11,
+          "equalToBundleDiff": true
+        }
+      }
+    },
+    {
+      "id": "A5",
+      "title": "client package diff, installed release versus candidate package (what the client install would change)",
+      "ok": true,
+      "ms": 0,
+      "data": {
+        "installedVersion": "0.2.0-identity.2",
+        "installedFiles": 156,
+        "candidateFiles": 157,
+        "added": [
+          "packages/triangle-cli/src/identity-alias.mjs"
+        ],
+        "removed": [],
+        "changed": [
+          "bin/triangle-client",
+          "bin/triangle-mailbox",
+          "packages/agent-worker/src/grok-local-session.mjs",
+          "packages/agent-worker/src/identity-primitives.mjs",
+          "packages/agent-worker/src/identity-registry.mjs",
+          "packages/agent-worker/src/identity-view.mjs",
+          "packages/agent-worker/src/local-messaging-cli.mjs",
+          "packages/agent-worker/src/local-messaging-client.mjs",
+          "packages/agent-worker/src/local-messaging-journal.mjs",
+          "packages/agent-worker/src/local-messaging-protocol.mjs",
+          "packages/agent-worker/src/local-messaging-server.mjs",
+          "packages/agent-worker/src/recipient-resolver.mjs",
+          "packages/agent-worker/src/router-registry-snapshot.mjs",
+          "packages/agent-worker/src/unified-router.mjs",
+          "packages/triangle-cli/src/cli.mjs",
+          "packages/triangle-cli/src/doctor.mjs",
+          "packages/triangle-cli/src/identity-status.mjs",
+          "packages/triangle-cli/src/identity-upgrade.mjs"
+        ],
+        "unchanged": 138
+      }
+    },
+    {
+      "id": "A6",
+      "title": "the live install receipt against the disk (read only): what gate H3's package installer will find",
+      "ok": true,
+      "ms": 4,
+      "data": {
+        "version": "0.2.0-identity.2",
+        "ownedFiles": 7,
+        "matchingDisk": 7,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "B1",
+      "title": "scratch client, router, v1 registry and the Grok principal, built with the installed bundle's code and wrapper",
+      "ok": true,
+      "ms": 1282,
+      "data": {
+        "registry": {
+          "ok": true,
+          "state": "ok",
+          "schema": "identity_registry_v1",
+          "sequence": 3,
+          "bindings": 3,
+          "aliases": {}
+        },
+        "recipients": [
+          "alpha",
+          "beta",
+          "scratch-b"
+        ],
+        "bound": [
+          "alpha",
+          "beta",
+          "ghost"
+        ],
+        "boundNotLocal": [
+          "ghost"
+        ],
+        "localNotBound": [
+          "scratch-b"
+        ],
+        "grokPrincipal": {
+          "alias": "limited",
+          "mayMessage": [
+            "beta",
+            "scratch-b",
+            "late"
+          ],
+          "mayNotMessage": [
+            "alpha"
+          ]
+        }
+      }
+    },
+    {
+      "id": "B2",
+      "title": "installed supervisor (copy) serves the v1 registry: status shape, principal and exact sends, discovery",
+      "ok": true,
+      "ms": 717,
+      "data": {
+        "host": {
+          "pid": 3770,
+          "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+          "node": "v22.22.3"
+        },
+        "registryBlock": {
+          "state": "ok",
+          "sequence": 3,
+          "schema": "identity_registry_v1",
+          "supportedSchemas": [
+            "identity_registry_v1",
+            "identity_registry_v2"
+          ],
+          "rootSha256": "6e80aa698a0a484d8fe7f4d482006497a4f696e2691b5508fa3c0e06b1c5b56e"
+        },
+        "registryBlockKeys": [
+          "rootSha256",
+          "schema",
+          "sequence",
+          "state",
+          "supportedSchemas"
+        ],
+        "counters": {
+          "resolved": {
+            "principal": 0,
+            "id": 0
+          },
+          "errors": {
+            "recipient_not_found": 0,
+            "route_unavailable": 0,
+            "recipient_ambiguous": 0
+          }
+        },
+        "principalSend": {
+          "via": "principal",
+          "principal": "agent_2fcc05e36f871673f014f2f29a288661",
+          "profile": "alpha"
+        },
+        "discoveryEntries": 3
+      }
+    },
+    {
+      "id": "B3",
+      "title": "the upgrade as the owner did it (G5): candidate CLI plan against the installed host, then apply in a terminal",
+      "ok": true,
+      "ms": 1706,
+      "data": {
+        "planId": "4e46740b7c9c699568259262e34fcbae2b2b78b9d09a131a2d292710073210ec",
+        "floor": {
+          "manifest": {
+            "ok": true,
+            "code": null,
+            "version": 14
+          },
+          "supervisor": {
+            "ok": true,
+            "code": null,
+            "detail": null,
+            "supportedSchemas": [
+              "identity_registry_v1",
+              "identity_registry_v2"
+            ],
+            "routerEnabled": true
+          }
+        },
+        "backupDirName": "backup-v1-20261113T055318Z",
+        "registryBlock": {
+          "state": "ok",
+          "sequence": 4,
+          "schema": "identity_registry_v2",
+          "supportedSchemas": [
+            "identity_registry_v1",
+            "identity_registry_v2"
+          ],
+          "rootSha256": "6e80aa698a0a484d8fe7f4d482006497a4f696e2691b5508fa3c0e06b1c5b56e"
+        },
+        "auditActions": [
+          "bind",
+          "bind",
+          "bind",
+          "upgrade"
+        ]
+      }
+    },
+    {
+      "id": "B4",
+      "title": "installed supervisor on the v2 registry, no aliases: the negative set, counters and discovery to hold constant",
+      "ok": true,
+      "ms": 2295,
+      "data": {
+        "negativeSet": {
+          "unknown-principal": {
+            "exit": 1,
+            "state": "send_outcome_unknown",
+            "error": "recipient_not_found",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "peer-id": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "bound-not-local-principal": {
+            "exit": 1,
+            "state": "send_outcome_unknown",
+            "error": "route_unavailable",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "exact-id-outside-grant": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "alias-shaped-unknown-name": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "alias-shaped-unknown-name-owner-cli": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          }
+        },
+        "counterDelta": {
+          "resolved": {
+            "id": 2
+          },
+          "errors": {
+            "recipient_not_found": 1,
+            "route_unavailable": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "C1",
+      "title": "H2: stop the installed host, stage the candidate supervisor bundle over it, validate",
+      "ok": true,
+      "ms": 1250,
+      "data": {
+        "candidateBundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb",
+        "installedBundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+        "differingArtifacts": 11,
+        "nodeUnchanged": true,
+        "rollbackRecordWritten": ".rollback-supervisor-030fd845940944bf8ddef290e031f6ec.json"
+      }
+    },
+    {
+      "id": "C2",
+      "title": "candidate host on the same v2 registry and journal, no aliases: today's results, plus the additive fields",
+      "ok": true,
+      "ms": 3074,
+      "data": {
+        "host": {
+          "pid": 3868,
+          "bundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb",
+          "node": "v22.22.3"
+        },
+        "registryBlock": {
+          "state": "ok",
+          "sequence": 4,
+          "schema": "identity_registry_v2",
+          "supportedSchemas": [
+            "identity_registry_v1",
+            "identity_registry_v2"
+          ],
+          "addressForms": [
+            "alias",
+            "id",
+            "principal"
+          ],
+          "rootSha256": "6e80aa698a0a484d8fe7f4d482006497a4f696e2691b5508fa3c0e06b1c5b56e"
+        },
+        "negativeSet": {
+          "unknown-principal": {
+            "exit": 1,
+            "state": "send_outcome_unknown",
+            "error": "recipient_not_found",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "peer-id": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "bound-not-local-principal": {
+            "exit": 1,
+            "state": "send_outcome_unknown",
+            "error": "route_unavailable",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "exact-id-outside-grant": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "alias-shaped-unknown-name": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          },
+          "alias-shaped-unknown-name-owner-cli": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed",
+            "reachedARunner": false,
+            "journalRow": false
+          }
+        },
+        "sameAsInstalled": [
+          "registry block",
+          "negative-set answers",
+          "counter deltas",
+          "discovery entries"
+        ],
+        "earlierMessageReadable": true
+      }
+    },
+    {
+      "id": "D1",
+      "title": "H3: the candidate package installed into a scratch home by its own installer; the installed triangle lists the alias commands",
+      "ok": true,
+      "ms": 2513,
+      "data": {
+        "installScope": null,
+        "receiptVersion": "0.2.0-ad3-rehearsal.1",
+        "helpListsAliasCommands": true,
+        "installerExit": 0
+      }
+    },
+    {
+      "id": "E1",
+      "title": "alias set builder alpha, plan: ready, the supervisor honors aliases, nothing written",
+      "ok": true,
+      "ms": 424,
+      "data": {
+        "planId": "e09d434d73b3d7bcc7b043d3020a491df1cbb84550c70b70ebff5ef9e6142328",
+        "target": {
+          "given": "alpha",
+          "principalId": "agent_2fcc05e36f871673f014f2f29a288661",
+          "bindingId": "bind_67fc628548b1f5d0e403deb20e78f944",
+          "profile": "alpha",
+          "profileInstanceId": "fa44c2b300fa0c590adeda2338010d65323f73c39f1fa146367696e5d1de3d78"
+        },
+        "advice": {
+          "listing": {
+            "aliasesOfPrincipal": 1,
+            "listed": [
+              "builder"
+            ],
+            "unlisted": []
+          },
+          "supervisor": {
+            "state": "honored",
+            "reason": null,
+            "detail": null
+          }
+        },
+        "refusals": [],
+        "writesNothing": true
+      }
+    },
+    {
+      "id": "E2",
+      "title": "alias set builder alpha, apply in a terminal with the plan id: audit entry, alias record, status --identity row",
+      "ok": true,
+      "ms": 417,
+      "data": {
+        "result": {
+          "schema": "identity_alias_result_v1",
+          "action": "set",
+          "registryRoot": "<scratch>/a/identity",
+          "alias": "builder",
+          "principal": "agent_2fcc05e36f871673f014f2f29a288661",
+          "profile": "alpha",
+          "from": {
+            "sequence": 4
+          },
+          "to": {
+            "sequence": 5,
+            "auditHead": {
+              "sequence": 5,
+              "hash": "6bdea44de5eb0076ddac72ce6f4762d0c1937d533eb8261ca25b43a57abf9f82"
+            }
+          },
+          "laterWrites": 0,
+          "auditEntry": "alias_set"
+        },
+        "aliasRecord": {
+          "generation": 5,
+          "principal_id": "agent_2fcc05e36f871673f014f2f29a288661",
+          "set_at": "2026-11-13T05:53:29.002Z"
+        },
+        "auditActions": [
+          "bind",
+          "bind",
+          "bind",
+          "upgrade",
+          "alias_set"
+        ],
+        "installedReaderReadsIt": true
+      }
+    },
+    {
+      "id": "E3",
+      "title": "discovery lists the alias for exactly alpha's entry; the other entries are unchanged",
+      "ok": true,
+      "ms": 381,
+      "data": {
+        "alphaSend": {
+          "permitted": true,
+          "addressKinds": [
+            "id",
+            "principal"
+          ],
+          "aliases": [
+            "builder"
+          ]
+        },
+        "unchangedEntries": 2,
+        "clientFromBeforeTheRestage": {
+          "sendExplanationKept": {
+            "permitted": true,
+            "addressKinds": [
+              "id",
+              "principal"
+            ]
+          },
+          "aliasField": "dropped",
+          "sendToTheName": "recipient_not_allowed"
+        }
+      }
+    },
+    {
+      "id": "E4",
+      "title": "the honored send: send --to builder reaches alpha's runner; receipt and status name the principal, never the alias",
+      "ok": true,
+      "ms": 923,
+      "data": {
+        "target": {
+          "via": "principal",
+          "principal": "agent_2fcc05e36f871673f014f2f29a288661",
+          "profile": "alpha"
+        },
+        "replyFromRunner": "echo[alpha]",
+        "counterDelta": {
+          "resolved": {
+            "alias": 1
+          },
+          "errors": {}
+        },
+        "aliasNameInReceipt": false
+      }
+    },
+    {
+      "id": "E5",
+      "title": "retry across clear and set: duplicates by alias and by principal, a changed principal, a cleared alias, the same principal again",
+      "ok": true,
+      "ms": 3321,
+      "data": {
+        "duplicateByAlias": true,
+        "duplicateByPrincipal": true,
+        "byExactId": {
+          "exit": 1,
+          "state": "send_outcome_unknown",
+          "error": "duplicate_id_conflict"
+        },
+        "grokVisibleAlias": {
+          "accepted": true,
+          "reachedRunner": "echo[beta]",
+          "retry": "duplicate",
+          "afterClear": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "originalStillAskable": true
+        },
+        "changedPrincipal": {
+          "exit": 1,
+          "state": "send_outcome_unknown",
+          "error": "duplicate_id_conflict"
+        },
+        "samePrincipalAgain": "duplicate",
+        "registrySequence": 11,
+        "auditActions": [
+          "bind",
+          "bind",
+          "bind",
+          "upgrade",
+          "alias_set",
+          "alias_set",
+          "alias_clear",
+          "alias_clear",
+          "alias_set",
+          "alias_clear",
+          "alias_set"
+        ]
+      }
+    },
+    {
+      "id": "E6",
+      "title": "a sender without permission: the alias of a recipient it may not message is an unknown name, by code, message, counters, record and discovery",
+      "ok": true,
+      "ms": 1692,
+      "data": {
+        "unknownName": {
+          "exit": 1,
+          "state": "rejected",
+          "error": "recipient_not_allowed"
+        },
+        "invisibleAlias": {
+          "exit": 1,
+          "state": "rejected",
+          "error": "recipient_not_allowed"
+        },
+        "serverAnswerForBoth": {
+          "ok": false,
+          "code": "recipient_not_allowed",
+          "message": "Grok outgoing grant denies recipient"
+        },
+        "counterDeltaEach": {
+          "resolved": {
+            "id": 1
+          }
+        },
+        "journalRows": 0,
+        "grokDiscoveryNamesTheAlias": false,
+        "ownerCliUnknownNameWhileAnAliasIsListed": {
+          "exit": 1,
+          "state": null,
+          "error": "recipient_not_allowed"
+        },
+        "desktopCanUseIt": true
+      }
+    },
+    {
+      "id": "E7",
+      "title": "refusals at plan time, each exit 1 and nothing written: reserved names, look-alikes, bad names, labels, an existing alias, targets that cannot route",
+      "ok": true,
+      "ms": 1552,
+      "data": {
+        "refusals": {
+          "claude → alpha": [
+            "alias_name_reserved"
+          ],
+          "agent_x → alpha": [
+            "alias_name_reserved"
+          ],
+          "peer_x → alpha": [
+            "alias_name_reserved"
+          ],
+          "session-x → alpha": [
+            "alias_name_reserved"
+          ],
+          "bind_x → alpha": [
+            "alias_name_reserved"
+          ],
+          "pair_x → alpha": [
+            "alias_name_reserved"
+          ],
+          "Builder2 → alpha": [
+            "alias_name_invalid"
+          ],
+          "-x → alpha": [
+            "alias_name_invalid"
+          ],
+          "aaaaaa…(33) → alpha": [
+            "alias_name_invalid"
+          ],
+          "scratch-b → alpha": [
+            "alias_collides_with_label"
+          ],
+          "alpha → beta": [
+            "alias_collides_with_label"
+          ],
+          "builder → alpha": [
+            "alias_exists"
+          ],
+          "builder → beta": [
+            "alias_exists"
+          ],
+          "fresh → ghost": [
+            "alias_target_not_local"
+          ],
+          "fresh → nobody": [
+            "alias_target_not_found"
+          ],
+          "fresh → agent_…": [
+            "alias_target_not_found"
+          ],
+          "fresh → scratch-b": [
+            "alias_target_not_found"
+          ]
+        },
+        "clearOfMissingAlias": [
+          "alias_not_found"
+        ],
+        "applyOfRefusedPlan": {
+          "exit": "1",
+          "refusal": "alias_target_not_local"
+        },
+        "writerRules": {
+          "setExisting": {
+            "code": "alias_conflict",
+            "message": "alias_conflict: alias_exists"
+          },
+          "clearMissing": {
+            "code": "invalid_registry",
+            "message": "invalid_registry: alias_not_found"
+          }
+        },
+        "applyGate": {
+          "noTerminal": {
+            "exit": 2,
+            "message": "identity alias --confirm requires standard input and output to be a terminal"
+          },
+          "wrongPlanId": {
+            "exit": "2",
+            "message": "That plan id does not match what is true now. Make a fresh plan and use its id. (plan_stale)"
+          }
+        },
+        "registryUnchanged": true,
+        "cases": 17
+      }
+    },
+    {
+      "id": "E8",
+      "title": "profiles added after aliases of their names: alias_unresolved only for a sender that can see both, discovery agrees with sending, status --identity says collides",
+      "ok": true,
+      "ms": 3098,
+      "data": {
+        "grokAnswerForLate": {
+          "exit": 1,
+          "state": "rejected",
+          "error": "alias_unresolved"
+        },
+        "counterDelta": {
+          "errors": {
+            "alias_unresolved": 1
+          }
+        },
+        "grokAnswerForHidden": "accepted, reached beta",
+        "ownerCliReachedTheProfiles": true,
+        "statusIdentityStates": [
+          "collides: late",
+          "collides: hidden"
+        ],
+        "discovery": {
+          "desktopBetaAliases": null,
+          "grokBetaAliases": [
+            "hidden"
+          ]
+        },
+        "afterClear": {
+          "grokByName": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "grokByExactId": "accepted"
+        }
+      }
+    },
+    {
+      "id": "E9",
+      "title": "the kill switch: with the router disabled nothing resolves, and the plan says so",
+      "ok": true,
+      "ms": 1734,
+      "data": {
+        "disabled": {
+          "routerEnabled": false,
+          "addressForms": [
+            "id"
+          ],
+          "grok": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "ownerCliRefusedByTheClient": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed"
+          },
+          "discoveryEntriesPresent": false,
+          "planAdvice": {
+            "state": "not_honored",
+            "reason": "router_disabled",
+            "detail": null
+          }
+        },
+        "reEnabled": {
+          "addressForms": [
+            "alias",
+            "id",
+            "principal"
+          ]
+        }
+      }
+    },
+    {
+      "id": "E10",
+      "title": "a restart of the candidate host keeps the aliases: discovery, a send, the same registry sequence",
+      "ok": true,
+      "ms": 512,
+      "data": {
+        "host": {
+          "pid": 4280,
+          "bundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb",
+          "node": "v22.22.3"
+        },
+        "registryBlock": {
+          "state": "ok",
+          "sequence": 15,
+          "schema": "identity_registry_v2",
+          "supportedSchemas": [
+            "identity_registry_v1",
+            "identity_registry_v2"
+          ],
+          "addressForms": [
+            "alias",
+            "id",
+            "principal"
+          ],
+          "rootSha256": "6e80aa698a0a484d8fe7f4d482006497a4f696e2691b5508fa3c0e06b1c5b56e"
+        },
+        "aliasesListed": [
+          "builder"
+        ]
+      }
+    },
+    {
+      "id": "F1",
+      "title": "H2 rolled back with the aliases in the registry: the installed supervisor ignores them and fails closed; nothing else changes",
+      "ok": true,
+      "ms": 5019,
+      "data": {
+        "host": {
+          "pid": 4300,
+          "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+          "node": "v22.22.3"
+        },
+        "manifestByteIdentical": true,
+        "candidateBundleRemoved": true,
+        "aliasesInRegistry": [
+          "builder",
+          "reviewer"
+        ],
+        "registryBlock": {
+          "state": "ok",
+          "sequence": 16,
+          "schema": "identity_registry_v2",
+          "supportedSchemas": [
+            "identity_registry_v1",
+            "identity_registry_v2"
+          ],
+          "rootSha256": "6e80aa698a0a484d8fe7f4d482006497a4f696e2691b5508fa3c0e06b1c5b56e"
+        },
+        "aliasAnswers": {
+          "grokAliasItCouldUse": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "grokAliasItCouldNot": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "ownerCliRefusedByTheClient": {
+            "exit": 1,
+            "state": null,
+            "error": "recipient_not_allowed"
+          }
+        },
+        "counterDelta": {
+          "resolved": {
+            "id": 2
+          },
+          "note": "the two Grok sends reached the server; the owner CLI refused the name itself"
+        },
+        "discoveryHasNoAliases": true,
+        "negativeSetEqualsBaseline": true
+      }
+    },
+    {
+      "id": "F2",
+      "title": "the installed client package and writer next to a registry with aliases: they read it, show the count, plan nothing wrong, and a bind leaves the aliases alone",
+      "ok": true,
+      "ms": 412,
+      "data": {
+        "installedStatusIdentity": "Registry:  ok · v2 · sequence 16 · pairings 0 · aliases 2 · destinations 0 · <scratch>/a/identity",
+        "installedUpgradePlan": [
+          "registry_already_v2"
+        ],
+        "installedBindOnACopy": "ok, aliases untouched, chain reads",
+        "installedWriterAliasAction": {
+          "code": "invalid_registry",
+          "message": "invalid_registry: action_not_available"
+        },
+        "sequenceAfterBind": 17
+      }
+    },
+    {
+      "id": "F3",
+      "title": "the candidate CLI against the installed supervisor: the plan is ready with the warning that the alias will not be honored; set anyway, it is recorded and ignored",
+      "ok": true,
+      "ms": 1635,
+      "data": {
+        "supervisorAdvice": {
+          "state": "not_honored",
+          "reason": "address_forms_not_reported",
+          "detail": null
+        },
+        "warningInHumanPlan": true,
+        "setAnyway": {
+          "alias": "other",
+          "registrySequence": 17,
+          "runningInstalledHost": "keeps serving",
+          "senderAnswer": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          },
+          "discoveryUnchanged": true
+        }
+      }
+    },
+    {
+      "id": "F4",
+      "title": "H2 again: the candidate supervisor is restaged over the same registry and honors the aliases already there, with no registry change",
+      "ok": true,
+      "ms": 2186,
+      "data": {
+        "host": {
+          "pid": 4455,
+          "bundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb",
+          "node": "v22.22.3"
+        },
+        "sameBundleId": true,
+        "registryUnchanged": true,
+        "aliasesHonoredWithoutAnyRegistryChange": [
+          "builder",
+          "reviewer",
+          "other"
+        ],
+        "committed": true
+      }
+    },
+    {
+      "id": "F5",
+      "title": "H2 rolled back by hand after the install was committed (the plan's rollback: restore the saved manifest, restart); then staged and committed again",
+      "ok": true,
+      "ms": 1449,
+      "data": {
+        "host": {
+          "pid": 4477,
+          "bundleId": "c01e78bbf404c8690c956c7da9a8edd1ea63bd20342d354fe6ada14bfaf60e80",
+          "node": "v22.22.3"
+        },
+        "manifestRestoredByHand": true,
+        "installedHostAfterwards": {
+          "addressForms": null,
+          "aliasAnswer": {
+            "exit": 1,
+            "state": "rejected",
+            "error": "recipient_not_allowed"
+          }
+        },
+        "restagedBundleId": "45c2317e49c6031dea1386b76b569d9a2726a539f89c1c0856a9085c8ac662cb",
+        "committedAgain": true,
+        "registryUnchanged": true
+      }
+    },
+    {
+      "id": "G1",
+      "title": "alias clear for every alias: the sender's view returns to the start (discovery, router block); the audit chain holds every set and clear",
+      "ok": true,
+      "ms": 1087,
+      "data": {
+        "aliasesLeft": 0,
+        "auditActions": [
+          "bind",
+          "bind",
+          "bind",
+          "upgrade",
+          "alias_set",
+          "alias_set",
+          "alias_clear",
+          "alias_clear",
+          "alias_set",
+          "alias_clear",
+          "alias_set",
+          "alias_set",
+          "alias_set",
+          "alias_clear",
+          "alias_clear",
+          "alias_set",
+          "alias_set",
+          "alias_clear",
+          "alias_clear",
+          "alias_clear"
+        ],
+        "aliasSets": 8,
+        "aliasClears": 8,
+        "registrySequence": 20
+      }
+    },
+    {
+      "id": "G2",
+      "title": "the way back to the pre-D1 backup with an alias present: restore needs --discard-v2-data and counts the aliases; applied, the aliases go and sends still route",
+      "ok": true,
+      "ms": 1506,
+      "data": {
+        "refusedWithoutFlag": [
+          "restore_would_lose_v2_data"
+        ],
+        "planWithFlag": {
+          "relation": "ahead",
+          "discardedActions": [
+            "upgrade",
+            "alias_set",
+            "alias_set",
+            "alias_clear",
+            "alias_clear",
+            "alias_set",
+            "alias_clear",
+            "alias_set",
+            "alias_set",
+            "alias_set",
+            "alias_clear",
+            "alias_clear",
+            "alias_set",
+            "alias_set",
+            "alias_clear",
+            "alias_clear",
+            "alias_clear",
+            "alias_set"
+          ],
+          "v2Data": {
+            "serverlessBindings": 0,
+            "pairings": 0,
+            "aliases": 1,
+            "destinations": 0,
+            "any": true
+          }
+        },
+        "appliedExit": 0,
+        "registryAfter": {
+          "schema": "identity_registry_v1",
+          "sequence": 3
+        },
+        "aliasAfterRestore": {
+          "exit": 1,
+          "state": null,
+          "error": "recipient_not_allowed"
+        }
+      }
+    },
+    {
+      "id": "Z1",
+      "title": "the installed application root is exactly as it was (as far as it is compared)",
+      "ok": true,
+      "ms": 58,
+      "data": {
+        "compared": [
+          "files",
+          "identityEntries",
+          "backupEntries",
+          "baselineBundleTree",
+          "clientFiles",
+          "directoryNames",
+          "outside",
+          "bundles",
+          "releases",
+          "processes"
+        ],
+        "hashedFiles": 10,
+        "identityEntriesCompared": 3,
+        "backupEntriesCompared": 1,
+        "baselineBundleEntries": 101,
+        "processesCompared": 2,
+        "identical": true,
+        "acceptedSendsPerPair": {
+          "desktop>alpha": 7,
+          "desktop>beta": 7,
+          "desktop>scratch-b": 3,
+          "grok>beta": 3,
+          "desktop>late": 1,
+          "desktop>hidden": 1,
+          "grok>late": 1
+        }
+      }
+    }
+  ],
+  "warnings": [],
+  "verdict": "pass",
+  "scratch": {
+    "root": "<scratch>",
+    "applicationRoot": "<scratch>/a"
+  },
+  "liveRoot": {
+    "identical": true,
+    "compared": [
+      "files",
+      "identityEntries",
+      "backupEntries",
+      "baselineBundleTree",
+      "clientFiles",
+      "directoryNames",
+      "outside",
+      "bundles",
+      "releases",
+      "processes"
+    ],
+    "differences": []
+  },
+  "finishedAt": "2026-11-13T05:53:55.681Z"
+}
