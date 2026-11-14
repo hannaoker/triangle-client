@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readIdentityRegistry, REGISTRY_FILE_NAME, SUPPORTED_REGISTRY_SCHEMAS } from "./identity-registry.mjs";
-import { ALIAS_PATTERN } from "./identity-primitives.mjs";
+import {
+  AGENT_ID_PATTERN,
+  ALIAS_PATTERN,
+  DESTINATION_HARNESSES,
+  isValidWorkspacePath,
+} from "./identity-primitives.mjs";
 
 // The registry schemas this process can read. The router reports them in `local_status`. They are re-exported here so the
 // router itself imports no registry code: the source-level isolation test (identity-registry.test.mjs) lets only approved
@@ -9,6 +14,7 @@ import { ALIAS_PATTERN } from "./identity-primitives.mjs";
 export { SUPPORTED_REGISTRY_SCHEMAS };
 
 const EMPTY_ARRAY = Object.freeze([]);
+const DESTINATION_HARNESS_SET = new Set(DESTINATION_HARNESSES);
 
 function deepFreeze(obj) {
   if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
@@ -60,6 +66,12 @@ function createAbsentSnapshot(readAt) {
     aliasesFor(_principalId) {
       return EMPTY_ARRAY;
     },
+    destinationFor(_principalId) {
+      return null;
+    },
+    destinations() {
+      return EMPTY_ARRAY;
+    },
   });
 }
 
@@ -82,6 +94,12 @@ function createUnreadableSnapshot(errorCode, readAt) {
     aliasesFor(_principalId) {
       return EMPTY_ARRAY;
     },
+    destinationFor(_principalId) {
+      return null;
+    },
+    destinations() {
+      return EMPTY_ARRAY;
+    },
   });
 }
 
@@ -90,9 +108,8 @@ function createOkSnapshot(registry, readAt) {
     typeof registry?.sequence === "number" && Number.isSafeInteger(registry.sequence) && registry.sequence >= 0
       ? registry.sequence
       : 0;
-  // The schema of the registry that was read (v1 or v2): the router reports it in `local_status`. Of a v2 file only the alias
-  // names reach a send (below, AD.1): pairings and destinations are not copied here, and serverless-peer bindings are skipped
-  // below (the resolver filters on `mesh-managed` again).
+  // The schema of the registry that was read (v1 or v2): the router reports it in `local_status`. Of a v2 file, aliases and
+  // destination rules reach routing (pairings are not copied here), and serverless-peer bindings are skipped below.
   const schema = typeof registry?.schema === "string" ? registry.schema : null;
 
   const byPrincipal = new Map();
@@ -150,6 +167,50 @@ function createOkSnapshot(registry, readAt) {
     for (const names of aliasNamesByPrincipal.values()) Object.freeze(names);
   }
 
+  // Destination rules (AD.5): owner-configured (harness, workspace) defaults. A stored rule is routable
+  // only for exactly one active mesh-managed binding of that principal. Revoked, serverless, unbound,
+  // or ambiguous principals are omitted here even when the registry still holds the rule so it can be
+  // cleared. `generation` is the destination_set sequence. `bindingGeneration` is the active binding's
+  // generation, which callers match when they stored one (chat mappings). Destination records themselves
+  // are principal-scoped and do not store a binding generation.
+  const destinationByPrincipal = new Map();
+  const destinationEntries = [];
+  const rawDestinations = registry?.destinations;
+  if (rawDestinations && typeof rawDestinations === "object") {
+    for (const principalId of Object.keys(rawDestinations).sort(compareCodeUnits)) {
+      const record = rawDestinations[principalId];
+      const active = byPrincipal.get(principalId);
+      const binding = active?.length === 1 ? active[0] : null;
+      if (
+        !record ||
+        typeof record !== "object" ||
+        !binding ||
+        !AGENT_ID_PATTERN.test(principalId) ||
+        !DESTINATION_HARNESS_SET.has(record.harness) ||
+        !isValidWorkspacePath(record.workspace) ||
+        !Number.isSafeInteger(record.generation) ||
+        record.generation < 1 ||
+        !Number.isSafeInteger(binding.binding_generation) ||
+        binding.binding_generation < 1 ||
+        typeof binding.authority_origin !== "string"
+      ) {
+        continue;
+      }
+      const entry = deepFreeze({
+        principalId,
+        harness: record.harness,
+        workspace: record.workspace,
+        setAt: typeof record.set_at === "string" ? record.set_at : null,
+        generation: record.generation,
+        bindingGeneration: binding.binding_generation,
+        authorityOrigin: binding.authority_origin,
+      });
+      destinationByPrincipal.set(principalId, entry);
+      destinationEntries.push(entry);
+    }
+  }
+  Object.freeze(destinationEntries);
+
   return deepFreeze({
     state: "ok",
     sequence,
@@ -167,6 +228,12 @@ function createOkSnapshot(registry, readAt) {
     },
     aliasesFor(principalId) {
       return aliasNamesByPrincipal.get(principalId) ?? EMPTY_ARRAY;
+    },
+    destinationFor(principalId) {
+      return destinationByPrincipal.get(principalId) ?? null;
+    },
+    destinations() {
+      return destinationEntries;
     },
   });
 }

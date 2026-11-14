@@ -89,6 +89,7 @@ test('packaged capability loader is reachable only through approved owner CLI br
   const allowed = new Set([
     path.join(packages, 'triangle-cli/src/owner-approval-package.mjs'),
     path.join(packages, 'triangle-cli/src/identity-revoke.mjs'),
+    path.join(packages, 'triangle-cli/src/identity-destination.mjs'),
   ]);
   const offenders = [];
   function walk(dir) {

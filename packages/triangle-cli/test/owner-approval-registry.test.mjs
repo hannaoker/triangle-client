@@ -88,7 +88,7 @@ test('the revoke transaction adapter is reachable only through the guarded owner
  function walk(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
   const file=path.join(dir,entry.name);
   if(entry.isDirectory())walk(file);
-  else if(entry.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-registry.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-revoke.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-registry'))offenders.push(file);
+  else if(entry.isFile()&&file.endsWith('.mjs')&&!file.endsWith('/owner-approval-registry.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-revoke.mjs')&&file!==path.join(packages,'triangle-cli/src/identity-destination.mjs')&&fs.readFileSync(file,'utf8').includes('owner-approval-registry'))offenders.push(file);
  }}
  for(const entry of fs.readdirSync(packages,{withFileTypes:true})){
   const src=path.join(packages,entry.name,'src');if(entry.isDirectory()&&fs.existsSync(src))walk(src);

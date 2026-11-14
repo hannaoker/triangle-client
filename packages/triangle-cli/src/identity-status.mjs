@@ -75,12 +75,14 @@ export async function identityStatus({
     };
   }
 
-  // The alias rows say whether each alias reaches a local recipient, which only the client configuration knows. It is read only when
-  // there are aliases to judge, so a registry without any needs no configuration (its human output is what it always was; a v2
-  // registry's JSON gains an empty `aliases` array).
+  // Alias and destination rows check whether entries overlap local recipients from the client configuration. Read it only when
+  // either collection is non-empty so a v2 registry with neither stays zero-config cleanly.
   let localRecipients = null;
   const aliases = registry?.state === "ok" ? registry.registry?.aliases : null;
-  if (aliases !== null && typeof aliases === "object" && Object.keys(aliases).length > 0) {
+  const destinations = registry?.state === "ok" ? registry.registry?.destinations : null;
+  const hasAliases = aliases !== null && typeof aliases === "object" && Object.keys(aliases).length > 0;
+  const hasDestinations = destinations !== null && typeof destinations === "object" && Object.keys(destinations).length > 0;
+  if (hasAliases || hasDestinations) {
     const configured = await (customReadLocalRecipients ?? readLocalRecipients)(clientRoot);
     localRecipients = configured?.ok ? configured.recipients : null;
   }

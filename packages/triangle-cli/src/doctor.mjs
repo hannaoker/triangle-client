@@ -95,6 +95,14 @@ export function renderDoctor(report) {
         lines.push(`  - ${a.state} · ${a.name} → ${reaches} · ${a.principalId ?? "-"}`);
       }
     }
+    // The owner-set destination rules of a v2 registry (only a v2 registry has the key)
+    if (Array.isArray(report.identity.destinations) && report.identity.destinations.length > 0) {
+      lines.push("  Destinations (owner-set chat routing rules):");
+      for (const dest of report.identity.destinations) {
+        const targetProfile = dest.profile ?? (Array.isArray(dest.profiles) && dest.profiles.length > 0 ? dest.profiles.join(", ") : "-");
+        lines.push(`  - ${dest.state} · ${dest.principalId} (${targetProfile}) → ${dest.harness} in ${dest.workspace}`);
+      }
+    }
     if (Array.isArray(report.identity.diagnostics)) {
       for (const d of report.identity.diagnostics) {
         const tag = d.severity === "fault" ? "[fault]" : "[warn]";
