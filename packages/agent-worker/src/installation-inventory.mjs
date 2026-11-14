@@ -40,7 +40,7 @@ export const DEFAULT_MAX_OPEN_TXN_AGE_MS = 15 * 60_000;
 const MAX_JOURNAL_FILES = 5000;
 // Persisted enums (Swift `RuntimeAdapter`, `DeliveryMode`, `EnrollmentJournalState`).
 const RUNTIME_ADAPTERS = new Set(["codex", "hermes", "antigravity", "grok-bot", "cursor-acp"]);
-const DELIVERY_MODES = new Set(["worker", "mcp-interactive", "event-driven", "grok-bot", "headless-app-server", "headless-cursor-acp"]);
+const DELIVERY_MODES = new Set(["worker", "mcp-interactive", "event-driven", "grok-bot", "headless-app-server", "headless-cursor-acp", "router"]);
 const REGISTRY_REQUIRED_KEYS = ["version", "instanceId", "profile", "runtimeAdapter", "enabled"];
 const REGISTRY_ALLOWED_KEYS = new Set([...REGISTRY_REQUIRED_KEYS, "deliveryMode"]);
 const BINDING_KEYS_REQUIRED = ["version", "keyFile"];
@@ -58,7 +58,7 @@ const PROFILE_BINDING_MAX_BYTES = 4096;
 const AGENT_RECORD_MAX_BYTES = 64 * 1024;
 const INSTALLATION_IDENTITY_MAX_BYTES = 512;
 const WORKER_MANIFEST_KEYS = ["version", "nodeSHA256", "projectRoot", "environment", "artifacts"];
-const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+const WORKER_MANIFEST_VERSIONS = new Set([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 const WORKER_CLI_ENV = { codex: "CODEX_CLI", hermes: "HERMES_CLI", antigravity: "ANTIGRAVITY_CLI" };
 const SECRETISH_KEY = /token|secret|password|private|bearer|credential|key$/i;
 
@@ -168,6 +168,7 @@ export function classifyLane({ runtimeAdapter, deliveryMode }) {
     return { lane: "event-driven", support: "unsupported", reason: "event_driven_runtime_adapter_unsupported" };
   }
   if (deliveryMode === "mcp-interactive") return { lane: "app-server", support: "supported", reason: null };
+  if (deliveryMode === "router") return { lane: "router", support: "supported", reason: null };
   if (deliveryMode === "grok-bot") {
     // Swift still prepares a grokBotWake bootstrap, but the Node supervisor
     // (runClientSupervisor) throws on any non-null grokBotWake: the Mini Bob

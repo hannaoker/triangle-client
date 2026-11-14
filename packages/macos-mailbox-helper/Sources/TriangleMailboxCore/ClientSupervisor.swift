@@ -301,6 +301,9 @@ public struct ClientSupervisor: Sendable {
             case .headlessCursorAcp:
                 // Recorded as omitted from worker/eventWake; may still feed cursorAcpWakes.
                 return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_headless_cursor_acp")
+            case .router:
+                // Destination/chat-mapping router profile: never polled or woken as a runner lane.
+                return .init(instanceID: instance.instanceID.value, reasonCode: "delivery_mode_router")
             case .eventDriven, .worker:
                 return nil
             }

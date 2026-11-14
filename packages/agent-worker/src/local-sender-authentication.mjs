@@ -41,8 +41,11 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
   });
   return Object.freeze({
     async prepareSend({ credential, senderId, recipientId, requestId, existingRoute = null }) {
-      // The switch controls new pins, not authentication of existing pinned retries.
-      if (!existingRoute && !(typeof enabled === "function" ? enabled() : enabled)) return null;
+      const pinningEnabled = typeof enabled === "function" ? enabled() : enabled;
+      // The switch controls new pins. Turning it off restores the previous send path:
+      // no authentication and no provenance. Existing pins still verify below.
+      // Runner recipients are not sessions and never get a synthesized generation.
+      if (!existingRoute && !pinningEnabled) return null;
       if (!SESSION.test(senderId) || !SESSION.test(recipientId)) return null;
       const remote = await authenticate(credential, senderId);
       const local = await sessionBroker.describeLocalSession(recipientId);

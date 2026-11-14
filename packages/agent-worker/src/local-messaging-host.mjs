@@ -10,7 +10,8 @@ import {createLocalMessagingSubsystem} from './local-messaging-supervisor-seam.m
 import {createPerSenderRateLimiter} from './local-messaging-rate-limiter.mjs';
 import {coded} from './local-messaging-errors.mjs';
 import {grokBindings,createGrokBroker} from './grok-local-session.mjs';
-import {describeReplyIdentity,describeChatBinding} from './local-messaging-server.mjs';
+import {describeReplyIdentity,describeChatBinding,loadRouterConfig} from './local-messaging-server.mjs';
+import {activeMeshBindingMatches,createRegistrySnapshotProvider} from './router-registry-snapshot.mjs';
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
@@ -165,9 +166,18 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     });
    }
    if(config.sessionMessaging?.enabled){
+    let bindingSnapshots=null;
+    const confirmChatBinding=(claim)=>{
+     const root=loadRouterConfig(config.stateRoot).registryRoot||path.resolve(config.stateRoot,'../../identity');
+     if(!bindingSnapshots||bindingSnapshots.root!==root){
+      bindingSnapshots={root,provider:createRegistrySnapshotProvider({root})};
+     }
+     return activeMeshBindingMatches(bindingSnapshots.provider.get(),claim);
+    };
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
      boundIntegrationPath:config.integrationPath,additionalPrincipals:grokIds,ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],
      codexSenderPrincipals:[integration.senderId,...recipientIds,...(interactiveIntegration?[interactiveIntegration.senderId]:[]),...grokIds],logger,
+     chatMappingStoreRoot:config.stateRoot,confirmChatBinding,
      issue:(sender,opts)=>subsystem.issueSessionCredential(sender,opts)});
     const legacy=interactiveBroker;
     interactiveBroker={

@@ -278,6 +278,36 @@ function withReadOnlyJournal(stateRoot, read) {
 
 const replyIdsFor = (db, messageId) => db.prepare("SELECT message_id FROM local_replies WHERE in_reply_to = ? ORDER BY message_id ASC").all(messageId).map((r) => r.message_id);
 
+const LIVE_ATTACHED_SQL = "SELECT s.id AS address, s.harness, s.workspace, s.generation, a.expires_at FROM local_session_attachments a JOIN local_discovered_sessions s ON s.id = a.id WHERE a.expires_at > ? AND s.lifecycle != 'ended'";
+
+// Read-only listing for owner CLI confirm. Does not take the owner lock, create
+// files, migrate, or run crash recovery. The journal is DELETE mode, so a host
+// that currently holds a write lock makes this fail with journal_busy instead of
+// opening a second writer.
+export function listLiveAttachedSessionsReadOnly({ stateRoot, now = Date.now() } = {}) {
+  if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
+    throw coded("invalid_params", "stateRoot is required");
+  }
+  const dbPath = path.join(stateRoot, DB_NAME);
+  if (lstatSync(dbPath, { throwIfNoEntry: false }) === undefined) return [];
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    db.exec("PRAGMA query_only = ON");
+    const ready = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_discovered_sessions'").get();
+    if (!ready) return [];
+    return db.prepare(LIVE_ATTACHED_SQL).all(now);
+  } catch (error) {
+    if (error?.code === "ERR_SQLITE_ERROR" && /locked|busy/i.test(error.message ?? "")) {
+      throw coded("journal_busy", "The local messaging journal is in use; chat-map confirm cannot list live chats until the host releases its write lock");
+    }
+    throw error;
+  } finally {
+    try { db?.close(); } catch { /* already closed or never opened */ }
+  }
+}
+
 export function listHeldRecords({ stateRoot } = {}) {
   const rows = withReadOnlyJournal(stateRoot, (db) => db.prepare(
     "SELECT * FROM local_messages WHERE phase IN ('held', 'executing') ORDER BY created_at ASC, message_id ASC",
@@ -744,6 +774,8 @@ export function createLocalMessagingJournal({
         checkAttachedIdentity(replyRoute.remote.address, replyRoute.remote.generation, now, options.replySenderBindingId);
         const pinned = replyRouteStore.pinInTransaction(replyRoute);
         db.prepare("UPDATE local_messages SET reply_route_key=?,sender_provenance_json=? WHERE message_id=?").run(pinned.key, options.senderProvenance ? JSON.stringify(options.senderProvenance) : null, messageId);
+      } else if (options.senderProvenance) {
+        db.prepare("UPDATE local_messages SET sender_provenance_json=? WHERE message_id=?").run(JSON.stringify(options.senderProvenance), messageId);
       }
 
       db.prepare(`
@@ -2214,6 +2246,10 @@ export function createLocalMessagingJournal({
   }
   async function getSessionAttachment(id){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments WHERE id=?').get(id)??null;}
   async function listSessionAttachments(){assertNotClosed();return db.prepare('SELECT * FROM local_session_attachments').all();}
+  async function listAllLiveAttachedSessions(now=Date.now()){
+    assertNotClosed();
+    return db.prepare("SELECT s.id AS address, s.harness, s.workspace, s.generation, a.expires_at FROM local_session_attachments a JOIN local_discovered_sessions s ON s.id = a.id WHERE a.expires_at > ? AND s.lifecycle != 'ended'").all(now);
+  }
   async function detachDiscoveredSession({id,childId}){assertNotClosed();db.prepare('UPDATE local_session_attachments SET expires_at=0 WHERE id=? AND child_id=?').run(id,childId);}
 
   // A session address exists only while its discovery row does. Once the row has aged out or been evicted nothing
@@ -2238,6 +2274,7 @@ export function createLocalMessagingJournal({
     attachDiscoveredSession,
     getSessionAttachment,
     listSessionAttachments,
+    listAllLiveAttachedSessions,
     getDiscoveredSession,
     detachDiscoveredSession,
     recordDiscoveryEvent,

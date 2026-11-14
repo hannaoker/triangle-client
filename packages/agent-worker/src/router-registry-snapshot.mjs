@@ -238,6 +238,28 @@ function createOkSnapshot(registry, readAt) {
   });
 }
 
+// True only when the snapshot has exactly one active mesh-managed binding for the
+// principal and its authority and binding generation match the stored claim.
+export function activeMeshBindingMatches(snapshot, { principalId, authorityOrigin, bindingGeneration } = {}) {
+  if (!snapshot || snapshot.state !== "ok" || typeof snapshot.bindingsFor !== "function") return false;
+  if (typeof principalId !== "string" || typeof authorityOrigin !== "string" ||
+      !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1) {
+    return false;
+  }
+  let bindings;
+  try {
+    bindings = snapshot.bindingsFor(principalId);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(bindings) || bindings.length !== 1) return false;
+  const binding = bindings[0];
+  return binding?.revoked_at === null &&
+    binding.trust_mode === "mesh-managed" &&
+    binding.authority_origin === authorityOrigin &&
+    binding.binding_generation === bindingGeneration;
+}
+
 export function createRegistrySnapshotProvider({
   root,
   readRegistry = readIdentityRegistry,

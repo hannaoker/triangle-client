@@ -145,6 +145,23 @@ private func validateSummary(for operation: [String: Any]) throws -> String {
         else { throw CocoaError(.fileReadCorruptFile) }
         return "chat.map.set: \(selectorId)\nStore: \(root)\nSequence: \(sequence)\nSelector: \(harness) chat in \(workspace)\nPrincipal: \(principal) at \(origin) (gen \(bindingGeneration))"
 
+    case "chat.map.confirm":
+        let confirmKeys: Set<String> = ["storeRoot", "expectedSequence", "selectorId", "sessionAddress", "before"]
+        guard Set(operation.keys) == baseKeys.union(confirmKeys),
+              let confirmRoot = operation["storeRoot"] as? String, isValidNormalizedPosixPath(confirmRoot, maxBytes: 4096),
+              let confirmSequence = exactInt(operation["expectedSequence"]), confirmSequence >= 1,
+              let confirmSelector = operation["selectorId"] as? String, matches(confirmSelector, "^sel_[a-f0-9]{32}$"),
+              let sessionAddress = operation["sessionAddress"] as? String, matches(sessionAddress, "^session-[a-f0-9]{64}$"),
+              let confirmBefore = operation["before"] as? [String: Any],
+              Set(confirmBefore.keys) == Set(["harness", "workspace", "principalId", "authorityOrigin", "bindingGeneration"]),
+              let confirmHarness = confirmBefore["harness"] as? String, ["claude", "codex"].contains(confirmHarness),
+              let confirmWorkspace = confirmBefore["workspace"] as? String, isValidNormalizedPosixPath(confirmWorkspace, maxBytes: 1024),
+              let confirmPrincipal = confirmBefore["principalId"] as? String, matches(confirmPrincipal, "^agent_[a-f0-9]{32}$"),
+              let confirmOrigin = confirmBefore["authorityOrigin"] as? String, isValidBareHttpsOrigin(confirmOrigin),
+              let confirmGeneration = exactInt(confirmBefore["bindingGeneration"]), confirmGeneration >= 1
+        else { throw CocoaError(.fileReadCorruptFile) }
+        return "chat.map.confirm: \(confirmSelector)\nStore: \(confirmRoot)\nSequence: \(confirmSequence)\nSelector: \(confirmHarness) chat in \(confirmWorkspace)\nPrincipal: \(confirmPrincipal) at \(confirmOrigin) (gen \(confirmGeneration))\nSession: \(sessionAddress)\nConfirm this chat mapping"
+
     case "chat.map.revoke":
         let extraKeys: Set<String> = ["storeRoot", "expectedSequence", "selectorId", "before"]
         guard Set(operation.keys) == baseKeys.union(extraKeys),

@@ -178,6 +178,7 @@ export function createUnifiedRouter({
   snapshotProvider = null,
   recipients = [],
   canMessage = null,
+  resolveDestinationPrincipal = null,
 } = {}) {
   const isEnabled = () => (typeof enabled === "function" ? Boolean(enabled()) : Boolean(enabled));
 
@@ -404,8 +405,41 @@ export function createUnifiedRouter({
       });
     }
 
-    // Handle resolution error
+    // Handle resolution error — check dynamic D4 chat-mapped destination for non-runner principals
     if (res.kind === "error") {
+      if (
+        AGENT_ID_PATTERN.test(to) &&
+        typeof snapshot?.destinationFor === "function" &&
+        typeof resolveDestinationPrincipal === "function"
+      ) {
+        const destination = snapshot.destinationFor(to);
+        if (destination) {
+          const destResult = await resolveDestinationPrincipal({ principalId: to, destination });
+          if (destResult?.ok === true && typeof destResult.sessionAddress === "string") {
+            counters.resolved.principal += 1;
+            return Object.freeze({
+              ok: true,
+              resolvedTo: destResult.sessionAddress,
+              to,
+              resolved: true,
+              via: "principal",
+              principal: to,
+              profile: null,
+              bindingId: null,
+              route: "local",
+              recipientType: "interactive",
+              destination,
+            });
+          }
+          const code = destResult?.reason ?? "destination_unavailable";
+          const reason = destResult?.message ?? "Destination chat mapping is unavailable";
+          recordError(code);
+          const err = new RouterResolutionError(code, reason, []);
+          if (throwOnError) throw err;
+          return Object.freeze({ ok: false, code, reason, candidates: [], error: err });
+        }
+      }
+
       let filteredCandidates = [];
 
       if (res.code === "recipient_ambiguous") {

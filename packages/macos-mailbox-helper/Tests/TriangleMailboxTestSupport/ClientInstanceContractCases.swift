@@ -20,6 +20,7 @@ public enum ClientInstanceContractCases {
         .init(name: "Triangle Client exact lifecycle", run: exactLifecycleAndCredentialPreservation),
         .init(name: "Triangle Client delivery mode round trip", run: deliveryModeRoundTrip),
         .init(name: "Triangle Client legacy records default delivery mode", run: legacyDeliveryModeDefault),
+        .init(name: "Triangle Client unknown delivery mode stays inert", run: unknownDeliveryModeStaysInert),
     ]
 
     public static func identityDerivation() throws {
@@ -317,10 +318,39 @@ public enum ClientInstanceContractCases {
             try expect(try store.read(profile: cursor).participatesInHeadlessWake == false, "cursor-acp adapter still joined Codex headless wake")
             try expect(try store.read(profile: cursor).participatesInCursorAcpWake == false, "mis-set deliveryMode still claimed Cursor ACP wake")
             try expect(try store.read(profile: cursor).participatesInWatchGrantNotify == false, "mis-set cursor-acp still joined watch grant notify")
+            try store.setDeliveryMode(.router, profile: profile)
+            let routerRead = try store.read(profile: profile)
+            try expect(routerRead.deliveryMode == .router, "router delivery mode did not round trip")
+            try expect(routerRead.participatesInWorkerPolling == false, "router profile participated in worker polling")
+            try expect(routerRead.participatesInEventDrivenWake == false, "router profile participated in event-driven wake")
+            try expect(routerRead.participatesInAppServerWake == false, "router profile participated in App Server wake")
+            try expect(routerRead.participatesInGrokBotWake == false, "router profile participated in Grok Bot wake")
+            try expect(routerRead.participatesInHeadlessWake == false, "router profile participated in headless wake")
+            try expect(routerRead.participatesInCursorAcpWake == false, "router profile participated in Cursor ACP wake")
+            try expect(routerRead.participatesInWatchGrantNotify == false, "router profile participated in watch grant notify")
             try store.setDeliveryMode(.worker, profile: profile)
             try expect(try store.read(profile: profile).participatesInWorkerPolling, "worker delivery mode did not restore polling participation")
             try expect(try store.read(profile: profile).participatesInEventDrivenWake == false, "worker profile incorrectly claims wake ownership")
             try expect(try store.read(profile: profile).participatesInGrokBotWake == false, "worker profile incorrectly claims Grok Bot wake")
+        }
+    }
+
+    public static func unknownDeliveryModeStaysInert() throws {
+        try withStore { store, root in
+            let profile = try ProfileName("future")
+            let instance = try ClientInstance(profile: profile, runtimeAdapter: .hermes)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let record = root.appendingPathComponent(instance.instanceID.value + ".json")
+            let future = """
+            {"version":1,"instanceId":"\(instance.instanceID.value)","profile":"future","runtimeAdapter":"hermes","enabled":true,"deliveryMode":"not-yet-shipped"}
+            """
+            try Data(future.utf8).write(to: record)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+            let read = try store.read(profile: profile)
+            try expect(read.deliveryMode == .router, "unknown delivery mode was not kept inert")
+            try expect(read.participatesInWorkerPolling == false, "unknown delivery mode polled as a worker")
+            try expect(read.participatesInEventDrivenWake == false, "unknown delivery mode claimed event wake")
+            try expect(read.participatesInWatchGrantNotify == false, "unknown delivery mode joined watch grants")
         }
     }
 

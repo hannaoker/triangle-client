@@ -94,6 +94,11 @@ export const USAGE = `Usage: triangle <command> [options]
   identity destination clear TARGET --client-root DIR [--registry-root DIR] [--confirm PLAN_ID]
                               Plan or apply a default (harness, workspace) destination rule for a local MESH-managed principal.
                               Create-only (clear first to change). Apply needs a local owner terminal and OS authentication.
+  identity chat-map set --principal AGENT_ID --harness claude|codex --workspace DIR --client-root DIR [--registry-root DIR] [--store-root DIR] [--confirm PLAN_ID]
+  identity chat-map confirm (--selector SEL_ID | --harness claude|codex --workspace DIR) --client-root DIR [--store-root DIR] [--confirm PLAN_ID]
+  identity chat-map revoke (--selector SEL_ID | --harness claude|codex --workspace DIR) --client-root DIR [--store-root DIR] [--confirm PLAN_ID]
+                              Plan, confirm (local owner TTY when 1 live chat matches), or revoke a local chat selector mapping.
+                              Create-only (revoke first to change). Set/revoke require OS authentication.
   status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
                               What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
@@ -582,7 +587,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
             return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
           }
         }
-        if (sub === "alias" || sub === "destination") {
+        if (sub === "alias" || sub === "destination" || sub === "chat-map") {
           const resolveIdentityRoots = (cmdLabel) => {
             const clientRoot = flags["client-root"];
             if (!clientRoot) throw new UsageError(`${cmdLabel} requires --client-root ABSOLUTE_PATH`);
@@ -642,6 +647,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               return code === "plan_stale" || code === "confirmation_mismatch" ? 2 : 1;
             }
           }
+          if (sub === "destination") {
           const [action, target, ...extra] = rest;
           if (action !== "set" && action !== "clear") throw new UsageError("identity destination needs set or clear");
           if (target === undefined || extra.length > 0) {
@@ -716,6 +722,113 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
             return ["plan_stale", "confirmation_mismatch", "invalid_owner_operation"].includes(code) ? 2 : 1;
           } finally {
             if (cancellation) { process.removeListener("SIGINT", interruptInt); process.removeListener("SIGTERM", interruptTerm); }
+          }
+          }
+          if (sub === "chat-map") {
+            const [action, ...extra] = rest;
+            if (!["set", "confirm", "revoke"].includes(action)) {
+              throw new UsageError("identity chat-map needs set, confirm, or revoke");
+            }
+            if (extra.length > 0) throw new UsageError(`identity chat-map ${action} takes no positional arguments`);
+            allowOnly(
+              flags,
+              action === "set"
+                ? ["principal", "harness", "workspace", "client-root", "registry-root", "store-root", "confirm"]
+                : ["selector", "harness", "workspace", "client-root", "store-root", "confirm"]
+            );
+            if (action === "set") {
+              if (typeof flags.principal !== "string" || !flags.principal) throw new UsageError("identity chat-map set requires --principal AGENT_ID");
+              if (typeof flags.harness !== "string" || !flags.harness) throw new UsageError("identity chat-map set requires --harness claude|codex");
+              if (typeof flags.workspace !== "string" || !flags.workspace) throw new UsageError("identity chat-map set requires --workspace DIR");
+            } else if (!flags.selector && (!flags.harness || !flags.workspace)) {
+              throw new UsageError(`identity chat-map ${action} requires --selector SEL_ID or --harness and --workspace`);
+            }
+            const { clientRoot, normRegistry } = resolveIdentityRoots("identity chat-map");
+            const storeRoot = flags["store-root"] ?? path.join(clientRoot, "client/local");
+            if (typeof storeRoot !== "string" || !isAbsolute(storeRoot)) throw new UsageError("--store-root must be an absolute path");
+            if (flags.confirm !== undefined) {
+              if (typeof flags.confirm !== "string" || !/^[a-f0-9]{64}$/.test(flags.confirm)) {
+                throw new UsageError("--confirm must be 64 lowercase hex characters");
+              }
+              const terminal = ownerTerminal(identityDependencies, io);
+              if (!terminal || env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY) {
+                io.stderr(`identity chat-map ${action} --confirm requires a local owner terminal; SSH/headless application is unavailable`);
+                return 2;
+              }
+            }
+            let chatMapModule;
+            try { chatMapModule = await import("./identity-chat-map.mjs"); }
+            catch {
+              const message = "Chat mapping management is unavailable because this CLI package is incomplete.";
+              io.stderr(flags.json ? JSON.stringify({ error: "owner_approval_unavailable", message }) : message);
+              return 1;
+            }
+            const needsOsAuth = flags.confirm !== undefined;
+            const cancellation = needsOsAuth && typeof AbortController === "function" ? new AbortController() : null;
+            let interrupted = null;
+            const onSignal = (sig) => { interrupted = sig; cancellation?.abort(); };
+            if (cancellation) { process.on("SIGINT", onSignal); process.on("SIGTERM", onSignal); }
+            try {
+              const onOperation = async (desc) => {
+                if (!flags.json) io.stdout(desc);
+              };
+              let out;
+              if (action === "set") {
+                out = await chatMapModule.identityChatMapSet({
+                  storeRoot,
+                  registryRoot: normRegistry,
+                  principal: flags.principal,
+                  harness: flags.harness,
+                  workspace: flags.workspace,
+                  confirm: flags.confirm ?? null,
+                  provider: identityDependencies.chatMapProvider,
+                  releaseRoot: identityDependencies.releaseRoot,
+                  now: identityDependencies.now,
+                  signal: cancellation?.signal,
+                  onOperation,
+                });
+              } else if (action === "confirm") {
+                out = await chatMapModule.identityChatMapConfirm({
+                  storeRoot,
+                  selectorId: flags.selector ?? null,
+                  harness: flags.harness ?? null,
+                  workspace: flags.workspace ?? null,
+                  attachedSessions: identityDependencies.attachedSessions ?? null,
+                  confirm: flags.confirm ?? null,
+                  provider: identityDependencies.chatMapProvider,
+                  releaseRoot: identityDependencies.releaseRoot,
+                  now: identityDependencies.now,
+                  signal: cancellation?.signal,
+                  onOperation,
+                });
+              } else {
+                out = await chatMapModule.identityChatMapRevoke({
+                  storeRoot,
+                  selectorId: flags.selector ?? null,
+                  harness: flags.harness ?? null,
+                  workspace: flags.workspace ?? null,
+                  confirm: flags.confirm ?? null,
+                  provider: identityDependencies.chatMapProvider,
+                  releaseRoot: identityDependencies.releaseRoot,
+                  now: identityDependencies.now,
+                  signal: cancellation?.signal,
+                  onOperation,
+                });
+              }
+              io.stdout(flags.json
+                ? JSON.stringify(out)
+                : (flags.confirm !== undefined ? chatMapModule.renderChatMapResult(out) : chatMapModule.renderChatMapPlan(out)));
+              return 0;
+            } catch (err) {
+              if (err instanceof LocalStateError) throw err;
+              const code = typeof err?.code === "string" ? err.code : "identity_chat_map_failed";
+              const text = typeof err?.message === "string" ? err.message : "The command did not complete.";
+              io.stderr(flags.json ? JSON.stringify({ error: code, message: text }) : `${printable(text)} (${printable(code)})`);
+              if (interrupted) return interrupted === "SIGINT" ? 130 : 143;
+              return ["plan_stale", "confirmation_mismatch", "invalid_owner_operation"].includes(code) ? 2 : 1;
+            } finally {
+              if (cancellation) { process.removeListener("SIGINT", onSignal); process.removeListener("SIGTERM", onSignal); }
+            }
           }
         }
         throw new UsageError(`unknown identity command ${sub ?? ""}`);
