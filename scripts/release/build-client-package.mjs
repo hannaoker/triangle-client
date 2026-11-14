@@ -66,8 +66,8 @@ function main() {
   if (process.platform !== "darwin")
     throw Error("Only macOS packages are supported");
   if (!options.output) throw Error("--output is required");
-  if (options["owner-approval"] !== undefined && !["candidate", "revoke"].includes(options["owner-approval"]))
-    throw Error("--owner-approval accepts only candidate or revoke");
+  if (options["owner-approval"] !== undefined && !["candidate", "revoke", "identity"].includes(options["owner-approval"]))
+    throw Error("--owner-approval accepts only candidate, revoke, or identity");
   const scratch = mkdtempSync(join(tmpdir(), "triangle-package-build-"));
   const digest = (data) => createHash("sha256").update(data).digest("hex");
   try {
@@ -304,7 +304,10 @@ function main() {
       ...(ownerApprovalCandidate ? (options["owner-approval"] === "candidate"
         ? { ownerApprovalCandidate }
         : { ownerApproval: { version: 1, binary: ownerApprovalCandidate.binary,
-            commands: ["identity.revoke"], sourceSHA256: ownerApprovalCandidate.sourceSHA256,
+            commands: options["owner-approval"] === "identity"
+              ? ["identity.revoke", "identity.destination", "identity.chat-map"]
+              : ["identity.revoke"],
+            sourceSHA256: ownerApprovalCandidate.sourceSHA256,
             minimumMacOS: ownerApprovalCandidate.minimumMacOS } }) : {}),
       files: paths.map((path) => ({
         path,

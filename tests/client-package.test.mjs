@@ -487,7 +487,7 @@ test("owner approval packaging refuses an activation value", () => {
     const output = join(dir, "output");
     const result = run(["scripts/release/build-client-package.mjs", "--version", "0.1.0-test", "--output", output, "--owner-approval", "enabled"]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /accepts only candidate or revoke/);
+    assert.match(result.stderr, /accepts only candidate, revoke, or identity/);
     assert.equal(existsSync(output), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -546,6 +546,40 @@ test("revoke-enabled package declares only the explicit owner command; installed
     rewrite({ testOnly: false, ownerApprovalCandidate: { activation: "disabled" } });
     assert.equal(await decide(), "unavailable", "a candidate marker beside the policy refuses");
   } finally { rmSync(f.dir,{recursive:true,force:true}); }
+});
+
+test("identity-enabled package authorizes revoke, destination, and chat-map owner approval", async () => {
+  const f = fixture({ ownerApproval: "identity" });
+  try {
+    const installed = f.install();
+    assert.equal(installed.status, 0, installed.stderr);
+    const home = join(f.dir, "home"), app = join(home, "Library/Application Support/The Triangle");
+    const receipt = JSON.parse(readFileSync(join(app, "package-install.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(receipt.release, "package-manifest.json"), "utf8"));
+    assert.deepEqual(manifest.ownerApproval.commands, ["identity.revoke", "identity.destination", "identity.chat-map"]);
+    assert.equal(manifest.ownerApprovalCandidate, undefined);
+    const installed_ = name => import(pathToFileURL(join(receipt.release, "packages/triangle-cli/src", name)).href);
+    const { loadPackagedRevokeProvider, planIdentityRevoke } = await installed_("identity-revoke.mjs");
+    const { loadPackagedOwnerApprovalProvider } = await installed_("owner-approval-package.mjs");
+    const { describeOwnerOperation } = await installed_("owner-approval.mjs");
+    const { canonicalJson } = await installed_("canonical.mjs");
+    const helper = join(receipt.release, manifest.ownerApproval.binary), manifestFile = join(receipt.release, "package-manifest.json");
+    writeFileSync(helper, STAND_IN_APPROVER);
+    const standInHash = createHash("sha256").update(STAND_IN_APPROVER).digest("hex");
+    writeFileSync(manifestFile, JSON.stringify({
+      ...manifest,
+      testOnly: false,
+      files: manifest.files.map(entry => entry.path === manifest.ownerApproval.binary ? { ...entry, sha256: standInHash } : entry),
+    }));
+    const registry = join(app, "identity"); initIdentityRegistry(registry); bindProfileInRegistry(registry, "alpha", 1);
+    const request = { schema: "owner_operation_v1", ...planIdentityRevoke({ registryRoot: registry, profile: "alpha" }).operation,
+      nonce: "9".repeat(64), issuedAt: Math.floor(performance.now()), deadline: Math.floor(performance.now()) + 60000 };
+    const challenge = { request, digest: createHash("sha256").update(canonicalJson(request)).digest("hex"), summary: describeOwnerOperation(request) };
+    assert.equal(await loadPackagedRevokeProvider().authenticate(challenge), "approved");
+    for (const command of ["identity.destination", "identity.chat-map"]) {
+      assert.equal(await loadPackagedOwnerApprovalProvider({ command }).authenticate(challenge, { signal: AbortSignal.abort() }), "cancelled");
+    }
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
 test("the installed CLI plans a registry upgrade read-only, fails closed with no supervisor to ask, and is ready once one answers", () => {

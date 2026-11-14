@@ -3,11 +3,15 @@
 // This is a leaf module: it imports only node: built-ins, so the supervisor can load the
 // identity registry without also loading the installation and identity inventories.
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 export const AGENT_ID_PATTERN = /^agent_[a-f0-9]{32}$/;
 export const PEER_ID_PATTERN = /^peer_[a-f0-9]{32}$/;
 export const INSTANCE_ID_PATTERN = /^[a-f0-9]{64}$/;
 export const SESSION_ID_PATTERN = /^session-[a-f0-9]{64}$/;
+export const SELECTOR_ID_PATTERN = /^sel_[a-f0-9]{32}$/;
+export const MAX_WORKSPACE_BYTES = 1024;
+export const DESTINATION_HARNESSES = Object.freeze(["claude", "codex"]);
 
 // Alias names (docs/plans/2026-11-10-identity-aliases-and-destination-rules-plan.md, 3.1 and 3.6). The shape is the registry's
 // closed pattern: at most 32 characters of [a-z0-9._-]. That is shorter than any id the host mints, so no instance id, session
@@ -90,4 +94,19 @@ export function isValidBareHttpsOrigin(value) {
     && !value.includes("?")
     && !value.includes("#")
     && url.origin === value;
+}
+
+/**
+ * Validates normalized POSIX workspace syntax (UTF-8 <= 1024 bytes, no control/format
+ * chars or backslashes, no trailing slash except "/"). Does not hit the filesystem.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidWorkspacePath(value) {
+  if (typeof value !== "string" || value.length === 0 || !value.isWellFormed()) return false;
+  if (Buffer.byteLength(value, "utf8") > MAX_WORKSPACE_BYTES) return false;
+  if (/[\p{Cc}\p{Cf}\\]/u.test(value)) return false;
+  if (!path.posix.isAbsolute(value) || path.posix.normalize(value) !== value) return false;
+  return value === "/" || !value.endsWith("/");
 }

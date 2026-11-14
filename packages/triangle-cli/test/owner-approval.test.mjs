@@ -184,3 +184,70 @@ for(const field of ['profileId','principalId','bindingId'])test(`trailing newlin
  if(field==='profileId')op.profileId+='\n';else op.before[field]+='\n';
  assert.throws(()=>f.coord.prepare(op),{code:'invalid_owner_operation'});assert.equal(f.calls,0);
 });
+
+test('destination.set and destination.clear normalize, summarize, and verify before=null vs prior rule',async t=>{
+ const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'owner-dest-')));
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const workspace=path.join(root,'work');fs.mkdirSync(workspace,{mode:0o700});
+ const setOp={action:'destination.set',registryRoot:root,expectedSequence:4,principalId:'agent_'+'c'.repeat(32),harness:'claude',workspace,before:null};
+ const staleState={sequence:4,before:{harness:'codex',workspace,generation:2},commit(){throw Error('must not commit');}};
+ const badCoord=createOwnerApprovalCoordinator({clockMs:()=>1000,provider:{authenticate:async()=> 'approved'},
+  withLockedRegistry(_r,fn){return fn(staleState);}});
+ await assert.rejects(badCoord.execute(badCoord.prepare(setOp)),{code:'owner_approval_stale'});
+ let committed=null,seenChallenge=null;
+ const setCoord=createOwnerApprovalCoordinator({clockMs:()=>1000,
+  provider:{authenticate:async ch=>{seenChallenge=ch;return 'approved';}},
+  withLockedRegistry(rootArg,fn){assert.equal(rootArg,root);return fn({sequence:4,before:null,commit(op){committed=op;return {ok:true};}});}});
+ assert.deepEqual(await setCoord.execute(setCoord.prepare(setOp)),{ok:true});
+ assert.deepEqual(committed,setOp);
+ assert.ok(seenChallenge.summary.includes(`Target: claude chat in ${workspace}`));
+
+ // Deleted workspace can still be cleared safely with valid POSIX path syntax.
+ fs.rmSync(workspace,{recursive:true,force:true});
+ const clearOp={action:'destination.clear',registryRoot:root,expectedSequence:5,principalId:'agent_'+'c'.repeat(32),before:{harness:'claude',workspace,generation:5}};
+ const clearCoord=createOwnerApprovalCoordinator({clockMs:()=>1000,
+  provider:{authenticate:async ch=>{seenChallenge=ch;return 'approved';}},
+  withLockedRegistry(_r,fn){return fn({sequence:5,before:clearOp.before,commit(op){return op.action;}});}});
+ assert.equal(await clearCoord.execute(clearCoord.prepare(clearOp)),'destination.clear');
+ assert.ok(seenChallenge.summary.includes(`Clear: claude chat in ${workspace} (gen 5)`));
+});
+
+test('chat.map.set and chat.map.revoke work through withLockedStore and reject symlink workspaces or invalid fields',async t=>{
+ const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'owner-chat-map-')));
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const realWs=path.join(root,'real-ws');fs.mkdirSync(realWs,{mode:0o700});
+ const linkWs=path.join(root,'link-ws');fs.symlinkSync(realWs,linkWs);
+ const baseSet={action:'chat.map.set',storeRoot:root,expectedSequence:0,selectorId:'sel_'+'e'.repeat(32),
+  harness:'codex',workspace:realWs,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:2,before:null};
+ const seenChallenges=[];
+ const storeCoord=createOwnerApprovalCoordinator({clockMs:()=>1000,
+  provider:{authenticate:async ch=>{seenChallenges.push(ch);return 'approved';}},
+  withLockedStore(rootArg,fn){
+   assert.equal(rootArg,root);
+   return fn({sequence:seenChallenges.length===1?0:1,before:seenChallenges.length===1?null:{
+    harness:'codex',workspace:realWs,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:2,
+   },commit(op){return op.action;}});
+  }});
+ assert.equal(await storeCoord.execute(storeCoord.prepare(baseSet)),'chat.map.set');
+ assert.ok(seenChallenges[0].summary.includes(`Store: ${root}`)&&seenChallenges[0].summary.includes('Selector: codex chat in'));
+ fs.rmSync(realWs,{recursive:true,force:true});
+ const revokeOp={action:'chat.map.revoke',storeRoot:root,expectedSequence:1,selectorId:baseSet.selectorId,before:{
+  harness:'codex',workspace:realWs,principalId:baseSet.principalId,authorityOrigin:baseSet.authorityOrigin,bindingGeneration:2,
+ }};
+ assert.equal(await storeCoord.execute(storeCoord.prepare(revokeOp)),'chat.map.revoke');
+ assert.ok(seenChallenges[1].summary.includes('Revoke this chat mapping'));
+
+ for(const bad of [
+  {...baseSet,workspace:linkWs},
+  {...baseSet,expectedSequence:-1},
+  {...baseSet,selectorId:'agent_'+'e'.repeat(32)},
+  {...baseSet,harness:'cursor'},
+  {...baseSet,before:{}},
+  {...baseSet,workspace:`${root}/`},
+  {...baseSet,workspace:'/tmp/../etc'},
+  {...baseSet,bindingGeneration:0},
+  {...revokeOp,expectedSequence:0},
+ ]){
+  assert.throws(()=>storeCoord.prepare(bad),{code:'invalid_owner_operation'});
+ }
+});

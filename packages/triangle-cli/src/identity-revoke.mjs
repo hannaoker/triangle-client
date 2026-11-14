@@ -1,31 +1,17 @@
 // Owner-only CLI bridge. It never reads workload credentials or sends network requests.
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { canonicalJson } from './canonical.mjs';
 import { readIdentityRegistry } from '../../agent-worker/src/identity-registry.mjs';
 import { deriveClientInstanceId, isValidProfileName } from '../../agent-worker/src/identity-primitives.mjs';
-import { createOwnerApprovalCoordinator, normalizeOwnerOperation, describeOwnerOperation, createUnavailableOwnerApprovalProvider } from './owner-approval.mjs';
+import { createOwnerApprovalCoordinator, normalizeOwnerOperation, describeOwnerOperation } from './owner-approval.mjs';
+import { loadPackagedOwnerApprovalProvider } from './owner-approval-package.mjs';
 import { createRegistryRevokeAdapter } from './owner-approval-registry.mjs';
-import { createMacOSOwnerApprovalProvider } from './owner-approval-macos.mjs';
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
-const releaseDefault=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..');
-export function loadPackagedRevokeProvider({releaseRoot=releaseDefault,platform=process.platform}={}) {
-  const unavailable=()=>createUnavailableOwnerApprovalProvider();
-  try {
-    if(platform!=='darwin'||realpathSync(releaseRoot)!==releaseRoot)return unavailable();
-    const dir=lstatSync(releaseRoot),file=path.join(releaseRoot,'package-manifest.json'),stat=lstatSync(file);
-    if(!dir.isDirectory()||dir.uid!==process.getuid()||(dir.mode&0o077)!==0||!stat.isFile()||stat.nlink!==1||stat.uid!==process.getuid()||(stat.mode&0o777)!==0o600||stat.size>1024*1024)return unavailable();
-    const manifest=JSON.parse(readFileSync(file,'utf8')),policy=manifest.ownerApproval;
-    if(manifest.schema!==1||manifest.platform!=='darwin'||manifest.arch!==process.arch||manifest.testOnly!==false||manifest.ownerApprovalCandidate!==undefined||manifest.signingMode!=='public_ad_hoc'||manifest.credentialCustody!=='file'||
-       !policy||policy.version!==1||policy.binary!=='bin/triangle-owner-approval'||
-       canonicalJson(policy.commands)!==canonicalJson(['identity.revoke']))return unavailable();
-    const entries=manifest.files?.filter(entry=>entry.path===policy.binary);
-    if(entries?.length!==1||entries[0].mode!==0o700||typeof entries[0].sha256!=='string'||!/^[a-f0-9]{64}$/.test(entries[0].sha256)||entries[0].sha256.length!==64)return unavailable();
-    return createMacOSOwnerApprovalProvider({executable:path.join(releaseRoot,policy.binary),sha256:entries[0].sha256,platform});
-  }catch{return unavailable();}
+
+export function loadPackagedRevokeProvider({ releaseRoot, platform = process.platform } = {}) {
+  return loadPackagedOwnerApprovalProvider({ command: 'identity.revoke', releaseRoot, platform });
 }
 
 export function planIdentityRevoke({registryRoot,profile}) {

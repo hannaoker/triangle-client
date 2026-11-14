@@ -45,11 +45,13 @@ import { ancestors, privateDir, privateFile } from "./delivery-private-path.mjs"
 import {
   AGENT_ID_PATTERN,
   ALIAS_PATTERN,
+  DESTINATION_HARNESSES as DESTINATION_HARNESS_LIST,
   deriveClientInstanceId,
   INSTANCE_ID_PATTERN,
   isReservedAliasName,
   isValidBareHttpsOrigin,
   isValidProfileName,
+  isValidWorkspacePath,
   PEER_ID_PATTERN,
   SESSION_ID_PATTERN,
 } from "./identity-primitives.mjs";
@@ -158,8 +160,7 @@ const RESERVED_AUDIT_ACTIONS = new Set(
 );
 
 const PAIRING_ID_PATTERN = /^pair_[a-f0-9]{32}$/;
-const DESTINATION_HARNESSES = new Set(["claude", "codex"]);
-const MAX_WORKSPACE_BYTES = 1024;
+const DESTINATION_HARNESSES = new Set(DESTINATION_HARNESS_LIST);
 const MAX_REMOTE_ENDPOINTS = 8;
 
 const REGISTRY_TOP_KEYS_V2 = new Set([...REGISTRY_TOP_KEYS, "pairings", "aliases", "destinations"]);
@@ -600,14 +601,6 @@ function isCanonicalBase64Url(value, byteLength) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
   return decoded.length === byteLength && decoded.toString("base64url") === value;
-}
-
-function isValidWorkspacePath(value) {
-  if (typeof value !== "string" || value.length === 0 || !value.isWellFormed()) return false;
-  if (Buffer.byteLength(value, "utf8") > MAX_WORKSPACE_BYTES) return false;
-  if (/[\p{Cc}\p{Cf}\\]/u.test(value)) return false;
-  if (!path.posix.isAbsolute(value) || path.posix.normalize(value) !== value) return false;
-  return value === "/" || !value.endsWith("/");
 }
 
 function isPrincipalId(value) {
