@@ -39,6 +39,8 @@ test("v2 destination rules reach snapshot sorted by principalId with safe protot
       workspace: "/workspaces/g",
       setAt: T3,
       generation: snapshot.destinationFor(GRAVITY).generation,
+      bindingGeneration: 1,
+      authorityOrigin: "https://mesh.example.test",
     });
     assert.deepEqual(snapshot.destinationFor(GHOST).harness, "codex");
     assert.equal(snapshot.destinationFor(`agent_${"9".repeat(32)}`), null);
@@ -94,7 +96,9 @@ test("snapshot excludes non-agent keys even on malformed inputs and reacts immed
     }),
   }).get();
   assert.equal(snap.destinationFor(peer.principal_id), null);
-  assert.deepEqual(snap.destinations().map((d) => d.principalId), [GRAVITY]);
+  // A well-shaped agent rule with no active mesh binding is not routable.
+  assert.equal(snap.destinationFor(GRAVITY), null);
+  assert.deepEqual(snap.destinations(), []);
 
   withRoot((root) => {
     const provider = createRegistrySnapshotProvider({ root, ttlMs: 60_000 });

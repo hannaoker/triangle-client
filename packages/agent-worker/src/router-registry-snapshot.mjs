@@ -167,21 +167,32 @@ function createOkSnapshot(registry, readAt) {
     for (const names of aliasNamesByPrincipal.values()) Object.freeze(names);
   }
 
-  // Destination rules (AD.5): owner-configured (harness, workspace) defaults keyed by active MESH principal (agent_* only; peer_ deferred).
+  // Destination rules (AD.5): owner-configured (harness, workspace) defaults. A stored rule is routable
+  // only for exactly one active mesh-managed binding of that principal. Revoked, serverless, unbound,
+  // or ambiguous principals are omitted here even when the registry still holds the rule so it can be
+  // cleared. `generation` is the destination_set sequence. `bindingGeneration` is the active binding's
+  // generation, which callers match when they stored one (chat mappings). Destination records themselves
+  // are principal-scoped and do not store a binding generation.
   const destinationByPrincipal = new Map();
   const destinationEntries = [];
   const rawDestinations = registry?.destinations;
   if (rawDestinations && typeof rawDestinations === "object") {
     for (const principalId of Object.keys(rawDestinations).sort(compareCodeUnits)) {
       const record = rawDestinations[principalId];
+      const active = byPrincipal.get(principalId);
+      const binding = active?.length === 1 ? active[0] : null;
       if (
         !record ||
         typeof record !== "object" ||
+        !binding ||
         !AGENT_ID_PATTERN.test(principalId) ||
         !DESTINATION_HARNESS_SET.has(record.harness) ||
         !isValidWorkspacePath(record.workspace) ||
         !Number.isSafeInteger(record.generation) ||
-        record.generation < 1
+        record.generation < 1 ||
+        !Number.isSafeInteger(binding.binding_generation) ||
+        binding.binding_generation < 1 ||
+        typeof binding.authority_origin !== "string"
       ) {
         continue;
       }
@@ -191,6 +202,8 @@ function createOkSnapshot(registry, readAt) {
         workspace: record.workspace,
         setAt: typeof record.set_at === "string" ? record.set_at : null,
         generation: record.generation,
+        bindingGeneration: binding.binding_generation,
+        authorityOrigin: binding.authority_origin,
       });
       destinationByPrincipal.set(principalId, entry);
       destinationEntries.push(entry);

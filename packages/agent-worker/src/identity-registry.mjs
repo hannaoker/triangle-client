@@ -1154,7 +1154,11 @@ function validateIdentityRegistryV2(value) {
     cleanAliases[k] = clean;
   }
 
-  // Destination rules: keyed by a principal bound in this registry (the receiving identity), one rule each.
+  // Destination rules: keyed by a principal that has a binding in this registry, one rule each.
+  // A revoked principal may still have a stored rule. Validation keeps that rule so `revoke` stays a
+  // bindings-only audit and the owner can `destination_clear` it; rejecting it here would make the
+  // whole registry unreadable after revoke. Routing does not use a stored rule unless the snapshot
+  // finds exactly one active mesh-managed binding (see router-registry-snapshot destinationFor).
   if (!isPlainObject(value.destinations)) {
     throw codedError("invalid_registry", "destinations_not_object");
   }

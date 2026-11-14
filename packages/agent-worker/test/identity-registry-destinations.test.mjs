@@ -12,6 +12,7 @@ import {
   setIdentityDestination,
   updateIdentityRegistry,
 } from "../src/identity-registry.mjs";
+import { createRegistrySnapshotProvider } from "../src/router-registry-snapshot.mjs";
 import {
   agentBindingV1,
   appendAndCommit,
@@ -183,10 +184,18 @@ test("destination_set enforces active mesh-managed targets; destination_clear re
     });
     // Set destination for GHOST while active, then revoke GHOST.
     setDest(root, GHOST, "claude", "/workspaces/ghost");
+    const live = createRegistrySnapshotProvider({ root }).get();
+    assert.equal(live.destinationFor(GHOST).harness, "claude");
+    assert.equal(live.destinationFor(GHOST).bindingGeneration, 1);
     rawWrite(root, "revoke", GHOST_ID, (r) => { r.bindings[GHOST_ID].revoked_at = T2; return r; }, { now: T2 });
     const filesBefore = snapshotFiles(root);
+    // The stored rule remains so it can be cleared, but routing must not use it.
+    const dangling = createRegistrySnapshotProvider({ root }).get();
+    assert.equal(readIdentityRegistry({ root }).registry.destinations[GHOST].harness, "claude");
+    assert.equal(dangling.destinationFor(GHOST), null);
+    assert.equal(dangling.destinations().some((row) => row.principalId === GHOST), false);
 
-    // Clear on missing rule fails; clear on now-revoked (dangling) GHOST succeeds.
+    // Clear on missing rule fails; clear on the stored (no longer routable) GHOST rule succeeds.
     expectError(() => clearDest(root, GRAVITY), "invalid_registry", "destination_not_found");
     expectError(() => setDest(root, GHOST, "claude", "/workspaces/ghost"), "destination_conflict", "destination_exists");
     expectError(() => setDest(root, peer.principal_id, "codex", "/w"), "invalid_registry", "destination_target_not_mesh_managed");
