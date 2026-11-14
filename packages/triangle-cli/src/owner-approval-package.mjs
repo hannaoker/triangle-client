@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { createUnavailableOwnerApprovalProvider } from './owner-approval.mjs';
 import { createMacOSOwnerApprovalProvider } from './owner-approval-macos.mjs';
 
+// Package capabilities, not operation actions. `identity.chat-map` authorizes the
+// Swift provider actions `chat.map.set`, `chat.map.confirm`, and `chat.map.revoke`.
+// Callers must pass this capability name; the operation action is a different string.
 export const SUPPORTED_OWNER_APPROVAL_COMMANDS = Object.freeze([
   'identity.revoke',
   'identity.destination',

@@ -42,31 +42,11 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
   return Object.freeze({
     async prepareSend({ credential, senderId, recipientId, requestId, existingRoute = null }) {
       const pinningEnabled = typeof enabled === "function" ? enabled() : enabled;
-      if (!SESSION.test(senderId)) return null;
-      if (!SESSION.test(recipientId)) {
-        if (!pinningEnabled && !existingRoute) return null;
-        const remote = await authenticate(credential, senderId);
-        if (remote.principal === null) return null;
-        const recipient = /^[a-f0-9]{64}$/.test(recipientId)
-          ? { address: recipientId, generation: 1, principal: null, authorityOrigin: null, bindingGeneration: null }
-          : null;
-        if (!recipient) return null;
-        return {
-          replyRoute: null,
-          senderProvenance: createLocalSenderProvenance({ requestId, sender: remote, recipient }),
-        };
-      }
-      // The switch controls new pins, not authentication of existing pinned retries.
-      if (!existingRoute && !pinningEnabled) {
-        if (!credential) return null;
-        const remote = await authenticate(credential, senderId);
-        const local = await sessionBroker.describeLocalSession(recipientId);
-        if (remote.principal === null && local.principal === null) return null;
-        return {
-          replyRoute: null,
-          senderProvenance: createLocalSenderProvenance({ requestId, sender: remote, recipient: local }),
-        };
-      }
+      // The switch controls new pins. Turning it off restores the previous send path:
+      // no authentication and no provenance. Existing pins still verify below.
+      // Runner recipients are not sessions and never get a synthesized generation.
+      if (!existingRoute && !pinningEnabled) return null;
+      if (!SESSION.test(senderId) || !SESSION.test(recipientId)) return null;
       const remote = await authenticate(credential, senderId);
       const local = await sessionBroker.describeLocalSession(recipientId);
       if (existingRoute) verifyLocalReplyRoute(existingRoute, { local, remote });

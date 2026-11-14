@@ -123,41 +123,68 @@ export function chatMappingFilePath(storeRoot) {
   return path.join(storeRoot, CHAT_MAPPING_FILENAME);
 }
 
-export function readChatMappings({ storeRoot }) {
-  assertPrivateDirectory(storeRoot);
-  const filePath = chatMappingFilePath(storeRoot);
-  let lstat;
+function cacheIdentity(stat) {
+  if (!stat) return "absent";
+  return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.size}:${stat.mode}:${stat.uid}:${stat.nlink}`;
+}
+
+// Send-path cache. Keyed by store root and the file's identity so a changed
+// mapping is noticed without re-parsing on every message. CLI reads stay uncached.
+const sendReadCache = new Map();
+
+function openChatMappingText(filePath) {
+  let fd;
   try {
-    lstat = fs.lstatSync(filePath);
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   } catch (error) {
-    if (error.code === "ENOENT") {
-      return Object.freeze({
-        state: "absent",
-        storeRoot,
-        path: filePath,
-        schema: CHAT_MAPPING_SCHEMA,
-        version: CHAT_MAPPING_VERSION,
-        sequence: 0,
-        mappings: Object.freeze({}),
-      });
+    if (error.code === "ENOENT") return { status: "absent" };
+    if (error.code === "ELOOP" || error.code === "EFTYPE") {
+      throw coded("chat_mapping_custody", "Chat mapping file must be a single-link regular file");
     }
     throw error;
   }
-  if (!lstat.isFile() || lstat.isSymbolicLink() || lstat.nlink !== 1) {
-    throw coded("chat_mapping_custody", "Chat mapping file must be a single-link regular file");
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw coded("chat_mapping_custody", "Chat mapping file must be a single-link regular file");
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw coded("chat_mapping_custody", "Chat mapping file owner mismatch");
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      throw coded("chat_mapping_custody", "Chat mapping file permissions must be 0600");
+    }
+    if (stat.size > MAX_CHAT_MAPPINGS_BYTES) {
+      throw coded("chat_mapping_corrupt", "Chat mapping file exceeds maximum size");
+    }
+    return { status: "ok", stat, text: fs.readFileSync(fd, "utf8") };
+  } finally {
+    fs.closeSync(fd);
   }
-  if (typeof process.getuid === "function" && lstat.uid !== process.getuid()) {
-    throw coded("chat_mapping_custody", "Chat mapping file owner mismatch");
-  }
-  if ((lstat.mode & 0o077) !== 0) {
-    throw coded("chat_mapping_custody", "Chat mapping file permissions must be 0600");
-  }
-  if (lstat.size > MAX_CHAT_MAPPINGS_BYTES) {
-    throw coded("chat_mapping_corrupt", "Chat mapping file exceeds maximum size");
+}
+
+function absentChatMappings(storeRoot, filePath) {
+  return Object.freeze({
+    state: "absent",
+    storeRoot,
+    path: filePath,
+    schema: CHAT_MAPPING_SCHEMA,
+    version: CHAT_MAPPING_VERSION,
+    sequence: 0,
+    mappings: Object.freeze({}),
+  });
+}
+
+function loadChatMappings(storeRoot) {
+  assertPrivateDirectory(storeRoot);
+  const filePath = chatMappingFilePath(storeRoot);
+  const opened = openChatMappingText(filePath);
+  if (opened.status === "absent") {
+    return { store: absentChatMappings(storeRoot, filePath), cacheKey: "absent" };
   }
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    parsed = JSON.parse(opened.text);
   } catch {
     throw coded("chat_mapping_corrupt", "Chat mapping file contains invalid JSON");
   }
@@ -194,27 +221,56 @@ export function readChatMappings({ storeRoot }) {
     }
     mappings[key] = entry;
   }
-  return Object.freeze({
-    state: "ok",
-    storeRoot,
-    path: filePath,
-    schema: parsed.schema,
-    version: parsed.version,
-    sequence: parsed.sequence,
-    mappings: Object.freeze(mappings),
-  });
+  return {
+    store: Object.freeze({
+      state: "ok",
+      storeRoot,
+      path: filePath,
+      schema: parsed.schema,
+      version: parsed.version,
+      sequence: parsed.sequence,
+      mappings: Object.freeze(mappings),
+    }),
+    cacheKey: cacheIdentity(opened.stat),
+  };
+}
+
+export function readChatMappings({ storeRoot }) {
+  return loadChatMappings(storeRoot).store;
 }
 
 function writeChatMappingsAtomic(filePath, payload) {
   const tmpPath = `${filePath}.tmp.${process.pid}.${crypto.randomBytes(6).toString("hex")}`;
-  const fd = fs.openSync(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(tmpPath, flags, 0o600);
+  let fdClosed = false;
+  let renamed = false;
+  const closeFd = () => {
+    if (fdClosed) return;
+    fdClosed = true;
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  };
   try {
     fs.writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
     fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
+    closeFd();
+    fs.renameSync(tmpPath, filePath);
+    renamed = true;
+    const dirFlags = fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0);
+    const dirFd = fs.openSync(path.dirname(filePath), dirFlags);
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+  } catch (error) {
+    closeFd();
+    if (!renamed) {
+      try { fs.unlinkSync(tmpPath); } catch { /* temp may already be gone */ }
+    }
+    throw error;
   }
-  fs.renameSync(tmpPath, filePath);
+  sendReadCache.delete(path.dirname(filePath));
 }
 
 export function withLockedChatMappings(storeRoot, fn) {
@@ -280,55 +336,60 @@ export function setChatMapping(options) {
   return withLockedChatMappings(options.storeRoot, (current) => setChatMappingInLock(current, options));
 }
 
-export function confirmChatMapping({
-  storeRoot,
+export function confirmChatMappingInLock(current, {
   selectorId,
   attachedSessions,
   expectedSequence,
+  expectedSessionAddress,
   now = () => new Date().toISOString(),
 }) {
-  return withLockedChatMappings(storeRoot, (current) => {
-    if (expectedSequence !== undefined && current.sequence !== expectedSequence) {
-      throw coded("sequence_mismatch", "Chat mapping sequence changed before confirmation");
-    }
-    const entry = current.mappings[selectorId];
-    if (!entry) {
-      throw coded("chat_mapping_not_found", "Chat mapping selector not found");
-    }
-    if (entry.state === "confirmed") {
-      throw coded("chat_mapping_already_confirmed", "Chat mapping is already confirmed");
-    }
-    const matches = (attachedSessions ?? []).filter(
-      (s) => s && s.harness === entry.harness && s.workspace === entry.workspace && SESSION_ADDRESS_PATTERN.test(s.address ?? "")
-    );
-    if (matches.length === 0) {
-      throw coded("chat_mapping_no_live_session", "No live attached chat matches selector harness and workspace");
-    }
-    if (matches.length > 1) {
-      throw coded("chat_mapping_ambiguous_session", "Multiple live attached chats match selector harness and workspace");
-    }
-    const sessionAddress = matches[0].address;
-    if (Object.values(current.mappings).some((e) => e.selectorId !== selectorId && e.sessionAddress === sessionAddress)) {
-      throw coded("chat_mapping_session_conflict", "Attached chat session is already mapped to another selector");
-    }
-    const nextMappings = {
-      ...current.mappings,
-      [selectorId]: {
-        ...entry,
-        state: "confirmed",
-        sessionAddress,
-        confirmedAt: typeof now === "function" ? now() : String(now),
-      },
-    };
-    const nextPayload = {
-      schema: CHAT_MAPPING_SCHEMA,
-      version: CHAT_MAPPING_VERSION,
-      sequence: current.sequence + 1,
-      mappings: nextMappings,
-    };
-    writeChatMappingsAtomic(current.path, nextPayload);
-    return readChatMappings({ storeRoot });
-  });
+  if (expectedSequence !== undefined && current.sequence !== expectedSequence) {
+    throw coded("sequence_mismatch", "Chat mapping sequence changed before confirmation");
+  }
+  const entry = current.mappings[selectorId];
+  if (!entry) {
+    throw coded("chat_mapping_not_found", "Chat mapping selector not found");
+  }
+  if (entry.state === "confirmed") {
+    throw coded("chat_mapping_already_confirmed", "Chat mapping is already confirmed");
+  }
+  const matches = (attachedSessions ?? []).filter(
+    (s) => s && s.harness === entry.harness && s.workspace === entry.workspace && SESSION_ADDRESS_PATTERN.test(s.address ?? "")
+  );
+  if (matches.length === 0) {
+    throw coded("chat_mapping_no_live_session", "No live attached chat matches selector harness and workspace");
+  }
+  if (matches.length > 1) {
+    throw coded("chat_mapping_ambiguous_session", "Multiple live attached chats match selector harness and workspace");
+  }
+  const sessionAddress = matches[0].address;
+  if (typeof expectedSessionAddress === "string" && sessionAddress !== expectedSessionAddress) {
+    throw coded("chat_mapping_session_mismatch", "Live attached chat does not match the approved session");
+  }
+  if (Object.values(current.mappings).some((e) => e.selectorId !== selectorId && e.sessionAddress === sessionAddress)) {
+    throw coded("chat_mapping_session_conflict", "Attached chat session is already mapped to another selector");
+  }
+  const nextMappings = {
+    ...current.mappings,
+    [selectorId]: {
+      ...entry,
+      state: "confirmed",
+      sessionAddress,
+      confirmedAt: typeof now === "function" ? now() : String(now),
+    },
+  };
+  const nextPayload = {
+    schema: CHAT_MAPPING_SCHEMA,
+    version: CHAT_MAPPING_VERSION,
+    sequence: current.sequence + 1,
+    mappings: nextMappings,
+  };
+  writeChatMappingsAtomic(current.path, nextPayload);
+  return readChatMappings({ storeRoot: current.storeRoot });
+}
+
+export function confirmChatMapping(options) {
+  return withLockedChatMappings(options.storeRoot, (current) => confirmChatMappingInLock(current, options));
 }
 
 export function revokeChatMappingInLock(current, { selectorId, before, expectedSequence }) {
@@ -368,6 +429,16 @@ export function resolveChatDestinationForPrincipal({ storeRoot, principalId, des
   if (!destination || !AGENT_ID_PATTERN.test(principalId)) {
     return { ok: false, reason: "destination_not_configured" };
   }
+  // The snapshot only returns a destination for an active mesh binding, and it
+  // carries that binding's generation and authority. A mapping stored against a
+  // revoked or older binding must not deliver.
+  if (
+    !Number.isSafeInteger(destination.bindingGeneration) ||
+    destination.bindingGeneration < 1 ||
+    typeof destination.authorityOrigin !== "string"
+  ) {
+    return { ok: false, reason: "destination_binding_inactive" };
+  }
   const store = readChatMappings({ storeRoot });
   if (store.state === "absent") {
     return { ok: false, reason: "chat_mapping_missing" };
@@ -377,6 +448,9 @@ export function resolveChatDestinationForPrincipal({ storeRoot, principalId, des
   );
   if (!entry) {
     return { ok: false, reason: "chat_mapping_missing" };
+  }
+  if (entry.bindingGeneration !== destination.bindingGeneration || entry.authorityOrigin !== destination.authorityOrigin) {
+    return { ok: false, reason: "chat_mapping_stale_generation" };
   }
   if (entry.state !== "confirmed" || !entry.sessionAddress) {
     return { ok: false, reason: "chat_mapping_unconfirmed" };
@@ -393,14 +467,74 @@ export function resolveChatDestinationForPrincipal({ storeRoot, principalId, des
   return { ok: true, sessionAddress: matches[0].address, mapping: entry };
 }
 
-export function lookupConfirmedChatMappingForSession({ storeRoot, sessionAddress, harness, workspace }) {
+function probeMappingCacheKey(storeRoot) {
+  const filePath = chatMappingFilePath(storeRoot);
+  try {
+    return cacheIdentity(fs.lstatSync(filePath));
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";
+    const probe = new Error(error.code ?? "chat_mapping_unreadable");
+    probe.code = error.code ?? "chat_mapping_unreadable";
+    throw probe;
+  }
+}
+
+function reportMappingFailure(storeRoot, error, log) {
+  const code = typeof error?.code === "string" ? error.code : "chat_mapping_unreadable";
+  const message = `chat mapping store at ${storeRoot} is unreadable (${code}); treating the session as unmapped`;
+  if (typeof log === "function") log(message);
+  else console.error(message);
+}
+
+function readChatMappingsForSend(storeRoot, log) {
+  let probeKey;
+  try {
+    probeKey = probeMappingCacheKey(storeRoot);
+  } catch (error) {
+    const cached = sendReadCache.get(storeRoot);
+    const key = `error:${error.code ?? "unknown"}`;
+    if (cached?.key === key) return null;
+    reportMappingFailure(storeRoot, error, log);
+    sendReadCache.set(storeRoot, { key, store: null });
+    return null;
+  }
+  const cached = sendReadCache.get(storeRoot);
+  if (cached && cached.key === probeKey) return cached.store;
+  try {
+    const loaded = loadChatMappings(storeRoot);
+    sendReadCache.set(storeRoot, { key: loaded.cacheKey, store: loaded.store });
+    return loaded.store;
+  } catch (error) {
+    if (error.code === "chat_mapping_store_missing") {
+      sendReadCache.set(storeRoot, { key: probeKey, store: null });
+      return null;
+    }
+    reportMappingFailure(storeRoot, error, log);
+    sendReadCache.set(storeRoot, { key: probeKey, store: null });
+    return null;
+  }
+}
+
+export function lookupConfirmedChatMappingForSession({
+  storeRoot,
+  sessionAddress,
+  harness,
+  workspace,
+  failSoft = false,
+  log = null,
+} = {}) {
   if (!storeRoot || !SESSION_ADDRESS_PATTERN.test(sessionAddress ?? "")) return null;
   let store;
-  try {
-    store = readChatMappings({ storeRoot });
-  } catch (error) {
-    if (error.code === "chat_mapping_store_missing") return null;
-    throw error;
+  if (failSoft) {
+    store = readChatMappingsForSend(storeRoot, log);
+    if (!store) return null;
+  } else {
+    try {
+      store = readChatMappings({ storeRoot });
+    } catch (error) {
+      if (error.code === "chat_mapping_store_missing") return null;
+      throw error;
+    }
   }
   if (store.state === "absent") return null;
   const entry = Object.values(store.mappings).find(

@@ -243,7 +243,7 @@ export const ATTACH_HINT='No Triangle MCP child is attached to this chat. Chats 
 export const CODEX_ATTACH_HINT='This Codex chat has not called a Triangle tool yet, or its Triangle MCP server is not loaded. It becomes reachable on its first Triangle tool call (for example triangle_get_status). Codex loads MCP servers when a chat starts: restart the Codex app or start a new chat after setup.';
 // Codex addresses live in their own namespace, exactly as lifecycle discovery derives them (see recordDiscoveryEvent).
 export const sessionAddressKey=(harness,sessionId)=>harness==='codex'?'codex:'+sessionId:sessionId;
-export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,boundIntegrationPath=null,logger=null,processProbe=undefined,chatMappingStoreRoot=null}) {
+export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,issue,clock=()=>Date.now(),ownerSenderId=null,configuredRecipients=null,additionalPrincipals=[],codexSenderPrincipals=null,boundIntegrationPath=null,logger=null,processProbe=undefined,chatMappingStoreRoot=null,confirmChatBinding=null}) {
  const limiter=createPerSenderRateLimiter({maxRequestsPerWindow:240,windowMs:60000});
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
@@ -339,7 +339,9 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async describeLocalSession(id){const {c,r}=await current(id);
-   const mapped=chatMappingStoreRoot?lookupConfirmedChatMappingForSession({storeRoot:chatMappingStoreRoot,sessionAddress:id,harness:r.harness,workspace:r.workspace??c.workspace}):null;
+   let mapped=chatMappingStoreRoot?lookupConfirmedChatMappingForSession({storeRoot:chatMappingStoreRoot,sessionAddress:id,harness:r.harness,workspace:r.workspace??c.workspace,failSoft:true,log:(message)=>{if(typeof logger?.warn==='function')logger.warn(message);else console.error(message);}}):null;
+   // A mapping file is not authority. Without a live binding at the stored generation, the chat stays unlabeled.
+   if(mapped&&confirmChatBinding?.({principalId:mapped.principal,authorityOrigin:mapped.authorityOrigin,bindingGeneration:mapped.bindingGeneration})!==true)mapped=null;
    return Object.freeze({address:id,generation:r.generation,principal:mapped?.principal??null,authorityOrigin:mapped?.authorityOrigin??null,bindingGeneration:mapped?.bindingGeneration??null});},
   async listLiveAttachedSessions(){
    const c=policy(),scope=policyScope(c),attachments=new Map((await journal.listSessionAttachments()).map(a=>[a.id,a]));

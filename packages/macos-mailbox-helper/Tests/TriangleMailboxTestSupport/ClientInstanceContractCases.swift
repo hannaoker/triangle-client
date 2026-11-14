@@ -20,6 +20,7 @@ public enum ClientInstanceContractCases {
         .init(name: "Triangle Client exact lifecycle", run: exactLifecycleAndCredentialPreservation),
         .init(name: "Triangle Client delivery mode round trip", run: deliveryModeRoundTrip),
         .init(name: "Triangle Client legacy records default delivery mode", run: legacyDeliveryModeDefault),
+        .init(name: "Triangle Client unknown delivery mode stays inert", run: unknownDeliveryModeStaysInert),
     ]
 
     public static func identityDerivation() throws {
@@ -331,6 +332,25 @@ public enum ClientInstanceContractCases {
             try expect(try store.read(profile: profile).participatesInWorkerPolling, "worker delivery mode did not restore polling participation")
             try expect(try store.read(profile: profile).participatesInEventDrivenWake == false, "worker profile incorrectly claims wake ownership")
             try expect(try store.read(profile: profile).participatesInGrokBotWake == false, "worker profile incorrectly claims Grok Bot wake")
+        }
+    }
+
+    public static func unknownDeliveryModeStaysInert() throws {
+        try withStore { store, root in
+            let profile = try ProfileName("future")
+            let instance = try ClientInstance(profile: profile, runtimeAdapter: .hermes)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let record = root.appendingPathComponent(instance.instanceID.value + ".json")
+            let future = """
+            {"version":1,"instanceId":"\(instance.instanceID.value)","profile":"future","runtimeAdapter":"hermes","enabled":true,"deliveryMode":"not-yet-shipped"}
+            """
+            try Data(future.utf8).write(to: record)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+            let read = try store.read(profile: profile)
+            try expect(read.deliveryMode == .router, "unknown delivery mode was not kept inert")
+            try expect(read.participatesInWorkerPolling == false, "unknown delivery mode polled as a worker")
+            try expect(read.participatesInEventDrivenWake == false, "unknown delivery mode claimed event wake")
+            try expect(read.participatesInWatchGrantNotify == false, "unknown delivery mode joined watch grants")
         }
     }
 

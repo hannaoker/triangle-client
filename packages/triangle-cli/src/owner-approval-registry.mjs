@@ -5,10 +5,12 @@ import { updateIdentityRegistry } from '../../agent-worker/src/identity-registry
 import { canonicalJson } from './canonical.mjs';
 import { normalizeOwnerOperation } from './owner-approval.mjs';
 import {
+  confirmChatMappingInLock,
   revokeChatMappingInLock,
   setChatMappingInLock,
   withLockedChatMappings,
 } from '../../agent-worker/src/local-chat-mapping.mjs';
+import { listLiveAttachedSessionsReadOnly } from '../../agent-worker/src/local-messaging-journal.mjs';
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 
@@ -118,14 +120,18 @@ function chatMapObservation(entry) {
   });
 }
 
-export function createChatMappingApprovalAdapter(value, { now } = {}) {
+export function createChatMappingApprovalAdapter(value, { now, listAttachedSessions = null } = {}) {
   const op = normalizeOwnerOperation(value);
-  if (op.action !== 'chat.map.set' && op.action !== 'chat.map.revoke') {
+  if (op.action !== 'chat.map.set' && op.action !== 'chat.map.revoke' && op.action !== 'chat.map.confirm') {
     fail('owner_approval_action_unavailable');
   }
   const exactOperation = canonicalJson(op);
   const clock = typeof now === 'function' ? now : () => new Date().toISOString();
   const isSet = op.action === 'chat.map.set';
+  const isConfirm = op.action === 'chat.map.confirm';
+  const sessionsFor = typeof listAttachedSessions === 'function'
+    ? listAttachedSessions
+    : (root) => listLiveAttachedSessionsReadOnly({ stateRoot: root });
   return function withLockedRegistry(root, inspect) {
     if (root !== op.storeRoot || typeof inspect !== 'function') fail('invalid_owner_operation');
     return withLockedChatMappings(op.storeRoot, (current) => {
@@ -152,11 +158,19 @@ export function createChatMappingApprovalAdapter(value, { now } = {}) {
                   expectedSequence: op.expectedSequence,
                   now: () => clock(),
                 })
-              : revokeChatMappingInLock(current, {
-                  selectorId: op.selectorId,
-                  before: op.before,
-                  expectedSequence: op.expectedSequence,
-                });
+              : isConfirm
+                ? confirmChatMappingInLock(current, {
+                    selectorId: op.selectorId,
+                    attachedSessions: sessionsFor(op.storeRoot),
+                    expectedSequence: op.expectedSequence,
+                    expectedSessionAddress: op.sessionAddress,
+                    now: () => clock(),
+                  })
+                : revokeChatMappingInLock(current, {
+                    selectorId: op.selectorId,
+                    before: op.before,
+                    expectedSequence: op.expectedSequence,
+                  });
             committed = true;
             return { store };
           },

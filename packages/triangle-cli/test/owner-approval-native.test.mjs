@@ -26,6 +26,7 @@ test('native provider validates all owner-operation kinds without requesting aut
   {action:'destination.clear',registryRoot:root,expectedSequence:4,principalId:principal,before:{harness:'codex',workspace,generation:4}},
   {action:'chat.map.set',storeRoot:root,expectedSequence:0,selectorId,harness:'claude',workspace,principalId:principal,authorityOrigin:'https://example.test',bindingGeneration:1,before:null},
   {action:'chat.map.revoke',storeRoot:root,expectedSequence:1,selectorId,before:{harness:'claude',workspace,principalId:principal,authorityOrigin:'https://example.test',bindingGeneration:1}},
+  {action:'chat.map.confirm',storeRoot:root,expectedSequence:2,selectorId,sessionAddress:'session-'+'a'.repeat(64),before:{harness:'claude',workspace,principalId:principal,authorityOrigin:'https://example.test',bindingGeneration:1}},
  ];
  const wrapRaw=(canonicalRequest,op)=>{
   const parsed=JSON.parse(canonicalRequest);

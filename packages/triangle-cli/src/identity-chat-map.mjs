@@ -12,10 +12,10 @@ import {
 import { readIdentityRegistry } from '../../agent-worker/src/identity-registry.mjs';
 import {
   SESSION_ADDRESS_PATTERN,
-  confirmChatMapping,
   deriveChatSelectorId,
   readChatMappings,
 } from '../../agent-worker/src/local-chat-mapping.mjs';
+import { listLiveAttachedSessionsReadOnly } from '../../agent-worker/src/local-messaging-journal.mjs';
 import { createOwnerApprovalCoordinator, describeOwnerOperation, normalizeOwnerOperation } from './owner-approval.mjs';
 import { loadPackagedOwnerApprovalProvider } from './owner-approval-package.mjs';
 import { createChatMappingApprovalAdapter } from './owner-approval-registry.mjs';
@@ -61,15 +61,9 @@ function findActiveMeshBinding(registry, principalId) {
 }
 
 export async function discoverLiveAttachedSessions({ storeRoot, now = Date.now() }) {
-  const dbPath = path.join(storeRoot, 'local-messaging.db');
-  if (!fs.existsSync(dbPath)) return [];
-  const { createLocalMessagingJournal } = await import('../../agent-worker/src/local-messaging-journal.mjs');
-  const journal = createLocalMessagingJournal({ stateRoot: storeRoot });
-  try {
-    return await journal.listAllLiveAttachedSessions(now);
-  } finally {
-    await journal.close?.();
-  }
+  // Read-only snapshot. Opening the writer journal takes the owner lock and runs
+  // crash recovery, which is not safe while the host is serving the same directory.
+  return listLiveAttachedSessionsReadOnly({ stateRoot: storeRoot, now: typeof now === 'function' ? now() : now });
 }
 
 export function loadPackagedChatMapProvider({ command, releaseRoot, platform = process.platform } = {}) {
@@ -152,6 +146,8 @@ export async function planChatMapConfirm({
     harness: entry.harness,
     workspace: entry.workspace,
     principalId: entry.principalId,
+    authorityOrigin: entry.authorityOrigin,
+    bindingGeneration: entry.bindingGeneration,
     sessionAddress: matches[0].address,
   };
   return Object.freeze({ ...body, planId: sha256Hex(canonicalJson(body)) });
@@ -202,6 +198,7 @@ export async function identityChatMapSet({
   confirm = null,
   provider,
   releaseRoot,
+  platform,
   now,
   signal,
   onOperation = () => {},
@@ -210,7 +207,7 @@ export async function identityChatMapSet({
   if (confirm === null) return plan;
   assertConfirmMatches(confirm, plan.planId);
   const coordinator = createOwnerApprovalCoordinator({
-    provider: provider ?? loadPackagedChatMapProvider({ command: 'chat.map.set', releaseRoot }),
+    provider: provider ?? loadPackagedChatMapProvider({ command: 'identity.chat-map', releaseRoot, platform }),
     withLockedRegistry: createChatMappingApprovalAdapter(plan.operation, { now }),
   });
   await onOperation(describeOwnerOperation(plan.operation));
@@ -235,34 +232,54 @@ export async function identityChatMapConfirm({
   workspace = null,
   attachedSessions = null,
   confirm = null,
-  isTty = Boolean(process.stdin?.isTTY && process.stdout?.isTTY),
+  provider,
+  releaseRoot,
+  platform,
   now,
+  signal,
+  onOperation = () => {},
 }) {
   const plan = await planChatMapConfirm({ storeRoot, selectorId, harness, workspace, attachedSessions });
   if (confirm === null) return plan;
   assertConfirmMatches(confirm, plan.planId);
-  if (!isTty) fail('owner_tty_required');
-
-  const live = attachedSessions ?? await discoverLiveAttachedSessions({ storeRoot });
-  const updated = confirmChatMapping({
+  // Confirm binds a principal to one live chat. That is the same class of owner
+  // decision as set and revoke, so it uses the packaged OS approval capability
+  // `identity.chat-map` and the operation action `chat.map.confirm`. The approved
+  // operation names the exact session address; commit accepts only that session.
+  const operation = normalizeOwnerOperation({
+    action: 'chat.map.confirm',
     storeRoot,
-    selectorId: plan.selectorId,
-    attachedSessions: live,
     expectedSequence: plan.expectedSequence,
-    now,
+    selectorId: plan.selectorId,
+    sessionAddress: plan.sessionAddress,
+    before: {
+      harness: plan.harness,
+      workspace: plan.workspace,
+      principalId: plan.principalId,
+      authorityOrigin: plan.authorityOrigin,
+      bindingGeneration: plan.bindingGeneration,
+    },
   });
-  const entry = updated.mappings[plan.selectorId];
+  const listAttachedSessions = attachedSessions
+    ? () => attachedSessions
+    : (root) => listLiveAttachedSessionsReadOnly({ stateRoot: root });
+  const coordinator = createOwnerApprovalCoordinator({
+    provider: provider ?? loadPackagedChatMapProvider({ command: 'identity.chat-map', releaseRoot, platform }),
+    withLockedRegistry: createChatMappingApprovalAdapter(operation, { now, listAttachedSessions }),
+  });
+  await onOperation(describeOwnerOperation(operation));
+  const result = await coordinator.execute(coordinator.prepare(operation), { signal });
   return {
     schema: 'identity_chat_map_result_v1',
     action: 'confirm',
     scope: 'local-chat-mapping',
     selectorId: plan.selectorId,
-    principal: entry.principalId,
-    harness: entry.harness,
-    workspace: entry.workspace,
-    sessionAddress: entry.sessionAddress,
-    state: entry.state,
-    sequence: updated.sequence,
+    principal: plan.principalId,
+    harness: plan.harness,
+    workspace: plan.workspace,
+    sessionAddress: plan.sessionAddress,
+    state: 'confirmed',
+    sequence: result.registry.sequence,
   };
 }
 
@@ -274,6 +291,7 @@ export async function identityChatMapRevoke({
   confirm = null,
   provider,
   releaseRoot,
+  platform,
   now,
   signal,
   onOperation = () => {},
@@ -282,7 +300,7 @@ export async function identityChatMapRevoke({
   if (confirm === null) return plan;
   assertConfirmMatches(confirm, plan.planId);
   const coordinator = createOwnerApprovalCoordinator({
-    provider: provider ?? loadPackagedChatMapProvider({ command: 'chat.map.revoke', releaseRoot }),
+    provider: provider ?? loadPackagedChatMapProvider({ command: 'identity.chat-map', releaseRoot, platform }),
     withLockedRegistry: createChatMappingApprovalAdapter(plan.operation, { now }),
   });
   await onOperation(describeOwnerOperation(plan.operation));
@@ -308,8 +326,8 @@ export function renderChatMapPlan(plan) {
   }
   if (plan.action === 'confirm') {
     const apply = `triangle identity chat-map confirm --store-root ${quote(plan.storeRoot)} --selector ${plan.selectorId} --confirm ${plan.planId}`;
-    return `Confirm chat mapping ${plan.selectorId}\nPrincipal: ${plan.principalId}\nHarness: ${plan.harness}\nWorkspace: ${plan.workspace}\nSession: ${plan.sessionAddress}\nPlan: ${plan.planId}\n` +
-      'Local owner TTY confirmation is required. To apply this exact plan:\n' + apply;
+    return `Confirm chat mapping ${plan.selectorId}\nPrincipal: ${plan.principalId} at ${plan.authorityOrigin} (gen ${plan.bindingGeneration})\nHarness: ${plan.harness}\nWorkspace: ${plan.workspace}\nSession: ${plan.sessionAddress}\nPlan: ${plan.planId}\n` +
+      'Fresh owner authentication is required. The approved plan binds only this session. To apply this exact plan:\n' + apply;
   }
   const op = plan.operation;
   const apply = `triangle identity chat-map revoke --store-root ${quote(op.storeRoot)} --selector ${op.selectorId} --confirm ${plan.planId}`;

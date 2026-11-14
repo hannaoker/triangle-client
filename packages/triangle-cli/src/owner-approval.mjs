@@ -175,6 +175,21 @@ export function normalizeOwnerOperation(value) {
         before,
       });
     }
+    case 'chat.map.confirm': {
+      keys(value, ['action','storeRoot','expectedSequence','selectorId','sessionAddress','before']);
+      const storeRoot = canonicalExistingDir(value.storeRoot);
+      if (!isPositiveInt(value.expectedSequence) || !isSelectorId(value.selectorId) ||
+          typeof value.sessionAddress !== 'string' || !/^session-[a-f0-9]{64}$/.test(value.sessionAddress)) invalid();
+      const before = chatMapState(value.before);
+      return Object.freeze({
+        action: value.action,
+        storeRoot,
+        expectedSequence: value.expectedSequence,
+        selectorId: value.selectorId,
+        sessionAddress: value.sessionAddress,
+        before,
+      });
+    }
     default:
       invalid();
   }
@@ -202,6 +217,12 @@ export function describeOwnerOperation(op) {
         `Selector: ${op.before.harness} chat in ${op.before.workspace}\n` +
         `Principal: ${op.before.principalId} at ${op.before.authorityOrigin} (gen ${op.before.bindingGeneration})\n` +
         'Revoke this chat mapping';
+    case 'chat.map.confirm':
+      return `${op.action}: ${op.selectorId}\nStore: ${op.storeRoot}\nSequence: ${op.expectedSequence}\n` +
+        `Selector: ${op.before.harness} chat in ${op.before.workspace}\n` +
+        `Principal: ${op.before.principalId} at ${op.before.authorityOrigin} (gen ${op.before.bindingGeneration})\n` +
+        `Session: ${op.sessionAddress}\n` +
+        'Confirm this chat mapping';
     default:
       invalid();
   }

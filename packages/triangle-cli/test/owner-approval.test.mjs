@@ -236,6 +236,14 @@ test('chat.map.set and chat.map.revoke work through withLockedStore and reject s
  }};
  assert.equal(await storeCoord.execute(storeCoord.prepare(revokeOp)),'chat.map.revoke');
  assert.ok(seenChallenges[1].summary.includes('Revoke this chat mapping'));
+ const confirmOp={action:'chat.map.confirm',storeRoot:root,expectedSequence:2,selectorId:baseSet.selectorId,
+  sessionAddress:'session-'+'a'.repeat(64),before:revokeOp.before};
+ const confirmCoord=createOwnerApprovalCoordinator({clockMs:()=>1000,
+  provider:{authenticate:async ch=>{seenChallenges.push(ch);return 'approved';}},
+  withLockedStore(_r,fn){return fn({sequence:2,before:confirmOp.before,commit(op){return op.action;}});}});
+ assert.equal(await confirmCoord.execute(confirmCoord.prepare(confirmOp)),'chat.map.confirm');
+ assert.ok(seenChallenges[2].summary.includes('Session: session-'+'a'.repeat(64)));
+ assert.ok(seenChallenges[2].summary.includes('Confirm this chat mapping'));
 
  for(const bad of [
   {...baseSet,workspace:linkWs},

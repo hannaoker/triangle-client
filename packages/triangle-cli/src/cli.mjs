@@ -763,7 +763,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               io.stderr(flags.json ? JSON.stringify({ error: "owner_approval_unavailable", message }) : message);
               return 1;
             }
-            const needsOsAuth = flags.confirm !== undefined && action !== "confirm";
+            const needsOsAuth = flags.confirm !== undefined;
             const cancellation = needsOsAuth && typeof AbortController === "function" ? new AbortController() : null;
             let interrupted = null;
             const onSignal = (sig) => { interrupted = sig; cancellation?.abort(); };
@@ -795,8 +795,11 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
                   workspace: flags.workspace ?? null,
                   attachedSessions: identityDependencies.attachedSessions ?? null,
                   confirm: flags.confirm ?? null,
-                  isTty: flags.confirm !== undefined ? ownerTerminal(identityDependencies, io) : true,
+                  provider: identityDependencies.chatMapProvider,
+                  releaseRoot: identityDependencies.releaseRoot,
                   now: identityDependencies.now,
+                  signal: cancellation?.signal,
+                  onOperation,
                 });
               } else {
                 out = await chatMapModule.identityChatMapRevoke({

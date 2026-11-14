@@ -165,7 +165,20 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         profile = try values.decode(ProfileName.self, forKey: .profile)
         runtimeAdapter = try values.decode(RuntimeAdapter.self, forKey: .runtimeAdapter)
         enabled = try values.decode(Bool.self, forKey: .enabled)
-        deliveryMode = try values.decodeIfPresent(DeliveryMode.self, forKey: .deliveryMode) ?? .worker
+        if let raw = try values.decodeIfPresent(String.self, forKey: .deliveryMode) {
+            if let known = DeliveryMode(rawValue: raw) {
+                deliveryMode = known
+            } else {
+                // Unknown modes must not become `.worker`: that would poll and wake them.
+                // `.router` participates in no runner, wake, or watch-grant lane.
+                // An older helper without this fallback cannot decode `"router"` at all
+                // (Codable enum decode throws), so rolling the helper back while a
+                // profile is stored as router makes that client-instance record unreadable.
+                deliveryMode = .router
+            }
+        } else {
+            deliveryMode = .worker
+        }
         guard instanceID == .derive(profile: profile) else { throw ClientInstanceStoreError.invalidRecord }
     }
 }

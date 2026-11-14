@@ -128,6 +128,7 @@ test('framing accepts destination and chat-map operations cleanly',async t=>{
   {action:'destination.clear',registryRoot:f.root,expectedSequence:3,principalId:'agent_'+'c'.repeat(32),before:{harness:'codex',workspace,generation:3}},
   {action:'chat.map.set',storeRoot:f.root,expectedSequence:0,selectorId:'sel_'+'e'.repeat(32),harness:'claude',workspace,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:1,before:null},
   {action:'chat.map.revoke',storeRoot:f.root,expectedSequence:1,selectorId:'sel_'+'e'.repeat(32),before:{harness:'claude',workspace,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:1}},
+  {action:'chat.map.confirm',storeRoot:f.root,expectedSequence:2,selectorId:'sel_'+'e'.repeat(32),sessionAddress:'session-'+'a'.repeat(64),before:{harness:'claude',workspace,principalId:'agent_'+'c'.repeat(32),authorityOrigin:'https://example.test',bindingGeneration:1}},
  ]){
   const now=Math.floor(performance.now());
   const request={schema:'owner_operation_v1',...op,nonce:'9'.repeat(64),issuedAt:now,deadline:now+5000};
