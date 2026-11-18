@@ -4,7 +4,7 @@ import { rmSync } from "node:fs";
 import test from "node:test";
 
 import { clearIdentityDestination, readIdentityRegistry, setIdentityDestination } from "../src/identity-registry.mjs";
-import { createRegistrySnapshotProvider } from "../src/router-registry-snapshot.mjs";
+import { activeMeshBindingMatches, createRegistrySnapshotProvider } from "../src/router-registry-snapshot.mjs";
 import { agentBindingV1, makeRoot, makeV1Root, peerBindingV2, T2, upgradeThroughWriter } from "./identity-registry-v2-helpers.mjs";
 
 const T3 = "2026-11-07T10:15:00.000Z";
@@ -108,4 +108,49 @@ test("snapshot excludes non-agent keys even on malformed inputs and reacts immed
     clearIdentityDestination({ root, expectedSequence: seqOf(root), now: T3, principalId: GRAVITY });
     assert.equal(provider.get().destinationFor(GRAVITY), null);
   });
+});
+
+// A destination is routable only for exactly one active mesh-managed binding (review of #180 to #182, mutant N1): two active bindings of one
+// principal are ambiguous, and the rule is kept in the registry so that it can be cleared but is not routed.
+const registryWith = (bindings, destinations) => ({
+  state: "ok",
+  registry: { schema: "identity_registry_v2", sequence: 9, bindings, aliases: {}, destinations },
+});
+const fixedProvider = (registry) => createRegistrySnapshotProvider({ root: "/fake/root", statRegistry: () => "stat", readRegistry: () => registry });
+
+test("a principal with two active bindings has no routable destination, and one binding is routable", () => {
+  const first = agentBindingV1("gravity2");
+  const second = agentBindingV1("gravity2-again", { principal_id: GRAVITY });
+  const rule = { [GRAVITY]: { harness: "claude", workspace: "/workspaces/g", set_at: T3, generation: 9 } };
+  const one = fixedProvider(registryWith({ [first.profile_instance_id]: first }, rule)).get();
+  assert.equal(one.destinationFor(GRAVITY)?.workspace, "/workspaces/g");
+  const two = fixedProvider(registryWith({ [first.profile_instance_id]: first, [second.profile_instance_id]: second }, rule)).get();
+  assert.equal(two.destinationFor(GRAVITY), null, "two active bindings are ambiguous");
+  assert.deepEqual(two.destinations(), []);
+  // a revoked second binding leaves the first routable
+  const revoked = { ...second, revoked_at: T2 };
+  const withRevoked = fixedProvider(registryWith({ [first.profile_instance_id]: first, [second.profile_instance_id]: revoked }, rule)).get();
+  assert.equal(withRevoked.destinationFor(GRAVITY)?.bindingGeneration, 1);
+});
+
+// What a mapping's claim must match to count as live (mutants N4 to N6): the binding's generation and authority, and exactly one binding.
+test("activeMeshBindingMatches: exactly one active mesh binding with the claimed authority and generation", () => {
+  const binding = agentBindingV1("gravity2");
+  const claim = { principalId: GRAVITY, authorityOrigin: binding.authority_origin, bindingGeneration: binding.binding_generation };
+  const snapshot = (bindings) => ({ state: "ok", bindingsFor: () => bindings });
+  assert.equal(activeMeshBindingMatches(snapshot([binding]), claim), true);
+  assert.equal(activeMeshBindingMatches(snapshot([binding]), { ...claim, bindingGeneration: claim.bindingGeneration + 1 }), false, "another generation");
+  assert.equal(activeMeshBindingMatches(snapshot([{ ...binding, binding_generation: 2 }]), claim), false, "the binding moved on");
+  assert.equal(activeMeshBindingMatches(snapshot([binding]), { ...claim, authorityOrigin: "https://other.example.test" }), false, "another authority");
+  assert.equal(activeMeshBindingMatches(snapshot([binding, { ...binding, binding_id: "bind_" + "e".repeat(32) }]), claim), false, "two bindings are ambiguous");
+  assert.equal(activeMeshBindingMatches(snapshot([]), claim), false, "no binding");
+  assert.equal(activeMeshBindingMatches(snapshot([{ ...binding, revoked_at: T2 }]), claim), false, "revoked");
+  assert.equal(activeMeshBindingMatches(snapshot([{ ...binding, trust_mode: "serverless-peer" }]), claim), false, "not mesh-managed");
+  assert.equal(activeMeshBindingMatches({ state: "unreadable", bindingsFor: () => [binding] }, claim), false, "an unreadable registry confirms nothing");
+  assert.equal(activeMeshBindingMatches({ state: "ok", bindingsFor() { throw new Error("boom"); } }, claim), false);
+  assert.equal(activeMeshBindingMatches(snapshot("not a list"), claim), false);
+  assert.equal(activeMeshBindingMatches(null, claim), false);
+  for (const bad of [{ ...claim, principalId: 7 }, { ...claim, authorityOrigin: null }, { ...claim, bindingGeneration: 0 }, { ...claim, bindingGeneration: 1.5 }, {}]) {
+    assert.equal(activeMeshBindingMatches(snapshot([binding]), bad), false, JSON.stringify(bad));
+  }
 });

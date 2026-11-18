@@ -97,8 +97,9 @@ export const USAGE = `Usage: triangle <command> [options]
   identity chat-map set --principal AGENT_ID --harness claude|codex --workspace DIR --client-root DIR [--registry-root DIR] [--store-root DIR] [--confirm PLAN_ID]
   identity chat-map confirm (--selector SEL_ID | --harness claude|codex --workspace DIR) --client-root DIR [--store-root DIR] [--confirm PLAN_ID]
   identity chat-map revoke (--selector SEL_ID | --harness claude|codex --workspace DIR) --client-root DIR [--store-root DIR] [--confirm PLAN_ID]
-                              Plan, confirm (local owner TTY when 1 live chat matches), or revoke a local chat selector mapping.
-                              Create-only (revoke first to change). Set/revoke require OS authentication.
+                              Plan, set, confirm (binds the one live chat of that harness and workspace) or revoke a local chat selector mapping.
+                              Create-only (revoke first to change). Applying set, confirm or revoke needs a local owner terminal and OS authentication.
+                              The store is in the state root of the client configuration unless --store-root says otherwise.
   status | doctor [--identity [--client-root DIR] [--registry-root DIR]]
                               What this device controls and what needs attention.
   resume [--abandon]          Replay owner operations whose outcome was unknown (or discard them).
@@ -744,8 +745,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               throw new UsageError(`identity chat-map ${action} requires --selector SEL_ID or --harness and --workspace`);
             }
             const { clientRoot, normRegistry } = resolveIdentityRoots("identity chat-map");
-            const storeRoot = flags["store-root"] ?? path.join(clientRoot, "client/local");
-            if (typeof storeRoot !== "string" || !isAbsolute(storeRoot)) throw new UsageError("--store-root must be an absolute path");
+            if (flags["store-root"] !== undefined && (typeof flags["store-root"] !== "string" || !isAbsolute(flags["store-root"]))) throw new UsageError("--store-root must be an absolute path");
             if (flags.confirm !== undefined) {
               if (typeof flags.confirm !== "string" || !/^[a-f0-9]{64}$/.test(flags.confirm)) {
                 throw new UsageError("--confirm must be 64 lowercase hex characters");
@@ -763,6 +763,8 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               io.stderr(flags.json ? JSON.stringify({ error: "owner_approval_unavailable", message }) : message);
               return 1;
             }
+            // The state root of the client configuration, which is where the supervisor keeps the store (see defaultChatMapStoreRoot).
+            const storeRoot = flags["store-root"] ?? await chatMapModule.defaultChatMapStoreRoot(clientRoot);
             const needsOsAuth = flags.confirm !== undefined;
             const cancellation = needsOsAuth && typeof AbortController === "function" ? new AbortController() : null;
             let interrupted = null;
@@ -817,7 +819,7 @@ export async function main(argv, { env = process.env, io = PROCESS_IO, fetchImpl
               }
               io.stdout(flags.json
                 ? JSON.stringify(out)
-                : (flags.confirm !== undefined ? chatMapModule.renderChatMapResult(out) : chatMapModule.renderChatMapPlan(out)));
+                : (flags.confirm !== undefined ? chatMapModule.renderChatMapResult(out) : chatMapModule.renderChatMapPlan(out, { clientRoot })));
               return 0;
             } catch (err) {
               if (err instanceof LocalStateError) throw err;

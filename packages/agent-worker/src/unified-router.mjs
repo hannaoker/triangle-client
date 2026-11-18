@@ -414,7 +414,14 @@ export function createUnifiedRouter({
       ) {
         const destination = snapshot.destinationFor(to);
         if (destination) {
-          const destResult = await resolveDestinationPrincipal({ principalId: to, destination });
+          // The resolver decides who may be told anything about the rule, its mapping and its chat (the sender must be one that may message that
+          // chat), and says so with `hidden`. Whatever it does wrong fails the same way: the sender is answered as for a principal with no rule.
+          let destResult;
+          try {
+            destResult = await resolveDestinationPrincipal({ principalId: to, destination, senderId, canMessage: effectiveCanMessage });
+          } catch {
+            destResult = { ok: false, hidden: true };
+          }
           if (destResult?.ok === true && typeof destResult.sessionAddress === "string") {
             counters.resolved.principal += 1;
             return Object.freeze({
@@ -431,12 +438,15 @@ export function createUnifiedRouter({
               destination,
             });
           }
-          const code = destResult?.reason ?? "destination_unavailable";
-          const reason = destResult?.message ?? "Destination chat mapping is unavailable";
-          recordError(code);
-          const err = new RouterResolutionError(code, reason, []);
-          if (throwOnError) throw err;
-          return Object.freeze({ ok: false, code, reason, candidates: [], error: err });
+          if (destResult?.hidden !== true) {
+            const code = destResult?.reason ?? "destination_unavailable";
+            const reason = destResult?.message ?? "Destination chat mapping is unavailable";
+            recordError(code);
+            const err = new RouterResolutionError(code, reason, []);
+            if (throwOnError) throw err;
+            return Object.freeze({ ok: false, code, reason, candidates: [], error: err });
+          }
+          // hidden: nothing below says that a rule exists
         }
       }
 

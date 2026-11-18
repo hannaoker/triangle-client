@@ -66,6 +66,18 @@ export async function discoverLiveAttachedSessions({ storeRoot, now = Date.now()
   return listLiveAttachedSessionsReadOnly({ stateRoot: storeRoot, now: typeof now === 'function' ? now() : now });
 }
 
+// The supervisor keeps the chat-mapping store in its state root: the `stateRoot` of the client configuration it was set up with (`client/local` of
+// the application root in an installed system, and --client-root names the `client` directory). The configuration is read with the supervisor's
+// own loader, so a file the supervisor would refuse is not trusted here either; without a readable one the state root is `local` beside it.
+export async function defaultChatMapStoreRoot(clientRoot, { loadConfig } = {}) {
+  try {
+    const load = loadConfig ?? (await import('../../agent-worker/src/local-messaging-host.mjs')).loadLocalMessagingConfig;
+    const config = load(path.join(clientRoot, 'local-messaging.json'));
+    if (typeof config?.stateRoot === 'string' && path.isAbsolute(config.stateRoot) && path.resolve(config.stateRoot) === config.stateRoot) return config.stateRoot;
+  } catch { /* no usable configuration: the default below */ }
+  return path.join(clientRoot, 'local');
+}
+
 export function loadPackagedChatMapProvider({ command, releaseRoot, platform = process.platform } = {}) {
   return loadPackagedOwnerApprovalProvider({ command, releaseRoot, platform });
 }
@@ -316,21 +328,23 @@ export async function identityChatMapRevoke({
   };
 }
 
-export function renderChatMapPlan(plan) {
+export function renderChatMapPlan(plan, { clientRoot = null } = {}) {
   const quote = (value) => "'" + String(value).replaceAll("'", "'\\''") + "'";
+  // The command to run needs --client-root as the plan did; a plan rendered without one (a library caller) leaves it out.
+  const root = clientRoot === null ? '' : ` --client-root ${quote(clientRoot)}`;
   if (plan.action === 'set') {
     const op = plan.operation;
-    const apply = `triangle identity chat-map set --store-root ${quote(op.storeRoot)} --registry-root ${quote(plan.registryRoot ?? '')} --harness ${op.harness} --workspace ${quote(op.workspace)} --principal ${op.principalId} --confirm ${plan.planId}`;
+    const apply = `triangle identity chat-map set${root} --store-root ${quote(op.storeRoot)} --registry-root ${quote(plan.registryRoot ?? '')} --harness ${op.harness} --workspace ${quote(op.workspace)} --principal ${op.principalId} --confirm ${plan.planId}`;
     return `Set chat mapping ${op.selectorId}\n${describeOwnerOperation(op)}\nPlan: ${plan.planId}\n` +
       'Fresh owner authentication is required. To apply this exact plan:\n' + apply;
   }
   if (plan.action === 'confirm') {
-    const apply = `triangle identity chat-map confirm --store-root ${quote(plan.storeRoot)} --selector ${plan.selectorId} --confirm ${plan.planId}`;
+    const apply = `triangle identity chat-map confirm${root} --store-root ${quote(plan.storeRoot)} --selector ${plan.selectorId} --confirm ${plan.planId}`;
     return `Confirm chat mapping ${plan.selectorId}\nPrincipal: ${plan.principalId} at ${plan.authorityOrigin} (gen ${plan.bindingGeneration})\nHarness: ${plan.harness}\nWorkspace: ${plan.workspace}\nSession: ${plan.sessionAddress}\nPlan: ${plan.planId}\n` +
       'Fresh owner authentication is required. The approved plan binds only this session. To apply this exact plan:\n' + apply;
   }
   const op = plan.operation;
-  const apply = `triangle identity chat-map revoke --store-root ${quote(op.storeRoot)} --selector ${op.selectorId} --confirm ${plan.planId}`;
+  const apply = `triangle identity chat-map revoke${root} --store-root ${quote(op.storeRoot)} --selector ${op.selectorId} --confirm ${plan.planId}`;
   return `Revoke chat mapping ${op.selectorId}\n${describeOwnerOperation(op)}\nPlan: ${plan.planId}\n` +
     'Fresh owner authentication is required. To apply this exact plan:\n' + apply;
 }

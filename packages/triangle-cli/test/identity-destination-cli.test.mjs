@@ -13,6 +13,7 @@ import { deriveClientInstanceId } from "../../agent-worker/src/identity-primitiv
 import { readIdentityRegistry, setIdentityDestination } from "../../agent-worker/src/identity-registry.mjs";
 import { bindProfileInRegistry, initIdentityRegistry, makeMeshManagedBinding } from "../../agent-worker/test/local-messaging-identity-fixtures.mjs";
 import { peerBindingV2, upgradeThroughWriter } from "../../agent-worker/test/identity-registry-v2-helpers.mjs";
+import { markerRelease } from "./owner-approval-release-fixture.mjs";
 
 const principalOf = (profile) => makeMeshManagedBinding(profile).principal_id;
 const recipientsOf = (...profiles) => profiles.map((profile) => ({ profile, instanceId: deriveClientInstanceId(profile) }));
@@ -316,4 +317,33 @@ test("status --identity displays Destinations rows in human and JSON output clea
   assert.match(text, /Destinations \(owner-set chat routing rules\):/);
   assert.match(text, /active · agent_.* \(alpha\) → claude in/);
   assert.ok(MAX_DESTINATIONS === 256);
+});
+
+test("destination set and clear ask the packaged approval for the identity.destination capability and no other (P8)", async (t) => {
+  const wrong = markerRelease(["identity.chat-map"]);
+  const right = markerRelease(["identity.destination"]);
+  t.after(() => { wrong.cleanup(); right.cleanup(); });
+  for (const [label, release, shouldStart] of [["a package that allows only identity.chat-map", wrong, false], ["a package that allows identity.destination", right, true]]) {
+    const f = fixture(t);
+    const common = { target: "alpha", clientRoot: f.client, registryRoot: f.reg, platform: "darwin", releaseRoot: release.release };
+    const setPlan = await f.plan("set", "alpha", "--harness", "claude", "--workspace", f.ws);
+    release.reset();
+    await assert.rejects(
+      () => applyIdentityDestination({ ...common, action: "set", harness: "claude", workspace: f.ws, confirm: setPlan.planId }),
+      (err) => err.code === "owner_approval_unavailable",
+      `set with ${label}`,
+    );
+    assert.equal(release.started(), shouldStart, `set with ${label}: the approval binary ${shouldStart ? "is" : "is not"} started`);
+    // a rule to clear, made through the injected provider
+    const applied = await f.run(["set", "alpha", "--harness", "claude", "--workspace", f.ws, "--confirm", setPlan.planId]);
+    assert.equal(applied.code, 0, applied.err);
+    const clearPlan = await f.plan("clear", "alpha");
+    release.reset();
+    await assert.rejects(
+      () => applyIdentityDestination({ ...common, action: "clear", confirm: clearPlan.planId }),
+      (err) => err.code === "owner_approval_unavailable",
+      `clear with ${label}`,
+    );
+    assert.equal(release.started(), shouldStart, `clear with ${label}: the approval binary ${shouldStart ? "is" : "is not"} started`);
+  }
 });

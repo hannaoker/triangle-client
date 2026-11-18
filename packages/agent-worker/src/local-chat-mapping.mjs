@@ -425,9 +425,12 @@ export function revokeChatMapping(options) {
   return withLockedChatMappings(options.storeRoot, (current) => revokeChatMappingInLock(current, options));
 }
 
-export function resolveChatDestinationForPrincipal({ storeRoot, principalId, destination, attachedSessions }) {
+// What the store says about the chat a destination rule points at, without touching liveness and without throwing: an unreadable store is a
+// reason, never an exception, and a reason carries no path. `entry` is the confirmed mapping, with its pinned session address, when there is one.
+// The caller decides who may be told the reason (see the server's resolveDestinationPrincipal): this function tells everyone.
+export function inspectChatDestination({ storeRoot, principalId, destination }) {
   if (!destination || !AGENT_ID_PATTERN.test(principalId)) {
-    return { ok: false, reason: "destination_not_configured" };
+    return { ok: false, reason: "destination_not_configured", entry: null };
   }
   // The snapshot only returns a destination for an active mesh binding, and it
   // carries that binding's generation and authority. A mapping stored against a
@@ -437,24 +440,35 @@ export function resolveChatDestinationForPrincipal({ storeRoot, principalId, des
     destination.bindingGeneration < 1 ||
     typeof destination.authorityOrigin !== "string"
   ) {
-    return { ok: false, reason: "destination_binding_inactive" };
+    return { ok: false, reason: "destination_binding_inactive", entry: null };
   }
-  const store = readChatMappings({ storeRoot });
+  let store;
+  try {
+    store = readChatMappings({ storeRoot });
+  } catch (error) {
+    return { ok: false, reason: typeof error?.code === "string" ? error.code : "chat_mapping_unreadable", entry: null };
+  }
   if (store.state === "absent") {
-    return { ok: false, reason: "chat_mapping_missing" };
+    return { ok: false, reason: "chat_mapping_missing", entry: null };
   }
   const entry = Object.values(store.mappings).find(
     (m) => m.principalId === principalId && m.harness === destination.harness && m.workspace === destination.workspace
   );
   if (!entry) {
-    return { ok: false, reason: "chat_mapping_missing" };
+    return { ok: false, reason: "chat_mapping_missing", entry: null };
   }
   if (entry.bindingGeneration !== destination.bindingGeneration || entry.authorityOrigin !== destination.authorityOrigin) {
-    return { ok: false, reason: "chat_mapping_stale_generation" };
+    return { ok: false, reason: "chat_mapping_stale_generation", entry: null };
   }
   if (entry.state !== "confirmed" || !entry.sessionAddress) {
-    return { ok: false, reason: "chat_mapping_unconfirmed" };
+    return { ok: false, reason: "chat_mapping_unconfirmed", entry: null };
   }
+  return { ok: true, entry };
+}
+
+// The confirmed mapping's chat must be one of the live attached chats, and the very one that was approved: its pinned address, not any chat
+// of the same harness and workspace.
+export function resolveChatLiveness({ entry, attachedSessions }) {
   const matches = (attachedSessions ?? []).filter(
     (s) => s && s.address === entry.sessionAddress && s.harness === entry.harness && s.workspace === entry.workspace
   );
@@ -465,6 +479,12 @@ export function resolveChatDestinationForPrincipal({ storeRoot, principalId, des
     return { ok: false, reason: "destination_session_ambiguous" };
   }
   return { ok: true, sessionAddress: matches[0].address, mapping: entry };
+}
+
+export function resolveChatDestinationForPrincipal({ storeRoot, principalId, destination, attachedSessions }) {
+  const inspected = inspectChatDestination({ storeRoot, principalId, destination });
+  if (!inspected.ok) return { ok: false, reason: inspected.reason };
+  return resolveChatLiveness({ entry: inspected.entry, attachedSessions });
 }
 
 function probeMappingCacheKey(storeRoot) {

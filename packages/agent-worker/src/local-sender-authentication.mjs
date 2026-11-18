@@ -26,8 +26,15 @@ export async function authenticateAttachedLocalSender({
   }
   // The broker rechecks owner policy, discovery, lease, child and generation.
   await sessionBroker.validateRequest({ claims, senderId: expectedSenderId });
+  // The chat is described the way it is described as a recipient: a confirmed owner mapping gives it a principal, and nothing else does. Both
+  // ends of a pin must come from the same description. A chat that was pinned as a mapped recipient would otherwise never match the unmapped
+  // identity it authenticates with when it replies.
+  const described = typeof sessionBroker.describeLocalSession === "function"
+    ? await sessionBroker.describeLocalSession(expectedSenderId)
+    : null;
   return Object.freeze({ address: expectedSenderId, generation: claims.generation,
-    principal: null, authorityOrigin: null, bindingGeneration: null });
+    principal: described?.principal ?? null, authorityOrigin: described?.authorityOrigin ?? null,
+    bindingGeneration: described?.bindingGeneration ?? null });
 }
 
 // Explicit opt-in seam for the server. Only attached-chat pairs are covered in

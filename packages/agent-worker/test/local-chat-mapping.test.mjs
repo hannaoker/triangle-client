@@ -37,7 +37,7 @@ const SESSION_1 = "session-" + "1".repeat(64);
 const SESSION_2 = "session-" + "2".repeat(64);
 const ORIGIN = "https://triangle.example";
 
-test("D4 chat-mappings store: custody, set, D5-B confirm, lookup, destination resolution, and revoke", () => {
+test("D4 chat-mappings store: custody, set, confirm, lookup, destination resolution, and revoke", () => {
   const storeRoot = mkPrivateDir("triangle-chat-map-");
   try {
     const empty = readChatMappings({ storeRoot });

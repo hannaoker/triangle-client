@@ -21,7 +21,7 @@ import {
 import { coded, sanitizeError } from "./local-messaging-errors.mjs";
 import { createUnifiedRouter } from "./unified-router.mjs";
 import { createRegistrySnapshotProvider } from "./router-registry-snapshot.mjs";
-import { resolveChatDestinationForPrincipal } from "./local-chat-mapping.mjs";
+import { inspectChatDestination, resolveChatLiveness } from "./local-chat-mapping.mjs";
 
 // Presentation only. Journal phases and authorization remain authoritative.
 export function describeMessageDelivery(record,{notification='unknown',recipientAvailable=null,pullOnly=false,now=Date.now()}={}){
@@ -67,9 +67,10 @@ export function describeReplyIdentity({attachedChats=false,policy={},pinning=fal
  if(policy.state==='disabled')return view('disabled','policy_disabled',`Reply identity is turned off by the owner policy: new requests between attached chats are not pinned to their sender. ${original}`,turnOn);
  return view('disabled','policy_unknown',`The reply-identity policy state is not recognised by this reader, so new pins stay off. ${original}`,'Check the policy with a compatible runtime before changing it.');
 }
-// Attached chats have no principal binding in this release; discovery shows their principal as null.
+// An attached chat has a principal only when the owner mapped it to an agent and confirmed the mapping (identity chat-map); discovery shows the
+// principal as null for every other chat. This view is the default and does not list mappings.
 export function describeChatBinding(){
- return {binding:'unbound',summary:'Attached chats are identified only by their local session address. No principal, authority or binding generation is recorded for a chat, so its requests carry local-attested provenance and discovery shows principal null for it.',nextAction:'Nothing is needed for local messaging. Giving a chat a principal is a separate owner decision that no status or discovery call makes.'};
+ return {binding:'unbound',summary:'Attached chats are identified by their local session address. No principal, authority or binding generation is recorded for a chat unless the owner has mapped it to an agent and confirmed the mapping; until then its requests carry local-attested provenance and discovery shows principal null for it. This view does not list mappings.',nextAction:'Nothing is needed for local messaging. Giving a chat a principal is a separate owner decision that no status or discovery call makes.'};
 }
 
 const MAX_INFLIGHT_PER_SOCKET = 50;
@@ -332,17 +333,31 @@ export function createLocalControlServer({
       },
     },
     recipients: () => Array.from(directory.values()),
-    resolveDestinationPrincipal: async ({ principalId, destination }) => {
-      if (!sessionBroker || typeof sessionBroker.listLiveAttachedSessions !== "function") {
-        return { ok: false, reason: "destination_not_configured" };
+    // Dynamic resolution of a non-runner principal to its one confirmed chat. Authorization comes first (U3, plan CD-6: "checking sender
+    // authorization"): only a sender that may message the chat the rule points at is told anything about the rule, its mapping or the chat,
+    // and every other sender is answered as for a principal with no rule (`hidden`). The owner policy's answer is asked without the chat's
+    // lease or lifecycle, so an unreachable chat is not a way to tell the senders it allows from the rest. The ACL and the credential's scope
+    // still decide the delivery itself below.
+    resolveDestinationPrincipal: async ({ principalId, destination, senderId, canMessage: askCanMessage }) => {
+      const hidden = Object.freeze({ ok: false, hidden: true, reason: "destination_hidden" });
+      if (!sessionBroker || typeof sessionBroker.listLiveAttachedSessions !== "function") return hidden;
+      const inspected = inspectChatDestination({ storeRoot: effectiveStateRoot, principalId, destination });
+      const pinned = inspected.entry?.sessionAddress ?? null;
+      let mayKnow = false;
+      try {
+        if (pinned !== null) {
+          mayKnow = typeof acl.mayMessageIgnoringLiveness === "function"
+            ? (await acl.mayMessageIgnoringLiveness(senderId, pinned)) === true
+            : (typeof askCanMessage === "function" && (await askCanMessage(senderId, pinned)) === true);
+        } else if (typeof acl.mayMessageHarness === "function") {
+          mayKnow = (await acl.mayMessageHarness(senderId, destination?.harness)) === true;
+        }
+      } catch {
+        mayKnow = false;
       }
-      const attachedSessions = await sessionBroker.listLiveAttachedSessions();
-      return resolveChatDestinationForPrincipal({
-        storeRoot: effectiveStateRoot,
-        principalId,
-        destination,
-        attachedSessions,
-      });
+      if (!mayKnow) return hidden;
+      if (!inspected.ok) return { ok: false, reason: inspected.reason };
+      return resolveChatLiveness({ entry: inspected.entry, attachedSessions: await sessionBroker.listLiveAttachedSessions() });
     },
   });
 
@@ -621,7 +636,8 @@ export function createLocalControlServer({
 
           // 2. Turn claims recipient check (fail closed)
           if (claims?.allowedRecipients && !claims.allowedRecipients.includes(effectiveTo)) {
-            throw coded("recipient_not_allowed", `Recipient ${effectiveTo} is not permitted by turn credential claims`);
+            // A destination resolves to a chat the sender did not name: its address stays out of the answer.
+            throw coded("recipient_not_allowed", resolution.destination ? "Recipient is not permitted by turn credential claims" : `Recipient ${effectiveTo} is not permitted by turn credential claims`);
           }
 
           // 3. Rate limiter check and reserve BEFORE first await

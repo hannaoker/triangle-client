@@ -295,6 +295,7 @@ test("the owner status explains disabled reply identity and unbound chats withou
     assert.deepEqual(Object.keys(host.identity.chats).sort(), ["binding", "nextAction", "summary"]);
     assert.equal(host.identity.chats.binding, "unbound");
     assert.match(host.identity.chats.summary, /no principal/i);
+    assert.match(host.identity.chats.summary, /unless the owner has mapped it to an agent and confirmed the mapping/, "a confirmed owner mapping is the one way a chat gets a principal");
     assert.match(host.identity.chats.summary, /local-attested/);
     assert.match(host.identity.chats.nextAction, /owner decision/i);
 
