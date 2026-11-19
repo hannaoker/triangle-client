@@ -29,13 +29,17 @@ async function world(t, mapped) {
   const secret = "mapped-chat-reply-secret-32-bytes!!";
   const issuer = createTurnCapabilityIssuer({ secret });
   const validator = createTurnCapabilityValidator({ secret });
+  const offline = new Set();
+  const gone = () => Object.assign(new Error("Session MCP child is offline"), { code: "session_offline" });
   const broker = {
     isInteractiveSender: (id) => states.has(id),
     async validateRequest({ claims, senderId }) {
+      if (offline.has(senderId)) throw gone();
       const state = states.get(senderId);
       if (!state || claims.generation !== state.generation || claims.bindingId !== state.child) throw Object.assign(new Error("fenced"), { code: "session_fenced" });
     },
     async describeLocalSession(id) {
+      if (offline.has(id)) throw gone();
       const state = states.get(id);
       const m = mapped.get(id) ?? null;
       return { address: id, generation: state.generation, principal: m?.principal ?? null, authorityOrigin: m?.authorityOrigin ?? null, bindingGeneration: m?.bindingGeneration ?? null };
@@ -69,7 +73,7 @@ async function world(t, mapped) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   await server.start();
-  return { client, journal, broker, validator, issuer, states };
+  return { client, journal, broker, validator, issuer, states, offline };
 }
 
 async function requestAndReply(w, { requestId }) {
@@ -161,8 +165,51 @@ test("authenticateAttachedLocalSender describes the chat the way the broker does
   assert.equal(bare.principal, null);
   await assert.rejects(authenticateAttachedLocalSender({ credential, expectedSenderId: A, credentialValidator: validator, sessionBroker: { async validateRequest() { throw Object.assign(new Error("fenced"), { code: "session_fenced" }); }, async describeLocalSession() { return mapping(P_A); } } }), { code: "session_fenced" });
   // a broker's description is not trusted past its shape: a mapped principal needs its authority and generation
-  await assert.rejects(authenticateAttachedLocalSender({ credential, expectedSenderId: A, credentialValidator: validator, sessionBroker: brokerFor({ principal: P_A, authorityOrigin: null, bindingGeneration: null }) }).then((identity) => createAttachedReplyIdentity({ credentialValidator: validator, sessionBroker: brokerFor({}) }) && identity).then(async (identity) => {
+  await assert.rejects(authenticateAttachedLocalSender({ credential, expectedSenderId: A, credentialValidator: validator, sessionBroker: brokerFor({ principal: P_A, authorityOrigin: null, bindingGeneration: null }) }).then(async (identity) => {
     const { createLocalReplyRoute } = await import("../src/local-reply-route-contract.mjs");
     return createLocalReplyRoute({ requestId: "r", local: identity, remote: identity });
   }), { code: "invalid_reply_identity" });
+});
+
+test("a reply waits for a requester that is offline when it has no principal, and is refused while it is offline when it was pinned with one", async (t) => {
+  // without a principal the reply is queued for its original chat, as it always was
+  const plain = await world(t, new Map());
+  const first = await requestAndReply(plain, { requestId: "offline-plain" });
+  plain.offline.add(A);
+  const queued = await first.recipient.sendReply({ messageId: "msg-offline-plain", claimToken: first.claim.claimToken, text: "done", replyId: "reply-offline-plain" });
+  assert.equal(queued.recipient, A, "the reply is addressed to the chat that asked");
+
+  // with a principal its binding cannot be checked while the chat is away, so the reply does not wait on an unchecked pin
+  const mapped = await world(t, new Map([[A, mapping(P_A)]]));
+  const second = await requestAndReply(mapped, { requestId: "offline-mapped" });
+  mapped.offline.add(A);
+  await assert.rejects(second.recipient.sendReply({ messageId: "msg-offline-mapped", claimToken: second.claim.claimToken, text: "done", replyId: "reply-offline-mapped" }), { code: "session_offline" });
+  assert.equal((await mapped.journal.getReplyRouteForMessage("msg-offline-mapped")).remote.principal, P_A, "the pin is untouched");
+  // the replier retries when the chat is back, with the same claim
+  mapped.offline.delete(A);
+  const retried = await second.recipient.sendReply({ messageId: "msg-offline-mapped", claimToken: second.claim.claimToken, text: "done", replyId: "reply-offline-mapped" });
+  assert.equal(retried.recipient, A);
+});
+
+test("a mapping of the requester that changed after the request fails the reply closed, as one of the replier does (M2, L-5)", async (t) => {
+  const mapped = new Map([[A, mapping(P_A)]]);
+  const w = await world(t, mapped);
+  const { recipient, claim } = await requestAndReply(w, { requestId: "requester-revoked" });
+  mapped.delete(A);
+  await assert.rejects(recipient.sendReply({ messageId: "msg-requester-revoked", claimToken: claim.claimToken, text: "late", replyId: "reply-requester-revoked" }), { code: "reply_remote_mismatch" });
+  // the same chat mapped to another principal is no better
+  mapped.set(A, mapping(P_B));
+  await assert.rejects(recipient.sendReply({ messageId: "msg-requester-revoked", claimToken: claim.claimToken, text: "late", replyId: "reply-requester-revoked" }), { code: "reply_remote_mismatch" });
+  // and the original mapping again is the pin that was made
+  mapped.set(A, mapping(P_A));
+  assert.equal((await recipient.sendReply({ messageId: "msg-requester-revoked", claimToken: claim.claimToken, text: "ok", replyId: "reply-requester-revoked" })).recipient, A);
+});
+
+test("a chat that cannot be described cannot authenticate: the failure is the broker's, not a chat without a principal", async () => {
+  const secret = "mapped-chat-describe-secret-32-bytes!";
+  const issuer = createTurnCapabilityIssuer({ secret });
+  const validator = createTurnCapabilityValidator({ secret });
+  const credential = issuer.issue({ senderId: A, senderType: "interactive", sessionId: "raw-a", generation: 1, bindingId: "child-a" });
+  const gone = Object.assign(new Error("Session MCP child is offline"), { code: "session_offline" });
+  await assert.rejects(authenticateAttachedLocalSender({ credential, expectedSenderId: A, credentialValidator: validator, sessionBroker: { async validateRequest() {}, async describeLocalSession() { throw gone; } } }), { code: "session_offline" });
 });

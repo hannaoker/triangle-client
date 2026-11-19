@@ -446,7 +446,10 @@ export function inspectChatDestination({ storeRoot, principalId, destination }) 
   try {
     store = readChatMappings({ storeRoot });
   } catch (error) {
-    return { ok: false, reason: typeof error?.code === "string" ? error.code : "chat_mapping_unreadable", entry: null };
+    // Only this module's own reasons are passed on; an errno (EACCES, ENOTDIR, ELOOP, ...) says nothing the sender should see and would become a
+    // counter key.
+    const code = typeof error?.code === "string" && /^chat_mapping_[a-z_]+$/.test(error.code) ? error.code : "chat_mapping_unreadable";
+    return { ok: false, reason: code, entry: null };
   }
   if (store.state === "absent") {
     return { ok: false, reason: "chat_mapping_missing", entry: null };

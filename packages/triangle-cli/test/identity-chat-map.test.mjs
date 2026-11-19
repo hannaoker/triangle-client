@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -252,9 +253,9 @@ test("packaged chat-map set, confirm, and revoke use the identity.chat-map allow
 
 // The installed layout, with a space in the path as "The Triangle" has: <app>/client is --client-root, <app>/identity is the registry. Without a
 // `stateRoot` the client has no configuration and its state root is client/local; with one, the configuration names it.
-function chatWorld(t, { stateRoot = null } = {}) {
+function chatWorld(t, { stateRoot = null, appName = "The Triangle" } = {}) {
   const base = mkDir("triangle-cli-cm-");
-  const app = path.join(base, "The Triangle");
+  const app = path.join(base, appName);
   const clientRoot = path.join(app, "client");
   const registryRoot = path.join(app, "identity");
   const workspace = mkDir("triangle-ws-");
@@ -526,4 +527,26 @@ test("an explicit --store-root must be an absolute path, and is refused before a
   assert.notEqual(missing.code, 0);
   assert.equal(w.store(), null);
   assert.equal(w.calls.n, 0);
+});
+
+test("the printed apply commands survive a real shell for application roots with quotes, dollar signs, backticks, parentheses, globs and spaces (M5)", async (t) => {
+  for (const [label, appName] of [["a quote", "it's here"], ["a dollar sign and a backtick", "a $HOME `id` $(id) b"], ["a glob", "a*b?[c]"], ["spaces and parentheses", "The (Triangle) app"]]) {
+    const w = chatWorld(t, { appName });
+    // The shell reads the printed line as a call of a function that prints its arguments NUL-separated, so nothing is expanded or run.
+    const parse = (out) => {
+      const command = out.split("To apply this exact plan:\n")[1];
+      const script = 'triangle(){ for a in "$@"; do printf "%s\\0" "$a"; done; }\n' + command + "\n";
+      return execFileSync("/bin/bash", ["-c", script], { encoding: "utf8" }).split("\0").slice(0, -1);
+    };
+    for (const [action, args] of [["set", w.setArgs], ["confirm", w.confirmArgs], ["revoke", w.revokeArgs]]) {
+      const planned = await w.run(args);
+      assert.equal(planned.code, 0, `${label} ${action}: ${planned.err}`);
+      const words = parse(planned.out);
+      assert.deepEqual(words.slice(0, 3), ["identity", "chat-map", action], label);
+      assert.equal(words[words.indexOf("--client-root") + 1], w.clientRoot, `${label} ${action}: the client root as planned`);
+      assert.equal(words[words.indexOf("--store-root") + 1], w.state, `${label} ${action}: the store root as planned`);
+      const applied = await w.run(words.slice(2));
+      assert.equal(applied.code, 0, `${label} ${action}: ${applied.err}`);
+    }
+  }
 });

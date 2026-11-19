@@ -98,7 +98,7 @@ test("D4 chat-mappings store: custody, set, confirm, lookup, destination resolut
     }), { ok: false, reason: "chat_mapping_unconfirmed" });
     assert.equal(lookupConfirmedChatMappingForSession({ storeRoot, sessionAddress: SESSION_1 }), null);
 
-    // D5-B confirm requires exact 1 live attached chat matching (harness, workspace)
+    // confirm requires exactly one live attached chat matching (harness, workspace)
     assert.throws(() => confirmChatMapping({
       storeRoot,
       selectorId,

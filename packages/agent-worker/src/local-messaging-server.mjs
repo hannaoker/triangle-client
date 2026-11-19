@@ -70,7 +70,7 @@ export function describeReplyIdentity({attachedChats=false,policy={},pinning=fal
 // An attached chat has a principal only when the owner mapped it to an agent and confirmed the mapping (identity chat-map); discovery shows the
 // principal as null for every other chat. This view is the default and does not list mappings.
 export function describeChatBinding(){
- return {binding:'unbound',summary:'Attached chats are identified by their local session address. No principal, authority or binding generation is recorded for a chat unless the owner has mapped it to an agent and confirmed the mapping; until then its requests carry local-attested provenance and discovery shows principal null for it. This view does not list mappings.',nextAction:'Nothing is needed for local messaging. Giving a chat a principal is a separate owner decision that no status or discovery call makes.'};
+ return {binding:'unbound',summary:'Attached chats are identified by their local session address. No principal, authority or binding generation is recorded for a chat unless the owner has mapped it to an agent and confirmed the mapping, and even then it is used only in reply pins while reply identity is on and never shown in discovery; otherwise its requests carry local-attested provenance at most. This view does not list mappings.',nextAction:'Nothing is needed for local messaging. Giving a chat a principal is a separate owner decision that no status or discovery call makes.'};
 }
 
 const MAX_INFLIGHT_PER_SOCKET = 50;

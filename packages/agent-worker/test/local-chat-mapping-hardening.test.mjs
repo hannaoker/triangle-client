@@ -206,6 +206,12 @@ test("inspectChatDestination says what the store says, never throws, and never c
     const missing = inspectChatDestination({ storeRoot: path.join(storeRoot, "nowhere"), principalId: PRINCIPAL(1), destination: DESTINATION });
     assert.equal(missing.ok, false);
     assert.equal(JSON.stringify(missing).includes(storeRoot), false, "no path in the answer");
+    // an errno is not a reason: a root below a regular file fails with ENOTDIR, which a sender must not see and a counter must not key on
+    const plain = path.join(storeRoot, "a-regular-file");
+    fs.writeFileSync(plain, "x", { mode: 0o600 });
+    const blocked = inspectChatDestination({ storeRoot: path.join(plain, "below"), principalId: PRINCIPAL(1), destination: DESTINATION });
+    assert.deepEqual(blocked, { ok: false, reason: "chat_mapping_unreadable", entry: null });
+    assert.match(blocked.reason, /^chat_mapping_[a-z_]+$/);
   } finally {
     fs.rmSync(storeRoot, { recursive: true, force: true });
   }

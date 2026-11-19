@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { setupLocalMessaging, setupRouter, setupSessionDiscovery, setupWorkspaceMessaging, disableWorkspaceMessaging } from "../src/local-messaging-cli.mjs";
+import { editSessionGrant, setupLocalMessaging, setupRouter, setupSessionDiscovery, setupWorkspaceMessaging, disableWorkspaceMessaging } from "../src/local-messaging-cli.mjs";
 import { readPrivateJson, writePrivateJson } from "../src/local-messaging-auth-broker.mjs";
 import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import { createWorkspaceSessionBroker } from "../src/local-messaging-interactive-session.mjs";
@@ -214,4 +214,22 @@ test("the binding check says no when anything goes wrong in asking, and asks aga
   assert.equal(createChatBindingConfirmer({ stateRoot: "/x", loadRouter: () => ({ registryRoot: "/fake/c" }), createProvider: () => ({ get() { throw new Error("registry unreadable"); } }) })(claim), false);
   assert.equal(createChatBindingConfirmer({ stateRoot: "/x", loadRouter: () => ({ registryRoot: "/fake/c" }), createProvider: () => ({ get: () => ({ state: "unreadable", bindingsFor: () => [binding] }) }) })(claim), false);
   void createRegistrySnapshotProvider;
+});
+
+test("an exact pair answers for its own chat and for no other and not for a harness, and a chat that has ended is still answered (mayMessageSession, mayMessageHarness)", async (t) => {
+  const PAIRED_SENDER = "session-" + "e".repeat(64); // an exact pair counts for a chat address or a live configured sender
+  const f = await fixture(t);
+  const paired = await f.start();
+  const other = await f.start();
+  const ended = await f.start();
+  await f.event(ended.sessionId, "end");
+  const broker = f.broker();
+  assert.equal(await broker.mayMessageSession(PAIRED_SENDER, paired.id), false, "no grant yet");
+  editSessionGrant("grant-session", { config: f.configPath, senders: [PAIRED_SENDER], to: paired.id });
+  assert.equal(await broker.mayMessageSession(PAIRED_SENDER, paired.id), true, "the pair");
+  assert.equal(await broker.mayMessageSession(PAIRED_SENDER, other.id), false, "another chat of the same workspace");
+  assert.equal(await broker.mayMessageHarness(PAIRED_SENDER, "claude"), false, "an exact pair names one chat and cannot answer for a harness");
+  // the policy's answer does not depend on the chat's lifecycle: an ended chat is answered like any other, and delivery refuses it separately
+  assert.equal(await broker.mayMessageSession(f.desktop, ended.id), true);
+  await assert.rejects(broker.checkRecipient(f.desktop, ended.id), { code: "session_offline" });
 });

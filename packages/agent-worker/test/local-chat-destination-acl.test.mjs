@@ -62,7 +62,7 @@ function scriptedAcl({ policy, live, blockDelivery = false, asked = [], gateThro
 }
 
 async function world(options, run) {
-  const { mapping = "confirmed", rule = true, router = true, corrupt = false, mappingGeneration = 1, live = [CHAT], policy, scope = null, blockDelivery = false, gateThrows = false } = options;
+  const { mapping = "confirmed", rule = true, router = true, corrupt = false, mappingGeneration = 1, live = [CHAT], policy, scope = null, blockDelivery = false, gateThrows = false, harness = "claude" } = options;
   const dir = privateTmp("dacl-");
   const stateRoot = path.join(dir, "s");
   const identityRoot = path.join(dir, "identity");
@@ -73,13 +73,13 @@ async function world(options, run) {
   const rhea = bindProfileInRegistry(identityRoot, "rhea", 2);
   upgradeThroughWriter(identityRoot, { now: new Date().toISOString() });
   if (rule) {
-    setIdentityDestination({ root: identityRoot, expectedSequence: readIdentityRegistry({ root: identityRoot }).registry.sequence, principalId: rhea.principal_id, harness: "claude", workspace });
+    setIdentityDestination({ root: identityRoot, expectedSequence: readIdentityRegistry({ root: identityRoot }).registry.sequence, principalId: rhea.principal_id, harness, workspace });
   }
-  const selectorId = deriveChatSelectorId({ harness: "claude", workspace });
+  const selectorId = deriveChatSelectorId({ harness, workspace });
   if (mapping !== "none") {
-    setChatMapping({ storeRoot: stateRoot, selectorId, harness: "claude", workspace, principalId: rhea.principal_id, authorityOrigin: rhea.authority_origin, bindingGeneration: mappingGeneration, expectedSequence: 0 });
+    setChatMapping({ storeRoot: stateRoot, selectorId, harness, workspace, principalId: rhea.principal_id, authorityOrigin: rhea.authority_origin, bindingGeneration: mappingGeneration, expectedSequence: 0 });
     if (mapping === "confirmed") {
-      confirmChatMapping({ storeRoot: stateRoot, selectorId, expectedSequence: 1, attachedSessions: [{ address: CHAT, harness: "claude", workspace }] });
+      confirmChatMapping({ storeRoot: stateRoot, selectorId, expectedSequence: 1, attachedSessions: [{ address: CHAT, harness, workspace }] });
     }
   }
   if (corrupt) fs.writeFileSync(path.join(stateRoot, CHAT_MAPPING_FILENAME), "{ not json", { mode: 0o600 });
@@ -104,7 +104,7 @@ async function world(options, run) {
     inboxBroker: { isDesktopSender: () => false, validateRequest() {} },
     sessionBroker: {
       async listFor() { return []; },
-      async listLiveAttachedSessions() { return live.map((address) => ({ address, harness: "claude", workspace, generation: 1 })); },
+      async listLiveAttachedSessions() { return live.map((address) => ({ address, harness, workspace, generation: 1 })); },
       async describeLocalSession(id) { return Object.freeze({ address: id, generation: 1, principal: null, authorityOrigin: null, bindingGeneration: null }); },
     },
     discoveryBroker: { async listFor() { return []; } },
@@ -134,6 +134,20 @@ async function answer(promise) {
   } catch (error) {
     return { ok: false, code: error.code, message: error.message };
   }
+}
+
+// What changed in the router's counters (errors and resolved) between two `local_status` answers.
+function routerDelta(before, after) {
+  const out = {};
+  for (const k of new Set([...Object.keys(before.errors ?? {}), ...Object.keys(after.errors ?? {})])) {
+    const d = (after.errors?.[k] ?? 0) - (before.errors?.[k] ?? 0);
+    if (d !== 0) out[k] = d;
+  }
+  for (const k of Object.keys(after.resolved ?? {})) {
+    const d = after.resolved[k] - (before.resolved?.[k] ?? 0);
+    if (d !== 0) out[`resolved.${k}`] = d;
+  }
+  return out;
 }
 
 function localStatus(socketPath, credential, senderId) {
@@ -169,11 +183,10 @@ test("a sender that may not message the mapped chat gets the answer of a princip
   for (const [name, options] of STATES) {
     const seen = await world({ ...options, policy: POLICY() }, async ({ as, admitted, rhea, socketPath }) => {
       const { client, credential } = as(DENIED);
-      const before = (await localStatus(socketPath, credential, DENIED)).router.errors;
+      const before = (await localStatus(socketPath, credential, DENIED)).router;
       const result = await answer(client.sendMessage({ to: rhea.principal_id, text: "hi", messageId: "m-denied", requestId: "r-denied" }));
-      const after = (await localStatus(socketPath, credential, DENIED)).router.errors;
-      const delta = Object.fromEntries(Object.keys(after).map((k) => [k, after[k] - (before[k] ?? 0)]).filter(([, v]) => v !== 0));
-      return { result, delta, admitted: admitted.length };
+      const after = (await localStatus(socketPath, credential, DENIED)).router;
+      return { result, delta: routerDelta(before, after), admitted: admitted.length };
     });
     assert.equal(seen.result.ok, false, `${name}: a denied sender must never be accepted`);
     assert.equal(seen.admitted, 0, name);
@@ -186,11 +199,15 @@ test("a sender that may not message the mapped chat gets the answer of a princip
 
 test("a sender that may message the mapped chat is told why delivery is not possible, and is accepted when it is", async () => {
   for (const [name, options, expected] of STATES) {
-    const seen = await world({ ...options, policy: POLICY() }, async ({ as, admitted, rhea }) => {
-      const { client } = as(PERMITTED);
+    const seen = await world({ ...options, policy: POLICY() }, async ({ as, admitted, rhea, socketPath }) => {
+      const { client, credential } = as(PERMITTED);
+      const before = (await localStatus(socketPath, credential, PERMITTED)).router;
       const result = await answer(client.sendMessage({ to: rhea.principal_id, text: "hi", messageId: "m-ok", requestId: "r-ok" }));
-      return { result, admitted: admitted.length };
+      const after = (await localStatus(socketPath, credential, PERMITTED)).router;
+      return { result, delta: routerDelta(before, after), admitted: admitted.length };
     });
+    // the router counts what it did for this sender: the reason it refused with, or the resolution it made
+    assert.deepEqual(seen.delta, expected === null ? { "resolved.principal": 1 } : { [expected]: 1 }, `${name}: counters`);
     if (expected === null) {
       assert.equal(seen.result.ok, true, name);
       assert.equal(seen.result.accepted, true, name);
@@ -224,6 +241,11 @@ test("the gate asks the owner policy about the pinned chat when there is one, an
   await world({ mapping: "pending", policy: POLICY() }, async ({ as, asked, rhea }) => {
     await answer(as(PERMITTED).client.sendMessage({ to: rhea.principal_id, text: "hi", messageId: "m2", requestId: "r2" }));
     assert.deepEqual(asked, [["harness", PERMITTED, "claude"]]);
+  });
+  // the rule's own harness is what is asked
+  await world({ mapping: "pending", harness: "codex", policy: POLICY() }, async ({ as, asked, rhea }) => {
+    await answer(as(PERMITTED).client.sendMessage({ to: rhea.principal_id, text: "hi", messageId: "m5", requestId: "r5" }));
+    assert.deepEqual(asked, [["harness", PERMITTED, "codex"]]);
   });
   // A sender that may message chats of the harness but not the pinned one is told nothing once a chat is pinned, and the reasons before that.
   await world({ policy: POLICY() }, async ({ as, rhea }) => {

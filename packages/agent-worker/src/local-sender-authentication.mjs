@@ -65,7 +65,9 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
       let remote;
       try { remote = await sessionBroker.describeLocalSession(route.remote.address); }
       catch (error) {
-        // A reply may wait for its ORIGINAL offline chat; never reroute it.
+        // A reply may wait for its ORIGINAL offline chat; never reroute it. That holds for a requester without a principal. A requester that
+        // was pinned with a principal (an owner-mapped chat) is refused while it is offline: its principal cannot be checked again while it is
+        // away, and the reply does not wait on an unchecked pin. The replier retries when the chat is back.
         if (error.code !== "session_offline" || route.remote.principal !== null) throw error;
         remote = route.remote;
       }
