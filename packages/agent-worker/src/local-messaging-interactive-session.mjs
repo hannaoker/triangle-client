@@ -352,6 +352,13 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   async validateRequest({claims,senderId}){const {r,a}=await current(senderId);
    if(claims.senderType!=='interactive'||claims.bindingId!==a.child_id||claims.generation!==r.generation)throw coded('session_fenced','Session attachment changed');},
   async checkRecipient(sender,to){if(!to.startsWith('session-'))return;const {c,r}=await current(to);if(!mayReceive(c,sender,r,await classSenderHarness(c,sender)))throw coded('recipient_not_allowed','Session receiver policy denies sender');},
+  // The receiver policy's answer for one session whether or not it can be reached right now: no lease, lifecycle or child check. Who may be
+  // told anything about the chat a destination rule points at is decided with this, so that an unreachable chat is not a way to tell the
+  // senders the policy allows from the ones it does not.
+  async mayMessageSession(sender,to){try{if(typeof to!=='string'||!to.startsWith('session-'))return false;const c=policy(),r=await journal.getDiscoveredSession({id:to,installationId:c.installationId,workspace:c.workspace});return !!r&&mayReceive(c,sender,r,await classSenderHarness(c,sender))===true;}catch{return false;}},
+  // The same question for "a chat of this harness" while no chat is pinned yet: the owner's sender list for the harness, or a class grant. An
+  // exact pair names one session and cannot answer it.
+  async mayMessageHarness(sender,harness){try{if(harness!=='claude'&&harness!=='codex')return false;const c=policy();return mayReceive(c,sender,{id:null,harness},await classSenderHarness(c,sender))===true;}catch{return false;}},
   // One policy read, one directory listing and one attachment listing however many sessions there are.
   async listFor(reader){let result=[];try{
     const c=policy(),readerHarness=await classSenderHarness(c,reader);

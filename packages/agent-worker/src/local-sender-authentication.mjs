@@ -26,8 +26,15 @@ export async function authenticateAttachedLocalSender({
   }
   // The broker rechecks owner policy, discovery, lease, child and generation.
   await sessionBroker.validateRequest({ claims, senderId: expectedSenderId });
+  // The chat is described the way it is described as a recipient: a confirmed owner mapping gives it a principal, and nothing else does. Both
+  // ends of a pin must come from the same description. A chat that was pinned as a mapped recipient would otherwise never match the unmapped
+  // identity it authenticates with when it replies.
+  const described = typeof sessionBroker.describeLocalSession === "function"
+    ? await sessionBroker.describeLocalSession(expectedSenderId)
+    : null;
   return Object.freeze({ address: expectedSenderId, generation: claims.generation,
-    principal: null, authorityOrigin: null, bindingGeneration: null });
+    principal: described?.principal ?? null, authorityOrigin: described?.authorityOrigin ?? null,
+    bindingGeneration: described?.bindingGeneration ?? null });
 }
 
 // Explicit opt-in seam for the server. Only attached-chat pairs are covered in
@@ -58,7 +65,9 @@ export function createAttachedReplyIdentity({ credentialValidator, sessionBroker
       let remote;
       try { remote = await sessionBroker.describeLocalSession(route.remote.address); }
       catch (error) {
-        // A reply may wait for its ORIGINAL offline chat; never reroute it.
+        // A reply may wait for its ORIGINAL offline chat; never reroute it. That holds for a requester without a principal. A requester that
+        // was pinned with a principal (an owner-mapped chat) is refused while it is offline: its principal cannot be checked again while it is
+        // away, and the reply does not wait on an unchecked pin. The replier retries when the chat is back.
         if (error.code !== "session_offline" || route.remote.principal !== null) throw error;
         remote = route.remote;
       }

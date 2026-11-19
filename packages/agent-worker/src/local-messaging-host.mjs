@@ -66,6 +66,40 @@ export function loadLocalMessagingConfig(configPath) {
  return config;
 }
 
+// Whether a chat mapping's claim still holds: the registry the router reads has exactly one active mesh binding for the principal, at the authority
+// and generation the mapping was made against. A mapping file is not authority, so anything that goes wrong in asking is a no.
+export function createChatBindingConfirmer({stateRoot,loadRouter=loadRouterConfig,createProvider=createRegistrySnapshotProvider}={}){
+ let cached=null;
+ return claim=>{
+  try{
+   const root=loadRouter(stateRoot).registryRoot||path.resolve(stateRoot,'../../identity');
+   if(!cached||cached.root!==root)cached={root,provider:createProvider({root})};
+   return activeMeshBindingMatches(cached.provider.get(),claim)===true;
+  }catch{return false;}
+ };
+}
+
+// The owner policy's answers for "may this sender message that chat?" with the chat's lease, lifecycle and the credential's scope left out: the
+// conditions that come and go. They decide who may be told anything about the chat a destination rule points at (the server's
+// resolveDestinationPrincipal), so that an unreachable chat is not a way to tell the senders the policy allows from the rest. Delivery itself
+// still goes through checkAllowed and the credential's scope.
+export function createDestinationPermissions({sessionBroker=null,grokBroker=null}={}) {
+ return {
+  // For a session address only; every other recipient is false. A Grok principal's outgoing grant is part of the answer.
+  async mayMessageIgnoringLiveness(sender,to){
+   try{
+    if(typeof to!=='string'||!to.startsWith('session-')||!sessionBroker)return false;
+    if(grokBroker&&(grokBroker.has(sender)||grokBroker.has(to)))grokBroker.checkAllowed(sender,to);
+    return (await sessionBroker.mayMessageSession(sender,to))===true;
+   }catch{return false;}
+  },
+  // For "a chat of this harness" while no chat is pinned yet. A Grok principal has no class-level grant, so it is never told.
+  async mayMessageHarness(sender,harness){
+   try{return !!sessionBroker&&!grokBroker?.has(sender)&&(await sessionBroker.mayMessageHarness(sender,harness))===true;}catch{return false;}
+  },
+ };
+}
+
 export function createInstalledLocalMessagingHost({configPath,runners,gate,logger={},wakeAdapter=null,wakeRunner=null,minIntervalMs=null,timerIntervalMs=null,clock=null,replyIdentityEnabled=null}) {
  const config=loadLocalMessagingConfig(configPath);
  const replyPolicyPath=path.join(path.dirname(configPath),'reply-identity.json');
@@ -166,14 +200,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
     });
    }
    if(config.sessionMessaging?.enabled){
-    let bindingSnapshots=null;
-    const confirmChatBinding=(claim)=>{
-     const root=loadRouterConfig(config.stateRoot).registryRoot||path.resolve(config.stateRoot,'../../identity');
-     if(!bindingSnapshots||bindingSnapshots.root!==root){
-      bindingSnapshots={root,provider:createRegistrySnapshotProvider({root})};
-     }
-     return activeMeshBindingMatches(bindingSnapshots.provider.get(),claim);
-    };
+    const confirmChatBinding=createChatBindingConfirmer({stateRoot:config.stateRoot});
     sessionBroker=createWorkspaceSessionBroker({policyPath:config.sessionMessaging.integrationPath,discoveryPath:config.discovery.integrationPath,journal,
      boundIntegrationPath:config.integrationPath,additionalPrincipals:grokIds,ownerSenderId:integration.senderId,configuredRecipients:[...recipientIds,...(inboxEnabled?[integration.senderId]:[])],
      codexSenderPrincipals:[integration.senderId,...recipientIds,...(interactiveIntegration?[interactiveIntegration.senderId]:[]),...grokIds],logger,
@@ -213,6 +240,8 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      }
      baseAcl.checkAllowed(sender,to);
     },
+    // Who may be told about the chat a destination rule points at (see createDestinationPermissions).
+    ...createDestinationPermissions({sessionBroker,grokBroker}),
    };
    const sessionRecipients={has:id=>(inboxEnabled&&id===integration.senderId)||!!grokBroker?.has(id)||interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
    try {
