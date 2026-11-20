@@ -64,14 +64,13 @@ function supervisorFor(extra,lane=meshLane(),events=[]){
 const quickSleep=sleeps=>ms=>{sleeps.push(ms);return new Promise(r=>setTimeout(r,2));};
 for(const [label,config,code] of [
  ['a changed desktop identity','identity','binding_changed'],
- ['a missing recipient lane','lane','local_recipient_unavailable'],
 ]) {
  test(`${label} disables only the local route; MESH lanes keep running and the failure is reported`,async()=>{
   const f=localFixture(),lane=meshLane(),events=[],sleeps=[];
   try{
    if(config==='identity')writePrivateJson(f.bindingPath,{...readPrivateJson(f.bindingPath),instanceId:'b'.repeat(64)});
    const supervisor=createClientSupervisor({
-    instances:[instance(config==='lane'?'2'.repeat(64):gravityId)],localMessaging:{configPath:f.configPath},createDeliveryClient:()=>({}),createWorker:lane.createWorker,
+    instances:[instance(gravityId)],localMessaging:{configPath:f.configPath},createDeliveryClient:()=>({}),createWorker:lane.createWorker,
     createRunner:()=>({run:async()=>({status:'completed',text:'ok'})}),random:()=>0,logger:{error:(event,detail)=>events.push({event,code:detail?.code})},
    });
    assert.equal(supervisor.localStatus().failure.code,code,'failure is visible before watch starts');
@@ -88,6 +87,31 @@ for(const [label,config,code] of [
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
  });
 }
+// A disabled agent (no runtime for a configured recipient) must not take the local route down for
+// everyone else: the route runs, the agent is listed as unavailable and its queued work waits.
+test('a recipient whose runtime is not running leaves the local route running and lists it as unavailable',async()=>{
+ const f=localFixture(),lane=meshLane(),events=[],warnings=[];
+ // A failed assertion must still stop the watch, or the test file never exits.
+ const controller=new AbortController();let watching=null;
+ try{
+  const supervisor=createClientSupervisor({
+   instances:[instance('2'.repeat(64))],localMessaging:{configPath:f.configPath},createDeliveryClient:()=>({}),createWorker:lane.createWorker,
+   createRunner:()=>({run:async()=>({status:'completed',text:'ok'})}),random:()=>0,
+   logger:{error:(event,detail)=>events.push({event,code:detail?.code}),warn:message=>warnings.push(String(message))},
+  });
+  assert.equal(supervisor.localStatus().failure,undefined,'the host is built');
+  watching=supervisor.watch({signal:controller.signal,sleep:quickSleep([])});
+  await waitFor(()=>lane.watching,{message:'MESH lane watch'});
+  await waitFor(()=>supervisor.localStatus().state==='running',{message:'local route running'});
+  const status=supervisor.localStatus();
+  assert.deepEqual(status.unavailableRecipients,['gravity2']);
+  assert.equal(status.failure,undefined);
+  assert.ok(!events.some(e=>e.event==='triangle_client_local_messaging_failed'),'no local failure is reported');
+  assert.ok(warnings.some(w=>w.includes('gravity2')&&w.includes('not running')),'the log names the agent that is not running');
+  assert.ok(!JSON.stringify(status).includes(f.secret),'status never carries secrets');
+  controller.abort();await watching;
+ }finally{controller.abort();await watching?.catch(()=>{});fs.rmSync(f.root,{recursive:true,force:true});}
+});
 test('a busy local journal is retried while MESH lanes run, then the local route recovers',async()=>{
  const f=localFixture(),lane=meshLane(),events=[];
  const competing=createLocalMessagingJournal({stateRoot:f.stateRoot});

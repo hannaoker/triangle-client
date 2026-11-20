@@ -114,9 +114,15 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  };
  const admissionEnabled=replyIdentityEnabled??(()=>replyPolicy().enabled);
 
- for(const r of config.recipients)if(typeof runners.get(r.instanceId)?.run!=='function')throw coded('local_recipient_unavailable',`Recipient runtime unavailable: ${r.profile}`);
+ // A configured worker whose runtime is not running (its agent is disabled) must not take local
+ // messaging down for everyone else: it takes no new work (the server refuses it before anything is
+ // recorded) and its queued work stays queued until it runs again (the dispatcher skips it).
+ const runnable=id=>typeof runners.get(id)?.run==='function';
+ const unavailableRecipients=config.recipients.filter(r=>!runnable(r.instanceId)).map(r=>r.profile);
+ for(const profile of unavailableRecipients)logger.warn?.(`Local recipient ${profile} is not running: it takes no new work and its queued work waits`);
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
+ const runnerAvailable=id=>!recipientIds.includes(id)||runnable(id);
  const inboxEnabled=config.inbox?.enabled===true;
  const inboxPolicy=()=>{try{const current=loadLocalMessagingConfig(configPath).inbox;return inboxEnabled&&current?.enabled?current:null;}catch{return null;}};
  const receivesFrom=sender=>!!inboxPolicy()?.allowedSenders.includes(sender);
@@ -170,7 +176,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  const brokerFailureLimit=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  let subsystem=null,journal=null,dispatcher=null,notifier=null,startPromise=null,closed=false;
  const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:codexAllowedRecipients,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
- function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients};}
+ function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients,...(unavailableRecipients.length?{unavailableRecipients}:{})};}
  async function start() {
   if(closed)throw coded('local_host_closed','Local host is closed');
   if(startPromise)return startPromise;
@@ -245,7 +251,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
    };
    const sessionRecipients={has:id=>(inboxEnabled&&id===integration.senderId)||!!grokBroker?.has(id)||interactiveRecipients.has(id)||!!sessionBroker?.isInteractiveSender(id)};
    try {
-    dispatcher=createLocalMessagingDispatcher({journal,logger,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
+    dispatcher=createLocalMessagingDispatcher({journal,logger,canRun:runnerAvailable,runnerTimeoutMs:config.runnerTimeoutMs??3600000,runRecipient:(job,options)=>{
      const runner=runners.get(job.recipient);
      if(!runner)throw coded('local_recipient_unavailable','Recipient runtime unavailable');
      const request={contextId:'local-'+createHash('sha256').update(`${job.sender}\0${job.requestId}`).digest('hex').slice(0,40),senderId:job.sender,text:job.text};
@@ -273,7 +279,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>{const policy=replyPolicy(),pinning=!!sessionBroker&&(replyIdentityEnabled===null?policy.enabled===true:typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true);return {...baseStatus(),replyIdentity:{enabled:pinning,scope:'attached-chat-pairs',...(policy.error?{error:policy.error}:{} )},identity:{replyIdentity:describeReplyIdentity({attachedChats:!!sessionBroker,policy,pinning}),chats:describeChatBinding()},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null};},credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,runnerAvailable,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>{const policy=replyPolicy(),pinning=!!sessionBroker&&(replyIdentityEnabled===null?policy.enabled===true:typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true);return {...baseStatus(),replyIdentity:{enabled:pinning,scope:'attached-chat-pairs',...(policy.error?{error:policy.error}:{} )},identity:{replyIdentity:describeReplyIdentity({attachedChats:!!sessionBroker,policy,pinning}),chats:describeChatBinding()},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null};},credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

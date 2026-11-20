@@ -9,7 +9,11 @@ export function createLocalMessagingDispatcher({
   maxConcurrent = 2,
   now = Date.now,
   compactIntervalMs = 3600000,
+  // canRun(recipient) false: the recipient's runtime is not running. Its queued work is
+  // neither claimed nor failed; it stays queued_local until a start where it can run.
+  canRun = null,
 } = {}) {
+  const runnable = typeof canRun === "function" ? canRun : () => true;
   if (!journal) {
     throw coded("invalid_dispatcher_options", "journal is required");
   }
@@ -194,6 +198,9 @@ export function createLocalMessagingDispatcher({
     if (stopping) {
       return;
     }
+    if (!runnable(job.recipient)) {
+      return;
+    }
     if (inFlightMessageIds.has(job.messageId)) {
       return;
     }
@@ -213,6 +220,7 @@ export function createLocalMessagingDispatcher({
     const recovery = await activeJournal.recoverQueued();
     if (recovery?.toRun) {
       for (const job of recovery.toRun) {
+        if (!runnable(job.recipient)) continue;
         if (!inFlightMessageIds.has(job.messageId)) {
           inFlightMessageIds.add(job.messageId);
           pendingQueue.push(job);

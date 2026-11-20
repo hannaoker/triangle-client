@@ -1042,3 +1042,36 @@ test("directory rejects ambiguous or unbounded owner metadata before serving", (
     }
   } finally { fs.rmSync(env.tmpDir, { recursive: true, force: true }); }
 });
+
+test("a configured worker that is not running takes no new work; the ACL answers first and a retry of recorded work keeps its answer", async () => {
+  const env = setupEnvironment();
+  const executed = [];
+  const dispatcher = createTestRecoverableDispatcher({ journal: env.journal, execute: async (job) => { executed.push(job.messageId); } });
+  let available = false;
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter, loopTracker: env.loopTracker, dispatcher,
+    runnerAvailable: (id) => available || id !== "gravity2",
+  });
+  const clientFor = (senderId) => createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId }), senderId });
+  const codex = clientFor("desktop-codex"), eve = clientFor("eve");
+  try {
+    await server.start();
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "off-1", requestId: "off-req-1" }), { code: "local_recipient_unavailable" });
+    assert.ok(!(await env.journal.getRecord("off-1")), "nothing was recorded");
+    await assert.rejects(eve.sendMessage({ to: "gravity2", text: "probe", messageId: "off-2", requestId: "off-req-2" }), { code: "recipient_not_allowed" }, "a sender the ACL denies learns nothing about availability");
+    available = true;
+    const first = await codex.sendMessage({ to: "gravity2", text: "earlier work", messageId: "off-3", requestId: "off-req-3" });
+    assert.equal(first.accepted, true);
+    available = false;
+    const retry = await codex.sendMessage({ to: "gravity2", text: "earlier work", messageId: "off-3", requestId: "off-req-3" });
+    assert.equal(retry.accepted, true);
+    assert.equal(retry.isDuplicate, true, "work recorded before the agent stopped keeps its usual answer");
+    assert.deepEqual(executed.filter((id) => id === "off-1"), [], "the refused send never reached the dispatcher");
+  } finally {
+    await codex.close().catch(() => {});
+    await eve.close().catch(() => {});
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});

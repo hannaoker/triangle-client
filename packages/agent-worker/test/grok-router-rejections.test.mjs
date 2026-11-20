@@ -54,7 +54,7 @@ test("every durable way the router can fail a send before admitting it counts as
 });
 
 test("the codes that were refusals before stay refusals, and an unknown or transport error is still an unknown outcome", () => {
-  for (const code of ["recipient_not_allowed", "invalid_params", "invalid_request", "payload_too_large", "rate_limit_exceeded", "loop_limit_exceeded", "session_disabled", "session_offline", "generation_fenced"]) {
+  for (const code of ["recipient_not_allowed", "invalid_params", "invalid_request", "payload_too_large", "rate_limit_exceeded", "loop_limit_exceeded", "session_disabled", "session_offline", "local_recipient_unavailable", "generation_fenced"]) {
     assert.ok(GROK_REJECTED_CODES.includes(code), code);
   }
   for (const code of ["send_failed", "connection_timeout", "internal_error", "unknown_error", "duplicate_id_conflict", "route_unavailable"]) {
