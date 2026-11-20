@@ -33,10 +33,10 @@ async function fixture(){
  const {root,workspace,wrapper,configPath,bindingPath}=ownerFiles();
  const config=readPrivateJson(configPath);let desktop=readPrivateJson(config.integrationPath),host;const clients=[],children=[],runs=[],logs=[];
  // Runners follow the owner config as it is now; extra ids model a supervisor that still holds a runner for a removed profile.
- // `runs` records what workers were asked to do, `logs` what the host warned about.
+ // `runs` records what workers were asked to do, `logs` the notices the host sent to the owner's log.
  const start=async(extraRunnerIds=[])=>{const runner={run:async request=>{runs.push(request);return {status:'completed',text:'worker result'};}};
   host=createInstalledLocalMessagingHost({configPath,runners:new Map([...readPrivateJson(configPath).recipients.map(r=>r.instanceId),...extraRunnerIds].map(id=>[id,runner])),gate:createProfiledReasonerGate(),
-   logger:{info(){},error(){},warn:message=>logs.push(message)}});await host.start();};await start();
+   logger:{info(){},error(){},warn(){},notice:(event,detail)=>logs.push({event,...detail})}});await host.start();};await start();
  const client=(senderId)=>{const c=createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId});clients.push(c);return c;};
  let owner=client(desktop.senderId);
  const grant=async()=> (await owner.exchangeTurnBinding({bindingId:desktop.bindingId,threadId:desktop.threadId,secret:desktop.secret})).credential;
@@ -384,10 +384,11 @@ test('swallowed broker failures are logged once per failure and again after reco
   const config=readPrivateJson(configPath),policyPath=config.sessionMessaging.integrationPath,discoveryPath=config.discovery.integrationPath;
   const good=fs.readFileSync(policyPath,'utf8'),owner=JSON.parse(good).allowedSenders[0],real=JSON.parse(good).workspace;
   j=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  // The owner's log gets a notice: a fixed event id and the code (see supervisor-owner-notices.test.mjs for the line).
   const warnings=[];
-  const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:j,issue(){},logger:{warn:message=>warnings.push(message)}});
+  const broker=createWorkspaceSessionBroker({policyPath,discoveryPath,journal:j,issue(){},logger:{notice:(event,detail)=>warnings.push({event,...detail})}});
   const probe=async()=>[await broker.listFor(owner),broker.allowedRecipients().length];
-  const unavailable=code=>`Workspace session messaging unavailable (${code}); configured recipients remain available`;
+  const unavailable=code=>({event:'triangle_client_local_session_messaging_unavailable',code});
   assert.deepEqual(await probe(),[[],1]);assert.deepEqual(warnings,[]);
   // A damaged policy hides everything and says why, once, however often it is asked.
   fs.writeFileSync(policyPath,'{ not json');
@@ -402,7 +403,7 @@ test('swallowed broker failures are logged once per failure and again after reco
   assert.deepEqual(await probe(),[[],1]);
   fs.writeFileSync(policyPath,'{ not json');await probe();
   assert.deepEqual(warnings.slice(2),[unavailable('invalid_private_file')]);
-  assert.ok(warnings.every(message=>!/not json|tri-attach|secret|[a-f0-9]{64}/.test(message)),'codes only: no contents, paths or identifiers');
+  assert.ok(warnings.every(entry=>Object.keys(entry).join()==='event,code'&&!/not json|tri-attach|secret|[a-f0-9]{64}/.test(JSON.stringify(entry))),'codes only: no contents, paths or identifiers');
  }finally{await j?.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 
@@ -410,7 +411,7 @@ test('the host hands its logger to the session broker, so a damaged policy is re
  const f=await fixture();try{
   fs.writeFileSync(f.config.sessionMessaging.integrationPath,'{ not json');
   for(let i=0;i<2;i++)await f.owner.listSessions({credential:await f.grant()});
-  assert.deepEqual(f.logs.filter(message=>/session messaging/i.test(message)),['Workspace session messaging unavailable (invalid_private_file); configured recipients remain available']);
+  assert.deepEqual(f.logs.filter(entry=>entry.event==='triangle_client_local_session_messaging_unavailable'),[{event:'triangle_client_local_session_messaging_unavailable',code:'invalid_private_file'}]);
  }finally{await f.close();}
 });
 

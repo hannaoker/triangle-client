@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {createClientSupervisor} from '../src/client-supervisor.mjs';
@@ -8,6 +9,7 @@ import {sanitizedLogger} from '../src/client-supervisor-cli.mjs';
 import {setupLocalMessaging} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
+import {resolveLocalSocketAddress} from '../src/local-messaging-address.mjs';
 import {waitFor} from './local-messaging-fixtures.mjs';
 import {TEST_WORKLOAD,testKey} from './support/test-workload.mjs';
 const id='1'.repeat(64);
@@ -122,6 +124,36 @@ test('the production notice writes only a fixed event id, a valid profile name a
  logger.notice('triangle_client_local_recipient_not_running',{profile:'bad name s3cret',instanceId:'not-an-id'});
  assert.equal(written,'2026-11-20T00:00:00.000Z triangle-client: notice [local_recipient_not_running] profile=gravity2 instance=aaaaaaaaaaaa\n'
   +'2026-11-20T00:00:00.000Z triangle-client: notice [local_recipient_not_running]\n');
+});
+// The production wiring end to end (supervisor, local host, journal, production logger): what a restart that
+// interrupted local work puts in the owner's log, and that a client's malformed frame, which the server answers,
+// never reaches it (the server's warning about it is free-form; the production logger has no `warn`).
+test('local work held after a restart is counted in the owner log, and a malformed client frame is not logged',async()=>{
+ const f=localFixture(),lane=meshLane();let written='';
+ const logger=sanitizedLogger({write:chunk=>{written+=chunk;}});
+ const seed=createLocalMessagingJournal({stateRoot:f.stateRoot});
+ await seed.recordSend({sender:'1'.repeat(64),recipient:gravityId,messageId:'m-inflight',requestId:'r-inflight',text:`in flight when the service stopped ${f.root}`});
+ await seed.claimExecution('m-inflight');await seed.close();
+ const controller=new AbortController();let watching=null;
+ try{
+  const supervisor=createClientSupervisor({
+   instances:[instance(gravityId)],localMessaging:{configPath:f.configPath},createDeliveryClient:()=>({}),createWorker:lane.createWorker,
+   createRunner:()=>({run:async()=>({status:'completed',text:'ok'})}),random:()=>0,logger,
+  });
+  watching=supervisor.watch({signal:controller.signal,sleep:quickSleep([])});
+  await waitFor(()=>supervisor.localStatus().state==='running',{message:'local route running'});
+  assert.match(written,/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z triangle-client: notice \[local_messaging_held_on_recovery\] count=1$/m,'the owner log says how much work waits for reconciliation');
+  const before=written;
+  const answer=await new Promise(resolve=>{
+   const socket=net.createConnection(resolveLocalSocketAddress({stateRoot:f.stateRoot}).socketPath),chunks=[];
+   socket.on('data',chunk=>chunks.push(chunk));socket.on('error',()=>{});socket.on('close',()=>resolve(Buffer.concat(chunks)));
+   socket.on('connect',()=>{const body=Buffer.from(`{ not json ${f.root}`),head=Buffer.alloc(4);head.writeUInt32BE(body.length);socket.write(Buffer.concat([head,body]));});
+  });
+  assert.equal(JSON.parse(answer.subarray(4,4+answer.readUInt32BE(0)).toString('utf8')).error.code,'invalid_json','the server took its parser-error path and told the client');
+  assert.equal(written,before,'nothing about the malformed frame reaches the owner log');
+  assert.ok(!written.includes(f.root)&&!written.includes(f.secret),'no paths, contents or secrets in the owner log');
+  controller.abort();await watching;
+ }finally{controller.abort();await watching?.catch(()=>{});fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('a busy local journal is retried while MESH lanes run, then the local route recovers',async()=>{
  const f=localFixture(),lane=meshLane(),events=[];

@@ -730,6 +730,17 @@ function sanitizedHttpStatus(detail) {
   return Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null;
 }
 
+// A notice may carry an error code: the project's own snake_case codes or Node's errno and ERR_*
+// codes (EACCES, ERR_SQLITE_ERROR). Anything else (a message, a path, a token) is dropped, as is
+// anything holding a run of hex digits long enough to be a key or an id.
+const SAFE_NOTICE_CODE = /^(?:[a-z][a-z0-9_]{0,63}|E[A-Z0-9_]{1,63})$/;
+
+function sanitizedNoticeCode(code) {
+  if (typeof code !== "string" || !SAFE_NOTICE_CODE.test(code)) return null;
+  if (/mesh_/i.test(code) || /[a-fA-F0-9]{16}/.test(code)) return null;
+  return code;
+}
+
 function isoTimestamp(now) {
   try {
     const value = new Date(now()).toISOString();
@@ -763,8 +774,11 @@ export function sanitizedLogger(stderr, { now = () => Date.now() } = {}) {
       stderr.write(`${line}\n`);
     },
     // A state the owner should know about that is not a failure (for example a configured local
-    // recipient whose agent is not running). Only a fixed event id, a validated profile name and an
-    // opaque instance prefix are written, never free-form text. Modules that call `warn` stay quiet.
+    // recipient whose agent is not running, or messages held after a restart). Only a fixed event
+    // id and four validated fields are written: a profile name, an opaque instance prefix, an error
+    // code and a count. Never free-form text. There is deliberately no `warn` or `info`: modules
+    // that call them (some with messages, paths or child output) stay quiet in production, and a
+    // warning the owner needs is sent here by its call site.
     notice(event, detail) {
       const source = sanitizedEventName(event);
       if (!source) return;
@@ -772,6 +786,9 @@ export function sanitizedLogger(stderr, { now = () => Date.now() } = {}) {
       let line = `${timestamp ? `${timestamp} ` : ""}triangle-client: notice [${source}]`;
       if (typeof detail?.profile === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(detail.profile)) line += ` profile=${detail.profile}`;
       if (typeof detail?.instanceId === "string" && /^[a-f0-9]{64}$/.test(detail.instanceId)) line += ` instance=${detail.instanceId.slice(0, 12)}`;
+      const code = sanitizedNoticeCode(detail?.code);
+      if (code) line += ` code=${code}`;
+      if (Number.isSafeInteger(detail?.count) && detail.count >= 0) line += ` count=${detail.count}`;
       stderr.write(`${line}\n`);
     },
   });

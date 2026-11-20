@@ -1147,6 +1147,8 @@ export function createLocalControlServer({
             },
             onError: (err) => {
               const sanitized = sanitizeError(err);
+              // Free-form and caused by the connecting client, which gets the error below: a developer
+              // logger may print it, the production logger has no `warn` and stays quiet.
               logger.warn?.(`Socket parser error: ${sanitized.message}`);
               // Send actionable error response if socket is still writable
               try {

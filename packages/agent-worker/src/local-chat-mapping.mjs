@@ -502,10 +502,11 @@ function probeMappingCacheKey(storeRoot) {
   }
 }
 
+// `log` gets the message and, for a caller that must not print paths, the code on its own.
 function reportMappingFailure(storeRoot, error, log) {
   const code = typeof error?.code === "string" ? error.code : "chat_mapping_unreadable";
   const message = `chat mapping store at ${storeRoot} is unreadable (${code}); treating the session as unmapped`;
-  if (typeof log === "function") log(message);
+  if (typeof log === "function") log(message, { code });
   else console.error(message);
 }
 

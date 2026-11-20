@@ -248,12 +248,13 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
  const failures=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  const policyScope=c=>c.installationId+':'+createHash('sha256').update(c.secret).digest('hex');
  // A broken policy or journal hides the sessions and leaves only the configured recipients. Say so once per
- // failure (and again once it has recovered) instead of failing silently; codes only, never contents or paths.
+ // failure (and again once it has recovered) instead of failing silently, in the owner's log: an event id and
+ // an error code only, never contents or paths.
  let degradedCode=null;
  const degraded=error=>{
   const code=typeof error?.code==='string'&&/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.code)?error.code:'broker_error';
   if(code===degradedCode)return;degradedCode=code;
-  try{logger?.warn?.(`Workspace session messaging unavailable (${code}); configured recipients remain available`);}catch{}
+  try{logger?.notice?.('triangle_client_local_session_messaging_unavailable',{code});}catch{}
  };
  const healthy=()=>{degradedCode=null;};
  // The policy file is the ceiling the owner granted at setup; it never widens what the live owner
@@ -339,7 +340,9 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   },
   async detach(request){const harness=harnessOf(request),c=verify(request,harness);const id=sessionAddress(c.installationId,c.workspace,sessionAddressKey(harness,request.sessionId));await journal.detachDiscoveredSession({id,childId:request.childId});return {detached:true};},
   async describeLocalSession(id){const {c,r}=await current(id);
-   let mapped=chatMappingStoreRoot?lookupConfirmedChatMappingForSession({storeRoot:chatMappingStoreRoot,sessionAddress:id,harness:r.harness,workspace:r.workspace??c.workspace,failSoft:true,log:(message)=>{if(typeof logger?.warn==='function')logger.warn(message);else console.error(message);}}):null;
+   // An unreadable mapping store leaves the chat unlabeled. The owner's log gets an event id and the code;
+   // the store's message names its path, so it is never printed (the production logger has no `warn`).
+   let mapped=chatMappingStoreRoot?lookupConfirmedChatMappingForSession({storeRoot:chatMappingStoreRoot,sessionAddress:id,harness:r.harness,workspace:r.workspace??c.workspace,failSoft:true,log:(message,detail)=>{try{logger?.notice?.('triangle_client_local_chat_mapping_unreadable',{code:detail?.code});}catch{}}}):null;
    // A mapping file is not authority. Without a live binding at the stored generation, the chat stays unlabeled.
    if(mapped&&confirmChatBinding?.({principalId:mapped.principal,authorityOrigin:mapped.authorityOrigin,bindingGeneration:mapped.bindingGeneration})!==true)mapped=null;
    return Object.freeze({address:id,generation:r.generation,principal:mapped?.principal??null,authorityOrigin:mapped?.authorityOrigin??null,bindingGeneration:mapped?.bindingGeneration??null});},
