@@ -677,8 +677,10 @@ export function createLocalControlServer({
               ? "interactive"
               : "runner";
             // Only a sender that passed the ACL and its credential scope gets this far. A retry of
-            // a message already recorded keeps its usual answer.
-            if (!existingRecord && recipientType === "runner" && typeof runnerAvailable === "function" && !runnerAvailable(effectiveTo)) {
+            // a message already recorded keeps its usual answer; getRecord also finds replies, and an
+            // id that only a reply has is new work (a message record always has a phase).
+            const recordedMessage = typeof existingRecord?.phase === "string";
+            if (!recordedMessage && recipientType === "runner" && typeof runnerAvailable === "function" && !runnerAvailable(effectiveTo)) {
               throw coded("local_recipient_unavailable", "Recipient is not running; nothing was queued");
             }
 

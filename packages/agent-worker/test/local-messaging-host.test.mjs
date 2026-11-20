@@ -100,7 +100,7 @@ test('unauthenticated exchanges cannot exhaust the desktop bucket; only verified
 });
 
 test('a configured worker whose runtime is not running leaves the installed host up: new work is refused and its queued work waits',async()=>{
- const root=fs.mkdtempSync('/private/tmp/tri-off-');let host,calls=0;const warnings=[];
+ const root=fs.mkdtempSync('/private/tmp/tri-off-');let host,calls=0;const notices=[];
  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
  try{
   writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'thread-current',enabled:false});
@@ -115,9 +115,9 @@ test('a configured worker whose runtime is not running leaves the installed host
   }finally{await seed.close();}
   const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
   const refusal=async args=>{try{await exec(process.execPath,[cli,...args,'--config',configPath]);}catch(error){const out=JSON.parse(error.stdout);assert.equal(out.state,'send_outcome_unknown');return out.error;}throw new Error('the command was accepted');};
-  host=createInstalledLocalMessagingHost({configPath,runners:new Map(),gate:createProfiledReasonerGate(),logger:{warn:m=>warnings.push(String(m))}});
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map(),gate:createProfiledReasonerGate(),logger:{notice:(event,detail)=>notices.push({event,...detail})}});
   await host.start();
-  assert.ok(warnings.some(w=>w.includes('gravity2')&&w.includes('not running')),'the owner log says which agent is not running');
+  assert.deepEqual(notices,[{event:'triangle_client_local_recipient_not_running',profile:'gravity2',instanceId:recipient}],'the owner log says which agent is not running');
   assert.deepEqual((await run(['status'])).unavailableRecipients,['gravity2']);
   assert.equal(await refusal(['send','--to','gravity2','--text','new work','--message-id','off-new','--request-id','off-new-request']),'local_recipient_unavailable');
   await new Promise(r=>setTimeout(r,50));
@@ -136,5 +136,28 @@ test('a configured worker whose runtime is not running leaves the installed host
   assert.equal((await run(['status'])).unavailableRecipients,undefined,'nothing is listed once the agent runs');
   await waitFor(async()=>(await run(['replies','--request-id','off-request'])).replies.length===1,{message:'queued work runs once its agent runs',timeoutMs:10000,intervalMs:50});
   assert.equal(calls,1);
+ }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('an id that only a reply has is new work: it is refused for an agent that is not running, like any new id',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-reply-id-');let host;
+ const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+ try{
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'thread-current',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'thread-current',recipients:['gravity2','helper']});
+  const config=readPrivateJson(configPath),helper=config.recipients.find(r=>r.profile==='helper').instanceId;
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map([[helper,{run:async()=>({status:'completed',text:'ok'})}]]),gate:createProfiledReasonerGate()});
+  await host.start();
+  const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
+  const replyId=(await run(['send','--to','helper','--text','hello','--message-id','to-helper','--request-id','to-helper-request','--wait-ms','5000'])).replies[0].messageId;
+  await assert.rejects(exec(process.execPath,[cli,'send','--to','gravity2','--text','new work','--message-id',replyId,'--request-id','reuse-request','--config',configPath]),
+   error=>JSON.parse(error.stdout).error==='local_recipient_unavailable');
+  await host.stop();host=null;
+  const check=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  try{
+   const record=await check.getRecord(replyId);
+   assert.equal(record.inReplyTo,'to-helper','the id still names only the reply');
+   assert.equal(record.phase,undefined,'no message was recorded under it');
+  }finally{await check.close();}
  }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });

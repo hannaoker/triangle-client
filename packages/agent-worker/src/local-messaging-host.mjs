@@ -119,7 +119,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  // recorded) and its queued work stays queued until it runs again (the dispatcher skips it).
  const runnable=id=>typeof runners.get(id)?.run==='function';
  const unavailableRecipients=config.recipients.filter(r=>!runnable(r.instanceId)).map(r=>r.profile);
- for(const profile of unavailableRecipients)logger.warn?.(`Local recipient ${profile} is not running: it takes no new work and its queued work waits`);
+ for(const r of config.recipients)if(!runnable(r.instanceId))logger.notice?.('triangle_client_local_recipient_not_running',{profile:r.profile,instanceId:r.instanceId});
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
  const runnerAvailable=id=>!recipientIds.includes(id)||runnable(id);

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {createClientSupervisor} from '../src/client-supervisor.mjs';
+import {sanitizedLogger} from '../src/client-supervisor-cli.mjs';
 import {setupLocalMessaging} from '../src/local-messaging-cli.mjs';
 import {readPrivateJson,writePrivateJson} from '../src/local-messaging-auth-broker.mjs';
 import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
@@ -90,14 +91,15 @@ for(const [label,config,code] of [
 // A disabled agent (no runtime for a configured recipient) must not take the local route down for
 // everyone else: the route runs, the agent is listed as unavailable and its queued work waits.
 test('a recipient whose runtime is not running leaves the local route running and lists it as unavailable',async()=>{
- const f=localFixture(),lane=meshLane(),events=[],warnings=[];
+ const f=localFixture(),lane=meshLane();let written='';
+ // The production logger, so the test sees what the owner sees on stderr.
+ const logger=sanitizedLogger({write:chunk=>{written+=chunk;}});
  // A failed assertion must still stop the watch, or the test file never exits.
  const controller=new AbortController();let watching=null;
  try{
   const supervisor=createClientSupervisor({
    instances:[instance('2'.repeat(64))],localMessaging:{configPath:f.configPath},createDeliveryClient:()=>({}),createWorker:lane.createWorker,
-   createRunner:()=>({run:async()=>({status:'completed',text:'ok'})}),random:()=>0,
-   logger:{error:(event,detail)=>events.push({event,code:detail?.code}),warn:message=>warnings.push(String(message))},
+   createRunner:()=>({run:async()=>({status:'completed',text:'ok'})}),random:()=>0,logger,
   });
   assert.equal(supervisor.localStatus().failure,undefined,'the host is built');
   watching=supervisor.watch({signal:controller.signal,sleep:quickSleep([])});
@@ -106,11 +108,20 @@ test('a recipient whose runtime is not running leaves the local route running an
   const status=supervisor.localStatus();
   assert.deepEqual(status.unavailableRecipients,['gravity2']);
   assert.equal(status.failure,undefined);
-  assert.ok(!events.some(e=>e.event==='triangle_client_local_messaging_failed'),'no local failure is reported');
-  assert.ok(warnings.some(w=>w.includes('gravity2')&&w.includes('not running')),'the log names the agent that is not running');
-  assert.ok(!JSON.stringify(status).includes(f.secret),'status never carries secrets');
+  assert.match(written,new RegExp(` triangle-client: notice \\[local_recipient_not_running\\] profile=gravity2 instance=${gravityId.slice(0,12)}\\n`),'the log names the agent that is not running');
+  assert.ok(!written.includes('[local_messaging_failed]'),'no local failure is logged');
+  assert.ok(!written.includes(f.secret)&&!JSON.stringify(status).includes(f.secret),'neither the log nor status carries secrets');
   controller.abort();await watching;
  }finally{controller.abort();await watching?.catch(()=>{});fs.rmSync(f.root,{recursive:true,force:true});}
+});
+test('the production notice writes only a fixed event id, a valid profile name and an instance prefix',()=>{
+ let written='';
+ const logger=sanitizedLogger({write:chunk=>{written+=chunk;}},{now:()=>Date.parse('2026-11-20T00:00:00.000Z')});
+ logger.notice('triangle_client_local_recipient_not_running',{profile:'gravity2',instanceId:'a'.repeat(64),secret:'s3cret'});
+ logger.notice('Recipient gravity2 has secret s3cret',{profile:'gravity2'});
+ logger.notice('triangle_client_local_recipient_not_running',{profile:'bad name s3cret',instanceId:'not-an-id'});
+ assert.equal(written,'2026-11-20T00:00:00.000Z triangle-client: notice [local_recipient_not_running] profile=gravity2 instance=aaaaaaaaaaaa\n'
+  +'2026-11-20T00:00:00.000Z triangle-client: notice [local_recipient_not_running]\n');
 });
 test('a busy local journal is retried while MESH lanes run, then the local route recovers',async()=>{
  const f=localFixture(),lane=meshLane(),events=[];
