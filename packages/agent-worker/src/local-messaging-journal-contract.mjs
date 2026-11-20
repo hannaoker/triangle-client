@@ -12,15 +12,17 @@ import { coded } from "./local-messaging-errors.mjs";
  *     Must perform complete immutable envelope comparison (sender, recipient,
  *     requestId, inReplyTo, text, metadata). Duplicate identical envelope returns
  *     existing record with isDuplicate: true, its stored phase and original requestId.
- *     Conflicting envelope throws duplicate_id_conflict, and so does an id a reply
- *     already has (message and reply ids share one namespace; getRecord finds either).
+ *     Conflicting envelope throws duplicate_id_conflict. A new message never takes an
+ *     id a reply already has (message_id_in_use). Replies are not checked against
+ *     messages: a message whose id a reply took still answers its exact retry.
  * - recordReply(envelope): Persist reply correlated to original request. Must verify
  *     original request's expected sender/recipient/requestId/inReplyTo.
  * - listReplies({ requester, requestId, inReplyTo, limit }): Non-consuming retrieval
  *     filtered strictly to requester. Never exposes foreign replies.
  * - consumeReply({ requester, messageId }): Explicit consumption only. Rejects foreign
  *     requester.
- * - getRecord(messageId): Inspect message by ID for sender/recipient.
+ * - getRecord(messageId): Inspect message by ID for sender/recipient. Looks for a
+ *     message first, then a reply; only a message record has a string phase.
  *
  * Execution transitions (relied on by the dispatcher and by restart recovery):
  * - claimExecution(messageId): Atomically move 'queued_local' to 'executing' and return

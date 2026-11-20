@@ -1110,7 +1110,7 @@ test("refusals for a worker that is not running give back the sender's rate rese
 // getRecord also finds replies. Before this check, a send that reused a reply's id passed as a retry: it took
 // the reply's loop depth (no parent check, no loop limit), skipped the pair-limit fallback and reply pinning,
 // and was then recorded as new work.
-test("a send that reuses a reply's id is refused as a conflict before anything counts it as a retry", async () => {
+test("a send that reuses a reply's id is refused before anything counts it as a retry", async () => {
   const env = setupEnvironment();
   const stateRoot = path.join(env.tmpDir, "state");
   fs.mkdirSync(stateRoot, { mode: 0o700 });
@@ -1127,9 +1127,9 @@ test("a send that reuses a reply's id is refused as a conflict before anything c
     await server.start();
     assert.equal((await codex.sendMessage({ to: "gravity2", text: "work", messageId: "m-1", requestId: "r-1" })).accepted, true);
     await journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "rep-1", requestId: "r-1", inReplyTo: "m-1", text: "done" });
-    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2" }), { code: "duplicate_id_conflict" });
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2" }), { code: "message_id_in_use" });
     await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-3", inReplyTo: "no-such-message" }),
-      { code: "duplicate_id_conflict" }, "a parent nobody sent is not waved through either");
+      { code: "message_id_in_use" }, "a parent nobody sent is not waved through either");
     const record = await journal.getRecord("rep-1");
     assert.equal(record.inReplyTo, "m-1", "the id still names the reply");
     assert.equal(record.phase, undefined, "no message was recorded under it");
@@ -1156,11 +1156,43 @@ test("the send path refuses a reply's id itself, even with a journal that would 
   const codex = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
   try {
     await server.start();
-    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2", inReplyTo: "no-such-message" }), { code: "duplicate_id_conflict" });
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2", inReplyTo: "no-such-message" }), { code: "message_id_in_use" });
     assert.equal(await env.journal.getRecord("rep-1"), null, "no message was recorded under the reply's id");
   } finally {
     await codex.close().catch(() => {});
     await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("a message whose id a reply took still answers its exact retry through the send path", async () => {
+  const env = setupEnvironment();
+  const stateRoot = path.join(env.tmpDir, "state");
+  fs.mkdirSync(stateRoot, { mode: 0o700 });
+  const journal = createLocalMessagingJournal({ stateRoot });
+  const admitted = [];
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal, acl: env.acl, credentialValidator: env.validator, rateLimiter: env.rateLimiter,
+    loopTracker: createConversationLoopTracker({ maxLoopDepth: 10, journal }),
+    dispatcher: { start: async () => {}, stop: async () => {}, notifyAdmission: async (job) => { admitted.push(job.messageId); } },
+  });
+  const codex = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
+  try {
+    await server.start();
+    const send = { to: "gravity2", text: "work", messageId: "m-1", requestId: "r-1" };
+    assert.equal((await codex.sendMessage(send)).accepted, true);
+    // replies are not checked against message ids: this one takes the message's own id
+    await journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "m-1", requestId: "r-1", inReplyTo: "m-1", text: "done" });
+    const retry = await codex.sendMessage(send);
+    assert.equal(retry.accepted, true);
+    assert.equal(retry.isDuplicate, true, "getRecord finds the message first, so this is its retry");
+    await assert.rejects(codex.sendMessage({ ...send, text: "changed" }), { code: "duplicate_id_conflict" }, "a changed retry is still a conflict");
+    assert.deepEqual([...new Set(admitted)], ["m-1"], "nothing new reached the dispatcher (queued work may be nudged again)");
+    assert.equal(typeof (await journal.getRecord("m-1")).phase, "string", "status by that id shows the message");
+  } finally {
+    await codex.close().catch(() => {});
+    await server.close();
+    await journal.close();
     fs.rmSync(env.tmpDir, { recursive: true, force: true });
   }
 });

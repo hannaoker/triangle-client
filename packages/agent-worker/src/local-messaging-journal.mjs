@@ -742,10 +742,11 @@ export function createLocalMessagingJournal({
         }
         throw coded("duplicate_id_conflict", `Conflicting envelope for messageId: ${messageId}`);
       }
-      // Message and reply ids share one namespace (getRecord and status find either): a new message
-      // never takes an id a reply already has.
+      // A new message never takes an id a reply already has (getRecord and status look for a message
+      // first, then a reply). Replies are not checked against messages, so this comes after the
+      // retry check above: a message whose id a reply took still answers its exact retry.
       if (db.prepare("SELECT 1 FROM local_replies WHERE message_id = ?").get(messageId)) {
-        throw coded("duplicate_id_conflict", `messageId ${messageId} is already used by a reply`);
+        throw coded("message_id_in_use", `messageId ${messageId} is already used by a reply`);
       }
 
       // Check pair window admission limit atomically with insertion

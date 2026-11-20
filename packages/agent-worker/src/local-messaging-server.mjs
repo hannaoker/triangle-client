@@ -655,13 +655,14 @@ export function createLocalControlServer({
 
           // 4. Dedupe check & persisted loop depth before unique pair charge
           const existingRecord = await journal.getRecord(messageId);
-          // Message and reply ids share one namespace, and getRecord finds either (only a message
-          // record has a phase). An id a reply already has is never a retry: everything below would
-          // treat it as one (taking the reply's loop depth instead of checking the parent and the
-          // loop limit, skipping the pair limit and reply pinning) while new work is recorded under it.
+          // getRecord finds a message or, failing that, a reply (only a message record has a phase).
+          // An id a reply already has is never a retry: everything below would treat it as one
+          // (taking the reply's loop depth instead of checking the parent and the loop limit,
+          // skipping the pair limit and reply pinning) while new work is recorded under it. Its own
+          // code, because sending again with the same ids can never succeed.
           if (existingRecord && typeof existingRecord.phase !== "string") {
             rateReservation?.rollback?.();
-            throw coded("duplicate_id_conflict", "messageId is already used by a reply");
+            throw coded("message_id_in_use", "messageId is already used by a reply; send with a new messageId");
           }
           const effectiveRequestId = requestId || messageId;
           let calculatedDepth = 1;

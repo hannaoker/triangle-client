@@ -912,11 +912,29 @@ test("a new message never takes an id a reply already has, and the reply is unto
     await journal.recordReply({ sender: "bob", recipient: "alice", messageId: "rep-1", requestId: "req-1", inReplyTo: "msg-1", text: "done" });
     await assert.rejects(
       journal.recordSend({ sender: "alice", recipient: "bob", messageId: "rep-1", requestId: "req-2", text: "new work", metadata: { _loopDepth: 1 } }),
-      { code: "duplicate_id_conflict" },
+      { code: "message_id_in_use" },
     );
     const record = await journal.getRecord("rep-1");
     assert.equal(record.inReplyTo, "msg-1", "the id still names the reply");
     assert.equal(record.phase, undefined, "no message was recorded under it");
+  } finally {
+    await journal.close();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("a message whose id a reply took still answers its exact retry", async () => {
+  const stateRoot = createIsolatedStateRoot("triangle-reply-id-");
+  const journal = createLocalMessagingJournal({ stateRoot });
+  try {
+    const envelope = { sender: "alice", recipient: "bob", messageId: "msg-1", requestId: "req-1", text: "work", metadata: { _loopDepth: 1 } };
+    await journal.recordSend(envelope);
+    // replies are not checked against message ids: this one takes the message's own id
+    await journal.recordReply({ sender: "bob", recipient: "alice", messageId: "msg-1", requestId: "req-1", inReplyTo: "msg-1", text: "done" });
+    const retry = await journal.recordSend(envelope);
+    assert.equal(retry.isDuplicate, true, "the exact retry is still a duplicate");
+    assert.equal(retry.requestId, "req-1");
+    await assert.rejects(journal.recordSend({ ...envelope, text: "changed" }), { code: "duplicate_id_conflict" }, "a changed retry is still a conflict");
   } finally {
     await journal.close();
     fs.rmSync(stateRoot, { recursive: true, force: true });
