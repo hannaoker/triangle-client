@@ -901,3 +901,24 @@ test('offline stale wake reconciliation is exact, fenced and durable without con
   } finally {await notifier.stop();}
  } finally {await journal?.close(); fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
+
+// Message and reply ids share one namespace, and getRecord finds either: a new message must never be
+// recorded under an id a reply already has.
+test("a new message never takes an id a reply already has, and the reply is untouched", async () => {
+  const stateRoot = createIsolatedStateRoot("triangle-reply-id-");
+  const journal = createLocalMessagingJournal({ stateRoot });
+  try {
+    await journal.recordSend({ sender: "alice", recipient: "bob", messageId: "msg-1", requestId: "req-1", text: "work", metadata: { _loopDepth: 1 } });
+    await journal.recordReply({ sender: "bob", recipient: "alice", messageId: "rep-1", requestId: "req-1", inReplyTo: "msg-1", text: "done" });
+    await assert.rejects(
+      journal.recordSend({ sender: "alice", recipient: "bob", messageId: "rep-1", requestId: "req-2", text: "new work", metadata: { _loopDepth: 1 } }),
+      { code: "duplicate_id_conflict" },
+    );
+    const record = await journal.getRecord("rep-1");
+    assert.equal(record.inReplyTo, "msg-1", "the id still names the reply");
+    assert.equal(record.phase, undefined, "no message was recorded under it");
+  } finally {
+    await journal.close();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});

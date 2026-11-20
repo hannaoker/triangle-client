@@ -742,6 +742,11 @@ export function createLocalMessagingJournal({
         }
         throw coded("duplicate_id_conflict", `Conflicting envelope for messageId: ${messageId}`);
       }
+      // Message and reply ids share one namespace (getRecord and status find either): a new message
+      // never takes an id a reply already has.
+      if (db.prepare("SELECT 1 FROM local_replies WHERE message_id = ?").get(messageId)) {
+        throw coded("duplicate_id_conflict", `messageId ${messageId} is already used by a reply`);
+      }
 
       // Check pair window admission limit atomically with insertion
       const effectiveMax = options.maxPairRequests ?? maxPairRequests;

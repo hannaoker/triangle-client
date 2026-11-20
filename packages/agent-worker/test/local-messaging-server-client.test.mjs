@@ -1106,3 +1106,61 @@ test("refusals for a worker that is not running give back the sender's rate rese
     fs.rmSync(env.tmpDir, { recursive: true, force: true });
   }
 });
+
+// getRecord also finds replies. Before this check, a send that reused a reply's id passed as a retry: it took
+// the reply's loop depth (no parent check, no loop limit), skipped the pair-limit fallback and reply pinning,
+// and was then recorded as new work.
+test("a send that reuses a reply's id is refused as a conflict before anything counts it as a retry", async () => {
+  const env = setupEnvironment();
+  const stateRoot = path.join(env.tmpDir, "state");
+  fs.mkdirSync(stateRoot, { mode: 0o700 });
+  const journal = createLocalMessagingJournal({ stateRoot });
+  const admitted = [];
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: createPerSenderRateLimiter({ maxRequestsPerWindow: 3, windowMs: 60000 }),
+    loopTracker: createConversationLoopTracker({ maxLoopDepth: 10, journal }),
+    dispatcher: { start: async () => {}, stop: async () => {}, notifyAdmission: async (job) => { admitted.push(job.messageId); } },
+  });
+  const codex = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
+  try {
+    await server.start();
+    assert.equal((await codex.sendMessage({ to: "gravity2", text: "work", messageId: "m-1", requestId: "r-1" })).accepted, true);
+    await journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "rep-1", requestId: "r-1", inReplyTo: "m-1", text: "done" });
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2" }), { code: "duplicate_id_conflict" });
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-3", inReplyTo: "no-such-message" }),
+      { code: "duplicate_id_conflict" }, "a parent nobody sent is not waved through either");
+    const record = await journal.getRecord("rep-1");
+    assert.equal(record.inReplyTo, "m-1", "the id still names the reply");
+    assert.equal(record.phase, undefined, "no message was recorded under it");
+    assert.deepEqual(admitted, ["m-1"], "nothing new reached the dispatcher");
+    // both refusals gave back their rate reservations: two more sends fit the budget of three
+    for (const id of ["m-2", "m-3"]) assert.equal((await codex.sendMessage({ to: "gravity2", text: "work", messageId: id, requestId: "r-" + id })).accepted, true);
+  } finally {
+    await codex.close().catch(() => {});
+    await server.close();
+    await journal.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("the send path refuses a reply's id itself, even with a journal that would record new work under it", async () => {
+  const env = setupEnvironment();
+  // getRecord finds a reply under rep-1, but this journal's recordSend does not know about replies
+  const reply = { messageId: "rep-1", sender: "gravity2", recipient: "desktop-codex", requestId: "r-1", inReplyTo: "m-1", text: "done", consumed: false };
+  const journal = { ...env.journal, getRecord: async (id) => (id === "rep-1" ? reply : env.journal.getRecord(id)) };
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter, loopTracker: env.loopTracker, dispatcher: env.dispatcher,
+  });
+  const codex = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
+  try {
+    await server.start();
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "rep-1", requestId: "r-2", inReplyTo: "no-such-message" }), { code: "duplicate_id_conflict" });
+    assert.equal(await env.journal.getRecord("rep-1"), null, "no message was recorded under the reply's id");
+  } finally {
+    await codex.close().catch(() => {});
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});

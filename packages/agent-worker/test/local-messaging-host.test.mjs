@@ -139,7 +139,7 @@ test('a configured worker whose runtime is not running leaves the installed host
  }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('an id that only a reply has is new work: it is refused for an agent that is not running, like any new id',async()=>{
+test('an id a reply already has is refused as a conflict, whether its agent is running or not, and nothing is recorded',async()=>{
  const root=fs.mkdtempSync('/private/tmp/tri-reply-id-');let host;
  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
  try{
@@ -150,8 +150,8 @@ test('an id that only a reply has is new work: it is refused for an agent that i
   await host.start();
   const run=async args=>JSON.parse((await exec(process.execPath,[cli,...args,'--config',configPath])).stdout);
   const replyId=(await run(['send','--to','helper','--text','hello','--message-id','to-helper','--request-id','to-helper-request','--wait-ms','5000'])).replies[0].messageId;
-  await assert.rejects(exec(process.execPath,[cli,'send','--to','gravity2','--text','new work','--message-id',replyId,'--request-id','reuse-request','--config',configPath]),
-   error=>JSON.parse(error.stdout).error==='local_recipient_unavailable');
+  for(const to of ['helper','gravity2'])await assert.rejects(exec(process.execPath,[cli,'send','--to',to,'--text','new work','--message-id',replyId,'--request-id','reuse-'+to,'--config',configPath]),
+   error=>{assert.equal(JSON.parse(error.stdout).error,'duplicate_id_conflict',to);return true;});
   await host.stop();host=null;
   const check=createLocalMessagingJournal({stateRoot:config.stateRoot});
   try{

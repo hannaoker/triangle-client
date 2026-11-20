@@ -12,7 +12,8 @@ import { coded } from "./local-messaging-errors.mjs";
  *     Must perform complete immutable envelope comparison (sender, recipient,
  *     requestId, inReplyTo, text, metadata). Duplicate identical envelope returns
  *     existing record with isDuplicate: true, its stored phase and original requestId.
- *     Conflicting envelope throws duplicate_id_conflict.
+ *     Conflicting envelope throws duplicate_id_conflict, and so does an id a reply
+ *     already has (message and reply ids share one namespace; getRecord finds either).
  * - recordReply(envelope): Persist reply correlated to original request. Must verify
  *     original request's expected sender/recipient/requestId/inReplyTo.
  * - listReplies({ requester, requestId, inReplyTo, limit }): Non-consuming retrieval
