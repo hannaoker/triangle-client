@@ -3,7 +3,7 @@
 - **Date prepared:** 2026-11-20 (Pacific)
 - **Target commit:** `hannaoker/triangle-client` `main` at `fd753b9` (`fd753b9b8e11133bee98aff4b48f3a3e66bdc1b0`, merges `#183` + `#184` + `#185`)
 - **Live state baseline:** `06e0bd2` v15 runtime bundles + `0.2.0-identity.3` client receipt (`6/7` skewed from the unrecorded `2026-11-14` v15 install)
-- **Status:** **Not executed.** Both gates require explicit owner approval before any change to `~/Library/Application Support/The Triangle/`, `~/Library/LaunchAgents/`, or running processes.
+- **Status:** Both gates completed on the Mini. The supervisor manifest is v15 (bundle `cc602ac0…`), and all seven files match the `0.2.0-identity.4` package receipt. Installation evidence is in `releases/restage-fd753b9-gate-s-install-verification.json` and `releases/restage-fd753b9-gate-p-install-verification.json` under the Mini application root.
 - **Prerequisites & evidence:**
   - Unrecorded install & outage record: [`2026-11-20-v15-install-record.md`](2026-11-20-v15-install-record.md)
   - Scratch rehearsal report: [`2026-11-20-restage-prep-fd753b9-rehearsal.md`](2026-11-20-restage-prep-fd753b9-rehearsal.md)
@@ -11,9 +11,9 @@
 
 ---
 
-## 1. Current Live Snapshot (`2026-11-20`, Read-Only Verified)
+## 1. Pre-install Snapshot (`2026-11-20`, Read-Only Verified)
 
-| Component | Current Live State on Mini |
+| Component | Pre-install State on Mini |
 | :--- | :--- |
 | **LaunchAgent `dev.thetriangle.client`** | Running wrapper PID `25207` (`bin/triangle-mailbox run-supervisor`) -> child PID `25245` on supervisor bundle `009977d1…`. |
 | **Supervisor manifest (`worker-runtime/supervisor.manifest.json`)** | Schema **v15** (`manifest sha256 f9bc30d0…`), bundle `009977d1…`, `91/91` artifacts equal to `06e0bd2`, `nodeSHA256 5d9d3872…` (Node `v22.22.3`). |

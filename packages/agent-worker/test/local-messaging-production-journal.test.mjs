@@ -923,14 +923,13 @@ test("a new message never takes an id a reply already has, and the reply is unto
   }
 });
 
-test("a message whose id a reply took still answers its exact retry", async () => {
+test("a refused reply-id collision preserves exact message retries", async () => {
   const stateRoot = createIsolatedStateRoot("triangle-reply-id-");
   const journal = createLocalMessagingJournal({ stateRoot });
   try {
     const envelope = { sender: "alice", recipient: "bob", messageId: "msg-1", requestId: "req-1", text: "work", metadata: { _loopDepth: 1 } };
     await journal.recordSend(envelope);
-    // replies are not checked against message ids: this one takes the message's own id
-    await journal.recordReply({ sender: "bob", recipient: "alice", messageId: "msg-1", requestId: "req-1", inReplyTo: "msg-1", text: "done" });
+    await assert.rejects(journal.recordReply({ sender: "bob", recipient: "alice", messageId: "msg-1", requestId: "req-1", inReplyTo: "msg-1", text: "done" }), { code: "message_id_in_use" });
     const retry = await journal.recordSend(envelope);
     assert.equal(retry.isDuplicate, true, "the exact retry is still a duplicate");
     assert.equal(retry.requestId, "req-1");
