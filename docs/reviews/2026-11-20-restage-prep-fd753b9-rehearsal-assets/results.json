@@ -1,0 +1,472 @@
+{
+  "schema": "restage_prep_fd753b9_rehearsal_v1",
+  "startedAt": "2026-11-21T04:08:58.284Z",
+  "runner": {
+    "node": "v22.22.3",
+    "platform": "darwin",
+    "arch": "arm64",
+    "script": "rehearsal-restage.mjs"
+  },
+  "inputs": {
+    "installed": {
+      "manifestVersion": 15,
+      "bundleId": "009977d183b3f593ccb5fec7bc5472426696308625566200a76332040f45d10c",
+      "artifacts": 91,
+      "nodeSHA256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c",
+      "manifestSha256": "f9bc30d0ce27720f0f41781d1867060fb22b4e41d6da7b269c0b3cc60f903a68",
+      "workers": {
+        "codex": {
+          "version": 15,
+          "bundleId": "36aaa25e96db2875f20ecf717dcddc31586c191c54b1cf1367343b3e79a6979c",
+          "artifacts": 93
+        },
+        "hermes": {
+          "version": 15,
+          "bundleId": "c89a464ec58e41e8ca421ad3694b741d1389cb5fabe53ce2417e7497ae4645a6",
+          "artifacts": 93
+        },
+        "antigravity": {
+          "version": 15,
+          "bundleId": "fa82facd83739d4ed60cb1881b50ebafe23cf7c6f6a228fe3eedec135d511348",
+          "artifacts": 93
+        }
+      },
+      "clientPackageVersion": "0.2.0-identity.3",
+      "triangleLocalSha256": "d27cc1ca339a8688186c1b782133a22eaa3c4a85e4119fdb657eb909035b840a"
+    },
+    "candidate": {
+      "commit": "fd753b9b8e11133bee98aff4b48f3a3e66bdc1b0",
+      "version": "0.2.0-restage-rehearsal.1",
+      "archiveSha256": "8affc20daaf596bcf24674a5a8a2cd9b5833414b9cb179a6cb2b4cbdb26547fb",
+      "files": 161,
+      "signingMode": "public_ad_hoc",
+      "credentialCustody": "file",
+      "testOnly": false
+    },
+    "artifactDiff": {
+      "manifestVersion": 15,
+      "supervisorArtifacts": 91,
+      "changed": [
+        "packages/agent-worker/src/client-supervisor-cli.mjs",
+        "packages/agent-worker/src/grok-local-session.mjs",
+        "packages/agent-worker/src/local-chat-mapping.mjs",
+        "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+        "packages/agent-worker/src/local-messaging-host.mjs",
+        "packages/agent-worker/src/local-messaging-interactive-session.mjs",
+        "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+        "packages/agent-worker/src/local-messaging-journal.mjs",
+        "packages/agent-worker/src/local-messaging-server.mjs",
+        "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+        "packages/agent-worker/src/local-sender-authentication.mjs",
+        "packages/agent-worker/src/unified-router.mjs"
+      ],
+      "added": [],
+      "removed": [],
+      "git": {
+        "installedSourceCommit": "06e0bd242a088eb163db60505e8df0b1391b0219",
+        "installedArtifactsEqualBlobs": 91,
+        "equalToBundleDiff": true
+      }
+    },
+    "packageDiff": {
+      "installedVersion": "0.2.0-identity.3",
+      "installedFiles": 157,
+      "candidateFiles": 161,
+      "added": [
+        "packages/agent-worker/src/local-chat-mapping.mjs",
+        "packages/triangle-cli/src/identity-chat-map.mjs",
+        "packages/triangle-cli/src/identity-destination.mjs",
+        "packages/triangle-cli/src/owner-approval-package.mjs"
+      ],
+      "removed": [],
+      "changed": [
+        "bin/triangle-client",
+        "bin/triangle-mailbox",
+        "packages/agent-worker/src/client-supervisor-cli.mjs",
+        "packages/agent-worker/src/grok-local-session.mjs",
+        "packages/agent-worker/src/identity-primitives.mjs",
+        "packages/agent-worker/src/identity-registry.mjs",
+        "packages/agent-worker/src/identity-view.mjs",
+        "packages/agent-worker/src/installation-inventory.mjs",
+        "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+        "packages/agent-worker/src/local-messaging-host.mjs",
+        "packages/agent-worker/src/local-messaging-interactive-session.mjs",
+        "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+        "packages/agent-worker/src/local-messaging-journal.mjs",
+        "packages/agent-worker/src/local-messaging-server.mjs",
+        "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+        "packages/agent-worker/src/local-sender-authentication.mjs",
+        "packages/agent-worker/src/router-registry-snapshot.mjs",
+        "packages/agent-worker/src/unified-router.mjs",
+        "packages/triangle-cli/src/cli.mjs",
+        "packages/triangle-cli/src/doctor.mjs",
+        "packages/triangle-cli/src/identity-revoke.mjs",
+        "packages/triangle-cli/src/identity-status.mjs",
+        "packages/triangle-cli/src/owner-approval-registry.mjs",
+        "packages/triangle-cli/src/owner-approval.mjs",
+        "packages/triangle-cli/src/setup-runtime.mjs",
+        "scripts/triangle-worker-install.py",
+        "worker-artifacts.json"
+      ],
+      "unchanged": 130
+    },
+    "liveReceipt": {
+      "version": "0.2.0-identity.3",
+      "ownedFiles": 7,
+      "matchingDisk": 1,
+      "mismatches": [
+        "bin/triangle-mailbox",
+        "install-manifest/triangle-mailbox.sha256",
+        "install-manifest/triangle-mailbox-install.json",
+        "bin/triangle-client",
+        "install-manifest/triangle-client.sha256",
+        "install-manifest/triangle-client-install.json"
+      ],
+      "helperManifestsValid": {
+        "triangle-mailbox": true,
+        "triangle-client": true
+      }
+    },
+    "candidateBundleId": "cc602ac014586beff8ba08e24003115ea8ce16d646d2eef72457fa287ac26f4f"
+  },
+  "steps": [
+    {
+      "id": "A1",
+      "title": "installed state: v15 supervisor manifest, worker manifests, bundle and client receipt (read only)",
+      "ok": true,
+      "ms": 294,
+      "data": {
+        "manifestVersion": 15,
+        "bundleIdPrefix": "009977d183b3",
+        "artifacts": 91,
+        "clientPackageVersion": "0.2.0-identity.3",
+        "liveProcesses": 2
+      }
+    },
+    {
+      "id": "A2",
+      "title": "installed v15 bundle copied to scratch root and hash-verified",
+      "ok": true,
+      "ms": 371,
+      "data": {
+        "artifactsVerified": 91,
+        "nodeSha256": "5d9d3872911e2340a43b707962e68143de8a4e8d54628845c0c4f2de1fb7cd5c"
+      }
+    },
+    {
+      "id": "A3",
+      "title": "candidate package: archive hash, tracked blobs match commit, node hash, strict codesign",
+      "ok": true,
+      "ms": 2264,
+      "data": {
+        "commit": "fd753b9b8e11133bee98aff4b48f3a3e66bdc1b0",
+        "version": "0.2.0-restage-rehearsal.1",
+        "archiveSha256": "8affc20daaf596bcf24674a5a8a2cd9b5833414b9cb179a6cb2b4cbdb26547fb",
+        "files": 161,
+        "signingMode": "public_ad_hoc",
+        "credentialCustody": "file",
+        "testOnly": false,
+        "trackedFilesEqualCommittedBlobs": 156,
+        "nodeEqualsInstalledNode": true
+      }
+    },
+    {
+      "id": "A4",
+      "title": "supervisor artifact diff: exact 12 modules, manifest stays v15, 0 added/removed",
+      "ok": true,
+      "ms": 935,
+      "data": {
+        "manifestVersion": 15,
+        "supervisorArtifacts": 91,
+        "changed": [
+          "packages/agent-worker/src/client-supervisor-cli.mjs",
+          "packages/agent-worker/src/grok-local-session.mjs",
+          "packages/agent-worker/src/local-chat-mapping.mjs",
+          "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+          "packages/agent-worker/src/local-messaging-host.mjs",
+          "packages/agent-worker/src/local-messaging-interactive-session.mjs",
+          "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+          "packages/agent-worker/src/local-messaging-journal.mjs",
+          "packages/agent-worker/src/local-messaging-server.mjs",
+          "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+          "packages/agent-worker/src/local-sender-authentication.mjs",
+          "packages/agent-worker/src/unified-router.mjs"
+        ],
+        "added": [],
+        "removed": [],
+        "git": {
+          "installedSourceCommit": "06e0bd242a088eb163db60505e8df0b1391b0219",
+          "installedArtifactsEqualBlobs": 91,
+          "equalToBundleDiff": true
+        }
+      }
+    },
+    {
+      "id": "A5",
+      "title": "client package diff: 0.2.0-identity.3 (157) -> candidate (161)",
+      "ok": true,
+      "ms": 0,
+      "data": {
+        "installedVersion": "0.2.0-identity.3",
+        "installedFiles": 157,
+        "candidateFiles": 161,
+        "added": [
+          "packages/agent-worker/src/local-chat-mapping.mjs",
+          "packages/triangle-cli/src/identity-chat-map.mjs",
+          "packages/triangle-cli/src/identity-destination.mjs",
+          "packages/triangle-cli/src/owner-approval-package.mjs"
+        ],
+        "removed": [],
+        "changed": [
+          "bin/triangle-client",
+          "bin/triangle-mailbox",
+          "packages/agent-worker/src/client-supervisor-cli.mjs",
+          "packages/agent-worker/src/grok-local-session.mjs",
+          "packages/agent-worker/src/identity-primitives.mjs",
+          "packages/agent-worker/src/identity-registry.mjs",
+          "packages/agent-worker/src/identity-view.mjs",
+          "packages/agent-worker/src/installation-inventory.mjs",
+          "packages/agent-worker/src/local-messaging-dispatcher.mjs",
+          "packages/agent-worker/src/local-messaging-host.mjs",
+          "packages/agent-worker/src/local-messaging-interactive-session.mjs",
+          "packages/agent-worker/src/local-messaging-journal-contract.mjs",
+          "packages/agent-worker/src/local-messaging-journal.mjs",
+          "packages/agent-worker/src/local-messaging-server.mjs",
+          "packages/agent-worker/src/local-messaging-supervisor-seam.mjs",
+          "packages/agent-worker/src/local-sender-authentication.mjs",
+          "packages/agent-worker/src/router-registry-snapshot.mjs",
+          "packages/agent-worker/src/unified-router.mjs",
+          "packages/triangle-cli/src/cli.mjs",
+          "packages/triangle-cli/src/doctor.mjs",
+          "packages/triangle-cli/src/identity-revoke.mjs",
+          "packages/triangle-cli/src/identity-status.mjs",
+          "packages/triangle-cli/src/owner-approval-registry.mjs",
+          "packages/triangle-cli/src/owner-approval.mjs",
+          "packages/triangle-cli/src/setup-runtime.mjs",
+          "scripts/triangle-worker-install.py",
+          "worker-artifacts.json"
+        ],
+        "unchanged": 130
+      }
+    },
+    {
+      "id": "A6",
+      "title": "live receipt audit (read only): 6 of 7 owned files mismatch; helper install-manifests match disk",
+      "ok": true,
+      "ms": 8,
+      "data": {
+        "version": "0.2.0-identity.3",
+        "ownedFiles": 7,
+        "matchingDisk": 1,
+        "mismatches": [
+          "bin/triangle-mailbox",
+          "install-manifest/triangle-mailbox.sha256",
+          "install-manifest/triangle-mailbox-install.json",
+          "bin/triangle-client",
+          "install-manifest/triangle-client.sha256",
+          "install-manifest/triangle-client-install.json"
+        ],
+        "helperManifestsValid": {
+          "triangle-mailbox": true,
+          "triangle-client": true
+        }
+      }
+    },
+    {
+      "id": "B1",
+      "title": "baseline outage reproduction: v15 bundle 009977d1 fails local_recipient_unavailable when gravity2 has no runner",
+      "ok": true,
+      "ms": 910,
+      "data": {
+        "failedStartCode": "local_recipient_unavailable",
+        "socketCreated": false
+      }
+    },
+    {
+      "id": "B2",
+      "title": "baseline world prepared (gravity2, helper, rhea destination, nora, m2chat, alias, grok) + queued work seeded",
+      "ok": true,
+      "ms": 1211,
+      "data": {
+        "seeded": [
+          "pre-off-1",
+          "pre-gone-1"
+        ],
+        "baselineHealthy": true
+      }
+    },
+    {
+      "id": "C1",
+      "title": "Gate S: stage-runtime + validate-runtime onto scratch manifest; exact 12-module diff, v15, node unchanged",
+      "ok": true,
+      "ms": 1225,
+      "data": {
+        "candidateBundleId": "cc602ac014586beff8ba08e24003115ea8ce16d646d2eef72457fa287ac26f4f",
+        "differingArtifacts": 12,
+        "nodeUnchanged": true,
+        "rollbackRecord": ".rollback-supervisor-1d36f6eb18474b5f8c48c573467d58f5.json"
+      }
+    },
+    {
+      "id": "C2",
+      "title": "#184 host fix: starts with disabled gravity2 (single-recipient & multi-recipient), notice emitted, refuses new work, preserves queued_local",
+      "ok": true,
+      "ms": 2794,
+      "data": {
+        "singleRecipientStartsCleanly": true,
+        "noticeEmitted": true,
+        "unavailableRecipients": [
+          "gravity2"
+        ],
+        "helperReplyIdCaptured": true,
+        "grokRejectedUnavailable": true,
+        "preOffKeptQueuedAndRetried": true,
+        "preGoneHeld": true
+      }
+    },
+    {
+      "id": "C3",
+      "title": "#185 reply-id reuse fix: refused message_id_in_use (server, journal, Grok); same-id message still retries",
+      "ok": true,
+      "ms": 737,
+      "data": {
+        "serverRefused": [
+          "helper",
+          "gravity2"
+        ],
+        "grokRejected": true,
+        "journalDirectGuard": {
+          "ok": true,
+          "reuseCode": "message_id_in_use",
+          "sameIdRetryIsDuplicate": true
+        },
+        "serverDirectGuard": {
+          "ok": true,
+          "errorCode": "message_id_in_use",
+          "recordSendCalled": false,
+          "rateRolledBack": true
+        }
+      }
+    },
+    {
+      "id": "C4",
+      "title": "M1 ACL-first destination indistinguishability on running candidate host",
+      "ok": true,
+      "ms": 225,
+      "data": {
+        "ok": true,
+        "statesChecked": 5,
+        "unauthorizedChatAnswer": "route_unavailable"
+      }
+    },
+    {
+      "id": "C5",
+      "title": "M2 + M3 mapped chat provenance and reply pinning with reply-identity enabled",
+      "ok": true,
+      "ms": 421,
+      "data": {
+        "unmapped": null,
+        "pending": null,
+        "confirmedPinnedReplyReceived": true,
+        "afterRevoke": null
+      }
+    },
+    {
+      "id": "D1",
+      "title": "Gate P: scratch package install refuses 6/7 stale receipt, succeeds cleanly after helper-verified reconciliation",
+      "ok": true,
+      "ms": 3394,
+      "data": {
+        "staleReceiptRefused": true,
+        "reconciledEntries": 6,
+        "installedVersion": "0.2.0-restage-rehearsal.1",
+        "receiptMatched": 9
+      }
+    },
+    {
+      "id": "D2",
+      "title": "M5 CLI checks on scratch-installed triangle: help, status --identity, destination plan, chat-map storeRoot & --client-root, fail-closed confirm",
+      "ok": true,
+      "ms": 1566,
+      "data": {
+        "helpListsCommands": true,
+        "statusShowsDestinationRow": true,
+        "destinationPlansVerified": [
+          "ready(nora)",
+          "destination_target_has_runner(gravity2)",
+          "destination_exists(rhea)"
+        ],
+        "chatMapStoreRootDefaultMatchesStateRoot": true,
+        "chatMapNoConfigFallbackVerified": true,
+        "plainBuildFailsClosedOwnerApprovalUnavailable": true
+      }
+    },
+    {
+      "id": "E1",
+      "title": "journal post-stop checks, rollback-runtime, manual committed rollback, and deterministic candidate bundle ID",
+      "ok": true,
+      "ms": 3049,
+      "data": {
+        "preOffQueuedLocal": true,
+        "preGoneHeldRuntimeError": true,
+        "helperReplyIntactOnDisk": true,
+        "stagedRollbackRestoredByteIdentical": true,
+        "manualRollbackRestoredBaseline": true,
+        "candidateBundleId": "cc602ac014586beff8ba08e24003115ea8ce16d646d2eef72457fa287ac26f4f"
+      }
+    },
+    {
+      "id": "Z1",
+      "title": "the installed application root is byte-for-byte untouched",
+      "ok": true,
+      "ms": 56,
+      "data": {
+        "compared": [
+          "files",
+          "identityEntries",
+          "backupEntries",
+          "baselineBundleTree",
+          "clientFiles",
+          "directoryNames",
+          "outside",
+          "bundles",
+          "releases",
+          "processes"
+        ],
+        "hashedFiles": 15,
+        "identityEntriesCompared": 3,
+        "baselineBundleEntries": 102,
+        "processesCompared": 2,
+        "identical": true
+      }
+    }
+  ],
+  "warnings": [
+    {
+      "step": "A6",
+      "text": "live package-install.json mismatches disk for 6 of 7 owned files (bin/triangle-mailbox, install-manifest/triangle-mailbox.sha256, install-manifest/triangle-mailbox-install.json, bin/triangle-client, install-manifest/triangle-client.sha256, install-manifest/triangle-client-install.json)"
+    }
+  ],
+  "verdict": "pass",
+  "scratch": {
+    "root": "<scratch>",
+    "applicationRoot": "<scratch>/a"
+  },
+  "liveRoot": {
+    "identical": true,
+    "compared": [
+      "files",
+      "identityEntries",
+      "backupEntries",
+      "baselineBundleTree",
+      "clientFiles",
+      "directoryNames",
+      "outside",
+      "bundles",
+      "releases",
+      "processes"
+    ],
+    "differences": []
+  },
+  "finishedAt": "2026-11-21T04:09:17.753Z"
+}
