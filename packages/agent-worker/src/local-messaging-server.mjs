@@ -655,6 +655,15 @@ export function createLocalControlServer({
 
           // 4. Dedupe check & persisted loop depth before unique pair charge
           const existingRecord = await journal.getRecord(messageId);
+          // getRecord finds a message or, failing that, a reply (only a message record has a phase).
+          // An id a reply already has is never a retry: everything below would treat it as one
+          // (taking the reply's loop depth instead of checking the parent and the loop limit,
+          // skipping the pair limit and reply pinning) while new work is recorded under it. Its own
+          // code, because sending again with the same ids can never succeed.
+          if (existingRecord && typeof existingRecord.phase !== "string") {
+            rateReservation?.rollback?.();
+            throw coded("message_id_in_use", "messageId is already used by a reply; send with a new messageId");
+          }
           const effectiveRequestId = requestId || messageId;
           let calculatedDepth = 1;
 
@@ -677,10 +686,8 @@ export function createLocalControlServer({
               ? "interactive"
               : "runner";
             // Only a sender that passed the ACL and its credential scope gets this far. A retry of
-            // a message already recorded keeps its usual answer; getRecord also finds replies, and an
-            // id that only a reply has is new work (a message record always has a phase).
-            const recordedMessage = typeof existingRecord?.phase === "string";
-            if (!recordedMessage && recipientType === "runner" && typeof runnerAvailable === "function" && !runnerAvailable(effectiveTo)) {
+            // a message already recorded keeps its usual answer (an id a reply has was refused above).
+            if (!existingRecord && recipientType === "runner" && typeof runnerAvailable === "function" && !runnerAvailable(effectiveTo)) {
               throw coded("local_recipient_unavailable", "Recipient is not running; nothing was queued");
             }
 

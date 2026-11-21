@@ -104,7 +104,9 @@ Keep the same message/request IDs and body when retrying an ambiguous send.
 Explicit authorization denials return `rejected`, and so do names that do not
 resolve (`recipient_not_found`, `recipient_ambiguous`, `alias_unresolved`) and
 a configured agent that is not running (`local_recipient_unavailable`: nothing
-was queued, so sending again cannot work until the owner runs the agent);
+was queued, so sending again cannot work until the owner runs the agent) and a
+message ID a reply already has (`message_id_in_use`: nothing was recorded; send
+again under a new message ID);
 transport uncertainty and an unreadable route (`route_unavailable`) return
 `send_outcome_unknown`. Neither means the receiver executed. A `rejected` answer
 to a retry does not prove the first attempt was refused: if it may have been

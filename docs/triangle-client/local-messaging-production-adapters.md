@@ -13,7 +13,7 @@ This document details the production storage and execution dispatcher adapters f
 ## Local Messaging Journal (`local-messaging-journal.mjs`)
 
 - Implements `#106` `REQUIRED_JOURNAL_METHODS` (`recordSend`, `recordReply`, `recordExecutionFailure`, `listReplies`, `consumeReply`, `getRecord`) and lifecycle execution methods (`recoverQueued`, `claimExecution`, `completeExecution`, `holdExecution`, `status`, `close`).
-- **Atomic Full Envelope Identity**: Uses recursive canonical JSON serialization and SHA-256 hashing to compare inbound envelopes. Exact duplicates return `isDuplicate: true`; conflicting envelopes sharing a `messageId` throw `duplicate_id_conflict`.
+- **Atomic Full Envelope Identity**: Uses recursive canonical JSON serialization and SHA-256 hashing to compare inbound envelopes. Exact duplicates return `isDuplicate: true`; conflicting envelopes sharing a `messageId` throw `duplicate_id_conflict`; a new message whose `messageId` a reply already has throws `message_id_in_use`.
 - **Reply Correlation & Validation**: Verifies that reply envelopes accurately match the original request (`inReplyTo`, matching `sender`/`recipient`, matching `requestId`). Forgeries throw `invalid_reply_recipient`, `invalid_reply_sender`, or `invalid_reply_correlation`.
 - **Foreign Isolation & Explicit Consumption**: `listReplies` filters strictly to the requester; foreign access is hidden. `consumeReply` verifies ownership and throws `foreign_access_denied` for unauthorized consumers. Reply pagination progress is tracked via base64url-encoded cursors.
 - **Crash Recovery**: On journal instantiation, any in-flight requests in phase `executing` are immediately transitioned to `held` with reason `crash_recovery` rather than being re-executed.
