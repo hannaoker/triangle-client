@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   createCursorAcpProcess,
 } from "../../src/cursor-acp-runtime/acp-process.mjs";
 import { createDefaultCursorAcpShadowProfile } from "../../src/cursor-acp-runtime/config-guards.mjs";
+import { createFileCursorSessionRegistry } from "../../src/cursor-acp-runtime/session-registry.mjs";
 import { createHeadlessCursorAcpRuntime } from "../../src/cursor-acp-runtime/headless-runtime.mjs";
 
 const PROFILE_INSTANCE_ID = "a".repeat(64);
@@ -242,6 +243,50 @@ test("shadow runtime: start, prompt, reply-before-ack; excludes Codex/Bob", asyn
     assert.equal(second.sessionId, result.sessionId);
 
     await runtime.stop();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a fresh runtime loads the room session and durably replaces a missing ACP session", async () => {
+  const home = tempHome();
+  const store = path.join(home, "sessions.json");
+  const fake = createFakeAcpStdioProgram({ durableStorePath: store });
+  async function turn(n) {
+    const runtime = createHeadlessCursorAcpRuntime({
+      registry: createFileCursorSessionRegistry({ stateRoot: home, profileInstanceId: PROFILE_INSTANCE_ID }),
+      profileConfig: createDefaultCursorAcpShadowProfile({ workingDirectory: home }),
+      enableShadow: true,
+      transactionProxy: createProxyRecorder(),
+      command: fake.command, args: fake.args,
+      cursorHome: path.join(home, "cursor-home"),
+      env: { HOME: home, PATH: process.env.PATH },
+    });
+    try {
+      await runtime.start();
+      return await runtime.runDelivery({
+        profileInstanceId: PROFILE_INSTANCE_ID, roomId: ROOM_ID, deliveryId: "delivery_" + n,
+        numericDeliveryId: n, text: "private turn body", inboundEventId: INBOUND_EVENT_ID,
+      });
+    } finally {
+      await runtime.stop();
+    }
+  }
+  try {
+    const first = await turn(1);
+    const next = await turn(2);
+    assert.equal(next.startedNewSession, false);
+    assert.equal(next.sessionId, first.sessionId);
+    rmSync(store);
+    const replacement = await turn(3);
+    assert.equal(replacement.startedNewSession, true);
+    assert.notEqual(replacement.sessionId, first.sessionId);
+    assert.equal((await turn(4)).sessionId, replacement.sessionId);
+    const file = path.join(home, "conversations", ROOM_ID + ".json");
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
+      version: 1, meshRoomId: ROOM_ID, profileInstanceId: PROFILE_INSTANCE_ID, cursorSessionId: replacement.sessionId,
+    });
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
