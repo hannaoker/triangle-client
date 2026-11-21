@@ -407,3 +407,64 @@ test('grok wait bounds slow grant renewals and list calls by the remaining budge
  let u=0;const once=await waitForMatch({mode:'inbox',requestId:null,timeoutMs:100},{listInbox:async(_,{timeout})=>{u+=timeout;const i=[];i.nextCursor=null;return i;}},async()=>({credential:'c'}),{now:()=>u,sleep:async ms=>{u+=ms;}});
  assert.equal(once.state,'timeout');assert.equal(once.polls,1);assert.ok(u<=1000);
 });
+
+test('a worker extends the live watch and its final reply survives a watcher restart', async () => {
+  const f = fixture();
+  try {
+    const alice = f.pair('alice', ctxA, [grokId(ctxB)], [grokId(ctxB)]);
+    const bob = f.pair('bob', ctxB, [alice.senderId], [alice.senderId]);
+    await f.start();
+    await f.run(ctxA, ['grok','send','--to',bob.senderId,'--request-id','job','--message-id','task',
+      '--reply-window','{"seconds":3}'], 'Review it');
+    const wait = ['grok','wait','--request-id','job','--follow-message','task','--json'];
+    const chunk = async () => {
+      try { await f.run(ctxA, [...wait,'--timeout','0.1']); }
+      catch (error) {
+        assert.equal(error.code, GROK_WAIT_TIMEOUT_EXIT);
+        return JSON.parse(error.stdout).watchDeadline;
+      }
+      assert.fail('expected an unfinished task');
+    };
+    const initial = await chunk();
+    const claimFile = path.join(f.root,'long-claim.json');
+    await f.run(ctxB,['grok','claim','--message-id','task','--claim-id','worker','--claim-file',claimFile]);
+    const watching = f.run(ctxA,[...wait,'--timeout','10']);
+    const progress = ['grok','send','--to',alice.senderId,'--in-reply-to','task','--request-id','job',
+      '--message-id','progress','--reply-window','{"seconds":10}'];
+    await f.run(ctxB,progress,'Still working');
+    const extended = await chunk();
+    assert.ok(extended > initial);
+    await f.run(ctxB,progress,'Still working');
+    assert.equal(await chunk(),extended);
+    await new Promise(resolve=>setTimeout(resolve,Math.max(0,initial-Date.now()+100)));
+    await f.run(ctxB,['grok','reply','--message-id','task','--reply-id','finished','--claim-file',claimFile],'Done');
+    assert.deepEqual((await watching).replyIds,['finished']);
+    await f.stop();
+    await f.start();
+    assert.deepEqual((await f.run(ctxA,wait)).replyIds,['finished']);
+  } finally { await f.close(); }
+});
+
+test('watch reconstruction ignores unrelated updates and enforces hard and soft expiry', async () => {
+  const {createLocalMessagingJournal} = await import('../src/local-messaging-journal.mjs');
+  const root = fs.mkdtempSync('/private/tmp/tri-window-');
+  const journal = createLocalMessagingJournal({stateRoot:root});
+  try {
+    const start = 10000;
+    const original = await journal.recordSend({sender:'alice',recipient:'bob',messageId:'root',
+      requestId:'job',text:'work',metadata:{_loopDepth:1,replyWindow:{seconds:100}}},{now:start});
+    const update = (id,offset,overrides={}) => journal.recordSend({sender:'bob',recipient:'alice',
+      messageId:id,requestId:'job',inReplyTo:'root',text:'working',
+      metadata:{_loopDepth:2,replyWindow:{seconds:9999}},...overrides},{now:start+offset});
+    await update('foreign',1000,{sender:'charlie'});
+    await update('other',1000,{requestId:'other'});
+    await update('deep',1000,{metadata:{_loopDepth:3,replyWindow:{seconds:600}}});
+    await update('late',100001);
+    assert.equal(journal.replyWindowDeadline(original),start+100000);
+    await update('on-time',90000);
+    assert.equal(journal.replyWindowDeadline(original),start+700001);
+    await update('next',690000);
+    await update('last',1280000);
+    assert.equal(journal.replyWindowDeadline(original),start+1800000);
+  } finally { await journal.close(); fs.rmSync(root,{recursive:true,force:true}); }
+});

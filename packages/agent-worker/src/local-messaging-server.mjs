@@ -852,6 +852,12 @@ export function createLocalControlServer({
             to_principal: record.to_principal,
             resolved_via: record.resolved_via,
           };
+          if (params.watchRequestId !== undefined) {
+            identifier(params.watchRequestId, "watchRequestId");
+            if (record.sender !== senderId || record.requestId !== params.watchRequestId || !record.phase)
+              throw coded("invalid_request", "Watch requires your original request and message IDs");
+            rawStatus.watchDeadline = journal.replyWindowDeadline(record);
+          }
           const decoratedStatus = activeRouter.decorateStatus(rawStatus, { record });
           const resp = createSuccessResponse(
             id,

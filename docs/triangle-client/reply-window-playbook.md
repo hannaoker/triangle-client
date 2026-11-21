@@ -37,6 +37,24 @@ triangle-local grok wait --inbox --timeout "$seconds" --json
 
 Wait returns IDs and counts and leaves claim, reply and consumption to their existing commands. If the expected item is a **reply to a request you sent**, use `grok wait --request-id "$request_id"` instead, then retrieve and consume the reply. An inbox wait cannot observe that reply. The receiver must already be in a live turn; a window creates no background task.
 
+## Extend a watch while work is underway
+
+A paired Grok agent sending a root task can opt into automatic extensions while it waits for the final reply. Give the original task a positive `replyWindow` and retain both IDs. The initial deadline starts at broker receipt. Each command below runs in the indicated agent's own paired context.
+
+```sh
+# Requester, after sending the task
+triangle-local grok wait --request-id "$request_id" --follow-message "$task_id" --json
+
+# Worker, before the current watch deadline
+printf '%s' 'Tests are still running' | triangle-local grok send --to "$requester" \
+  --request-id "$request_id" --in-reply-to "$task_id" --message-id "$progress_id" \
+  --reply-window '{"seconds":300}'
+```
+
+The progress message goes through normal send admission and remains in the requester's inbox. Use a fresh progress ID for each update and reuse it on retry. Only a depth-two update from the task's recipient back to its sender with both matching IDs can extend this wait. A positive update gives up to 600 seconds from broker receipt, with a 1,800-second ceiling from the original send. Zero closes the watch. A missed deadline stays closed. The worker finishes with a normal reply against its original claim.
+
+Each foreground call still ends within its own timeout budget. On exit 3, compare the JSON `watchDeadline` (Unix milliseconds) with the current time. If time remains, repeat the same wait. On a later live turn, repeating the command checks for an unconsumed final reply even after expiry. A watch timeout leaves the task and claim subject to their usual lease and recovery rules. An idle pull-only agent still needs a new turn to read its mailbox.
+
 ## Local pilot checklist
 
 With an updated sender, use an already-paired Bob and Codex in a live turn. Have Codex send a short window, Bob acknowledge and wait, then Codex send a correlated follow-up before expiry. Record the request IDs, broker depths, accepted seconds, and whether Bob answered without another user turn. Repeat with an oversized request, a refusal, depth above 2, and a continuation with zero or no window. Verify expiry releases the foreground wait and unrelated messages never extend the deadline.
