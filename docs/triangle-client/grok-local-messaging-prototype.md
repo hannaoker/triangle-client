@@ -94,11 +94,42 @@ node packages/agent-worker/src/local-messaging-cli.mjs grok reply \
   --claim-file /absolute/private/claim.json < reply.txt
 ```
 
-`--text-file` is an alternative to stdin. `--text` is intentionally unavailable
-on the Grok surface. Runtime supports status, sessions, send, inbox, claim, reply,
-replies, consume and wait. Explicit-alias mode adds `--alias researcher` to each call.
-Claim tokens go directly to the private file, never stdout. Claim-file reuse for
-another operation and symlinks are refused before claiming the new message.
+The installed entry is `triangle-local` with the same arguments. The source
+commands above pass `--config` because they use an isolated file. Pairing is
+selected by hashing `CURSOR_CONVERSATION_ID` from the process environment, or
+by `--alias` when that flag is present. A pairing that stores a context hash
+still requires the current conversation to hash to the same value; a
+conflicting context fails with `grok_context_mismatch`. An explicit-alias
+pairing has no context hash, so every call passes `--alias ALIAS`.
+
+`grok status` and `grok inbox` already print one JSON object. `--json`,
+`--timeout`, and `--inbox` are valid only for `grok wait`. Passing any of
+them to another grok operation, including `grok inbox` and `grok status`,
+fails with `invalid_arguments`. `triangle-local --help` documents `--json`
+only on `grok wait`, which matches that rule.
+
+`--text-file` is an alternative to stdin. The body must be non-empty after
+trimming and at most 128 KB. `--text` is rejected (`Use stdin or text-file
+for Grok message bodies`). Runtime supports status, sessions, send, inbox,
+claim, reply, replies, consume and wait.
+
+`grok claim` requires `--message-id`, `--claim-id`, and `--claim-file`. The
+claim file's directory is private (`0700`; created that way when missing) and
+the file is `0600`. The claim token is written only into that file and is
+never printed. `grok reply` requires `--message-id`, `--claim-file`, and
+`--reply-id`. Claim-file reuse for another operation and symlinks are refused
+before claiming the new message.
+
+Installed inbox, claim, and reply:
+
+```bash
+triangle-local grok inbox
+triangle-local grok claim \
+  --message-id MESSAGE_ID --claim-id STABLE_CLAIM_ID \
+  --claim-file /absolute/private/claim.json
+printf 'text' | triangle-local grok reply --message-id MESSAGE_ID \
+  --claim-file /absolute/private/claim.json --reply-id REPLY_UUID
+```
 
 Keep the same message/request IDs and body when retrying an ambiguous send.
 Explicit authorization denials return `rejected`, and so do names that do not
@@ -110,7 +141,7 @@ again under a new message ID);
 transport uncertainty and an unreadable route (`route_unavailable`) return
 `send_outcome_unknown`. Neither means the receiver executed. A `rejected` answer
 to a retry does not prove the first attempt was refused: if it may have been
-admitted, ask `status --message-id` before sending the text again under new IDs. Replies are retrieved
+admitted, ask `grok status --message-id` (it already prints JSON; do not pass `--json`) before sending the text again under new IDs. Replies are retrieved
 by correlation and consumed separately. Never reply merely to acknowledge a reply.
 
 ## Wait for a reply without polling (`grok wait`)
@@ -128,11 +159,14 @@ node packages/agent-worker/src/local-messaging-cli.mjs grok wait \
 
 - Exactly one of `--request-id` (an unconsumed reply correlated to that request)
   or `--inbox` (any unclaimed inbound message) is required.
+- `--json`, `--timeout`, and `--inbox` are valid only on `grok wait`. `grok inbox`
+  and `grok status` already print JSON and are run without `--json`. Passing
+  `--json`, `--timeout`, or `--inbox` to them fails with `invalid_arguments`.
 - Identity and context binding are the same as every other `grok` operation: the
-  inherited `CURSOR_CONVERSATION_ID` (or the owner-assigned `--alias` for an
-  explicit-alias pairing), no override flags, and `grok_context_mismatch` fails
-  closed before any broker call. Argument errors are also reported before any
-  broker call.
+  inherited `CURSOR_CONVERSATION_ID` (hashed and matched to the pairing) or
+  `--alias` for an explicit-alias pairing. `--alias` does not override a
+  conflicting context, and `grok_context_mismatch` fails closed before any
+  broker call. Argument errors are also reported before any broker call.
 - Read-only: it only makes the `list_replies` / `list_inbox` calls that
   `grok replies` / `grok inbox` already make, on the same local socket. It never
   consumes, claims or acks; `list_inbox` keeps its existing expired-lease reaping.
@@ -146,10 +180,14 @@ node packages/agent-worker/src/local-messaging-cli.mjs grok wait \
 - `--timeout` is in seconds (up to three decimals): default 750, maximum 760, so
   one call fits under a 13-minute (780s) tool call with margin.
 - Exit codes: **0** a match is ready; **3** the timeout passed with no match;
-  **1** any error (unchanged CLI behavior: one JSON line on stderr with the code,
+  **1** any thrown error. Stderr is one JSON line. The `error` field is the code,
   for example `grok_context_mismatch`, `session_disabled`, `invalid_arguments`, or
-  a socket error if the service is not running). Errors are not retried inside
-  `wait`; a waiter decides whether to call again.
+  a socket error if the service is not running. The `message` field is the fixed
+  text `Triangle local command failed; check binding, service status and arguments`.
+  It does not name the bad flag. A wrong flag is the usual cause of
+  `invalid_arguments` (`--json`, `--timeout`, or `--inbox` on a command other than
+  `grok wait`, or `--text` on `grok send` or `grok reply`). Errors are not retried
+  inside `wait`; a waiter decides whether to call again.
 - Output is one line. Default: a short human summary. `--json`: one JSON object
   `{operation, mode, state, requestId, replyIds | messageIds, count, more,
   waitedMs, polls, timeoutSeconds}`. IDs and counts only, never message bodies,

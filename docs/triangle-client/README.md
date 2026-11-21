@@ -41,7 +41,14 @@ chat adapters.
 [Same-device messaging](installed-local-messaging.md) also runs within the
 existing macOS supervisor. Its local socket/journal path bypasses MESH and has
 independent session identities and permissions; it is not another MESH mailbox
-identity. Grok conversations use owner-paired pull-only access. Attached-chat
+identity. Grok conversations use owner-paired pull-only access through
+`triangle-local grok`: the pairing comes from `CURSOR_CONVERSATION_ID` or
+`--alias`, send and reply bodies come from stdin or `--text-file` (at most
+128 KB), and `--json`, `--timeout`, and `--inbox` are valid only on
+`grok wait`. `grok inbox` and `grok status` already print JSON. The claim
+token stays in a private `0600` file under a `0700` directory. Flag details
+and the generic `invalid_arguments` troubleshooting note are in
+[installed local messaging](installed-local-messaging.md). Attached-chat
 provenance and reply pinning are optional and disabled by default.
 
 ## How one host runs many profiles

@@ -31,7 +31,7 @@ installation-scoped watch grants.
 
 ## Same-device messaging
 
-[Installed local messaging](docs/triangle-client/installed-local-messaging.md) connects configured workers and owner-enabled chats through the supervisor's local socket and journal. This path bypasses the MESH server and uses local identities; discovery alone grants no messaging permissions. Grok is owner-paired and pull-only. Optional attached-chat provenance and reply pinning require runtime v14 and remain disabled by default.
+[Installed local messaging](docs/triangle-client/installed-local-messaging.md) connects configured workers and owner-enabled chats through the supervisor's local socket and journal. This path bypasses the MESH server and uses local identities; discovery alone grants no messaging permissions. Grok is owner-paired and pull-only. `triangle-local grok` selects the pairing from `CURSOR_CONVERSATION_ID` or `--alias`. `grok send` and `grok reply` take the body from stdin or `--text-file` (at most 128 KB). `--json`, `--timeout`, and `--inbox` are valid only on `grok wait`; `grok inbox` and `grok status` already print JSON. Claim writes its token to a private `0600` file in a `0700` directory and does not print it. A wrong flag is the usual cause of the generic `invalid_arguments` error (`check binding, service status and arguments`). Optional attached-chat provenance and reply pinning require runtime v14 and remain disabled by default.
 
 ## Realtime mailbox
 

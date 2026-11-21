@@ -27,7 +27,45 @@ triangle-local consume --message-id REPLY_ID
 triangle-local mcp
 ```
 
+Those examples are the desktop sender. `triangle-local grok` is a separate pull-only surface, documented in the next section. Desktop `send` and desktop `reply` take `--text`. Grok `send` and `reply` take the body from stdin or `--text-file`.
+
 Setup binds the desktop sender to the thread named by `--thread-id`, but only in the owner-created integration file (`desktop-integration.json` in the local state directory). It reads the dedicated desktop-sender binding (`desktop-binding.json`, falling back to legacy `app-server-binding.json` if present) solely for the existing sender identity and never writes it. Local messaging keeps working when an older app-server host is retired or moves its own binding, because the thread is fixed by the integration file and the broker verifies that the desktop identity matches. Use `--rebind-thread` only as an explicit owner action to move an existing integration to another conversation; it rotates the capability secret, so old exchanges stop working. Setup preserves wake settings but disables automatic wake whenever the sender or thread changes (or the prior integration is missing); activate wake explicitly for the new binding. Setup does not enroll a replacement identity or touch the binding's inbound wake flag. Restart the existing client service after setup. A cold multi-profile start can exceed the service script's default ten-second readiness window; `TRIANGLE_READY_TIMEOUT_MS=60000` is available for the supervised activation check.
+
+## Grok pull-only CLI
+
+`triangle-local grok` is the command surface for an owner-paired Grok conversation. The running process selects the pairing from `CURSOR_CONVERSATION_ID` (the CLI hashes that value and matches the pairing's `contextHash`) or from `--alias` when the flag is present. `--alias` selects that pairing. A pairing that stores a context hash still requires the current `CURSOR_CONVERSATION_ID` to hash to the same value; a conflicting context fails with `grok_context_mismatch` before any broker call. An explicit-alias pairing has no context hash, so each call passes `--alias ALIAS`.
+
+`grok status`, `grok sessions`, `grok inbox`, `grok send`, `grok claim`, `grok reply`, `grok replies`, and `grok consume` each print one JSON object on stdout. `--json`, `--timeout`, and `--inbox` are valid only for `grok wait`. `grok inbox` and `grok status` already print JSON and are run without `--json`. Passing `--json`, `--timeout`, or `--inbox` to any other grok operation fails with `invalid_arguments`. `triangle-local --help` documents `--json` only on `grok wait`, which matches that rule.
+
+`grok send` requires `--to`, `--message-id`, and `--request-id`. `grok send` and `grok reply` take the body from stdin or from `--text-file`. The body must be non-empty after trimming and at most 128 KB. `--text` is rejected with `Use stdin or text-file for Grok message bodies`.
+
+`grok claim` requires `--message-id`, `--claim-id`, and `--claim-file`. The claim file's directory is private (`0700`; the CLI creates it that way when it is missing) and the file is `0600`. The claim token is written only into that file. Stdout is `{messageId, claimId, claimed, leaseExpiresAt}` and does not include the token. Never print the claim file or the token. `grok reply` requires `--message-id`, `--claim-file`, and `--reply-id`, and reads the token from the claim file.
+
+Inbox, claim, and reply:
+
+```text
+triangle-local grok inbox
+triangle-local grok claim --message-id MESSAGE_ID --claim-id STABLE_CLAIM_ID --claim-file /absolute/private/claim.json
+printf 'text' | triangle-local grok reply --message-id MESSAGE_ID --claim-file /absolute/private/claim.json --reply-id REPLY_UUID
+```
+
+The rest of the surface:
+
+```text
+triangle-local grok status
+triangle-local grok status --message-id MESSAGE_ID
+triangle-local grok sessions
+printf '%s' 'Task' | triangle-local grok send --to EXACT_PEER_ADDRESS --message-id STABLE_MESSAGE_ID --request-id STABLE_REQUEST_ID
+triangle-local grok send --to EXACT_PEER_ADDRESS --message-id STABLE_MESSAGE_ID --request-id STABLE_REQUEST_ID --text-file /absolute/private/body.txt
+triangle-local grok replies --request-id STABLE_REQUEST_ID
+triangle-local grok consume --message-id REPLY_ID
+triangle-local grok wait --request-id STABLE_REQUEST_ID [--timeout 750] [--json]
+triangle-local grok wait --inbox [--timeout 750] [--json]
+```
+
+`grok wait` is one read-only blocking call. Pass exactly one of `--request-id` (an unconsumed reply for that request) or `--inbox` (any unclaimed inbox message). `--timeout` is seconds, default 750, maximum 760. Exit 0 means a match is ready, 3 means the timeout passed with no match, and 1 means an error. Without `--json` the stdout line is a short summary. With `--json` it is one object of ids and counts only (no message body and no claim token). Wait does not consume, claim, or ack. After it returns ready, run `grok replies` and `grok consume`, or the inbox, claim, and reply flow above.
+
+A thrown grok failure exits 1 and writes one JSON line to stderr: `{"error":"<code>","message":"Triangle local command failed; check binding, service status and arguments"}`. The `error` field is the code (`invalid_arguments`, `grok_context_mismatch`, `session_disabled`, and so on). The `message` field stays that fixed sentence, so it does not name the bad flag. A wrong flag is the usual cause of `invalid_arguments`: `--json`, `--timeout`, or `--inbox` on a command other than `grok wait`, or `--text` on `grok send` or `grok reply`. A send the service refuses is different: stdout is `{messageId, requestId, state, error}` and the process still exits 1 (`rejected` or `send_outcome_unknown`).
 
 ## Custody and authority
 
@@ -599,7 +637,10 @@ are denied. Workspace participation is still required for attached Claude sender
 Use `triangle_list_inbox`, `triangle_claim_message`, and `triangle_reply_message`
 from MCP, or `inbox`, `claim --message-id ... --claim-id ...`, and
 `reply --message-id ... --claim-file /private/claim.json --reply-id ... --text ...`
-from the installed CLI. Save claim output in an owner-private directory/file.
+from the installed desktop CLI. Save claim output in an owner-private directory/file.
+That `--text` reply is the desktop inbox. Grok reply takes the body on stdin or
+`--text-file`. Grok claim writes the claim token only to `--claim-file`. See
+Grok pull-only CLI.
 Use stable claim/reply IDs when retrying. Claiming removes queued inbox visibility
 but retains the executing record; replies return to the original sender.
 
@@ -788,7 +829,7 @@ and a message ID gives that message's delivery observations to its sender or rec
 | `triangle-local status` (owner CLI) | Host status: journal, dispatcher, wake, discovery, router | `--message-id ID` |
 | `triangle_get_status` on the bound Codex MCP (`triangle-local mcp`) | This conversation's own view | `messageId` |
 | `triangle_get_status` on attached Claude and Codex chats | This chat's own view | `messageId` |
-| `triangle-local grok status` | This pairing's own view | `--message-id ID` (earlier builds accepted the flag and ignored it) |
+| `triangle-local grok status` | This pairing's own view, already JSON | `--message-id ID` (earlier builds accepted the flag and ignored it). Do not pass `--json`; that flag is only valid on `grok wait` |
 
 The own view is `{route, senderId, sessionId, generation, inbox: {queued, executing,
 held}}` and never contains host status. The owner CLI and the bound MCP adapter share
