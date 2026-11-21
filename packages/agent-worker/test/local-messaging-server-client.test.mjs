@@ -1165,7 +1165,7 @@ test("the send path refuses a reply's id itself, even with a journal that would 
   }
 });
 
-test("a message whose id a reply took still answers its exact retry through the send path", async () => {
+test("a refused reply-id collision preserves exact message retries through the send path", async () => {
   const env = setupEnvironment();
   const stateRoot = path.join(env.tmpDir, "state");
   fs.mkdirSync(stateRoot, { mode: 0o700 });
@@ -1181,8 +1181,7 @@ test("a message whose id a reply took still answers its exact retry through the 
     await server.start();
     const send = { to: "gravity2", text: "work", messageId: "m-1", requestId: "r-1" };
     assert.equal((await codex.sendMessage(send)).accepted, true);
-    // replies are not checked against message ids: this one takes the message's own id
-    await journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "m-1", requestId: "r-1", inReplyTo: "m-1", text: "done" });
+    await assert.rejects(journal.recordReply({ sender: "gravity2", recipient: "desktop-codex", messageId: "m-1", requestId: "r-1", inReplyTo: "m-1", text: "done" }), { code: "message_id_in_use" });
     const retry = await codex.sendMessage(send);
     assert.equal(retry.accepted, true);
     assert.equal(retry.isDuplicate, true, "getRecord finds the message first, so this is its retry");

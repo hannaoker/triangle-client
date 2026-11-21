@@ -13,8 +13,8 @@ import { coded } from "./local-messaging-errors.mjs";
  *     requestId, inReplyTo, text, metadata). Duplicate identical envelope returns
  *     existing record with isDuplicate: true, its stored phase and original requestId.
  *     Conflicting envelope throws duplicate_id_conflict. A new message never takes an
- *     id a reply already has (message_id_in_use). Replies are not checked against
- *     messages: a message whose id a reply took still answers its exact retry.
+ *     id a reply already has (message_id_in_use). New replies likewise reject ids owned by messages.
+ *     Legacy records with overlapping ids still answer exact retries.
  * - recordReply(envelope): Persist reply correlated to original request. Must verify
  *     original request's expected sender/recipient/requestId/inReplyTo.
  * - listReplies({ requester, requestId, inReplyTo, limit }): Non-consuming retrieval

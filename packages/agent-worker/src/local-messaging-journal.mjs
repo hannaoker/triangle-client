@@ -743,7 +743,7 @@ export function createLocalMessagingJournal({
         throw coded("duplicate_id_conflict", `Conflicting envelope for messageId: ${messageId}`);
       }
       // A new message never takes an id a reply already has (getRecord and status look for a message
-      // first, then a reply). Replies are not checked against messages, so this comes after the
+      // first, then a reply). Older journals can contain collisions, so this comes after the
       // retry check above: a message whose id a reply took still answers its exact retry.
       if (db.prepare("SELECT 1 FROM local_replies WHERE message_id = ?").get(messageId)) {
         throw coded("message_id_in_use", `messageId ${messageId} is already used by a reply`);
@@ -805,6 +805,12 @@ export function createLocalMessagingJournal({
     }
   }
 
+  function assertReplyIdAvailable(messageId) {
+    if (db.prepare("SELECT 1 FROM local_messages WHERE message_id = ?").get(messageId)) {
+      throw coded("message_id_in_use", "Reply ID already belongs to a message");
+    }
+  }
+
   function recordReplySync(envelope) {
     assertNotClosed();
     if (!envelope || typeof envelope !== "object") {
@@ -839,6 +845,7 @@ export function createLocalMessagingJournal({
       throw coded("duplicate_id_conflict", `Conflicting reply for messageId: ${messageId}`);
     }
 
+    assertReplyIdAvailable(messageId);
     const now = Date.now();
     const metadataJson = metadata ? JSON.stringify(metadata) : null;
     db.prepare(`
@@ -852,7 +859,16 @@ export function createLocalMessagingJournal({
   }
 
   async function recordReply(envelope) {
-    return recordReplySync(envelope);
+    assertNotClosed();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const reply = recordReplySync(envelope);
+      db.exec("COMMIT");
+      return reply;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // Runner completion has one durable boundary. Do not await between writes:
@@ -1095,6 +1111,7 @@ export function createLocalMessagingJournal({
           text: lateText,
           metadata,
         };
+        assertReplyIdAvailable(replyMessageId);
         db.prepare(`
           INSERT INTO local_replies (
             message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, consumed, created_at, updated_at, reconcile_id
@@ -2105,6 +2122,7 @@ export function createLocalMessagingJournal({
         throw coded("duplicate_id_conflict", `Conflicting reply ID: ${effectiveReplyId}`);
       }
 
+      assertReplyIdAvailable(effectiveReplyId);
       db.prepare(`
         INSERT INTO local_replies (
           message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, consumed, created_at, updated_at

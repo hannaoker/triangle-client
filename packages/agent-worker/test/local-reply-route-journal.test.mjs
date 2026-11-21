@@ -54,6 +54,10 @@ test("real journal atomically admits request+pin and reply+generation, including
   assert.equal((await journal.getRecord("m1")).phase, "executing");
   assert.equal((await journal.listReplies({ requester: remote.address })).length, 0);
   inject.exec("DROP TRIGGER fail_reply"); inject.close();
+  await assert.rejects(
+    journal.recordInteractiveReply({ ...reply, replyId: reply.messageId }),
+    { code: "message_id_in_use" },
+  );
   const result = await journal.recordInteractiveReply(reply);
   assert.equal(result.text, "result");
   assert.equal((await journal.getReplyRouteForMessage("m1")).local.generation, 2);
