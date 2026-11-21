@@ -762,6 +762,18 @@ export function sanitizedLogger(stderr, { now = () => Date.now() } = {}) {
       if (instance) line += ` instance=${instance}`;
       stderr.write(`${line}\n`);
     },
+    // A state the owner should know about that is not a failure (for example a configured local
+    // recipient whose agent is not running). Only a fixed event id, a validated profile name and an
+    // opaque instance prefix are written, never free-form text. Modules that call `warn` stay quiet.
+    notice(event, detail) {
+      const source = sanitizedEventName(event);
+      if (!source) return;
+      const timestamp = isoTimestamp(now);
+      let line = `${timestamp ? `${timestamp} ` : ""}triangle-client: notice [${source}]`;
+      if (typeof detail?.profile === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(detail.profile)) line += ` profile=${detail.profile}`;
+      if (typeof detail?.instanceId === "string" && /^[a-f0-9]{64}$/.test(detail.instanceId)) line += ` instance=${detail.instanceId.slice(0, 12)}`;
+      stderr.write(`${line}\n`);
+    },
   });
 }
 

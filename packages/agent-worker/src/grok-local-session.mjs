@@ -15,7 +15,8 @@ const ALIAS = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$/;
 // failures that stay true until the owner changes something (an unknown principal, an ambiguous one, an unresolved alias) happen before
 // anything is admitted. `route_unavailable` is left out on purpose: it also covers a registry that could not be read for a moment, and a
 // retry of a send that was admitted after a lost answer meets the same resolution first, so a bot told "rejected" could send it again.
-export const GROK_REJECTED_CODES = Object.freeze(['recipient_not_allowed','recipient_not_found','recipient_ambiguous','alias_unresolved','invalid_params','invalid_request','payload_too_large','rate_limit_exceeded','loop_limit_exceeded','session_disabled','session_offline','generation_fenced']);
+// `local_recipient_unavailable` (the agent is not running) is given only when nothing was recorded: a retry of a recorded send keeps its answer.
+export const GROK_REJECTED_CODES = Object.freeze(['recipient_not_allowed','recipient_not_found','recipient_ambiguous','alias_unresolved','invalid_params','invalid_request','payload_too_large','rate_limit_exceeded','loop_limit_exceeded','session_disabled','session_offline','local_recipient_unavailable','generation_fenced']);
 const ADDRESS = /^(session-)?[a-f0-9]{64}$/;
 const KEYS = ['version','type','alias','contextHash','senderId','sessionId','generation','bindingId','secret','enabled','revoked','allowedSenders','allowedRecipients'];
 const hash = value => createHash('sha256').update(value).digest('hex');

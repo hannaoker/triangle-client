@@ -1042,3 +1042,67 @@ test("directory rejects ambiguous or unbounded owner metadata before serving", (
     }
   } finally { fs.rmSync(env.tmpDir, { recursive: true, force: true }); }
 });
+
+test("a configured worker that is not running takes no new work; the ACL answers first and a retry of recorded work keeps its answer", async () => {
+  const env = setupEnvironment();
+  const executed = [];
+  const dispatcher = createTestRecoverableDispatcher({ journal: env.journal, execute: async (job) => { executed.push(job.messageId); } });
+  let available = false;
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: env.rateLimiter, loopTracker: env.loopTracker, dispatcher,
+    runnerAvailable: (id) => available || id !== "gravity2",
+  });
+  const clientFor = (senderId) => createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId }), senderId });
+  const codex = clientFor("desktop-codex"), eve = clientFor("eve");
+  // the ACL allows this sender, but its credential is scoped to another recipient
+  const scoped = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex", allowedRecipients: ["eve"] }), senderId: "desktop-codex" });
+  try {
+    await server.start();
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: "off-1", requestId: "off-req-1" }), { code: "local_recipient_unavailable" });
+    assert.ok(!(await env.journal.getRecord("off-1")), "nothing was recorded");
+    await assert.rejects(eve.sendMessage({ to: "gravity2", text: "probe", messageId: "off-2", requestId: "off-req-2" }), { code: "recipient_not_allowed" }, "a sender the ACL denies learns nothing about availability");
+    await assert.rejects(scoped.sendMessage({ to: "gravity2", text: "probe", messageId: "off-4", requestId: "off-req-4" }), { code: "recipient_not_allowed" }, "nor does a credential scoped away from the agent");
+    available = true;
+    const first = await codex.sendMessage({ to: "gravity2", text: "earlier work", messageId: "off-3", requestId: "off-req-3" });
+    assert.equal(first.accepted, true);
+    available = false;
+    const retry = await codex.sendMessage({ to: "gravity2", text: "earlier work", messageId: "off-3", requestId: "off-req-3" });
+    assert.equal(retry.accepted, true);
+    assert.equal(retry.isDuplicate, true, "work recorded before the agent stopped keeps its usual answer");
+    assert.deepEqual(executed.filter((id) => id === "off-1"), [], "the refused send never reached the dispatcher");
+  } finally {
+    await codex.close().catch(() => {});
+    await eve.close().catch(() => {});
+    await scoped.close().catch(() => {});
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("refusals for a worker that is not running give back the sender's rate reservation", async () => {
+  const env = setupEnvironment();
+  let available = false;
+  const server = createLocalControlServer({
+    socketPath: env.socketPath, journal: env.journal, acl: env.acl, credentialValidator: env.validator,
+    rateLimiter: createPerSenderRateLimiter({ maxRequestsPerWindow: 3, windowMs: 60000 }), loopTracker: env.loopTracker, dispatcher: env.dispatcher,
+    runnerAvailable: (id) => available || id !== "gravity2",
+  });
+  const codex = createLocalControlClient({ socketPath: env.socketPath, turnCredential: env.issuer.issue({ senderId: "desktop-codex" }), senderId: "desktop-codex" });
+  try {
+    await server.start();
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(codex.sendMessage({ to: "gravity2", text: "new work", messageId: `budget-off-${i}`, requestId: `budget-off-req-${i}` }), { code: "local_recipient_unavailable" });
+    }
+    available = true;
+    for (let i = 0; i < 3; i++) {
+      const sent = await codex.sendMessage({ to: "gravity2", text: "work", messageId: `budget-on-${i}`, requestId: `budget-on-req-${i}` });
+      assert.equal(sent.accepted, true, `send ${i + 1} of 3 fits the budget`);
+    }
+    await assert.rejects(codex.sendMessage({ to: "gravity2", text: "work", messageId: "budget-on-3", requestId: "budget-on-req-3" }), { code: "rate_limit_exceeded" }, "the budget is enforced");
+  } finally {
+    await codex.close().catch(() => {});
+    await server.close();
+    fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});

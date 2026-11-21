@@ -640,3 +640,35 @@ test('the dispatcher exposes exactly one name per hook: start, stop, notifyAdmis
  const dispatcher=createLocalMessagingDispatcher({journal:{completeExecutionWithReply(){}},runRecipient:async()=>{}});
  assert.deepEqual(Object.keys(dispatcher).sort(),['notifyAdmission','start','status','stop']);
 });
+
+test("canRun false leaves a recipient's queued work queued: neither recovery nor admission claims or fails it", async () => {
+  const stateRoot = createIsolatedStateRoot("triangle-dispatcher-off-");
+  const journal = createLocalMessagingJournal({ stateRoot });
+  const ran = [];
+  let dispatcher = null;
+  try {
+    for (const [messageId, recipient] of [["off-a", "gravity2"], ["on-b", "other"]]) {
+      await journal.recordSend({ sender: "desktop", recipient, messageId, requestId: `r-${messageId}`, text: `work ${messageId}`, metadata: {} });
+    }
+    dispatcher = createLocalMessagingDispatcher({
+      journal,
+      canRun: (recipient) => recipient !== "gravity2",
+      runRecipient: async (job) => { ran.push(job.messageId); return { status: "completed", text: "ok" }; },
+    });
+    await dispatcher.start();
+    await dispatcher.notifyAdmission({ sender: "desktop", recipient: "gravity2", messageId: "off-a", requestId: "r-off-a", text: "work off-a" });
+    await waitFor(async () => (await journal.getRecord("on-b"))?.phase === "completed", { message: "runnable work completes" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(ran, ["on-b"], "only the runnable recipient ran");
+    assert.equal((await journal.getRecord("off-a")).phase, "queued_local", "the other work is still queued, not failed or held");
+    await dispatcher.stop();
+    dispatcher = createLocalMessagingDispatcher({ journal, runRecipient: async (job) => { ran.push(job.messageId); return { status: "completed", text: "ok" }; } });
+    await dispatcher.start();
+    await waitFor(async () => (await journal.getRecord("off-a"))?.phase === "completed", { message: "queued work runs once its recipient can run" });
+    assert.deepEqual(ran, ["on-b", "off-a"]);
+  } finally {
+    await dispatcher?.stop();
+    await journal.close();
+    fs.rmSync(stateRoot, { recursive: true, force: true });
+  }
+});

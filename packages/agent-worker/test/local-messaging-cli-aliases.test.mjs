@@ -16,6 +16,9 @@ import {createOwnerAcl} from '../src/local-messaging-acl.mjs';
 import {readIdentityRegistry,setIdentityAlias,updateIdentityRegistry} from '../src/identity-registry.mjs';
 import {deriveClientInstanceId} from '../src/identity-primitives.mjs';
 import {createTestMemoryJournal,createTestRecoverableDispatcher} from './local-messaging-fixtures.mjs';
+import {createInstalledLocalMessagingHost} from '../src/local-messaging-host.mjs';
+import {createProfiledReasonerGate} from '../src/concurrency-gate.mjs';
+import {createLocalMessagingJournal} from '../src/local-messaging-journal.mjs';
 import {upgradeThroughWriter} from './identity-registry-v2-helpers.mjs';
 
 const exec=promisify(execFile),cli=fileURLToPath(new URL('../src/local-messaging-cli.mjs',import.meta.url));
@@ -76,4 +79,31 @@ test('installed CLI send uses an owner-set alias only when discovery lists it, a
    assert.equal(discoveries-asked,roundTrips,name+': round trips to the server');
   }
  }finally{await subsystem?.stop();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+// An alias or a principal resolves to the agent first, so an agent that is not running is refused under every name, as by profile.
+test('installed host: a send by alias or principal to an agent that is not running is refused like a send by profile, and nothing is recorded',async()=>{
+ const root=fs.mkdtempSync('/private/tmp/tri-alias-off-');fs.chmodSync(root,0o700);let host;
+ try {
+  const configPath=path.join(root,'local.json'),bindingPath=path.join(root,'binding.json');
+  writePrivateJson(bindingPath,{instanceId:'a'.repeat(64),threadId:'old',enabled:false});
+  setupLocalMessaging({config:configPath,'desktop-binding':bindingPath,'thread-id':'test-thread',recipients:['gravity2']});
+  const config=readPrivateJson(configPath),recipient=config.recipients[0].instanceId;
+  const registryRoot=path.join(root,'identity'),principal='agent_'+'b'.repeat(32);
+  updateIdentityRegistry({root:registryRoot,expectedSequence:0,action:'init',subject:null,mutate:r=>r});
+  updateIdentityRegistry({root:registryRoot,expectedSequence:1,action:'bind',subject:recipient,mutate:r=>{r.bindings[recipient]=binding('gravity2',recipient,principal);return r;}});
+  upgradeThroughWriter(registryRoot,{now:new Date().toISOString()});
+  setIdentityAlias({root:registryRoot,expectedSequence:readIdentityRegistry({root:registryRoot}).registry.sequence,alias:'gemini',principalId:principal});
+  writePrivateJson(path.join(config.stateRoot,'router.json'),{version:1,enabled:true,registryRoot});
+  host=createInstalledLocalMessagingHost({configPath,runners:new Map(),gate:createProfiledReasonerGate()});
+  await host.start();
+  for(const [form,to] of [['profile','gravity2'],['alias','gemini'],['principal',principal]]){
+   await assert.rejects(exec(process.execPath,[cli,'send','--config',configPath,'--to',to,'--text','new work','--message-id','off-'+form,'--request-id','off-'+form]),
+    error=>{assert.equal(JSON.parse(error.stdout).error,'local_recipient_unavailable',form);return true;});
+  }
+  await host.stop();host=null;
+  const journal=createLocalMessagingJournal({stateRoot:config.stateRoot});
+  try{for(const form of ['profile','alias','principal'])assert.equal(await journal.getRecord('off-'+form),null,form+': nothing was recorded');}
+  finally{await journal.close();}
+ }finally{await host?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });

@@ -230,6 +230,9 @@ export function createLocalControlServer({
   credentialBroker = null,
   interactiveBroker = null,
   interactiveRecipients = null,
+  // runnerAvailable(id) false: a configured worker whose runtime is not running. New work for it
+  // is refused before anything is recorded; work it already has stays queued.
+  runnerAvailable = null,
   statusProvider = null,
   recipientDirectory = [],
   discoveryBroker = null,
@@ -670,6 +673,17 @@ export function createLocalControlServer({
 
           let pairReservation = null;
           try {
+            const recipientType = (resolution.recipientType === "interactive" || effectiveTo.startsWith("session-") || (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(effectiveTo) : interactiveRecipients.includes(effectiveTo))))
+              ? "interactive"
+              : "runner";
+            // Only a sender that passed the ACL and its credential scope gets this far. A retry of
+            // a message already recorded keeps its usual answer; getRecord also finds replies, and an
+            // id that only a reply has is new work (a message record always has a phase).
+            const recordedMessage = typeof existingRecord?.phase === "string";
+            if (!recordedMessage && recipientType === "runner" && typeof runnerAvailable === "function" && !runnerAvailable(effectiveTo)) {
+              throw coded("local_recipient_unavailable", "Recipient is not running; nothing was queued");
+            }
+
             // Pair cap fallback only for injected test journals lacking durable pair limiter:
             // Do NOT charge for known duplicates!
             if (!journal.hasDurablePairLimiter && exchangeLimiter && !existingRecord) {
@@ -677,10 +691,6 @@ export function createLocalControlServer({
             }
 
             // 5. Record to durable shared journal
-            const recipientType = (resolution.recipientType === "interactive" || effectiveTo.startsWith("session-") || (interactiveRecipients && (typeof interactiveRecipients.has === "function" ? interactiveRecipients.has(effectiveTo) : interactiveRecipients.includes(effectiveTo))))
-              ? "interactive"
-              : "runner";
-
             const existingRoute = existingRecord && typeof journal.getReplyRouteForMessage === "function"
               ? await journal.getReplyRouteForMessage(messageId) : null;
             if (existingRoute && !replyIdentity) throw coded("reply_route_unavailable", "Pinned retries require authenticated identity verification");
