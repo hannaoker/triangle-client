@@ -88,7 +88,10 @@ function adoptLegacyJournalFiles(stateRoot, logger) {
     } finally {
       closeSync(dirFd);
     }
-    logger.warn?.("local_messaging_journal_adopted", { files: moves.length });
+    // The owner's log says the files moved: a build that predates the move would not find them.
+    try {
+      logger?.notice?.("local_messaging_journal_adopted", { count: moves.length });
+    } catch {}
   } finally {
     if (lock) {
       try {
@@ -654,9 +657,10 @@ export function createLocalMessagingJournal({
     db.prepare(
       "UPDATE local_messages SET phase = 'held', reason = 'crash_recovery', updated_at = ? WHERE phase = 'executing'"
     ).run(now);
-    logger.warn?.("local_messaging_held_on_recovery", {
-      count: uncertainOnStartup.length,
-    });
+    // Held work waits for the owner's reconciliation, so the owner's log says how much there is.
+    try {
+      logger?.notice?.("local_messaging_held_on_recovery", { count: uncertainOnStartup.length });
+    } catch {}
   }
 
   // Crash recovery on startup for wake bindings: any submitting binding is reset to uncertain

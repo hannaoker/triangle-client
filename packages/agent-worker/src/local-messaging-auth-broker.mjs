@@ -194,8 +194,10 @@ export function createSessionDiscoveryBroker({integrationPath,journal,clock=()=>
     const rows=(await journal.listDiscoveredSessions({installationId:c.installationId,workspace:c.workspace})).filter(r=>(c.harnesses||['claude']).includes(r.harness));
     const listed=await withSessionPresence(rows,{probe:processProbe,now:clock()});
     warned=false;return listed;
-   }catch{
-    if(!warned){warned=true;try{logger?.warn?.('Session discovery unavailable; configured recipients remain available');}catch{}}
+   }catch(error){
+    // Once per outage, to the owner's log, as an event id and an error code only: discovered sessions
+    // are missing from listings until it recovers, while configured recipients remain available.
+    if(!warned){warned=true;try{logger?.notice?.('triangle_client_local_session_discovery_unavailable',{code:error?.code});}catch{}}
     return [];
    }
   },
