@@ -193,6 +193,7 @@ export function createHeadlessCursorAcpRuntime({
     }
     resolvedRegistry.upsert(profileInstanceId, roomId, {
       cursorSessionId: sessionId,
+      replacesSessionId: existing?.cursorSessionId,
     });
     return { sessionId, startedNewSession: true };
   }

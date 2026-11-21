@@ -34,6 +34,7 @@ import {
   CURSOR_ACP_RUNTIME_ADAPTER,
 } from "./config-guards.mjs";
 import { createHeadlessCursorAcpDrain } from "./headless-drain.mjs";
+import { createFileCursorSessionRegistry } from "./session-registry.mjs";
 import { createHeadlessCursorAcpRuntime } from "./headless-runtime.mjs";
 import { resolveTriangleCursorHome } from "./runtime-home.mjs";
 
@@ -561,6 +562,7 @@ export function createInstalledCursorAcpDrain(config, {
     workingDirectory: normalized.workingDirectory,
   });
   const runtime = createHeadlessCursorAcpRuntime({
+    registry: createFileCursorSessionRegistry(normalized),
     profileConfig,
     transactionProxy,
     cursorHome,
