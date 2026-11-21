@@ -26,6 +26,7 @@ public enum MCPProxyContractCases {
         .init(name: "URLSession transport is valid for MCP forwarding", run: urlSessionMCPContract),
         .init(name: "workload access token and DPoP on every MCP request", run: workloadJWTAndDPoP),
         .init(name: "reflected workload access token terminates", run: reflectedAccessToken),
+        .init(name: "open pipe returns short lines without waiting for EOF", run: openPipeShortLineDoesNotWaitForEOF),
     ]
 
     public static func validMethodsAndSequentialTurns() async throws {
@@ -413,6 +414,34 @@ public enum MCPProxyContractCases {
         try expect(requests[3].value(forHTTPHeaderField: "Authorization") == "Bearer at_urlsession_fixture", "URLSession omitted the workload access token")
         try expect(requests[3].value(forHTTPHeaderField: "DPoP") != nil, "URLSession omitted DPoP")
         try assertSecretFree(output)
+    }
+
+    public static func openPipeShortLineDoesNotWaitForEOF() async throws {
+        let pipe = Pipe()
+        let reader = FileHandleMCPProxyInput(handle: pipe.fileHandleForReading)
+        let firstLine = #"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#
+        let secondLine = #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#
+        pipe.fileHandleForWriting.write(Data((firstLine + "\n").utf8))
+
+        let startedAt = Date()
+        let readTask = Task.detached { try reader.readLine(maximumBytes: MCPProxy.maximumMessageBytes) }
+        let watchdog = Task.detached {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try? pipe.fileHandleForWriting.close()
+        }
+        let receivedFirst = try await readTask.value
+        watchdog.cancel()
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        try expect(receivedFirst == Data(firstLine.utf8), "short line did not match written JSON-RPC frame")
+        try expect(elapsed < 1.0, "open pipe short line blocked waiting for 4096 bytes or EOF")
+
+        pipe.fileHandleForWriting.write(Data((secondLine + "\r\n").utf8))
+        try pipe.fileHandleForWriting.close()
+        let receivedSecond = try reader.readLine(maximumBytes: MCPProxy.maximumMessageBytes)
+        try expect(receivedSecond == Data(secondLine.utf8), "CRLF line after open read failed")
+        let eof = try reader.readLine(maximumBytes: MCPProxy.maximumMessageBytes)
+        try expect(eof == nil, "EOF did not return nil")
     }
 
     private static func proxy(transport: RecordingProxyTransport) -> MCPProxy {

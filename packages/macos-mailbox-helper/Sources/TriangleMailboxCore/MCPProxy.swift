@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public protocol MCPProxyOutput: AnyObject, Sendable {
@@ -53,15 +54,25 @@ public final class FileHandleMCPProxyInput: MCPProxyInput, @unchecked Sendable {
                 buffer.removeAll(keepingCapacity: false)
                 return stripCarriageReturn(line)
             }
-            do {
-                guard let chunk = try handle.read(upToCount: 4096), !chunk.isEmpty else {
-                    reachedEOF = true
-                    continue
+            // Use a single POSIX read rather than FileHandle.read(upToCount:), which
+            // blocks until all 4096 bytes or EOF and stalls interactive stdio clients.
+            let fd = handle.fileDescriptor
+            var chunk = [UInt8](repeating: 0, count: 4096)
+            let bytesRead: Int = chunk.withUnsafeMutableBytes { raw in
+                while true {
+                    let count = Darwin.read(fd, raw.baseAddress, raw.count)
+                    if count < 0 && errno == EINTR { continue }
+                    return count
                 }
-                buffer.append(chunk)
-            } catch {
+            }
+            if bytesRead < 0 {
                 throw MCPProxyInputError.inputFailure
             }
+            if bytesRead == 0 {
+                reachedEOF = true
+                continue
+            }
+            buffer.append(contentsOf: chunk[..<bytesRead])
         }
     }
 

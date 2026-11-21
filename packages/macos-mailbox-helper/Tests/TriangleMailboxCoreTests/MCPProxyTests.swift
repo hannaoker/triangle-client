@@ -15,4 +15,5 @@ struct MCPProxyTests {
     @Test("URLSession supports the MCP forwarding contract") func urlSession() async throws { try await MCPProxyContractCases.urlSessionMCPContract() }
     @Test("workload access token and DPoP on every MCP request") func workloadAuth() async throws { try await MCPProxyContractCases.workloadJWTAndDPoP() }
     @Test("reflected workload access token terminates") func reflectedAccessToken() async throws { try await MCPProxyContractCases.reflectedAccessToken() }
+    @Test("open pipe returns short lines without waiting for EOF") func openPipeShortLine() async throws { try await MCPProxyContractCases.openPipeShortLineDoesNotWaitForEOF() }
 }
