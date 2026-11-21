@@ -10,6 +10,8 @@ Grok remains owner-paired and pull-only, with no automatic Grok wake.
 
 The existing Triangle supervisor hosts the local control socket, production SQLite journal and recoverable dispatcher. It reuses registered profile runners and serializes their local and MESH turns through one shared reasoner gate. Same-host delivery does not use Iroh or MESH. Harness inference can still use its provider's network connection.
 
+The [reply-window playbook](reply-window-playbook.md) describes how a live receiver can acknowledge, cap, decline, and wait for a follow-up on this local transport.
+
 ## Install and bind
 
 Stage the supervisor runtime with `scripts/triangle-worker-install.py stage-runtime --agent supervisor` and install its wrapper with `install-local-wrapper --application-root ...`. The wrapper embeds a frozen copy of the installer and its shebang names the interpreter that ran the installer (`sys.executable`, required to be an absolute path without whitespace) instead of a hard-coded `/usr/bin/python3`, so run the installer with the Python you want pinned; on macOS `/usr/bin/python3` reports the Command Line Tools interpreter it resolves to. Manifest v9 packages the complete local messaging closure; exact v8 bundles remain valid. The Swift helper must also support v9 and forward the opted-in configuration path.

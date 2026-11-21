@@ -7,6 +7,8 @@ results and remaining boundaries are tracked in
 `docs/reviews/2026-10-24-pr117-installed-acceptance.md`.
 Base: client main `5b6c5c896eeb3e95a82cd2c3f32360e3710e52a4` (#116).
 
+For a live Grok receiver expecting a follow-up request, see the [reply-window playbook](reply-window-playbook.md) for deadlines, exit handling, and sender support.
+
 ## Motivation and boundary
 
 A Grok Bot with permission to execute commands on the owner's computer can use
