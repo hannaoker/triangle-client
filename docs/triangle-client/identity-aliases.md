@@ -142,3 +142,5 @@ configuration cannot be read, `unroutable` and `collides` are not judged and `do
 
 0 done, or a plan that can be applied; 1 refused or failed; 2 usage error, a stale or malformed plan id, or no terminal for
 `--confirm`.
+
+For destination rules (`triangle identity destination`) and local chat mappings (`triangle identity chat-map`), see [identity-destinations-and-chat-maps.md](identity-destinations-and-chat-maps.md).
