@@ -149,12 +149,13 @@ test("lost send, claim and reply responses retain exact IDs for safe retries", a
     await env.server.start();
     child=createClaudeSessionMcpChild({configPath:env.configPath,expectedVersion:SUPPORTED_CLAUDE_VERSION,env:{CLAUDE_CODE_SESSION_ID:env.interactiveSessionId},wakeIntervalMs:0});
     drop='send';
-    const sent=await call('triangle_send_message',{to:env.codexId,text:'ping'});
+    const sent=await call('triangle_send_message',{to:env.codexId,text:'ping',replyWindow:{seconds:120}});
     const messageId=retryId(sent,'messageId'),requestId=retryId(sent,'requestId');
     assert.equal(sent.result.isError,true);
     assert.ok(messageId&&requestId&&text(sent).includes('Outcome unknown'));
-    const sendRetry=await call('triangle_send_message',{to:env.codexId,text:'ping',messageId,requestId});
+    const sendRetry=await call('triangle_send_message',{to:env.codexId,text:'ping',replyWindow:{seconds:120},messageId,requestId});
     assert.equal(JSON.parse(text(sendRetry)).isDuplicate,true);
+    assert.deepEqual((await env.journal.getRecord(messageId)).metadata.replyWindow,{seconds:120});
     await env.journal.recordSend({sender:env.codexId,recipient:env.claudeId,recipientType:'interactive',messageId:'lost-response-inbound',requestId:'lost-response-request',text:'work'});
     drop='claim';
     const claimed=await call('triangle_claim_message',{messageId:'lost-response-inbound'});

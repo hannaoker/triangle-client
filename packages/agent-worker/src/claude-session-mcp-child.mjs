@@ -26,7 +26,7 @@ import {
   STATUS_TOOL_DESCRIPTION,
   LIST_SESSIONS_TOOL_DESCRIPTION,
   LIST_RECIPIENTS_TOOL_DESCRIPTION,
-  SEND_TOOL_DESCRIPTION,
+  SEND_TOOL_DESCRIPTION, WINDOW_REQUEST, WINDOW_ACK, windowEnvelope,
   SEND_TOOL_ARGUMENT_DESCRIPTIONS,
 } from "./local-messaging-protocol.mjs";
 
@@ -66,6 +66,7 @@ export const CLAUDE_MCP_TOOLS = [
       type: "object",
       properties: {
         messageId: { type: "string", description: "Original message ID being replied to" },
+        replyWindow: WINDOW_REQUEST, replyWindowAck: WINDOW_ACK,
         claimToken: { type: "string", description: "Claim token obtained from triangle_claim_message" },
         text: { type: "string", description: "Free-form reply content" },
         replyId: { type: "string", description: "Optional stable reply ID for idempotency" },
@@ -91,6 +92,7 @@ export const CLAUDE_MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        replyWindow: WINDOW_REQUEST,
         to: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.to },
         text: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.text },
         messageId: { type: "string", description: SEND_TOOL_ARGUMENT_DESCRIPTIONS.messageId },
@@ -166,9 +168,10 @@ async function runSessionTool({ client, credential, name, args, generation }) {
       if (typeof args.text !== "string" || args.text.length > MAX_FIELD_STRING_LENGTH) {
         throw new Error(`Tool argument 'text' exceeds maximum limit of ${MAX_FIELD_STRING_LENGTH}`);
       }
+      const windowFields = windowEnvelope(args, "reply");
       const replyId = args.replyId || ("rep-" + randomUUID());
       try {
-        const res = await client.sendReply({ messageId: args.messageId, claimToken: args.claimToken, text: args.text, replyId }, { credential });
+        const res = await client.sendReply({ messageId: args.messageId, claimToken: args.claimToken, text: args.text, replyId, ...windowFields }, { credential });
         return { replyId, ...res };
       } catch (err) {
         const failure = err instanceof Error ? err : new Error(String(err));
@@ -180,10 +183,11 @@ async function runSessionTool({ client, credential, name, args, generation }) {
     case "triangle_ack_notification":
       return await client.ackWake({ wakeId: args.wakeId, generation: args.generation ?? generation }, { credential });
     case "triangle_send_message": {
+      const windowFields = windowEnvelope(args, "send");
       const messageId = args.messageId || randomUUID();
       const requestId = args.requestId || randomUUID();
       try {
-        const res = await client.sendMessage({ to: args.to, text: args.text, messageId, requestId, inReplyTo: args.inReplyTo }, { credential });
+        const res = await client.sendMessage({ to: args.to, text: args.text, messageId, requestId, inReplyTo: args.inReplyTo, ...windowFields }, { credential });
         return { messageId, requestId, ...res };
       } catch (err) {
         const failure = err instanceof Error ? err : new Error(String(err));

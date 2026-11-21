@@ -14,6 +14,7 @@ import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messagi
 import {readSessionMessagingPolicy,validateInteractiveIntegration,CLASS_GRANT_DIRECTIONS,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
 import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
+import {cliWindowEnvelope} from './local-messaging-protocol.mjs';
 import {setupGrok,disableGrok,runGrokCommand} from './grok-local-session.mjs';
 // An owner-set alias (AD.1): the same shape as ALIAS_PATTERN in identity-primitives.mjs, kept inline so this CLI needs no other module (a test pins the two together).
 const ALIAS_NAME_PATTERN=/^[a-z0-9][a-z0-9._-]{0,31}$/;
@@ -22,7 +23,7 @@ export function defaultLocalConfigPath(env=process.env){return path.join(env.HOM
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
- const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','timeout']);
+ const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','timeout','reply-window','reply-window-ack']);
  while(args.length){const flag=args.shift();if(flag==='--inbox'||flag==='--json'){const key=flag==='--inbox'?'waitInbox':'json';if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=true;continue;}if(flag==='--exact-only'){if(options.exactOnly!==undefined)throw coded('invalid_arguments','Duplicate argument');options.exactOnly=true;continue;}if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
@@ -541,6 +542,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  // Flags of the owner reconciliation commands mean nothing elsewhere; a typo must fail instead of being ignored.
  if(!['held','reconcile-message'].includes(command)&&['reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  // grok wait flags (--inbox, --json, --timeout) mean nothing elsewhere; runGrokCommand rejects them on other grok operations.
+ const windowFields=cliWindowEnvelope(options,command==='grok'?options.operation:command);
  if(command!=='grok'&&['waitInbox','json','timeout'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  // Class-grant flags mean nothing elsewhere either.
  if(!['grant-session-class','revoke-session-class'].includes(command)&&['sender-harness','to-harness'].some(key=>options[key]!==undefined)||command!=='grant-session-class'&&options.confirm!==undefined)throw coded('invalid_arguments','Argument is not valid for this command');
@@ -551,8 +553,8 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='setup-router'){output.write(JSON.stringify(setupRouter(options,env))+'\n');return 0;}
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
- if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume|wait>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  grok wait --request-id <id> | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
+ if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output,windowFields});
+ if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume|wait>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  send/reply (including grok): --reply-window <JSON>; reply also accepts --reply-window-ack <JSON>\n  grok wait --request-id <id> | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -652,7 +654,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;
    if(typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>128*1024)throw coded('invalid_message','Bounded nonempty reply required');
-   result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text},rpcOptions);
+   result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text,...windowFields},rpcOptions);
   }
   if(command==='sessions')result={sessions:await client.listSessions(rpcOptions)};
   if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,...await client.discoverRecipientDetails(rpcOptions)};
@@ -691,7 +693,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    if(!Number.isInteger(wait)||wait<0||wait>300000)throw coded('invalid_arguments','wait-ms must be between 0 and 300000');
    const messageId=options['message-id']||randomUUID(),requestId=options['request-id']||randomUUID();
    let admission;
-   try { admission=await client.sendMessage({to,text,messageId,requestId},rpcOptions); }
+   try { admission=await client.sendMessage({to,text,messageId,requestId,inReplyTo:options['in-reply-to'],...windowFields},rpcOptions); }
    catch(error) {
     output.write(JSON.stringify({senderId:binding.senderId,messageId,requestId,state:'send_outcome_unknown',error:error?.code||'send_failed'})+'\n');
     return 1;

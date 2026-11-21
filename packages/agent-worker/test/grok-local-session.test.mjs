@@ -155,6 +155,35 @@ test('owner CLI pairing is secret-free, context-bound and independently opt-in f
  }finally{await f.close();}
 });
 
+test('a desktop request reaches a waiting Grok receiver with its window and returns a correlated acknowledgment', async () => {
+ const f = fixture();
+ try {
+  const bob = f.pair('bob', ctxB, [ownerId], [ownerId]);
+  await f.start();
+  const wait = f.run(ctxB, ['grok','wait','--inbox','--timeout','5','--json']);
+  await f.run(undefined, ['send','--to',bob.senderId,'--message-id','pilot','--request-id','exchange',
+    '--reply-window','{"seconds":120}','--text','question']);
+  assert.deepEqual((await wait).messageIds, ['pilot']);
+  const incoming = (await f.run(ctxB, ['grok','inbox'])).items[0];
+  assert.deepEqual(incoming.metadata.replyWindow, { seconds:120 });
+  assert.equal(incoming.loopDepth, 1);
+  const claimFile = path.join(f.root,'pilot-claim.json');
+  await f.run(ctxB,['grok','claim','--message-id','pilot','--claim-id','claim','--claim-file',claimFile]);
+  await f.run(ctxB,['grok','reply','--message-id','pilot','--reply-id','answer','--claim-file',claimFile,
+    '--reply-window-ack','{"acceptedSeconds":30}'],'Watching for 30 seconds.');
+  const reply = (await f.run(undefined,['replies','--request-id','exchange'])).replies[0];
+  assert.deepEqual(reply.metadata.replyWindowAck, { acceptedSeconds:30 });
+  assert.equal(reply.inReplyTo, 'pilot');
+  await f.run(undefined,['send','--to',bob.senderId,'--message-id','followup','--request-id','exchange',
+    '--in-reply-to','answer','--reply-window','{"seconds":0}','--text','done']);
+  const followup = (await f.run(ctxB,['grok','inbox'])).items[0];
+  assert.equal(followup.loopDepth, 3);
+  assert.deepEqual(followup.metadata.replyWindow,{seconds:0});
+  await errorCode(f.run(ctxB,['grok','status','--reply-window','{}']),'invalid_arguments');
+  await errorCode(f.run(ctxB,['grok','send','--reply-window','{"_loopDepth":1}']),'invalid_arguments');
+ } finally { await f.close(); }
+});
+
 test('private claim files cannot be reused for another message or through a symlink',async()=>{
  const f=fixture();try{
   const a=f.pair('alice',ctxA,[],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[]);await f.start();

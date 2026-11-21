@@ -201,7 +201,7 @@ function waitLine(plan, outcome) {
   return `grok wait: ready; ${outcome.ids.length}${outcome.more?'+':''} ${what}: ${outcome.ids.map(id=>JSON.stringify(id)).join(', ')}`;
 }
 
-export async function runGrokCommand(operation, options, {configPath,env,input,output,waitClock}) {
+export async function runGrokCommand(operation, options, {configPath,env,input,output,waitClock,windowFields = {}}) {
   const config = readPrivateJson(configPath), entries = grokBindings(config);
   if (config.enabled !== true || config.grok?.enabled !== true) throw coded('local_disabled','Grok messaging disabled');
   const context = env.CURSOR_CONVERSATION_ID;
@@ -256,7 +256,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
     if (operation==='send') {
       if (!options['message-id'] || !options['request-id'] || !options.to) throw coded('invalid_arguments','Exact to, stable message-id and request-id required');
       const text=await messageText();
-      try {result=await client.sendMessage({to:options.to,text,messageId:options['message-id'],requestId:options['request-id']},rpc);}
+      try {result=await client.sendMessage({to:options.to,text,messageId:options['message-id'],requestId:options['request-id'],inReplyTo:options['in-reply-to'],...windowFields},rpc);}
       catch(error){const rejected=GROK_REJECTED_CODES.includes(error.code);output.write(JSON.stringify({messageId:options['message-id'],requestId:options['request-id'],state:rejected?'rejected':'send_outcome_unknown',error:error.code||'send_failed'})+'\n');return 1;}
     }
     if (operation==='claim') {
@@ -283,7 +283,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
       if (!options['claim-file'] || !options['message-id'] || !options['reply-id']) throw coded('invalid_arguments','Claim file, message-id and stable reply-id required');
       const claim=readPrivateJson(options['claim-file']);
       if (claim.senderId!==b.senderId || claim.messageId!==options['message-id'] || claim.sessionId!==b.sessionId || claim.generation!==b.generation || typeof claim.claimToken!=='string') throw coded('claim_file_mismatch','Claim does not belong to this binding');
-      result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text:await messageText()},rpc);
+      result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text:await messageText(),...windowFields},rpc);
     }
     if (operation==='replies') {
       if (!options['request-id'] && !options['in-reply-to']) throw coded('invalid_arguments','Correlate reply retrieval explicitly');

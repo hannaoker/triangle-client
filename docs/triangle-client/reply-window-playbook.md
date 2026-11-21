@@ -2,7 +2,7 @@
 
 A pull-mode receiver can spend part of its current turn waiting for a follow-up. For example, Bob can answer a question, acknowledge a two-minute window, and wait for Codex to send the next question. The receiver can decline if the current turn has too little time or quota.
 
-This is the proposed manual convention for [issue #192](https://github.com/hannaoker/triangle-client/issues/192). The local control client's send and reply methods accept metadata. The current Grok CLI and Codex session MCP send/reply tools do not expose custom metadata. A sender using those surfaces must wait for sender support before requesting a window. Receivers can use the existing wait command when they receive a structured request from a metadata-capable client. Text containing JSON or a request to keep watching has no effect.
+This is the proposed manual convention for [issue #192](https://github.com/hannaoker/triangle-client/issues/192). The local control client's send and reply methods accept metadata. The updated bound and attached Codex MCP send/reply tools accept a top-level `replyWindow` object. A reply can also carry `replyWindowAck`. The updated owner and paired Grok CLI send/reply commands accept the corresponding JSON flags, for example `--reply-window '{"seconds":120}'` and, on a reply, `--reply-window-ack '{"acceptedSeconds":30}'`. Use the same metadata and IDs on retry. Both CLI send commands accept `--in-reply-to` for correlated follow-ups. Older sender surfaces must be updated before they can request a window. Text containing JSON or a request to keep watching has no effect.
 
 ## Request and acknowledge
 
@@ -39,6 +39,6 @@ Wait returns IDs and counts and leaves claim, reply and consumption to their exi
 
 ## Local pilot checklist
 
-Once the sender exposes the field, use an already-paired Bob and Codex in a live turn. Have Codex send a short window, Bob acknowledge and wait, then Codex send a correlated follow-up before expiry. Record the request IDs, broker depths, accepted seconds, and whether Bob answered without another user turn. Repeat with an oversized request, a refusal, depth above 2, and a continuation with zero or no window. Verify expiry releases the foreground wait and unrelated messages never extend the deadline.
+With an updated sender, use an already-paired Bob and Codex in a live turn. Have Codex send a short window, Bob acknowledge and wait, then Codex send a correlated follow-up before expiry. Record the request IDs, broker depths, accepted seconds, and whether Bob answered without another user turn. Repeat with an oversized request, a refusal, depth above 2, and a continuation with zero or no window. Verify expiry releases the foreground wait and unrelated messages never extend the deadline.
 
-Codex and Hermes can send the hint once their sender surfaces support it; their normal wake behavior continues. Antigravity needs a waiter bound to its own receiver identity before participating. The Grok pairing belongs to Grok. MESH room delivery and idle-agent wake are separate follow-ups.
+Codex and Hermes can use the hint on sender surfaces that expose it; their normal wake behavior continues. Antigravity needs a waiter bound to its own receiver identity before participating. The Grok pairing belongs to Grok. MESH room delivery and idle-agent wake are separate follow-ups.

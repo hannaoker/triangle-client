@@ -5,6 +5,52 @@ export const MAX_PAYLOAD_BYTES = 256 * 1024; // 256 KB
 export const MAX_FRAME_BYTES = 320 * 1024; // 320 KB
 export const MAX_FIELD_STRING_LENGTH = 128 * 1024; // 128 KB for text field
 
+// Optional local-envelope hints. Keep these typed so a peer cannot set broker
+// metadata (such as _loopDepth) through a sender tool.
+const reasonField = { type: "string", maxLength: 256 };
+export const WINDOW_REQUEST = {
+  type: "object", additionalProperties: false,
+  description: "Ask a live peer to watch briefly. Empty requests its default; zero ends the window.",
+  properties: { seconds: { type: "integer" }, reason: reasonField },
+};
+export const WINDOW_ACK = {
+  type: "object", additionalProperties: false, required: ["acceptedSeconds"],
+  properties: { acceptedSeconds: { type: "integer", minimum: 0, maximum: 600 },
+    until: { type: "string", format: "date-time" }, reason: reasonField },
+};
+
+export function windowEnvelope({ replyWindow, replyWindowAck }, operation) {
+  const metadata = {};
+  for (const [name, value, schema] of [
+    ["replyWindow", replyWindow, WINDOW_REQUEST], ["replyWindowAck", replyWindowAck, WINDOW_ACK],
+  ]) {
+    if (value === undefined) continue;
+    const invalid = () => coded("invalid_arguments", "Invalid " + name + " for " + operation);
+    if (!["send", "reply"].includes(operation) || (name === "replyWindowAck" && operation !== "reply")) throw invalid();
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).some(key => !Object.hasOwn(schema.properties, key))) throw invalid();
+    if (value.reason !== undefined && (typeof value.reason !== "string" || value.reason.length > 256)) throw invalid();
+    if (value.seconds !== undefined && !Number.isSafeInteger(value.seconds)) throw invalid();
+    if (name === "replyWindowAck") {
+      if (!Number.isInteger(value.acceptedSeconds) || value.acceptedSeconds < 0 || value.acceptedSeconds > 600) throw invalid();
+      if (value.until !== undefined && (typeof value.until !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.until) ||
+          !Number.isFinite(Date.parse(value.until)))) throw invalid();
+    }
+    metadata[name] = value;
+  }
+  return Object.keys(metadata).length ? { metadata } : {};
+}
+
+export function cliWindowEnvelope(options, operation) {
+  const parse = name => {
+    if (options[name] === undefined) return undefined;
+    try { return JSON.parse(options[name]); }
+    catch { throw coded("invalid_arguments", "Invalid JSON in --" + name); }
+  };
+  return windowEnvelope({ replyWindow: parse("reply-window"), replyWindowAck: parse("reply-window-ack") }, operation);
+}
+
 // What "status" answers, defined once for every surface. With a message ID it is always that message's delivery
 // observations (sender or recipient only). Without one the agent tools give the calling conversation's own session view
 // and never the host's; only the owner CLI, which shares the bound conversation's credential, gets the host-wide view.
@@ -24,6 +70,7 @@ export const LIST_SESSIONS_TOOL_DESCRIPTION = "List authorized configured recipi
 export const LIST_RECIPIENTS_TOOL_DESCRIPTION = "Discover authorized local agent recipients on this host: recipients lists the exact ids you may send to. When the owner has enabled principal routing, entries pairs every id with its principal (an agent_ id, or null), principalState (bound, unbound, or unknown when the registry could not be read, so null alone does not prove the recipient has no identity), route (local) and send.addressKinds, the address forms that name exactly that recipient: id, and principal only when the registry maps that principal to this one recipient; send.aliases, when present, lists up to eight of the names the owner set for exactly that recipient that you may use as `to`. Presence and reachability come from triangle_list_sessions.";
 export const SEND_TOOL_DESCRIPTION = "Send a message to an authorized local recipient agent on this host. Once the send is attempted, its result and any error carry messageId and requestId. If a call fails or times out the message may already be admitted: retry with the SAME messageId and requestId so it is recognised as a duplicate instead of running the task twice. Never send a new message just to retry.";
 export const SEND_TOOL_ARGUMENT_DESCRIPTIONS = Object.freeze({
+  replyWindow: WINDOW_REQUEST.description,
   to: "Exact recipient id from triangle_list_recipients or triangle_list_sessions, never a label. An agent_ principal may be used instead only when that entry's send.addressKinds lists principal, and an owner-set alias only when it appears in that entry's send.aliases; if send reports recipient_ambiguous, route_unavailable or alias_unresolved use the id. peer_ addresses are not supported.",
   text: "Message body text",
   messageId: "Stable message ID for idempotency. Optional on the first call (one is generated and returned); on a retry always pass the messageId returned by the earlier attempt.",
