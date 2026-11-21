@@ -349,8 +349,8 @@ export function createLocalControlClient({
       }, options);
     },
 
-    async getMessageStatus({ messageId }, options = {}) {
-      return await callRpc("get_message_status", { messageId }, options);
+    async getMessageStatus({ messageId, watchRequestId }, options = {}) {
+      return await callRpc("get_message_status", { messageId, watchRequestId }, options);
     },
 
     async listReplies({ requestId = null, inReplyTo = null, limit = 50 } = {}, options = {}) {

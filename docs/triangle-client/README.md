@@ -7,6 +7,8 @@ not a MESH server, not a MESH database, and not part of the MESH specification.
 This repository is the canonical source for all Triangle client implementation;
 it is maintained independently from the MESH server repository.
 
+For pull-mode conversations, see the [reply-window playbook](reply-window-playbook.md).
+
 ## Two client modes
 
 An operator can adopt either mode alone or both together. Both speak to the

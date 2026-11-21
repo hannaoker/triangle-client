@@ -140,51 +140,66 @@ export const GROK_WAIT_DEFAULT_SECONDS = 750;
 // One call must fit under a 13-minute (780s) foreground tool call with margin.
 export const GROK_WAIT_MAX_SECONDS = 760;
 const WAIT_FIRST_INTERVAL_MS = 250, WAIT_MAX_INTERVAL_MS = 2000, WAIT_GRANT_REFRESH_MS = 240000, WAIT_LIST_LIMIT = 50;
-const WAIT_ONLY = ['waitInbox','json','timeout'];
+const WAIT_ONLY = ['waitInbox','json','timeout','follow-message'];
 const NOT_FOR_WAIT = ['in-reply-to','message-id','limit','cursor','to','text','text-file','claim-id','claim-file','reply-id'];
 function waitPlan(options) {
   const byRequest = options['request-id'] !== undefined, byInbox = options.waitInbox === true;
   if (byRequest === byInbox) throw coded('invalid_arguments','Choose exactly one of --request-id or --inbox');
   if (byRequest && (typeof options['request-id'] !== 'string' || !options['request-id'])) throw coded('invalid_arguments','Exact request-id required');
   if (NOT_FOR_WAIT.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is not valid for grok wait');
+  const followMessage = options['follow-message'];
+  if (followMessage !== undefined && (!byRequest || !followMessage)) throw coded('invalid_arguments','--follow-message requires an original message ID and --request-id');
   const raw = options.timeout ?? String(GROK_WAIT_DEFAULT_SECONDS);
   const seconds = typeof raw === 'string' && /^\d{1,3}(\.\d{1,3})?$/.test(raw) ? Number(raw) : NaN;
   if (!(seconds > 0) || seconds > GROK_WAIT_MAX_SECONDS) throw coded('invalid_arguments',`timeout must be seconds in (0, ${GROK_WAIT_MAX_SECONDS}]`);
-  return {mode:byRequest?'request':'inbox',requestId:byRequest?options['request-id']:null,timeoutMs:Math.round(seconds*1000),json:options.json === true};
+  return {followMessage,mode:byRequest?'request':'inbox',requestId:byRequest?options['request-id']:null,timeoutMs:Math.round(seconds*1000),json:options.json === true};
 }
-// Read-only: only the list calls `grok replies` / `grok inbox` already make. Never
+// Poll reply or inbox listings and, for an opted-in follower, the durable deadline. Never
 // consumes, claims or acks; the caller runs replies+consume or inbox+claim after.
 // The local broker has no watch/long-poll RPC, so this is a bounded backoff poll.
 export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms))} = {}) {
-  const started = now(), deadline = started + plan.timeoutMs;
+  const started = now(), chunkEnd = started + plan.timeoutMs;
+  let deadline = chunkEnd, watchDeadline;
+  const watchInfo = () => plan.followMessage ? {watchDeadline, followMessage:plan.followMessage} : {};
   // Every broker call (connect + RPC can each use the timeout) is bounded by the
   // remaining budget, so a call never runs much past the deadline: the whole
   // wait ends within about timeout + 1s, under the 780s foreground-call limit.
   const budget = () => Math.min(5000, Math.max(500, Math.floor((deadline - now()) / 2)));
-  const timedOut = polls => ({state:'timeout',ids:[],more:false,waitedMs:Math.max(0, now() - started),polls});
+  const timedOut = polls => ({...watchInfo(),state:'timeout',ids:[],more:false,waitedMs:Math.max(0, now() - started),polls});
   let rpc = await grant({timeout:budget()}), refreshAt = now() + WAIT_GRANT_REFRESH_MS, interval = WAIT_FIRST_INTERVAL_MS, polls = 0;
   for (;;) {
     // Check before every call after the first poll; never start one past the deadline.
-    if (polls > 0 && now() >= deadline) return timedOut(polls);
+    if (polls > 0 && now() >= chunkEnd) return timedOut(polls);
     // Grants live 300s; refresh well before a long wait outlives one.
     if (now() >= refreshAt) {
       rpc = await grant({timeout:budget()}); refreshAt = now() + WAIT_GRANT_REFRESH_MS;
-      if (now() >= deadline) return timedOut(polls);
+      if (now() >= chunkEnd) return timedOut(polls);
     }
+    const pollStarted = now();
     const timeout = budget();
     polls++;
     let ids, more;
     if (plan.mode === 'request') {
-      const replies = await client.listReplies({requestId:plan.requestId,limit:WAIT_LIST_LIMIT},{...rpc,timeout});
+      if (plan.followMessage) {
+        const status = await client.getMessageStatus({messageId:plan.followMessage,watchRequestId:plan.requestId},{...rpc,timeout});
+        if (!Number.isSafeInteger(status.watchDeadline)) throw coded('invalid_request','An updated broker and a root request with a positive reply window are required');
+        watchDeadline = status.watchDeadline;
+        deadline = Math.min(chunkEnd, watchDeadline);
+      }
+      const replies = await client.listReplies({requestId:plan.requestId,...(plan.followMessage && {inReplyTo:plan.followMessage}),limit:WAIT_LIST_LIMIT},{...rpc,timeout:budget()});
       ids = replies.map(r=>r.messageId); more = replies.length >= WAIT_LIST_LIMIT;
     } else {
       const items = await client.listInbox({limit:WAIT_LIST_LIMIT},{...rpc,timeout});
       ids = [...items].map(i=>i.messageId); more = items.nextCursor != null;
     }
     const waitedMs = Math.max(0, now() - started);
-    if (ids.length) return {state:'ready',ids,more,waitedMs,polls};
+    if (ids.length) return {...watchInfo(),state:'ready',ids,more,waitedMs,polls};
     const remaining = deadline - now();
-    if (remaining <= 0) return timedOut(polls);
+    if (remaining <= 0) {
+      // An update may have committed between the status read and soft expiry.
+      if (plan.followMessage && pollStarted < deadline && now() < chunkEnd) continue;
+      return timedOut(polls);
+    }
     await sleep(Math.min(interval, remaining));
     interval = Math.min(WAIT_MAX_INTERVAL_MS, Math.round(interval * 1.5));
   }
@@ -193,15 +208,16 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
 function waitSummary(plan, outcome) {
   const base = {operation:'wait',mode:plan.mode,state:outcome.state};
   const ids = plan.mode === 'request' ? {requestId:plan.requestId,replyIds:outcome.ids} : {messageIds:outcome.ids};
-  return {...base,...ids,count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
+  return {...base,...ids,...(plan.followMessage && {followMessage:plan.followMessage,watchDeadline:outcome.watchDeadline}),count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
 }
 function waitLine(plan, outcome) {
   const what = plan.mode === 'request' ? `repl${outcome.ids.length===1?'y':'ies'} for request ${JSON.stringify(plan.requestId)}` : `inbox message${outcome.ids.length===1?'':'s'}`;
+  if (outcome.state === 'timeout' && plan.followMessage) return `grok wait: no final reply yet for ${JSON.stringify(plan.followMessage)}; watch deadline ${new Date(outcome.watchDeadline).toISOString()}`;
   if (outcome.state === 'timeout') return `grok wait: timeout after ${plan.timeoutMs/1000}s; no ${plan.mode === 'request' ? `unconsumed reply for request ${JSON.stringify(plan.requestId)}` : 'unclaimed inbox message'}`;
   return `grok wait: ready; ${outcome.ids.length}${outcome.more?'+':''} ${what}: ${outcome.ids.map(id=>JSON.stringify(id)).join(', ')}`;
 }
 
-export async function runGrokCommand(operation, options, {configPath,env,input,output,waitClock}) {
+export async function runGrokCommand(operation, options, {configPath,env,input,output,waitClock,windowFields = {}}) {
   const config = readPrivateJson(configPath), entries = grokBindings(config);
   if (config.enabled !== true || config.grok?.enabled !== true) throw coded('local_disabled','Grok messaging disabled');
   const context = env.CURSOR_CONVERSATION_ID;
@@ -256,7 +272,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
     if (operation==='send') {
       if (!options['message-id'] || !options['request-id'] || !options.to) throw coded('invalid_arguments','Exact to, stable message-id and request-id required');
       const text=await messageText();
-      try {result=await client.sendMessage({to:options.to,text,messageId:options['message-id'],requestId:options['request-id']},rpc);}
+      try {result=await client.sendMessage({to:options.to,text,messageId:options['message-id'],requestId:options['request-id'],inReplyTo:options['in-reply-to'],...windowFields},rpc);}
       catch(error){const rejected=GROK_REJECTED_CODES.includes(error.code);output.write(JSON.stringify({messageId:options['message-id'],requestId:options['request-id'],state:rejected?'rejected':'send_outcome_unknown',error:error.code||'send_failed'})+'\n');return 1;}
     }
     if (operation==='claim') {
@@ -283,7 +299,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
       if (!options['claim-file'] || !options['message-id'] || !options['reply-id']) throw coded('invalid_arguments','Claim file, message-id and stable reply-id required');
       const claim=readPrivateJson(options['claim-file']);
       if (claim.senderId!==b.senderId || claim.messageId!==options['message-id'] || claim.sessionId!==b.sessionId || claim.generation!==b.generation || typeof claim.claimToken!=='string') throw coded('claim_file_mismatch','Claim does not belong to this binding');
-      result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text:await messageText()},rpc);
+      result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text:await messageText(),...windowFields},rpc);
     }
     if (operation==='replies') {
       if (!options['request-id'] && !options['in-reply-to']) throw coded('invalid_arguments','Correlate reply retrieval explicitly');

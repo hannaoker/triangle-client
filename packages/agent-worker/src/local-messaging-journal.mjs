@@ -978,6 +978,39 @@ export function createLocalMessagingJournal({
     return null;
   }
 
+  // Replay the authenticated peer's durable progress in broker receipt order.
+  // Reading the same update again, including after a restart, yields the same deadline.
+  function replyWindowDeadline(record) {
+    const secondsFor = metadata => {
+      const window = metadata?.replyWindow;
+      if (!window || typeof window !== "object" || Array.isArray(window) ||
+          Object.keys(window).some(key => !["seconds", "reason"].includes(key)) ||
+          (window.reason !== undefined && (typeof window.reason !== "string" || window.reason.length > 256)) ||
+          (window.seconds !== undefined && !Number.isSafeInteger(window.seconds))) return null;
+      return Math.max(0, Math.min(600, window.seconds ?? 600));
+    };
+    const initial = secondsFor(record.metadata);
+    if (!initial || record.loopDepth !== 1) return null;
+    const hardEnd = record.createdAt + 1800000;
+    let deadline = record.createdAt + initial * 1000;
+    const updates = db.prepare(`
+      SELECT created_at, metadata_json FROM local_messages
+      WHERE in_reply_to = ? AND request_id = ? AND sender = ? AND recipient = ?
+        AND created_at BETWEEN ? AND ?
+      ORDER BY created_at, rowid
+    `).iterate(record.messageId, record.requestId, record.recipient, record.sender, record.createdAt, hardEnd);
+    for (const row of updates) {
+      if (row.created_at >= deadline) break;
+      const metadata = JSON.parse(row.metadata_json ?? "null");
+      if (metadata?._loopDepth !== 2) continue;
+      const seconds = secondsFor(metadata);
+      if (seconds === null) continue;
+      if (seconds === 0) return row.created_at;
+      deadline = Math.min(hardEnd, Math.max(deadline, row.created_at + seconds * 1000));
+    }
+    return deadline;
+  }
+
   async function recoverQueued() {
     assertNotClosed();
     const stillExecuting = db.prepare("SELECT * FROM local_messages WHERE phase = 'executing'").all();
@@ -2313,6 +2346,7 @@ export function createLocalMessagingJournal({
     listReplies,
     consumeReply,
     getRecord,
+    replyWindowDeadline,
     recoverQueued,
     claimExecution,
     completeExecution,
