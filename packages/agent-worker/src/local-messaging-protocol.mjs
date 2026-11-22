@@ -8,10 +8,29 @@ export const MAX_FIELD_STRING_LENGTH = 128 * 1024; // 128 KB for text field
 // Optional local-envelope hints. Keep these typed so a peer cannot set broker
 // metadata (such as _loopDepth) through a sender tool.
 const reasonField = { type: "string", maxLength: 256 };
+export const WATCH_DEFAULTS = Object.freeze({
+  seconds: 600,
+  maxExtensions: 3,
+  maxTotalSeconds: 600,
+  legacyHardCapSeconds: 1800,
+});
+export const WATCH_LIMITS = Object.freeze({
+  maxInitialSeconds: 600,
+  maxExtensions: 10,
+  maxTotalSeconds: 1800,
+  maxProgressSeconds: 300,
+  maxNoteBytes: 512,
+  maxReasonLength: 256,
+});
 export const WINDOW_REQUEST = {
   type: "object", additionalProperties: false,
-  description: "Ask a live peer to watch briefly. Empty requests its default; zero ends the window.",
-  properties: { seconds: { type: "integer" }, reason: reasonField },
+  description: "Ask a live peer to watch briefly, optionally declaring initial seconds, maxExtensions, and maxTotalSeconds within broker limits. Empty requests its default; zero ends the window.",
+  properties: {
+    seconds: { type: "integer" },
+    maxExtensions: { type: "integer" },
+    maxTotalSeconds: { type: "integer" },
+    reason: reasonField,
+  },
 };
 export const PROGRESS_TOOL = {
   name: "triangle_report_progress",
@@ -24,6 +43,32 @@ export const PROGRESS_TOOL = {
       eventId: {type:"string", description:"Stable ID for this update within the task. Reuse on retry."},
       seconds: {type:"integer", minimum:0, maximum:300},
       text: {type:"string", description:"Short progress note, at most 512 UTF-8 bytes."},
+    },
+  },
+};
+export const CLOSE_WATCH_TOOL = {
+  name: "triangle_close_watch",
+  description: "Close an active reply watch on a request you sent without cancelling the task. Its eventual reply stays retrievable.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    required: ["messageId", "requestId", "eventId"],
+    properties: {
+      messageId: { type: "string", description: "Original root request message ID" },
+      requestId: { type: "string", description: "Original correlation request ID" },
+      eventId: { type: "string", description: "Stable ID for this close receipt. Reuse on retry." },
+      text: { type: "string", description: "Optional short close note, at most 512 UTF-8 bytes." },
+    },
+  },
+};
+export const GET_REPLIES_TOOL = {
+  name: "triangle_get_replies",
+  description: "Retrieve pending replies from local agents for this session.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      requestId: { type: "string", description: "Filter by correlation request ID" },
+      inReplyTo: { type: "string", description: "Filter by inReplyTo message ID" },
+      includeProgress: { type: "boolean", description: "Also include active progress receipts for matching requests you sent." },
     },
   },
 };
@@ -43,8 +88,13 @@ export function windowEnvelope({ replyWindow, replyWindowAck }, operation) {
     if (!["send", "reply"].includes(operation) || (name === "replyWindowAck" && operation !== "reply")) throw invalid();
     if (!value || typeof value !== "object" || Array.isArray(value) ||
         Object.keys(value).some(key => !Object.hasOwn(schema.properties, key))) throw invalid();
-    if (value.reason !== undefined && (typeof value.reason !== "string" || value.reason.length > 256)) throw invalid();
-    if (value.seconds !== undefined && !Number.isSafeInteger(value.seconds)) throw invalid();
+    if (value.reason !== undefined && (typeof value.reason !== "string" || value.reason.length > WATCH_LIMITS.maxReasonLength)) throw invalid();
+    if (name === "replyWindow") {
+      if ((value.maxExtensions !== undefined || value.maxTotalSeconds !== undefined) && operation !== "send") throw invalid();
+      for (const field of ["seconds", "maxExtensions", "maxTotalSeconds"]) {
+        if (value[field] !== undefined && (!Number.isSafeInteger(value[field]) || value[field] < 0)) throw invalid();
+      }
+    }
     if (name === "replyWindowAck") {
       if (!Number.isInteger(value.acceptedSeconds) || value.acceptedSeconds < 0 || value.acceptedSeconds > 600) throw invalid();
       if (value.until !== undefined && (typeof value.until !== "string" ||

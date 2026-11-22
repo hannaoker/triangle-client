@@ -39,13 +39,13 @@ Wait returns IDs and counts and leaves claim, reply and consumption to their exi
 
 ## Extend a watch while work is underway
 
-Use `send --watch` (or `grok send --watch`) for a substantive question. It requests 120 seconds. To choose another duration, use `--reply-window '{"seconds":300}'`. A send without either flag requests no window. For new interactive root tasks, the broker starts the clock when the recipient's inbox first returns the task or when the recipient successfully claims it directly. Rereading, retrying a claim, and restarting the broker preserve that first timestamp. Previously stored tasks keep their admission-time deadlines.
+Use `send --watch` (or `grok send --watch`) for a substantive question. It requests 120 seconds. To configure initial window, extension count, and total duration up front (within broker limits of 600s initial, 10 extensions, and 1,800s total), pass `--reply-window '{"seconds":300,"maxExtensions":5,"maxTotalSeconds":900}'`. When omitted on a root request, defaults stay 3 progress extensions and 600s total (1,800s for legacy correlated updates). A send without either flag requests no window. For new interactive root tasks, the broker starts the clock when the recipient's inbox first returns the task or when the recipient successfully claims it directly. Rereading, retrying a claim, and restarting the broker preserve that first timestamp. Previously stored tasks keep their admission-time deadlines.
 
 After claiming the task, the worker can report progress using the same private claim file as its final reply. On a bound or attached MCP session, call `triangle_report_progress` with the original `messageId`, `claimToken`, `eventId`, `seconds`, and a short `text` note. A stable event ID names one update within the original task. Exact retries return the first receipt. The broker authenticates the claim, orders the updates, and saves them with the task.
 
 ```sh
-# Requester: watch for the final answer.
-triangle-local grok wait --request-id "$request_id" --follow-message "$task_id" --json
+# Requester: watch for the final answer and stream live progress receipts.
+triangle-local grok wait --request-id "$request_id" --follow-message "$task_id" --stream-progress --json
 
 # Paired Grok worker: extend while tests are running.
 printf '%s' 'Running the integration tests' | triangle-local grok progress \
@@ -55,13 +55,20 @@ printf '%s' 'Running the integration tests' | triangle-local grok progress \
 triangle-local progress --message-id "$task_id" --claim-file "$claim_file" \
   --event-id tests --seconds 120 --text 'Running the integration tests'
 
-# Requester: inspect receipts at any point.
+# Requester: close the watch early without cancelling the task (eventual reply stays retrievable).
+triangle-local grok close-watch --message-id "$task_id" --request-id "$request_id" --event-id stop --note 'Switching to async'
+
+# Bound desktop requester: equivalent CLI command (or triangle_close_watch on MCP).
+triangle-local close-watch --message-id "$task_id" --request-id "$request_id" --event-id stop --note 'Switching to async'
+
+# Requester: inspect receipts read-only via status or replies --include-progress.
 triangle-local grok status --message-id "$task_id"
+triangle-local grok replies --request-id "$request_id" --include-progress
 ```
 
-Progress leaves the worker's task open, creates no inbox item, and requires no acknowledgment. The wait keeps polling for the final reply. Its JSON summary includes the observed `progressIds` alongside `replyIds`. Status includes the note, sequence, and broker deadline for each receipt. Consuming the final reply hides receipts from normal status. Use `status --message-id "$task_id" --history` while the original record is retained.
+Progress leaves the worker's task open, creates no inbox item, and requires no acknowledgment. With `--stream-progress`, `grok wait --follow-message` emits each new progress or close receipt immediately (`state: "progress"`) without interrupting the wait for the final reply. Status and `replies --include-progress` (`triangle_get_replies` with `includeProgress: true`) expose active notes, sequences, actors, and broker deadlines read-only without claiming anything. Consuming the final reply hides receipts from normal status and `replies --include-progress`. Use `status --message-id "$task_id" --history` while the original record is retained.
 
-A task accepts up to three extensions of 1–300 seconds each. Receipts can extend the watch up to ten minutes from the watch start. A worker can also close the watch with a new event ID and `--seconds 0`. Closure, expiry and a turn ending all leave the task available under its normal claim lease. The worker can still send its final reply. A replay never reopens a closed watch. Older peers can still use a correlated send with a reply window under the existing bounds. That older operation creates an inbox item for the requester.
+Unless configured differently on the root request, a task accepts up to three extensions of 1–300 seconds each, up to 600s total from watch start (within broker maximums of 10 extensions and 1,800s total). Either participant can close the watch: a worker via `progress --seconds 0` (`triangle_report_progress`) or the requester via `close-watch` (`triangle_close_watch`), even before pickup. Closure, expiry, and a turn ending all leave the task running under its normal claim lease, and its eventual final reply stays retrievable via `replies` or `wait --request-id`. A replay never reopens a closed watch. Older peers can still use a correlated send with a reply window under the existing bounds; that older operation creates an inbox item for the requester.
 
 Each foreground wait has its own timeout budget of at most 760 seconds. While waiting for pickup, the caller still spends only its foreground timeout budget. A timeout with `watchDeadline: null` means the broker has not yet returned the task to the receiver or accepted its claim. If the caller wants to keep waiting, it can repeat the command with the same IDs. Once the watch has started, a chunk ending before its deadline can also be repeated. To retrieve a late final reply, use `grok replies --request-id "$request_id"`. To start a fresh bounded poll for that reply, use `grok wait --request-id "$request_id" --timeout 120` without `--follow-message`.
 

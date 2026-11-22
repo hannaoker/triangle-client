@@ -187,6 +187,7 @@ test("Codex MCP retains legacy tools and exposes explicitly scoped inbox operati
   assert.equal(toolNames.includes("triangle_reply_message"), true);
   assert.deepEqual(toolNames.sort(), [
     "triangle_claim_message",
+    "triangle_close_watch",
     "triangle_list_inbox",
     "triangle_reply_message",
     "triangle_report_progress",
@@ -864,6 +865,120 @@ test("Issue 4 [P2]: Shutdown with delayed socket connect aborts and awaits wake 
   } finally {
     try { mockSocketInstance?.destroy(); } catch {}
     try { dummyServer?.close(); } catch {}
+    await child?.close();
+    await env.cleanup();
+  }
+});
+
+test("Claude MCP child exposes watch limits, requester close-watch, and worker progress end-to-end", async () => {
+  const env = setupChildTestEnv();
+  let child;
+  const call = (name, args) =>
+    child.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+  const parse = (res) => JSON.parse(res.result.content[0].text);
+  try {
+    await env.server.start();
+    const claudeToolNames = CLAUDE_MCP_TOOLS.map((t) => t.name);
+    assert.equal(claudeToolNames.includes("triangle_close_watch"), true);
+    assert.equal(claudeToolNames.includes("triangle_report_progress"), true);
+
+    child = createClaudeSessionMcpChild({
+      configPath: env.configPath,
+      expectedVersion: SUPPORTED_CLAUDE_VERSION,
+      env: { CLAUDE_CODE_SESSION_ID: env.interactiveSessionId },
+      wakeIntervalMs: 0,
+    });
+
+    // 1. Outbound interactive message with configurable Stage 3 limits and pre-pickup Stage 1 requester closure
+    await env.journal.recordSend({
+      sender: env.claudeId,
+      recipient: env.codexId,
+      recipientType: "interactive",
+      text: "check build",
+      messageId: "child-out-msg",
+      requestId: "child-out-req",
+      metadata: { _loopDepth: 1, replyWindow: { seconds: 60, maxExtensions: 2, maxTotalSeconds: 120 } },
+    });
+    const statusBeforeClose = parse(await call("triangle_get_status", { messageId: "child-out-msg" }));
+    assert.equal(statusBeforeClose.watchLimits.maxExtensions, 2);
+    assert.equal(statusBeforeClose.watchLimits.maxTotalSeconds, 120);
+
+    const closedRes = await call("triangle_close_watch", {
+      messageId: "child-out-msg",
+      requestId: "child-out-req",
+      eventId: "child-cw-1",
+      text: "no longer needed",
+    });
+    assert.equal(closedRes.result.isError, false, JSON.stringify(closedRes));
+    assert.equal(parse(closedRes).actor, "requester");
+
+    const dupCloseRes = await call("triangle_close_watch", {
+      messageId: "child-out-msg",
+      requestId: "child-out-req",
+      eventId: "child-cw-1",
+      text: "no longer needed",
+    });
+    assert.equal(dupCloseRes.result.isError, false);
+    assert.equal(parse(dupCloseRes).isDuplicate, true);
+
+    const conflictCloseRes = await call("triangle_close_watch", {
+      messageId: "child-out-msg",
+      requestId: "child-out-req",
+      eventId: "child-cw-1",
+      text: "different reason",
+    });
+    assert.equal(conflictCloseRes.result.isError, true);
+
+    // 2. Inbound request where Claude claims, reports progress, closes worker-side, and completes
+    await env.journal.recordSend({
+      sender: env.codexId,
+      recipient: env.claudeId,
+      recipientType: "interactive",
+      messageId: "child-in-msg",
+      requestId: "child-in-req",
+      text: "run audit",
+      metadata: { _loopDepth: 1, replyWindow: { seconds: 60, maxExtensions: 2, maxTotalSeconds: 150 } },
+    });
+    const claim = parse(await call("triangle_claim_message", { messageId: "child-in-msg", claimId: "child-in-claim" }));
+    assert.ok(claim.claimToken);
+
+    const progRes = await call("triangle_report_progress", {
+      messageId: "child-in-msg",
+      claimToken: claim.claimToken,
+      eventId: "child-p1",
+      seconds: 30,
+      text: "scanning files",
+    });
+    assert.equal(progRes.result.isError, false, JSON.stringify(progRes));
+
+    const inStatus = parse(await call("triangle_get_status", { messageId: "child-in-msg" }));
+    assert.equal(inStatus.progress.length, 1);
+    assert.equal(inStatus.progress[0].note, "scanning files");
+    assert.equal(inStatus.watchLimits.extensionsUsed, 1);
+
+    const workerClose = await call("triangle_report_progress", {
+      messageId: "child-in-msg",
+      claimToken: claim.claimToken,
+      eventId: "child-p-close",
+      seconds: 0,
+      text: "stopping watch, finishing async",
+    });
+    assert.equal(workerClose.result.isError, false, JSON.stringify(workerClose));
+
+    const replyRes = await call("triangle_reply_message", {
+      messageId: "child-in-msg",
+      claimToken: claim.claimToken,
+      replyId: "child-in-reply",
+      text: "audit complete",
+    });
+    assert.equal(replyRes.result.isError, false, JSON.stringify(replyRes));
+    assert.equal(parse(replyRes).text, "audit complete");
+
+    const repliesRes = parse(await call("triangle_get_replies", { requestId: "child-out-req", includeProgress: true }));
+    assert.deepEqual(repliesRes.replies, []);
+    assert.equal(repliesRes.progress.length, 1);
+    assert.equal(repliesRes.progress[0].actor, "requester");
+  } finally {
     await child?.close();
     await env.cleanup();
   }

@@ -852,9 +852,13 @@ export function createLocalControlServer({
             to_principal: record.to_principal,
             resolved_via: record.resolved_via,
           };
-          if (record.phase && record.sender === senderId && journal.visibleProgress) {
+          if (record.phase && (record.sender === senderId || record.recipient === senderId) && journal.visibleProgress) {
             const events = journal.visibleProgress(record, params.progressHistory === true);
             if (events.length) rawStatus.progress = events;
+          }
+          if (record.phase && (record.sender === senderId || record.recipient === senderId)) {
+            const limits = journal.replyWindowLimits?.(record);
+            if (limits) rawStatus.watchLimits = limits;
           }
           if (params.watchRequestId !== undefined) {
             identifier(params.watchRequestId, "watchRequestId");
@@ -874,7 +878,10 @@ export function createLocalControlServer({
         }
 
         case "list_replies": {
-          const { limit = 50 } = params;
+          const { limit = 50, includeProgress = false, progressHistory = false } = params;
+          if (typeof includeProgress !== "boolean" || typeof progressHistory !== "boolean") {
+            throw coded("invalid_request", "includeProgress and progressHistory must be booleans");
+          }
           const requestId = identifier(params.requestId, "requestId", { optional: true }) ?? undefined;
           const inReplyTo = identifier(params.inReplyTo, "inReplyTo", { optional: true }) ?? undefined;
           const cappedLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
@@ -889,7 +896,26 @@ export function createLocalControlServer({
           // and the final decorated envelope strictly fits within protocol limits
           const decoratedReplies = activeRouter.decorateReplies({ replies });
           const bounded = boundRepliesToEnvelope(decoratedReplies.replies);
-          const resp = createSuccessResponse(id, { replies: bounded }, PROTOCOL_VERSION);
+          let progress;
+          if (includeProgress && typeof journal.listReplyProgress === "function") {
+            const rawProgress = await journal.listReplyProgress({
+              requester: senderId,
+              requestId,
+              inReplyTo,
+              progressHistory,
+            });
+            const repliesBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
+            let room = Math.max(0, MAX_PAYLOAD_BYTES - 1024 - repliesBytes);
+            progress = [];
+            for (const item of rawProgress) {
+              const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + 2;
+              if (itemBytes > room) break;
+              progress.push(item);
+              room -= itemBytes;
+            }
+          }
+          const payload = progress !== undefined ? { replies: bounded, progress } : { replies: bounded };
+          const resp = createSuccessResponse(id, payload, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }
@@ -1084,6 +1110,28 @@ export function createLocalControlServer({
           delete safeOutcome.to_principal;
           delete safeOutcome.resolved_via;
           const resp = createSuccessResponse(id, safeOutcome, PROTOCOL_VERSION);
+          socket.write(encodeFrame(resp));
+          break;
+        }
+
+        case "close_watch": {
+          const messageId = identifier(params.messageId, "messageId");
+          const requestId = identifier(params.requestId, "requestId");
+          const eventId = identifier(params.eventId, "eventId");
+          if (params.text !== undefined && typeof params.text !== "string") {
+            throw coded("invalid_request", "text must be a string");
+          }
+          if (typeof journal.closeWatch !== "function") {
+            throw coded("unsupported", "Journal does not support watch closure");
+          }
+          const outcome = await journal.closeWatch({
+            messageId,
+            requestId,
+            requester: senderId,
+            eventId,
+            ...(params.text !== undefined ? { text: params.text } : {}),
+          });
+          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;
         }

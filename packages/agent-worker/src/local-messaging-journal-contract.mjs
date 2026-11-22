@@ -21,6 +21,10 @@ import { coded } from "./local-messaging-errors.mjs";
  *     filtered strictly to requester. Never exposes foreign replies.
  * - consumeReply({ requester, messageId }): Explicit consumption only. Rejects foreign
  *     requester.
+ * - Optional watch & progress adapters implemented by production journals:
+ *     replyWindowDeadline(record), replyWindowLimits(record), visibleProgress(record, history),
+ *     listReplyProgress({ requester, requestId, inReplyTo, progressHistory }),
+ *     recordInteractiveProgress(args), closeWatch({ messageId, requestId, requester, eventId, text }).
  * - getRecord(messageId): Inspect message by ID for sender/recipient. Looks for a
  *     message first, then a reply; only a message record has a string phase.
  *
