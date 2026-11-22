@@ -23,8 +23,11 @@ export function defaultLocalConfigPath(env=process.env){return path.join(env.HOM
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
- const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','timeout','follow-message','reply-window','reply-window-ack']);
- while(args.length){const flag=args.shift();if(flag==='--inbox'||flag==='--json'){const key=flag==='--inbox'?'waitInbox':'json';if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=true;continue;}if(flag==='--exact-only'){if(options.exactOnly!==undefined)throw coded('invalid_arguments','Duplicate argument');options.exactOnly=true;continue;}if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
+ const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','event-id','seconds','timeout','follow-message','reply-window','reply-window-ack']);
+ while(args.length){const flag=args.shift();if(flag==='--watch'||flag==='--history'){
+   const key=flag.slice(2);if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');
+   options[key]=true;continue;
+ }if(flag==='--inbox'||flag==='--json'){const key=flag==='--inbox'?'waitInbox':'json';if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=true;continue;}if(flag==='--exact-only'){if(options.exactOnly!==undefined)throw coded('invalid_arguments','Duplicate argument');options.exactOnly=true;continue;}if(flag==='--enable'||flag==='--disable'){if(options[flag.slice(2)]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[flag.slice(2)]=true;continue;}if(flag==='--auto-attach'||flag==='--no-auto-attach'){if(options.autoAttach!==undefined)throw coded('invalid_arguments','Duplicate argument');options.autoAttach=flag==='--auto-attach';continue;}if(flag==='--rebind-thread'){options.rebind=true;continue;}if(flag==='--titles'||flag==='--no-titles'){if(options.titles!==undefined)throw coded('invalid_arguments','Duplicate argument');options.titles=flag==='--titles';continue;}if(!flag.startsWith('--')||!flags.has(flag.slice(2))||!args.length)throw coded('invalid_arguments','Unknown argument or missing value');const key=flag.slice(2),value=args.shift();if(key==='recipient')(options.recipients??=[]).push(value);else if(key==='sender')(options.senders??=[]).push(value);else {if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');options[key]=value;}}
  return {command,options};
 }
 export function setupLocalMessaging(options,env=process.env){
@@ -542,6 +545,16 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  // Flags of the owner reconciliation commands mean nothing elsewhere; a typo must fail instead of being ignored.
  if(!['held','reconcile-message'].includes(command)&&['reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  // grok wait flags (--inbox, --json, --timeout) mean nothing elsewhere; runGrokCommand rejects them on other grok operations.
+ const operation=command==='grok'?options.operation:command;
+ if(options.watch){
+   if(operation!=='send' || options['reply-window']!==undefined)throw coded('invalid_arguments','Use --watch on send, or specify --reply-window explicitly');
+   options['reply-window']='{"seconds":120}';
+ }
+ if(options.history && (operation!=='status'||!options['message-id']))throw coded('invalid_arguments','--history requires status --message-id');
+ if(operation==='progress'){
+   if(!options['event-id'] || !/^(0|[1-9]\d{0,2})$/.test(options.seconds) || Number(options.seconds)>300)
+     throw coded('invalid_arguments','Progress requires --event-id and --seconds (0–300)');
+ }else if(options['event-id']!==undefined || options.seconds!==undefined)throw coded('invalid_arguments','Progress flags require the progress command');
  const windowFields=cliWindowEnvelope(options,command==='grok'?options.operation:command);
  if(command!=='grok'&&['waitInbox','json','timeout','follow-message'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  // Class-grant flags mean nothing elsewhere either.
@@ -554,7 +567,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='setup-grok'){output.write(JSON.stringify(setupGrok(options,options.config||defaultLocalConfigPath(env),env))+'\n');return 0;}
  if(command==='disable-grok'){output.write(JSON.stringify(disableGrok(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='grok')return runGrokCommand(options.operation,options,{configPath:options.config||defaultLocalConfigPath(env),env,input,output,windowFields});
- if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|replies|consume|wait>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  send/reply (including grok): --reply-window <JSON>; reply also accepts --reply-window-ack <JSON>\n  grok wait --request-id <id> [--follow-message <original-id>] | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|progress|replies|consume|wait>, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  send/reply (including grok): --reply-window <JSON>; reply also accepts --reply-window-ack <JSON>\n  send --watch requests 120 seconds; status --message-id <task> --history includes retired progress\n  progress (including grok): --message-id <task> --claim-file <path> --event-id <id> --seconds <0-300>; use 0 to close the watch\n  grok wait --request-id <id> [--follow-message <original-id>] | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}
@@ -623,7 +636,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
   }
   return 0;
  }
- if(!['status','discover','sessions','send','replies','consume','ack-wake','inbox','claim','reply','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
+ if(!['status','discover','sessions','send','replies','consume','ack-wake','inbox','claim','reply','progress','mcp','claude-session-mcp'].includes(command))throw coded('invalid_arguments','Unknown command');
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
  const binding=readPrivateJson(config.integrationPath);
@@ -641,20 +654,23 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
    await runMcpStdioSession({input,output,handler:createLocalMessagingMcpHandler({client,turnCredentialProvider:credential})});return 0;
   }
   const rpcOptions={credential:await credential()};let result;
-  if(command==='status')result=options['message-id']!==undefined ? await client.getMessageStatus({messageId:options['message-id']},rpcOptions) : await client.localStatus(rpcOptions);
+  if(command==='status')result=options['message-id']!==undefined ? await client.getMessageStatus({messageId:options['message-id'],progressHistory:options.history},rpcOptions) : await client.localStatus(rpcOptions);
   if(command==='inbox'){const rows=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpcOptions);result={items:[...rows],nextCursor:rows.nextCursor??null};}
   if(command==='claim'){
    if(!options['message-id']||!options['claim-id'])throw coded('invalid_arguments','Stable message-id and claim-id required');
    result=await client.claimInboxMessage({messageId:options['message-id'],claimId:options['claim-id']},rpcOptions);
   }
-  if(command==='reply'){
-   if(!options['claim-file']||!options['message-id']||!options['reply-id'])throw coded('invalid_arguments','Private claim-file, message-id and stable reply-id required');
+  if(command==='reply'||command==='progress'){
+   if(!options['claim-file']||!options['message-id']||(command==='reply'&&!options['reply-id']))throw coded('invalid_arguments','Private claim-file, message-id and stable operation ID required');
    const claim=readPrivateJson(options['claim-file']);
    if(claim.messageId!==options['message-id']||typeof claim.claimToken!=='string')throw coded('invalid_arguments','Claim file must match the message');
    if(options.text&&options['text-file'])throw coded('invalid_arguments','Use text or text-file, not both');
    const text=options['text-file']?fs.readFileSync(options['text-file'],'utf8'):options.text;
    if(typeof text!=='string'||!text.trim()||Buffer.byteLength(text)>128*1024)throw coded('invalid_message','Bounded nonempty reply required');
-   result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text,...windowFields},rpcOptions);
+   const payload={messageId:claim.messageId,claimToken:claim.claimToken,text};
+   result=command==='progress'
+     ? await client.reportProgress({...payload,eventId:options['event-id'],seconds:Number(options.seconds)},rpcOptions)
+     : await client.sendReply({...payload,replyId:options['reply-id'],...windowFields},rpcOptions);
   }
   if(command==='sessions')result={sessions:await client.listSessions(rpcOptions)};
   if(command==='discover')result={senderId:binding.senderId,threadId:binding.threadId,...await client.discoverRecipientDetails(rpcOptions)};
@@ -721,7 +737,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
 // entry is a marked block so setup and disable touch nothing else in the file. Tool names mirror CODEX_MCP_TOOLS
 // (a test keeps them equal): everything but sending is pre-approved, because a woken chat must be able to read and
 // answer its inbox without waiting for a person, while a send reaches another agent and keeps asking.
-const CODEX_TOOL_NAMES=['triangle_attach_session','triangle_list_sessions','triangle_list_inbox','triangle_claim_message','triangle_reply_message','triangle_ack_notification','triangle_send_message','triangle_list_recipients','triangle_get_replies','triangle_consume_reply','triangle_get_status'];
+const CODEX_TOOL_NAMES=['triangle_attach_session','triangle_list_sessions','triangle_list_inbox','triangle_claim_message','triangle_reply_message','triangle_report_progress','triangle_ack_notification','triangle_send_message','triangle_list_recipients','triangle_get_replies','triangle_consume_reply','triangle_get_status'];
 export const CODEX_TOML_BEGIN='# >>> triangle-session (managed by triangle-local setup-session-messaging; remove with disable-session-messaging) >>>';
 export const CODEX_TOML_END='# <<< triangle-session <<<';
 const tomlString=value=>{

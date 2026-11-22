@@ -585,6 +585,9 @@ export function createLocalMessagingJournal({
     if (!discoveryColumns.includes(column)) db.exec(`ALTER TABLE local_discovered_sessions ADD COLUMN ${column} ${type}`);
   }
   const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
+  if (!messageColumns.includes("progress_json")) {
+    db.exec("ALTER TABLE local_messages ADD COLUMN progress_json TEXT");
+  }
   if (!messageColumns.includes("late_result_text")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN late_result_text TEXT");
   }
@@ -978,8 +981,19 @@ export function createLocalMessagingJournal({
     return null;
   }
 
-  // Replay the authenticated peer's durable progress in broker receipt order.
-  // Reading the same update again, including after a restart, yields the same deadline.
+  function progressEvents(messageId) {
+    const row = db.prepare("SELECT progress_json FROM local_messages WHERE message_id=?").get(messageId);
+    return JSON.parse(row?.progress_json ?? "[]");
+  }
+
+  function visibleProgress(record, history = false) {
+    if (!history && record.phase === "completed" && !db.prepare(
+      "SELECT 1 FROM local_replies WHERE in_reply_to=? AND consumed=0"
+    ).get(record.messageId)) return [];
+    return progressEvents(record.messageId);
+  }
+
+  // Merge legacy inbox extensions and claim-bound receipts by broker arrival time.
   function replyWindowDeadline(record) {
     const secondsFor = metadata => {
       const window = metadata?.replyWindow;
@@ -994,13 +1008,21 @@ export function createLocalMessagingJournal({
     const hardEnd = record.createdAt + 1800000;
     let deadline = record.createdAt + initial * 1000;
     const updates = db.prepare(`
-      SELECT created_at, metadata_json FROM local_messages
+      SELECT created_at, metadata_json, rowid AS ord, NULL AS receipt_deadline FROM local_messages
       WHERE in_reply_to = ? AND request_id = ? AND sender = ? AND recipient = ?
         AND created_at BETWEEN ? AND ?
-      ORDER BY created_at, rowid
-    `).iterate(record.messageId, record.requestId, record.recipient, record.sender, record.createdAt, hardEnd);
+      UNION ALL
+      SELECT json_extract(value,'$.createdAt'), NULL, key, json_extract(value,'$.watchDeadline')
+        FROM json_each((SELECT progress_json FROM local_messages WHERE message_id=?))
+      ORDER BY created_at, ord
+    `).iterate(record.messageId, record.requestId, record.recipient, record.sender, record.createdAt, hardEnd, record.messageId);
     for (const row of updates) {
       if (row.created_at >= deadline) break;
+      if (row.receipt_deadline !== null) {
+        if (row.receipt_deadline === row.created_at) return row.created_at;
+        deadline = Math.max(deadline, row.receipt_deadline);
+        continue;
+      }
       const metadata = JSON.parse(row.metadata_json ?? "null");
       if (metadata?._loopDepth !== 2) continue;
       const seconds = secondsFor(metadata);
@@ -2018,7 +2040,7 @@ export function createLocalMessagingJournal({
     };
   }
 
-  async function recordInteractiveReply({ messageId, claimToken, sessionId, generation, requester, text, replyId, metadata = {}, now = Date.now, replyIdentity = null } = {}) {
+  async function recordClaimResponse({ messageId, claimToken, sessionId, generation, requester, text, replyId, metadata = {}, now = Date.now, replyIdentity = null } = {}, progress = null) {
     assertNotClosed();
     if (!messageId || !claimToken || typeof text !== "string" || !requester || !sessionId || typeof generation !== "number") {
       throw coded("invalid_params", "messageId, claimToken, requester, sessionId, generation, and text are required");
@@ -2070,6 +2092,34 @@ export function createLocalMessagingJournal({
       }
       if (orig.claim_token !== claimToken) {
         throw coded("invalid_claim_token", "Claim token mismatch");
+      }
+
+      if (progress) {
+        const { eventId, seconds } = progress;
+        if (!eventId || !Number.isSafeInteger(seconds) || seconds < 0 || seconds > 300 ||
+            !text.trim() || Buffer.byteLength(text) > 512) throw coded("invalid_request", "Progress requires a short note and 0–300 seconds");
+        const events = JSON.parse(orig.progress_json ?? "[]");
+        const prior = events.find(event => event.eventId === eventId);
+        if (prior) {
+          if (prior.seconds !== seconds || prior.note !== text) throw coded("duplicate_id_conflict", "Progress ID already used");
+          commitAcceptedReply();
+          return { ...prior, isDuplicate:true };
+        }
+        if (orig.phase !== "executing" || orig.lease_expires_at <= currentTime)
+          throw coded("claim_failed", "Progress requires an active claim");
+        const deadline = replyWindowDeadline(mapMessageRow(orig));
+        if (deadline === null || deadline <= currentTime) throw coded("window_closed", "No open watch on this task");
+        if (seconds && events.length >= 3) throw coded("progress_limit", "Three progress extensions already recorded");
+        const extensionEnd = Math.min(orig.created_at + 600_000, currentTime + seconds * 1000);
+        const event = {
+          eventId, kind: seconds ? "progress" : "close", seq: events.length + 1,
+          createdAt: currentTime, note: text, seconds,
+          watchDeadline: seconds ? Math.max(deadline, extensionEnd) : currentTime,
+        };
+        events.push(event);
+        db.prepare("UPDATE local_messages SET progress_json=? WHERE message_id=?").run(JSON.stringify(events), messageId);
+        commitAcceptedReply();
+        return event;
       }
 
       if (orig.phase === "completed") {
@@ -2347,6 +2397,7 @@ export function createLocalMessagingJournal({
     consumeReply,
     getRecord,
     replyWindowDeadline,
+    visibleProgress,
     recoverQueued,
     claimExecution,
     completeExecution,
@@ -2358,7 +2409,8 @@ export function createLocalMessagingJournal({
     reconcileMessage,
     listInbox,
     claimInboxMessage,
-    recordInteractiveReply,
+    recordInteractiveReply: args => recordClaimResponse(args),
+    recordInteractiveProgress: args => recordClaimResponse(args, { eventId:args.eventId, seconds:args.seconds }),
     getReplyRouteForMessage,
     getInteractiveInboxCounts,
     compact,

@@ -189,6 +189,7 @@ test("Codex MCP retains legacy tools and exposes explicitly scoped inbox operati
     "triangle_claim_message",
     "triangle_list_inbox",
     "triangle_reply_message",
+    "triangle_report_progress",
     "triangle_ack_notification",
     "triangle_cancel_message",
     "triangle_consume_reply",

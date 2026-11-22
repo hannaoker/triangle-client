@@ -441,7 +441,7 @@ export function createLocalControlServer({
         }
       }
 
-      if(claims?.senderType==='desktop-inbox'||(inboxBroker?.isDesktopSender(senderId)&&['list_inbox','claim_inbox_message','send_reply','session_status'].includes(method))){
+      if(claims?.senderType==='desktop-inbox'||(inboxBroker?.isDesktopSender(senderId)&&['list_inbox','claim_inbox_message','send_reply','report_progress','session_status'].includes(method))){
         if(!inboxBroker)throw coded('unauthorized','Desktop inbox is not supported');
         await inboxBroker.validateRequest({claims,senderId});
       }
@@ -852,6 +852,10 @@ export function createLocalControlServer({
             to_principal: record.to_principal,
             resolved_via: record.resolved_via,
           };
+          if (record.phase && record.sender === senderId && journal.visibleProgress) {
+            const events = journal.visibleProgress(record, params.progressHistory === true);
+            if (events.length) rawStatus.progress = events;
+          }
           if (params.watchRequestId !== undefined) {
             identifier(params.watchRequestId, "watchRequestId");
             if (record.sender !== senderId || record.requestId !== params.watchRequestId || !record.phase)
@@ -1083,6 +1087,7 @@ export function createLocalControlServer({
           break;
         }
 
+        case "report_progress":
         case "send_reply": {
           const { messageId, claimToken, text, replyId, metadata = {} } = params;
           if (!messageId || !claimToken || typeof text !== "string") {
@@ -1096,12 +1101,17 @@ export function createLocalControlServer({
           if (!claims?.sessionId || typeof claims?.generation !== "number") {
             throw coded("unauthorized", "Interactive session credential required");
           }
+          const progress = method === "report_progress"
+            ? { eventId: identifier(params.eventId, "eventId"), seconds: params.seconds } : null;
           const route = typeof journal.getReplyRouteForMessage === "function"
             ? await journal.getReplyRouteForMessage(messageId) : null;
           if (route && !replyIdentity) throw coded("reply_route_unavailable", "Pinned work requires R2 verification");
           const verifiedReplyIdentity = route ? await replyIdentity.prepareReply({ credential, senderId, route }) : null;
-          const outcome = await journal.recordInteractiveReply({
+          if (progress && !journal.recordInteractiveProgress) throw coded("unsupported", "Journal does not support progress receipts");
+          const write = progress ? journal.recordInteractiveProgress : journal.recordInteractiveReply;
+          const outcome = await write.call(journal, {
             messageId,
+            ...progress,
             replyIdentity: verifiedReplyIdentity ? { ...verifiedReplyIdentity, bindingId: claims.bindingId } : null,
             claimToken,
             sessionId: claims.sessionId,
@@ -1111,7 +1121,7 @@ export function createLocalControlServer({
             replyId,
             metadata: route ? withoutPayloadProvenance(metadata) : metadata,
           });
-          notifier?.notifyObligationChange?.();
+          if (!progress) notifier?.notifyObligationChange?.();
           const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
           socket.write(encodeFrame(resp));
           break;

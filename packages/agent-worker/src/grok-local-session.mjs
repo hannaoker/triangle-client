@@ -160,7 +160,8 @@ function waitPlan(options) {
 export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms))} = {}) {
   const started = now(), chunkEnd = started + plan.timeoutMs;
   let deadline = chunkEnd, watchDeadline;
-  const watchInfo = () => plan.followMessage ? {watchDeadline, followMessage:plan.followMessage} : {};
+  const progressIds = new Set();
+  const watchInfo = () => plan.followMessage ? {watchDeadline, progressIds:[...progressIds], followMessage:plan.followMessage} : {};
   // Every broker call (connect + RPC can each use the timeout) is bounded by the
   // remaining budget, so a call never runs much past the deadline: the whole
   // wait ends within about timeout + 1s, under the 780s foreground-call limit.
@@ -183,6 +184,7 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
       if (plan.followMessage) {
         const status = await client.getMessageStatus({messageId:plan.followMessage,watchRequestId:plan.requestId},{...rpc,timeout});
         if (!Number.isSafeInteger(status.watchDeadline)) throw coded('invalid_request','An updated broker and a root request with a positive reply window are required');
+        for (const event of status.progress ?? []) progressIds.add(event.eventId);
         watchDeadline = status.watchDeadline;
         deadline = Math.min(chunkEnd, watchDeadline);
       }
@@ -208,7 +210,7 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
 function waitSummary(plan, outcome) {
   const base = {operation:'wait',mode:plan.mode,state:outcome.state};
   const ids = plan.mode === 'request' ? {requestId:plan.requestId,replyIds:outcome.ids} : {messageIds:outcome.ids};
-  return {...base,...ids,...(plan.followMessage && {followMessage:plan.followMessage,watchDeadline:outcome.watchDeadline}),count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
+  return {...base,...ids,...(plan.followMessage && {followMessage:plan.followMessage,watchDeadline:outcome.watchDeadline,progressIds:outcome.progressIds}),count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
 }
 function waitLine(plan, outcome) {
   const what = plan.mode === 'request' ? `repl${outcome.ids.length===1?'y':'ies'} for request ${JSON.stringify(plan.requestId)}` : `inbox message${outcome.ids.length===1?'':'s'}`;
@@ -226,7 +228,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
   const b = options.alias ? entries.find(b=>b.alias===options.alias) : digest ? entries.find(b=>b.contextHash===digest) : null;
   if (!b || (b.contextHash !== null && b.contextHash !== digest)) throw coded('grok_context_mismatch','Choose your own paired context or explicit alias');
   if (!b.enabled || b.revoked) throw coded('session_disabled','Grok pairing disabled');
-  if (!['status','sessions','send','inbox','claim','reply','replies','consume','wait'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
+  if (!['status','sessions','send','inbox','claim','reply','progress','replies','consume','wait'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
   if (operation !== 'wait' && WAIT_ONLY.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is only valid for grok wait');
   // Validate before any broker call so bad wait arguments never touch the socket.
   const plan = operation === 'wait' ? waitPlan(options) : null;
@@ -266,7 +268,7 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
       return outcome.state === 'ready' ? 0 : GROK_WAIT_TIMEOUT_EXIT;
     }
     const rpc = await exchange(); let result;
-    if (operation==='status') result = options['message-id'] !== undefined ? await client.getMessageStatus({messageId:options['message-id']},rpc) : await client.localStatus(rpc);
+    if (operation==='status') result = options['message-id'] !== undefined ? await client.getMessageStatus({messageId:options['message-id'],progressHistory:options.history},rpc) : await client.localStatus(rpc);
     if (operation==='sessions') result = {sessions:await client.listSessions(rpc)};
     if (operation==='inbox') {const items=await client.listInbox({limit:options.limit===undefined?50:Number(options.limit),cursor:options.cursor},rpc);result={items:[...items],nextCursor:items.nextCursor};}
     if (operation==='send') {
@@ -295,11 +297,14 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
       writePrivateJson(options['claim-file'],{...claim,senderId:b.senderId,sessionId:b.sessionId,generation:b.generation});
       result={messageId:claim.messageId,claimId:claim.claimId,claimed:true,leaseExpiresAt:claim.leaseExpiresAt};
     }
-    if (operation==='reply') {
-      if (!options['claim-file'] || !options['message-id'] || !options['reply-id']) throw coded('invalid_arguments','Claim file, message-id and stable reply-id required');
+    if (operation==='reply' || operation==='progress') {
+      if (!options['claim-file'] || !options['message-id'] || (operation==='reply' && !options['reply-id'])) throw coded('invalid_arguments','Claim file, message-id and stable operation ID required');
       const claim=readPrivateJson(options['claim-file']);
       if (claim.senderId!==b.senderId || claim.messageId!==options['message-id'] || claim.sessionId!==b.sessionId || claim.generation!==b.generation || typeof claim.claimToken!=='string') throw coded('claim_file_mismatch','Claim does not belong to this binding');
-      result=await client.sendReply({messageId:claim.messageId,claimToken:claim.claimToken,replyId:options['reply-id'],text:await messageText(),...windowFields},rpc);
+      const payload={messageId:claim.messageId,claimToken:claim.claimToken,text:await messageText()};
+      result=operation==='progress'
+        ? await client.reportProgress({...payload,eventId:options['event-id'],seconds:Number(options.seconds)},rpc)
+        : await client.sendReply({...payload,replyId:options['reply-id'],...windowFields},rpc);
     }
     if (operation==='replies') {
       if (!options['request-id'] && !options['in-reply-to']) throw coded('invalid_arguments','Correlate reply retrieval explicitly');
