@@ -140,8 +140,8 @@ export const GROK_WAIT_DEFAULT_SECONDS = 750;
 // One call must fit under a 13-minute (780s) foreground tool call with margin.
 export const GROK_WAIT_MAX_SECONDS = 760;
 const WAIT_FIRST_INTERVAL_MS = 250, WAIT_MAX_INTERVAL_MS = 2000, WAIT_GRANT_REFRESH_MS = 240000, WAIT_LIST_LIMIT = 50;
-const WAIT_ONLY = ['waitInbox','json','timeout','follow-message'];
-const NOT_FOR_WAIT = ['in-reply-to','message-id','limit','cursor','to','text','text-file','claim-id','claim-file','reply-id'];
+const WAIT_ONLY = ['waitInbox','json','timeout','follow-message','stream-progress'];
+const NOT_FOR_WAIT = ['in-reply-to','message-id','limit','cursor','to','text','text-file','note','event-id','seconds','claim-id','claim-file','reply-id','include-progress'];
 function waitPlan(options) {
   const byRequest = options['request-id'] !== undefined, byInbox = options.waitInbox === true;
   if (byRequest === byInbox) throw coded('invalid_arguments','Choose exactly one of --request-id or --inbox');
@@ -149,19 +149,30 @@ function waitPlan(options) {
   if (NOT_FOR_WAIT.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is not valid for grok wait');
   const followMessage = options['follow-message'];
   if (followMessage !== undefined && (!byRequest || !followMessage)) throw coded('invalid_arguments','--follow-message requires an original message ID and --request-id');
+  const streamProgress = options['stream-progress'] === true;
+  if (streamProgress && !followMessage) throw coded('invalid_arguments','--stream-progress requires --follow-message');
   const raw = options.timeout ?? String(GROK_WAIT_DEFAULT_SECONDS);
   const seconds = typeof raw === 'string' && /^\d{1,3}(\.\d{1,3})?$/.test(raw) ? Number(raw) : NaN;
   if (!(seconds > 0) || seconds > GROK_WAIT_MAX_SECONDS) throw coded('invalid_arguments',`timeout must be seconds in (0, ${GROK_WAIT_MAX_SECONDS}]`);
-  return {followMessage,mode:byRequest?'request':'inbox',requestId:byRequest?options['request-id']:null,timeoutMs:Math.round(seconds*1000),json:options.json === true};
+  return {followMessage,streamProgress,mode:byRequest?'request':'inbox',requestId:byRequest?options['request-id']:null,timeoutMs:Math.round(seconds*1000),json:options.json === true};
 }
 // Poll reply or inbox listings and, for an opted-in follower, the durable deadline. Never
 // consumes, claims or acks; the caller runs replies+consume or inbox+claim after.
 // The local broker has no watch/long-poll RPC, so this is a bounded backoff poll.
-export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms))} = {}) {
+export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=>new Promise(r=>setTimeout(r,ms)), onProgress=null} = {}) {
   const started = now(), chunkEnd = started + plan.timeoutMs;
-  let deadline = chunkEnd, watchDeadline;
-  const progressIds = new Set();
-  const watchInfo = () => plan.followMessage ? {watchDeadline, progressIds:[...progressIds], followMessage:plan.followMessage} : {};
+  let deadline = chunkEnd, watchDeadline, watchLimits;
+  const seenProgress = new Set();
+  const observedProgress = [];
+  const watchInfo = () => plan.followMessage
+    ? {
+        watchDeadline,
+        progressIds: observedProgress.map(event => event.eventId),
+        ...(observedProgress.length ? { progress: observedProgress } : {}),
+        ...(watchLimits ? { watchLimits } : {}),
+        followMessage: plan.followMessage,
+      }
+    : {};
   // Every broker call (connect + RPC can each use the timeout) is bounded by the
   // remaining budget, so a call never runs much past the deadline: the whole
   // wait ends within about timeout + 1s, under the 780s foreground-call limit.
@@ -184,7 +195,15 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
       if (plan.followMessage) {
         const status = await client.getMessageStatus({messageId:plan.followMessage,watchRequestId:plan.requestId},{...rpc,timeout});
         if (!(status.watchPending === true && status.watchDeadline === null) && !Number.isSafeInteger(status.watchDeadline)) throw coded('invalid_request','An updated broker and a root request with a positive reply window are required');
-        for (const event of status.progress ?? []) progressIds.add(event.eventId);
+        if (status.watchLimits) watchLimits = status.watchLimits;
+        for (const event of status.progress ?? []) {
+          const key = `${event.actor ?? 'worker'}\0${event.eventId}`;
+          if (!seenProgress.has(key)) {
+            seenProgress.add(key);
+            observedProgress.push(event);
+            onProgress?.(event, status);
+          }
+        }
         watchDeadline = status.watchDeadline;
         deadline = watchDeadline === null ? chunkEnd : Math.min(chunkEnd, watchDeadline);
       }
@@ -210,7 +229,7 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
 function waitSummary(plan, outcome) {
   const base = {operation:'wait',mode:plan.mode,state:outcome.state};
   const ids = plan.mode === 'request' ? {requestId:plan.requestId,replyIds:outcome.ids} : {messageIds:outcome.ids};
-  return {...base,...ids,...(plan.followMessage && {followMessage:plan.followMessage,watchDeadline:outcome.watchDeadline,progressIds:outcome.progressIds}),count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
+  return {...base,...ids,...(plan.followMessage && {followMessage:plan.followMessage,watchDeadline:outcome.watchDeadline,progressIds:outcome.progressIds,...(outcome.watchLimits?{watchLimits:outcome.watchLimits}:{})}),count:outcome.ids.length,more:outcome.more,waitedMs:outcome.waitedMs,polls:outcome.polls,timeoutSeconds:plan.timeoutMs/1000};
 }
 function waitLine(plan, outcome) {
   const what = plan.mode === 'request' ? `repl${outcome.ids.length===1?'y':'ies'} for request ${JSON.stringify(plan.requestId)}` : `inbox message${outcome.ids.length===1?'':'s'}`;
@@ -229,8 +248,9 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
   const b = options.alias ? entries.find(b=>b.alias===options.alias) : digest ? entries.find(b=>b.contextHash===digest) : null;
   if (!b || (b.contextHash !== null && b.contextHash !== digest)) throw coded('grok_context_mismatch','Choose your own paired context or explicit alias');
   if (!b.enabled || b.revoked) throw coded('session_disabled','Grok pairing disabled');
-  if (!['status','sessions','send','inbox','claim','reply','progress','replies','consume','wait'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
+  if (!['status','sessions','send','inbox','claim','reply','progress','close-watch','replies','consume','wait'].includes(operation)) throw coded('invalid_arguments','Unsupported Grok operation');
   if (operation !== 'wait' && WAIT_ONLY.some(key=>options[key] !== undefined)) throw coded('invalid_arguments','Argument is only valid for grok wait');
+  if (operation !== 'replies' && options['include-progress']) throw coded('invalid_arguments','--include-progress requires grok replies');
   // Validate before any broker call so bad wait arguments never touch the socket.
   const plan = operation === 'wait' ? waitPlan(options) : null;
   const client = createLocalControlClient({socketPath:resolveLocalSocketAddress({stateRoot:config.stateRoot}).socketPath,senderId:b.senderId});
@@ -264,7 +284,29 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
   };
   try {
     if (operation==='wait') {
-      const outcome = await waitForMatch(plan, client, exchange, waitClock);
+      const onProgress = plan.streamProgress
+        ? (event) => {
+            const line = plan.json
+              ? JSON.stringify({
+                  operation: 'wait',
+                  mode: 'request',
+                  state: 'progress',
+                  requestId: plan.requestId,
+                  followMessage: plan.followMessage,
+                  eventId: event.eventId,
+                  actor: event.actor ?? 'worker',
+                  kind: event.kind,
+                  seq: event.seq,
+                  note: event.note,
+                  createdAt: event.createdAt,
+                  watchDeadline: event.watchDeadline,
+                  newDeadline: event.watchDeadline,
+                })
+              : `grok wait: ${event.kind === 'close' ? 'closed' : 'progress'} #${event.seq} (${event.actor ?? 'worker'}/${event.eventId}): ${event.note}`;
+            output.write(line + '\n');
+          }
+        : null;
+      const outcome = await waitForMatch(plan, client, exchange, { ...(waitClock ?? {}), onProgress });
       output.write((plan.json ? JSON.stringify(waitSummary(plan,outcome)) : waitLine(plan,outcome))+'\n');
       return outcome.state === 'ready' ? 0 : GROK_WAIT_TIMEOUT_EXIT;
     }
@@ -307,9 +349,35 @@ export async function runGrokCommand(operation, options, {configPath,env,input,o
         ? await client.reportProgress({...payload,eventId:options['event-id'],seconds:Number(options.seconds)},rpc)
         : await client.sendReply({...payload,replyId:options['reply-id'],...windowFields},rpc);
     }
+    if (operation==='close-watch') {
+      if (!options['message-id'] || !options['request-id'] || !options['event-id']) throw coded('invalid_arguments','Message ID, request ID and stable event ID required');
+      if (options.text !== undefined) throw coded('invalid_arguments','Use --note, --text-file, or stdin for Grok message bodies');
+      if (options.note !== undefined && options['text-file'] !== undefined) throw coded('invalid_arguments','Use --note or --text-file, not both');
+      let note;
+      if (options.note !== undefined) {
+        if (typeof options.note !== 'string' || !options.note.trim() || Buffer.byteLength(options.note) > 512) throw coded('invalid_request','Bounded nonempty note required');
+        note = options.note;
+      } else if (options['text-file']) {
+        note = await messageText();
+      } else if (input && input.isTTY !== true) {
+        const chunks=[];let bytes=0;
+        for await (const chunk of input) {
+          const bytesChunk=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);
+          bytes+=bytesChunk.length;if(bytes>512)throw coded('invalid_request','Note too large');
+          chunks.push(bytesChunk);
+        }
+        if (bytes > 0) {
+          note = Buffer.concat(chunks,bytes).toString('utf8');
+          if (!note.trim()) throw coded('invalid_request','Bounded nonempty note required');
+        }
+      }
+      result=await client.closeWatch({messageId:options['message-id'],requestId:options['request-id'],eventId:options['event-id'],...(note!==undefined?{text:note}:{})},rpc);
+    }
     if (operation==='replies') {
       if (!options['request-id'] && !options['in-reply-to']) throw coded('invalid_arguments','Correlate reply retrieval explicitly');
-      result={replies:await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to']},rpc)};
+      const includeProgress = options['include-progress'] === true;
+      const replies = await client.listReplies({requestId:options['request-id'],inReplyTo:options['in-reply-to'],...(includeProgress?{includeProgress:true}:{})},rpc);
+      result = includeProgress ? {replies:[...replies],progress:replies.progress ?? []} : {replies};
     }
     if (operation==='consume') result=await client.consumeReply({messageId:options['message-id']},rpc);
     output.write(JSON.stringify(result)+'\n');return 0;

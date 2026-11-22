@@ -300,6 +300,9 @@ export function createLocalControlClient({
     async reportProgress({messageId, claimToken, eventId, seconds, text}, options = {}) {
       return callRpc("report_progress", {messageId, claimToken, eventId, seconds, text}, options);
     },
+    async closeWatch({ messageId, requestId, eventId, text } = {}, options = {}) {
+      return callRpc("close_watch", { messageId, requestId, eventId, ...(text !== undefined ? { text } : {}) }, options);
+    },
     async sendReply({ messageId, claimToken, text, replyId = null, metadata = {} } = {}, options = {}) {
       return await callRpc("send_reply", { messageId, claimToken, text, replyId, metadata }, options);
     },
@@ -356,9 +359,21 @@ export function createLocalControlClient({
       return await callRpc("get_message_status", { messageId, watchRequestId, progressHistory }, options);
     },
 
-    async listReplies({ requestId = null, inReplyTo = null, limit = 50 } = {}, options = {}) {
-      const res = await callRpc("list_replies", { requestId, inReplyTo, limit }, options);
-      return res.replies || [];
+    async listReplies({ requestId = null, inReplyTo = null, limit = 50, includeProgress = false, progressHistory = false } = {}, options = {}) {
+      const payload = { requestId, inReplyTo, limit };
+      if (includeProgress) payload.includeProgress = true;
+      if (progressHistory) payload.progressHistory = true;
+      const res = await callRpc("list_replies", payload, options);
+      const replies = res.replies || [];
+      if (res.progress !== undefined) {
+        Object.defineProperty(replies, "progress", {
+          value: res.progress,
+          enumerable: false,
+          writable: true,
+          configurable: true,
+        });
+      }
+      return replies;
     },
 
     async consumeReply({ messageId }, options = {}) {
@@ -385,18 +400,29 @@ export function createLocalControlClient({
       inReplyTo = null,
       timeoutMs: waitTimeoutMs = 10000,
       pollIntervalMs = 50,
+      onProgress = null,
       credential = activeTurnCredential,
     } = {}) {
       const deadline = Date.now() + waitTimeoutMs;
+      const seenProgress = new Set();
       while (Date.now() < deadline) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
         const boundedRpcTimeout = Math.min(remaining, timeoutMs);
 
         const replies = await this.listReplies(
-          { requestId, inReplyTo, limit: 1 },
+          { requestId, inReplyTo, limit: 1, includeProgress: typeof onProgress === "function" },
           { timeout: boundedRpcTimeout, credential },
         );
+        if (typeof onProgress === "function" && Array.isArray(replies.progress)) {
+          for (const event of replies.progress) {
+            const key = `${event.messageId ?? ""}\0${event.actor ?? "worker"}\0${event.eventId}`;
+            if (!seenProgress.has(key)) {
+              seenProgress.add(key);
+              onProgress(event);
+            }
+          }
+        }
         if (replies.length > 0) {
           return replies[0];
         }

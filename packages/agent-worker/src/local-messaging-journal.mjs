@@ -5,7 +5,7 @@ import path from "node:path";
 import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
 import { privateDir, privateFile } from "./delivery-private-path.mjs";
 import { coded, LocalMessagingError } from "./local-messaging-errors.mjs";
-import { MAX_PAYLOAD_BYTES } from "./local-messaging-protocol.mjs";
+import { MAX_PAYLOAD_BYTES, WATCH_DEFAULTS, WATCH_LIMITS } from "./local-messaging-protocol.mjs";
 import { sessionAddress } from "./local-messaging-interactive-session.mjs";
 import { sanitizeSessionTitle } from "./local-messaging-auth-broker.mjs";
 
@@ -389,13 +389,28 @@ function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
 // NULL keeps admission-time semantics for pre-upgrade rows and noninteractive work.
 const WATCH_AWAITING_PICKUP = -1;
 
-function replyWindowSeconds(metadata) {
+function parseReplyWindowConfig(metadata) {
   const window = metadata?.replyWindow;
   if (!window || typeof window !== "object" || Array.isArray(window) ||
-      Object.keys(window).some(key => !["seconds", "reason"].includes(key)) ||
-      (window.reason !== undefined && (typeof window.reason !== "string" || window.reason.length > 256)) ||
-      (window.seconds !== undefined && !Number.isSafeInteger(window.seconds))) return null;
-  return Math.max(0, Math.min(600, window.seconds ?? 600));
+      Object.keys(window).some(key => !["seconds", "maxExtensions", "maxTotalSeconds", "reason"].includes(key)) ||
+      (window.reason !== undefined && (typeof window.reason !== "string" || window.reason.length > WATCH_LIMITS.maxReasonLength))) {
+    return null;
+  }
+  for (const key of ["seconds", "maxExtensions", "maxTotalSeconds"]) {
+    if (window[key] !== undefined && (!Number.isSafeInteger(window[key]) || window[key] < 0)) return null;
+  }
+  const hasExplicitMaxExtensions = window.maxExtensions !== undefined;
+  const hasExplicitMaxTotal = window.maxTotalSeconds !== undefined;
+  const maxExtensions = Math.min(WATCH_LIMITS.maxExtensions, window.maxExtensions ?? WATCH_DEFAULTS.maxExtensions);
+  const maxTotalSeconds = Math.min(WATCH_LIMITS.maxTotalSeconds, window.maxTotalSeconds ?? WATCH_DEFAULTS.maxTotalSeconds);
+  const rawInitial = Math.min(WATCH_LIMITS.maxInitialSeconds, window.seconds ?? WATCH_DEFAULTS.seconds);
+  const initialSeconds = hasExplicitMaxTotal ? Math.min(rawInitial, maxTotalSeconds) : rawInitial;
+  const legacyHardCapSeconds = hasExplicitMaxTotal ? maxTotalSeconds : WATCH_DEFAULTS.legacyHardCapSeconds;
+  return { initialSeconds, maxExtensions, maxTotalSeconds, legacyHardCapSeconds, hasExplicitMaxExtensions, hasExplicitMaxTotal };
+}
+
+function replyWindowSeconds(metadata) {
+  return parseReplyWindowConfig(metadata)?.initialSeconds ?? null;
 }
 
 function mapMessageRow(row) {
@@ -1010,26 +1025,71 @@ export function createLocalMessagingJournal({
     return progressEvents(record.messageId);
   }
 
+  function listReplyProgress({ requester, requestId = null, inReplyTo = null, progressHistory = false } = {}) {
+    assertNotClosed();
+    if (!requester || typeof requester !== "string") {
+      throw coded("invalid_params", "requester is required");
+    }
+    let sql = "SELECT * FROM local_messages WHERE sender = ? AND progress_json IS NOT NULL";
+    const params = [requester];
+    if (requestId) {
+      sql += " AND request_id = ?";
+      params.push(requestId);
+    }
+    if (inReplyTo) {
+      sql += " AND message_id = ?";
+      params.push(inReplyTo);
+    }
+    sql += " ORDER BY created_at ASC, message_id ASC LIMIT 100";
+    const rows = db.prepare(sql).all(...params);
+    const items = [];
+    for (const row of rows) {
+      const record = mapMessageRow(row);
+      for (const event of visibleProgress(record, progressHistory === true)) {
+        items.push({ messageId: record.messageId, requestId: record.requestId, ...event });
+      }
+    }
+    return items;
+  }
+
+  function replyWindowLimits(record) {
+    const limits = parseReplyWindowConfig(record?.metadata);
+    if (!limits || record.loopDepth !== 1 || !limits.initialSeconds) return null;
+    const events = progressEvents(record.messageId);
+    const extensionsUsed = events.filter((event) => event.kind === "progress").length;
+    return {
+      initialSeconds: limits.initialSeconds,
+      maxExtensions: limits.maxExtensions,
+      maxTotalSeconds: limits.maxTotalSeconds,
+      extensionsUsed,
+      extensionsRemaining: Math.max(0, limits.maxExtensions - extensionsUsed),
+    };
+  }
+
   // Merge legacy inbox extensions and claim-bound receipts by broker arrival time.
   function replyWindowDeadline(record) {
-    const initial = replyWindowSeconds(record.metadata);
-    if (!initial || record.loopDepth !== 1 || record.watchStartedAt === null) return null;
+    const limits = parseReplyWindowConfig(record.metadata);
+    if (!limits || !limits.initialSeconds || record.loopDepth !== 1 || record.watchStartedAt === null) return null;
     const start = record.watchStartedAt ?? record.createdAt;
-    const hardEnd = start + 1800000;
-    let deadline = start + initial * 1000;
+    const hardEnd = start + limits.legacyHardCapSeconds * 1000;
+    let deadline = start + limits.initialSeconds * 1000;
+    let extensionsUsed = 0;
     const updates = db.prepare(`
-      SELECT created_at, metadata_json, rowid AS ord, NULL AS receipt_deadline FROM local_messages
+      SELECT created_at, metadata_json, 1 AS phase_order, rowid AS ord, NULL AS receipt_deadline FROM local_messages
       WHERE in_reply_to = ? AND request_id = ? AND sender = ? AND recipient = ?
         AND created_at BETWEEN ? AND ?
       UNION ALL
-      SELECT json_extract(value,'$.createdAt'), NULL, key, json_extract(value,'$.watchDeadline')
+      SELECT json_extract(value,'$.createdAt'), NULL,
+        CASE WHEN json_extract(value,'$.watchDeadline') = json_extract(value,'$.createdAt') THEN 0 ELSE 1 END,
+        key, json_extract(value,'$.watchDeadline')
         FROM json_each((SELECT progress_json FROM local_messages WHERE message_id=?))
-      ORDER BY created_at, ord
+      ORDER BY created_at, phase_order, ord
     `).iterate(record.messageId, record.requestId, record.recipient, record.sender, start, hardEnd, record.messageId);
     for (const row of updates) {
       if (row.created_at >= deadline) break;
       if (row.receipt_deadline !== null) {
         if (row.receipt_deadline === row.created_at) return row.created_at;
+        extensionsUsed += 1;
         deadline = Math.max(deadline, row.receipt_deadline);
         continue;
       }
@@ -1038,6 +1098,8 @@ export function createLocalMessagingJournal({
       const seconds = replyWindowSeconds(metadata);
       if (seconds === null) continue;
       if (seconds === 0) return row.created_at;
+      if (limits.hasExplicitMaxExtensions && extensionsUsed >= limits.maxExtensions) continue;
+      extensionsUsed += 1;
       deadline = Math.min(hardEnd, Math.max(deadline, row.created_at + seconds * 1000));
     }
     return deadline;
@@ -1102,6 +1164,75 @@ export function createLocalMessagingJournal({
     assertNotClosed();
     const row = db.prepare("SELECT message_id, late_result_text FROM local_messages WHERE message_id = ?").get(messageId);
     return row?.late_result_text ? { messageId: row.message_id, text: row.late_result_text } : null;
+  }
+
+  async function closeWatch({ messageId, requestId, requester, eventId, text = "Watch closed", now = Date.now } = {}) {
+    assertNotClosed();
+    const note = text === undefined ? "Watch closed" : text;
+    if (!messageId || !requestId || !requester || !eventId || typeof note !== "string" || !note.trim() || Buffer.byteLength(note) > WATCH_LIMITS.maxNoteBytes) {
+      throw coded("invalid_request", "Close watch requires messageId, requestId, eventId, and a bounded note");
+    }
+    const currentTime = typeof now === "function" ? now() : now;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const orig = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
+      if (!orig) throw coded("not_found", `Message ${messageId} not found`);
+      if (orig.sender !== requester) throw coded("foreign_access_denied", "Only original requester can close this watch");
+      if (orig.request_id !== requestId) throw coded("invalid_request", "Close watch requires your original request and message IDs");
+      if ((orig.recipient_type ?? "runner") !== "interactive") throw coded("window_closed", "No open watch on this task");
+
+      const mapped = mapMessageRow(orig);
+      const limits = parseReplyWindowConfig(mapped.metadata);
+      if (!limits || mapped.loopDepth !== 1 || !limits.initialSeconds) {
+        throw coded("window_closed", "No open watch on this task");
+      }
+
+      const events = JSON.parse(orig.progress_json ?? "[]");
+      const prior = events.find(event => event.eventId === eventId && (event.actor ?? "worker") === "requester");
+      if (prior) {
+        if (prior.note !== note) throw coded("duplicate_id_conflict", "Close ID already used");
+        db.exec("COMMIT");
+        return { ...prior, isDuplicate: true };
+      }
+
+      if (!["queued_local", "executing"].includes(orig.phase)) {
+        throw coded("window_closed", "No open watch on this task");
+      }
+
+      if (orig.watch_started_at === WATCH_AWAITING_PICKUP) {
+        if (events.some(event => event.kind === "close")) {
+          throw coded("window_closed", "No open watch on this task");
+        }
+      } else {
+        const deadline = replyWindowDeadline(mapped);
+        if (deadline === null || deadline <= currentTime) {
+          throw coded("window_closed", "No open watch on this task");
+        }
+      }
+
+      const event = {
+        eventId,
+        actor: "requester",
+        kind: "close",
+        seq: events.length + 1,
+        createdAt: currentTime,
+        note,
+        seconds: 0,
+        watchDeadline: currentTime,
+      };
+      events.push(event);
+      db.prepare(`
+        UPDATE local_messages
+        SET progress_json = ?,
+            watch_started_at = CASE WHEN watch_started_at = ? THEN ? ELSE watch_started_at END
+        WHERE message_id = ?
+      `).run(JSON.stringify(events), WATCH_AWAITING_PICKUP, currentTime, messageId);
+      db.exec("COMMIT");
+      return event;
+    } catch (err) {
+      try { db.exec("ROLLBACK"); } catch {}
+      throw err;
+    }
   }
 
   async function recordExecutionFailure({ messageId, reason = "execution_failed", runtimeError = null } = {}) {
@@ -2113,10 +2244,12 @@ export function createLocalMessagingJournal({
 
       if (progress) {
         const { eventId, seconds } = progress;
-        if (!eventId || !Number.isSafeInteger(seconds) || seconds < 0 || seconds > 300 ||
-            !text.trim() || Buffer.byteLength(text) > 512) throw coded("invalid_request", "Progress requires a short note and 0–300 seconds");
+        if (!eventId || !Number.isSafeInteger(seconds) || seconds < 0 || seconds > WATCH_LIMITS.maxProgressSeconds ||
+            !text.trim() || Buffer.byteLength(text) > WATCH_LIMITS.maxNoteBytes) {
+          throw coded("invalid_request", `Progress requires a short note and 0–${WATCH_LIMITS.maxProgressSeconds} seconds`);
+        }
         const events = JSON.parse(orig.progress_json ?? "[]");
-        const prior = events.find(event => event.eventId === eventId);
+        const prior = events.find(event => event.eventId === eventId && (event.actor ?? "worker") === "worker");
         if (prior) {
           if (prior.seconds !== seconds || prior.note !== text) throw coded("duplicate_id_conflict", "Progress ID already used");
           commitAcceptedReply();
@@ -2124,12 +2257,17 @@ export function createLocalMessagingJournal({
         }
         if (orig.phase !== "executing" || orig.lease_expires_at <= currentTime)
           throw coded("claim_failed", "Progress requires an active claim");
-        const deadline = replyWindowDeadline(mapMessageRow(orig));
-        if (deadline === null || deadline <= currentTime) throw coded("window_closed", "No open watch on this task");
-        if (seconds && events.length >= 3) throw coded("progress_limit", "Three progress extensions already recorded");
-        const extensionEnd = Math.min((orig.watch_started_at ?? orig.created_at) + 600_000, currentTime + seconds * 1000);
+        const mappedOrig = mapMessageRow(orig);
+        const limits = parseReplyWindowConfig(mappedOrig.metadata);
+        const deadline = replyWindowDeadline(mappedOrig);
+        if (!limits || deadline === null || deadline <= currentTime) throw coded("window_closed", "No open watch on this task");
+        const extensionCount = events.filter(event => event.kind === "progress").length;
+        if (seconds && extensionCount >= limits.maxExtensions) {
+          throw coded("progress_limit", `Maximum ${limits.maxExtensions} progress extensions already recorded`);
+        }
+        const extensionEnd = Math.min((orig.watch_started_at ?? orig.created_at) + limits.maxTotalSeconds * 1000, currentTime + seconds * 1000);
         const event = {
-          eventId, kind: seconds ? "progress" : "close", seq: events.length + 1,
+          eventId, actor: "worker", kind: seconds ? "progress" : "close", seq: events.length + 1,
           createdAt: currentTime, note: text, seconds,
           watchDeadline: seconds ? Math.max(deadline, extensionEnd) : currentTime,
         };
@@ -2411,10 +2549,13 @@ export function createLocalMessagingJournal({
     recordReply,
     recordExecutionFailure,
     listReplies,
+    listReplyProgress,
     consumeReply,
     getRecord,
     replyWindowDeadline,
+    replyWindowLimits,
     visibleProgress,
+    closeWatch,
     recoverQueued,
     claimExecution,
     completeExecution,

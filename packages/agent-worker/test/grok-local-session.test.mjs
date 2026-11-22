@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {promisify} from 'node:util';
-import {execFile} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
 import {Readable} from 'node:stream';
 import {fileURLToPath} from 'node:url';
 import {setupLocalMessaging,setupSessionDiscovery,setupWorkspaceMessaging,setupDesktopInbox,runSessionDiscoveryHook} from '../src/local-messaging-cli.mjs';
@@ -594,4 +594,211 @@ test('upgrading a queued interactive task preserves its original watch deadline'
     await journal.listInbox({requester:'bob',now:181_000});
     assert.equal(journal.replyWindowDeadline(await journal.getRecord('old')),121_000);
   } finally { await journal.close(); fs.rmSync(stateRoot,{recursive:true,force:true}); }
+});
+
+test('Stage 1: requester close-watch closes pre-pickup and executing watches, enforces idempotency/conflicts, survives restart, and keeps eventual reply retrievable',async()=>{
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[grokId(ctxB)],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[a.senderId]);
+  f.pair('charlie','33333333-3333-4333-8333-333333333333',[],[b.senderId]);
+  await f.start();
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','cw-pre','--request-id','cw-pre-req','--reply-window','{"seconds":120}'],'early stop task');
+  const preStatus=await f.run(ctxA,['grok','status','--message-id','cw-pre']);
+  assert.equal(preStatus.watchLimits.initialSeconds,120);
+  const ba=f.binding('alice'),clientA=f.client(a.senderId);
+  await clientA.exchangeInteractiveSession({bindingId:ba.bindingId,sessionId:ba.sessionId,generation:ba.generation,secret:ba.secret,contextHash:ba.contextHash});
+  const watchPre=await clientA.getMessageStatus({messageId:'cw-pre',watchRequestId:'cw-pre-req'});
+  assert.equal(watchPre.watchPending,true);
+  assert.equal(watchPre.watchDeadline,null);
+
+  await errorCode(f.run('33333333-3333-4333-8333-333333333333',['grok','close-watch','--message-id','cw-pre','--request-id','cw-pre-req','--event-id','foreign-cw'],'nope'),'foreign_access_denied');
+  const closed=await f.run(ctxA,['grok','close-watch','--message-id','cw-pre','--request-id','cw-pre-req','--event-id','cw-1','--note','stop waiting']);
+  assert.equal(closed.actor,'requester');
+  assert.equal(closed.kind,'close');
+  const watchAfter=await clientA.getMessageStatus({messageId:'cw-pre',watchRequestId:'cw-pre-req'});
+  assert.equal(watchAfter.watchPending,undefined);
+  assert.equal(watchAfter.watchDeadline,closed.watchDeadline);
+  const dupClosed=await f.run(ctxA,['grok','close-watch','--message-id','cw-pre','--request-id','cw-pre-req','--event-id','cw-1','--note','stop waiting']);
+  assert.equal(dupClosed.isDuplicate,true);
+  await errorCode(f.run(ctxA,['grok','close-watch','--message-id','cw-pre','--request-id','cw-pre-req','--event-id','cw-1','--note','changed note']),'duplicate_id_conflict');
+
+  // Survives broker restart before pickup and keeps task queued for worker
+  await clientA.close();
+  await f.stop();await f.start();
+  const afterRestart=await f.run(ctxA,['grok','status','--message-id','cw-pre']);
+  assert.equal(afterRestart.phase,'queued_local');
+  assert.equal(afterRestart.progress.length,1);
+  assert.equal(afterRestart.progress[0].eventId,'cw-1');
+
+  const claimFile=path.join(f.root,'claim-cw.json');
+  await f.run(ctxB,['grok','claim','--message-id','cw-pre','--claim-id','claim-cw-1','--claim-file',claimFile]);
+  await errorCode(f.run(ctxB,['grok','progress','--message-id','cw-pre','--claim-file',claimFile,'--event-id','p-after-close','--seconds','30'],'trying to extend'),'window_closed');
+
+  await f.run(ctxB,['grok','reply','--message-id','cw-pre','--claim-file',claimFile,'--reply-id','rep-cw-pre'],'eventual answer');
+  // Retry close-watch AFTER completion still behaves idempotently without losing reply
+  const postCompleteDup=await f.run(ctxA,['grok','close-watch','--message-id','cw-pre','--request-id','cw-pre-req','--event-id','cw-1','--note','stop waiting']);
+  assert.equal(postCompleteDup.isDuplicate,true);
+  const replies=await f.run(ctxA,['grok','replies','--request-id','cw-pre-req']);
+  assert.deepEqual(replies.replies.map(r=>r.text),['eventual answer']);
+ }finally{await f.close();}
+});
+
+test('Stage 1: simultaneous requester closeWatch and worker sendReply preserve eventual reply cleanly',async()=>{
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[grokId(ctxB)],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[a.senderId]);
+  await f.start();
+  const ba=f.binding('alice'),bb=f.binding('bob');
+  const clientA=f.client(a.senderId),clientB=f.client(b.senderId);
+  await clientA.exchangeInteractiveSession({bindingId:ba.bindingId,sessionId:ba.sessionId,generation:ba.generation,secret:ba.secret,contextHash:ba.contextHash});
+  await clientB.exchangeInteractiveSession({bindingId:bb.bindingId,sessionId:bb.sessionId,generation:bb.generation,secret:bb.secret,contextHash:bb.contextHash});
+  for(let i=0;i<5;i++){
+   const msgId=`race-msg-${i}`,reqId=`race-req-${i}`;
+   await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id',msgId,'--request-id',reqId,'--reply-window','{"seconds":120}'],`task ${i}`);
+   const claimFile=path.join(f.root,`race-claim-${i}.json`);
+   await f.run(ctxB,['grok','claim','--message-id',msgId,'--claim-id',`race-c-${i}`,'--claim-file',claimFile]);
+   const {claimToken}=readPrivateJson(claimFile);
+   const [closeRes,replyRes]=await Promise.allSettled([
+    clientA.closeWatch({messageId:msgId,requestId:reqId,eventId:`race-cw-${i}`,text:'simultaneous close'}),
+    clientB.sendReply({messageId:msgId,claimToken,text:`race reply ${i}`,replyId:`race-rep-${i}`}),
+   ]);
+   assert.equal(replyRes.status,'fulfilled',JSON.stringify(replyRes));
+   assert.ok(closeRes.status==='fulfilled'||closeRes.reason?.code==='window_closed',JSON.stringify(closeRes));
+   const found=await f.run(ctxA,['grok','replies','--request-id',reqId]);
+   assert.deepEqual(found.replies.map(r=>r.text),[`race reply ${i}`]);
+  }
+ }finally{await f.close();}
+});
+
+test('Stage 2: live progress visibility via stream-progress, include-progress, status, client APIs, and history retention without interrupting wait or claiming',async()=>{
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[grokId(ctxB)],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[a.senderId]);
+  await f.start();
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','prog-msg','--request-id','prog-req','--reply-window','{"seconds":60,"maxExtensions":3,"maxTotalSeconds":180}'],'long job');
+
+  const env={...process.env,CURSOR_CONVERSATION_ID:ctxA};
+  const waiter=spawn(process.execPath,[cli,'grok','wait','--request-id','prog-req','--follow-message','prog-msg','--stream-progress','--timeout','10','--json','--config',f.configPath],{env});
+  let waitOut='',waitErr='';
+  waiter.stdout.on('data',d=>{waitOut+=d;});
+  waiter.stderr.on('data',d=>{waitErr+=d;});
+
+  const claimFile=path.join(f.root,'prog-claim.json');
+  await f.run(ctxB,['grok','claim','--message-id','prog-msg','--claim-id','prog-c','--claim-file',claimFile]);
+  await f.run(ctxB,['grok','progress','--message-id','prog-msg','--claim-file',claimFile,'--event-id','p1','--seconds','30'],'step 1');
+  // Wait for first streamed NDJSON progress line
+  for(let i=0;i<50&&!waitOut.includes('"p1"');i++)await new Promise(r=>setTimeout(r,20));
+  assert.ok(waitOut.includes('"p1"'),`expected streamed p1, got stdout=${waitOut} stderr=${waitErr}`);
+  assert.equal(waiter.exitCode,null,'wait must remain running after progress receipt');
+
+  // Duplicate eventId is accepted but never emitted twice by stream-progress
+  await f.run(ctxB,['grok','progress','--message-id','prog-msg','--claim-file',claimFile,'--event-id','p1','--seconds','30'],'step 1');
+  await f.run(ctxB,['grok','progress','--message-id','prog-msg','--claim-file',claimFile,'--event-id','p2','--seconds','30'],'step 2');
+  for(let i=0;i<50&&!waitOut.includes('"p2"');i++)await new Promise(r=>setTimeout(r,20));
+
+  // Read-only status exposes progress & limits to both sender and recipient; replies --include-progress returns progress without consuming
+  const senderStatus=await f.run(ctxA,['grok','status','--message-id','prog-msg']);
+  const workerStatus=await f.run(ctxB,['grok','status','--message-id','prog-msg']);
+  assert.deepEqual(senderStatus.progress.map(p=>p.eventId),['p1','p2']);
+  assert.deepEqual(workerStatus.progress.map(p=>p.eventId),['p1','p2']);
+  assert.equal(senderStatus.watchLimits.extensionsUsed,2);
+  const preReplyView=await f.run(ctxA,['grok','replies','--request-id','prog-req','--include-progress']);
+  assert.deepEqual(preReplyView.replies,[]);
+  assert.deepEqual(preReplyView.progress.map(p=>p.note),['step 1','step 2']);
+
+  // client.listReplies({ includeProgress: true }) keeps array JSON shape via non-enumerable .progress
+  const ba=f.binding('alice'),clientA=f.client(a.senderId);
+  await clientA.exchangeInteractiveSession({bindingId:ba.bindingId,sessionId:ba.sessionId,generation:ba.generation,secret:ba.secret,contextHash:ba.contextHash});
+  const arrReplies=await clientA.listReplies({requestId:'prog-req',inReplyTo:'prog-msg',includeProgress:true});
+  assert.equal(Array.isArray(arrReplies),true);
+  assert.equal(arrReplies.length,0);
+  assert.equal(JSON.stringify(arrReplies),'[]');
+  assert.deepEqual(arrReplies.progress.map(p=>p.eventId),['p1','p2']);
+
+  // Older client mode (no --include-progress) returns only replies
+  const legacyReplies=await f.run(ctxA,['grok','replies','--request-id','prog-req']);
+  assert.equal(legacyReplies.progress,undefined);
+
+  await f.run(ctxB,['grok','reply','--message-id','prog-msg','--claim-file',claimFile,'--reply-id','prog-final'],'all done');
+  const exitCode=await new Promise(resolve=>waiter.once('close',resolve));
+  assert.equal(exitCode,0,`wait failed stderr=${waitErr}`);
+  const lines=waitOut.trim().split('\n').map(l=>JSON.parse(l));
+  assert.deepEqual(lines.filter(l=>l.state==='progress').map(l=>l.eventId),['p1','p2']);
+  assert.equal(lines.at(-1).state,'ready');
+  assert.deepEqual(lines.at(-1).progressIds,['p1','p2']);
+  assert.deepEqual(lines.at(-1).replyIds,['prog-final']);
+
+  // wait was read-only: final reply is still unconsumed and retrievable via grok replies --include-progress
+  const finalView=await f.run(ctxA,['grok','replies','--request-id','prog-req','--include-progress']);
+  assert.deepEqual(finalView.replies.map(r=>r.text),['all done']);
+  assert.deepEqual(finalView.progress.map(p=>p.eventId),['p1','p2']);
+
+  // Default wait without --stream-progress remains single-JSON compatible
+  const legacyWait=await f.run(ctxA,['grok','wait','--request-id','prog-req','--follow-message','prog-msg','--timeout','5','--json']);
+  assert.equal(legacyWait.state,'ready');
+
+  // client.waitForReply({ includeProgress, onProgress }) delivers progress callback and final reply
+  const streamed=[];
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','prog-msg-2','--request-id','prog-req-2','--reply-window','{"seconds":60}'],'job 2');
+  const claimFile2=path.join(f.root,'prog-claim-2.json');
+  await f.run(ctxB,['grok','claim','--message-id','prog-msg-2','--claim-id','prog-c-2','--claim-file',claimFile2]);
+  const waitReplyPromise=clientA.waitForReply({requestId:'prog-req-2',inReplyTo:'prog-msg-2',includeProgress:true,timeoutMs:5000,pollIntervalMs:50,onProgress:e=>streamed.push(e.eventId)});
+  await f.run(ctxB,['grok','progress','--message-id','prog-msg-2','--claim-file',claimFile2,'--event-id','cb-1','--seconds','30'],'via client');
+  for(let i=0;i<50&&!streamed.includes('cb-1');i++)await new Promise(r=>setTimeout(r,20));
+  await f.run(ctxB,['grok','reply','--message-id','prog-msg-2','--claim-file',claimFile2,'--reply-id','rep-2'],'done 2');
+  const awaitedReply=await waitReplyPromise;
+  assert.deepEqual(streamed,['cb-1']);
+  assert.equal(awaitedReply.text,'done 2');
+
+  // Consuming final reply retires default progress view while preserving --history
+  await f.run(ctxA,['grok','consume','--message-id',finalView.replies[0].messageId]);
+  const retiredDefault=await f.run(ctxA,['grok','status','--message-id','prog-msg']);
+  assert.equal(retiredDefault.progress,undefined);
+  const retiredHistory=await f.run(ctxA,['grok','status','--message-id','prog-msg','--history']);
+  assert.equal(retiredHistory.progress.length,2);
+ }finally{await f.close();}
+});
+
+test('Stage 3 & compat: configurable replyWindow limits clamp/enforce maxExtensions & maxTotalSeconds, reject expired progress, and validate CLI flags',async()=>{
+ const {createLocalMessagingJournal}=await import('../src/local-messaging-journal.mjs');
+ const stateRoot=fs.mkdtempSync('/private/tmp/tri-limits-');
+ let journal=createLocalMessagingJournal({stateRoot});
+ try{
+  // 1. Oversized limits clamp to broker limits (600, 10, 1800)
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'big',messageId:'lim-big',requestId:'req-big',
+   metadata:{_loopDepth:1,replyWindow:{seconds:9999,maxExtensions:99,maxTotalSeconds:9999}}},{now:1000});
+  assert.deepEqual(journal.replyWindowLimits(await journal.getRecord('lim-big')),{
+   initialSeconds:600,maxExtensions:10,maxTotalSeconds:1800,extensionsUsed:0,extensionsRemaining:10
+  });
+
+  // 2. maxTotalSeconds < seconds clamps initialSeconds and deadline (starting on pickup)
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'tight',messageId:'lim-tight',requestId:'req-tight',
+   metadata:{_loopDepth:1,replyWindow:{seconds:300,maxExtensions:1,maxTotalSeconds:45}}},{now:1000});
+  const tightLimits=journal.replyWindowLimits(await journal.getRecord('lim-tight'));
+  assert.equal(tightLimits.initialSeconds,45);
+  assert.equal(tightLimits.maxTotalSeconds,45);
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('lim-tight')),null);
+  await journal.claimInboxMessage({messageId:'lim-tight',claimId:'ct',requester:'bob',sessionId:'s1',generation:1,now:1000});
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('lim-tight')),46000);
+
+  // 3. Enforce maxExtensions, maxTotalSeconds ceiling, and expiration
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'bounded',messageId:'lim-bnd',requestId:'req-bnd',
+   metadata:{_loopDepth:1,replyWindow:{seconds:10,maxExtensions:1,maxTotalSeconds:15}}},{now:1000});
+  const claim=await journal.claimInboxMessage({messageId:'lim-bnd',claimId:'c1',requester:'bob',sessionId:'s1',generation:1,now:2000});
+  const p1=await journal.recordInteractiveProgress({messageId:'lim-bnd',claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'ext 1',now:10000,eventId:'e1',seconds:10});
+  assert.equal(p1.watchDeadline,17000,'capped at pickup(2000) + maxTotalSeconds(15s)');
+  await assert.rejects(()=>journal.recordInteractiveProgress({messageId:'lim-bnd',claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'ext 2',now:11000,eventId:'e2',seconds:5}),e=>e.code==='progress_limit');
+  await assert.rejects(()=>journal.recordInteractiveProgress({messageId:'lim-bnd',claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'late close',now:17000,eventId:'e3',seconds:0}),e=>e.code==='window_closed');
+  await journal.recordInteractiveReply({messageId:'lim-bnd',claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'still completes',replyId:'rep-bnd',now:18000});
+  assert.deepEqual((await journal.listReplies({requester:'alice',requestId:'req-bnd'})).map(r=>r.text),['still completes']);
+ }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+
+ const f=fixture();try{
+  const a=f.pair('alice',ctxA,[],[grokId(ctxB)]),b=f.pair('bob',ctxB,[a.senderId],[]);
+  await f.start();
+  await errorCode(f.run(ctxA,['grok','status','--stream-progress']),'invalid_arguments');
+  await errorCode(f.run(ctxA,['grok','send','--to',b.senderId,'--include-progress','--message-id','m1','--request-id','r1'],'hi'),'invalid_arguments');
+  await errorCode(f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','m2','--request-id','r2','--reply-window','{"maxExtensions":-1}'],'hi'),'invalid_arguments');
+  await f.run(ctxA,['grok','send','--to',b.senderId,'--message-id','m3','--request-id','r3','--reply-window','{"seconds":60}'],'hi');
+  const claimFile=path.join(f.root,'c3.json');
+  await f.run(ctxB,['grok','claim','--message-id','m3','--claim-id','c3','--claim-file',claimFile]);
+  await errorCode(f.run(ctxB,['grok','reply','--message-id','m3','--claim-file',claimFile,'--reply-id','rep3','--reply-window','{"seconds":30,"maxExtensions":1}'],'nope'),'invalid_arguments');
+ }finally{await f.close();}
 });

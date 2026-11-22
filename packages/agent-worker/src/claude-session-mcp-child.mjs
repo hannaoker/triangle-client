@@ -26,12 +26,13 @@ import {
   STATUS_TOOL_DESCRIPTION,
   LIST_SESSIONS_TOOL_DESCRIPTION,
   LIST_RECIPIENTS_TOOL_DESCRIPTION,
-  SEND_TOOL_DESCRIPTION, WINDOW_REQUEST, WINDOW_ACK, PROGRESS_TOOL, windowEnvelope,
+  SEND_TOOL_DESCRIPTION, WINDOW_REQUEST, WINDOW_ACK, PROGRESS_TOOL, CLOSE_WATCH_TOOL, GET_REPLIES_TOOL, windowEnvelope,
   SEND_TOOL_ARGUMENT_DESCRIPTIONS,
 } from "./local-messaging-protocol.mjs";
 
 export const CLAUDE_MCP_TOOLS = [
   PROGRESS_TOOL,
+  CLOSE_WATCH_TOOL,
   {
     name: "triangle_list_sessions",
     description: LIST_SESSIONS_TOOL_DESCRIPTION,
@@ -111,17 +112,7 @@ export const CLAUDE_MCP_TOOLS = [
       properties: {},
     },
   },
-  {
-    name: "triangle_get_replies",
-    description: "Retrieve pending replies from local agents for this session.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        requestId: { type: "string", description: "Filter by correlation request ID" },
-        inReplyTo: { type: "string", description: "Filter by inReplyTo message ID" },
-      },
-    },
-  },
+  GET_REPLIES_TOOL,
   {
     name: "triangle_consume_reply",
     description: "Explicitly mark a retrieved reply as consumed by the caller.",
@@ -167,6 +158,8 @@ async function runSessionTool({ client, credential, name, args, generation }) {
     }
     case "triangle_report_progress":
       return client.reportProgress(args, { credential });
+    case "triangle_close_watch":
+      return client.closeWatch(args, { credential });
     case "triangle_reply_message": {
       if (typeof args.text !== "string" || args.text.length > MAX_FIELD_STRING_LENGTH) {
         throw new Error(`Tool argument 'text' exceeds maximum limit of ${MAX_FIELD_STRING_LENGTH}`);
@@ -203,8 +196,15 @@ async function runSessionTool({ client, credential, name, args, generation }) {
       return { sessions: await client.listSessions({ credential }) };
     case "triangle_list_recipients":
       return await client.discoverRecipientDetails({ credential });
-    case "triangle_get_replies":
-      return { replies: await client.listReplies({ requestId: args.requestId, inReplyTo: args.inReplyTo }, { credential }) };
+    case "triangle_get_replies": {
+      const includeProgress = args.includeProgress === true;
+      const replies = await client.listReplies({
+        requestId: args.requestId,
+        inReplyTo: args.inReplyTo,
+        ...(includeProgress ? { includeProgress: true } : {}),
+      }, { credential });
+      return includeProgress ? { replies: [...replies], progress: replies.progress ?? [] } : { replies };
+    }
     case "triangle_consume_reply":
       return await client.consumeReply({ messageId: args.messageId }, { credential });
     case "triangle_get_status":

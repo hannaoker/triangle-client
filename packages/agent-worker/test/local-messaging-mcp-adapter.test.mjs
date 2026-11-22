@@ -392,3 +392,98 @@ test("an older server without session_status makes the no-argument status fail v
   assert.equal(res.result.isError, true);
   assert.doesNotMatch(res.result.content[0].text, /journal/);
 });
+
+test("triangle_close_watch forwards arguments and credential to client.closeWatch and surfaces errors", async () => {
+  let seen;
+  const handler = createLocalMessagingMcpHandler({
+    client: {
+      closeWatch: async (args, options) => {
+        seen = { args, options };
+        return { closed: true, messageId: args.messageId, requestId: args.requestId, watchDeadline: 5000 };
+      },
+    },
+    turnCredential: "mock-token",
+  });
+  const listed = await handler.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  assert.ok(listed.result.tools.some((t) => t.name === "triangle_close_watch"));
+
+  const ok = await handler.handleRequest({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "triangle_close_watch",
+      arguments: { messageId: "msg-1", requestId: "req-1", eventId: "ev-1", text: "stop waiting" },
+    },
+  });
+  assert.equal(ok.result.isError, false, JSON.stringify(ok));
+  assert.deepEqual(seen, {
+    args: { messageId: "msg-1", requestId: "req-1", eventId: "ev-1", text: "stop waiting" },
+    options: { credential: "mock-token" },
+  });
+  assert.equal(JSON.parse(ok.result.content[0].text).closed, true);
+
+  const failing = createLocalMessagingMcpHandler({
+    client: {
+      closeWatch: async () => {
+        throw Object.assign(new Error("Watch already closed"), { code: "window_closed" });
+      },
+    },
+    turnCredential: "mock-token",
+  });
+  const errRes = await failing.handleRequest({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "triangle_close_watch", arguments: { messageId: "msg-1", requestId: "req-1", eventId: "ev-2" } },
+  });
+  assert.equal(errRes.result.isError, true);
+});
+
+test("triangle_get_replies forwards includeProgress and preserves backward-compatible output when omitted", async () => {
+  const calls = [];
+  const repliesWithProgress = [{ messageId: "rep-1", text: "done" }];
+  Object.defineProperty(repliesWithProgress, "progress", {
+    value: [{ eventId: "p-1", note: "halfway", watchDeadline: 2000 }],
+    enumerable: false,
+  });
+  const handler = createLocalMessagingMcpHandler({
+    client: {
+      listReplies: async (params, options) => {
+        calls.push({ params, options });
+        return params?.includeProgress ? repliesWithProgress : [{ messageId: "rep-1", text: "done" }];
+      },
+    },
+    turnCredential: "mock-token",
+  });
+  const listed = await handler.handleRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const getRepliesTool = listed.result.tools.find((t) => t.name === "triangle_get_replies");
+  assert.equal(getRepliesTool.inputSchema.properties.includeProgress.type, "boolean");
+
+  const legacy = await handler.handleRequest({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "triangle_get_replies", arguments: { requestId: "req-1" } },
+  });
+  assert.equal(legacy.result.isError, false);
+  const legacyJson = JSON.parse(legacy.result.content[0].text);
+  assert.deepEqual(legacyJson, { replies: [{ messageId: "rep-1", text: "done" }] });
+
+  const withProgress = await handler.handleRequest({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "triangle_get_replies", arguments: { requestId: "req-1", includeProgress: true } },
+  });
+  assert.equal(withProgress.result.isError, false);
+  const withProgressJson = JSON.parse(withProgress.result.content[0].text);
+  assert.deepEqual(withProgressJson, {
+    replies: [{ messageId: "rep-1", text: "done" }],
+    progress: [{ eventId: "p-1", note: "halfway", watchDeadline: 2000 }],
+  });
+  assert.deepEqual(calls, [
+    { params: { requestId: "req-1", inReplyTo: undefined }, options: { credential: "mock-token" } },
+    { params: { requestId: "req-1", inReplyTo: undefined, includeProgress: true }, options: { credential: "mock-token" } },
+  ]);
+});
