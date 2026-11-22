@@ -280,15 +280,15 @@ test("v12 adds only the Grok participant module to every exact artifact set", ()
  assert.match(swift,/if manifestVersion >= 12 \{\s*artifacts\.formUnion\(\["packages\/agent-worker\/src\/grok-local-session\.mjs"\]\)/);
 });
 
-test("v13 adds the unified router closure (6 files) to every exact artifact set", () => {
+test("v13-v16 preserve earlier exact artifact sets and add router, reply identity, chat mapping, and Antigravity session modules", () => {
   const code = [
     "import importlib.util,json,sys",
     "s=importlib.util.spec_from_file_location('twi',sys.argv[1])",
     "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)",
-    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13,14,15]} for a in ['codex','hermes','antigravity','supervisor']}}))",
+    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13,14,15,16]} for a in ['codex','hermes','antigravity','supervisor']}}))",
   ].join("\n");
   const contract = JSON.parse(execFileSync(python, ["-c", code, installer], { encoding: "utf8" }));
-  assert.equal(contract.version, 15);
+  assert.equal(contract.version, 16);
   const additions = [
     "unified-router",
     "recipient-resolver",
@@ -309,10 +309,15 @@ test("v13 adds the unified router closure (6 files) to every exact artifact set"
     assert.deepEqual(versions[15].filter(p => !versions[14].includes(p)).sort(), r3.sort(), agent);
     assert.deepEqual(versions[14].filter(p => !versions[15].includes(p)), [], agent);
     assert.equal(versions[15].length, agent === "supervisor" ? 91 : 93, agent);
+    const r4 = ["antigravity-local-session"].map(name => `packages/agent-worker/src/${name}.mjs`);
+    assert.deepEqual(versions[16].filter(p => !versions[15].includes(p)).sort(), r4.sort(), agent);
+    assert.deepEqual(versions[15].filter(p => !versions[16].includes(p)), [], agent);
+    assert.equal(versions[16].length, agent === "supervisor" ? 92 : 94, agent);
   }
   const swift = readFileSync(path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"), "utf8");
   assert.match(swift, /if manifestVersion >= 13 \{\s*artifacts\.formUnion\(\[/);
   assert.match(swift, /if manifestVersion >= 15 \{\s*artifacts\.formUnion\(\[/);
+  assert.match(swift, /if manifestVersion >= 16 \{\s*artifacts\.formUnion\(\[/);
 });
 
 test('runtime staging refuses Node with glob support but unavailable unflagged SQLite', () => {

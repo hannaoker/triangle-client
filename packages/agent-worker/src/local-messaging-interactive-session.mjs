@@ -60,6 +60,7 @@ export function validateInteractiveIntegration(file) {
 export function createInteractiveSessionBroker({
   integrationPath,
   recipients = [],
+  resolveRecipients = null,
   issue,
   readIntegration = validateInteractiveIntegration,
 }) {
@@ -68,6 +69,9 @@ export function createInteractiveSessionBroker({
   }
   if (!Array.isArray(recipients) || recipients.some((r) => typeof r !== "string")) {
     throw coded("invalid_broker_options", "recipients must be an array of strings");
+  }
+  if (resolveRecipients !== null && typeof resolveRecipients !== "function") {
+    throw coded("invalid_broker_options", "resolveRecipients must be a function");
   }
   if (typeof issue !== "function") {
     throw coded("invalid_broker_options", "issue function is required");
@@ -141,11 +145,11 @@ export function createInteractiveSessionBroker({
     return current;
   }
 
-  function issueGrant(current) {
+  function issueGrant(current, grantedRecipients = recipients) {
     const credential = issue(current.senderId, {
       turnId: randomUUID(),
       ttlMs: 300000,
-      allowedRecipients: [...recipients],
+      allowedRecipients: [...grantedRecipients],
       sessionId: current.sessionId,
       generation: current.generation,
       bindingId: current.bindingId,
@@ -177,7 +181,8 @@ export function createInteractiveSessionBroker({
         throw err;
       }
       successLimiter.checkAndConsume("interactive");
-      return issueGrant(current);
+      if (!resolveRecipients) return issueGrant(current);
+      return Promise.resolve(resolveRecipients(current)).then((resolved) => issueGrant(current, resolved));
     },
   });
 }
@@ -362,6 +367,7 @@ export function createWorkspaceSessionBroker({policyPath,discoveryPath,journal,i
   // The same question for "a chat of this harness" while no chat is pinned yet: the owner's sender list for the harness, or a class grant. An
   // exact pair names one session and cannot answer it.
   async mayMessageHarness(sender,harness){try{if(harness!=='claude'&&harness!=='codex')return false;const c=policy();return mayReceive(c,sender,{id:null,harness},await classSenderHarness(c,sender))===true;}catch{return false;}},
+  async sessionHarness(id){try{if(typeof id!=='string'||!id.startsWith('session-'))return null;const c=policy(),r=await journal.getDiscoveredSession({id,installationId:c.installationId,workspace:c.workspace});return r?harnessOfRow(r):null;}catch{return null;}},
   // One policy read, one directory listing and one attachment listing however many sessions there are.
   async listFor(reader){let result=[];try{
     const c=policy(),readerHarness=await classSenderHarness(c,reader);

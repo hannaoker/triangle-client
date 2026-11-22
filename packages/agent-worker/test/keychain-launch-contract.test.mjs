@@ -56,6 +56,7 @@ const LOCAL_MESSAGING_RELATIVES = [
   "packages/agent-worker/src/local-messaging-host.mjs",
   "packages/agent-worker/src/local-messaging-cli.mjs",
   "packages/agent-worker/src/local-chat-mapping.mjs",
+  "packages/agent-worker/src/antigravity-local-session.mjs",
 ];
 function mode(file) { return fs.statSync(file).mode & 0o777; }
 
@@ -157,7 +158,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 15);
+  assert.equal(manifest.version, 16);
   for (const relative of WORKLOAD_CORE_RELATIVES) assert.ok(manifest.artifacts[relative], relative);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
@@ -369,7 +370,7 @@ test("prepare-runtime upgrades to manifest v14 while v6 without ownership or wor
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v7.version, 15);
+  assert.equal(v7.version, 16);
   assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
@@ -427,7 +428,7 @@ test("prepare-runtime upgrades to manifest v14 while v6 without ownership or wor
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 15);
+  assert.equal(after.version, 16);
   for (const relative of ownershipRelatives) {
     assert.ok(after.artifacts[relative]);
   }
