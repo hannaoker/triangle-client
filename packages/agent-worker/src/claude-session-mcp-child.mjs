@@ -26,11 +26,12 @@ import {
   STATUS_TOOL_DESCRIPTION,
   LIST_SESSIONS_TOOL_DESCRIPTION,
   LIST_RECIPIENTS_TOOL_DESCRIPTION,
-  SEND_TOOL_DESCRIPTION, WINDOW_REQUEST, WINDOW_ACK, windowEnvelope,
+  SEND_TOOL_DESCRIPTION, WINDOW_REQUEST, WINDOW_ACK, PROGRESS_TOOL, windowEnvelope,
   SEND_TOOL_ARGUMENT_DESCRIPTIONS,
 } from "./local-messaging-protocol.mjs";
 
 export const CLAUDE_MCP_TOOLS = [
+  PROGRESS_TOOL,
   {
     name: "triangle_list_sessions",
     description: LIST_SESSIONS_TOOL_DESCRIPTION,
@@ -164,6 +165,8 @@ async function runSessionTool({ client, credential, name, args, generation }) {
         throw failure;
       }
     }
+    case "triangle_report_progress":
+      return client.reportProgress(args, { credential });
     case "triangle_reply_message": {
       if (typeof args.text !== "string" || args.text.length > MAX_FIELD_STRING_LENGTH) {
         throw new Error(`Tool argument 'text' exceeds maximum limit of ${MAX_FIELD_STRING_LENGTH}`);

@@ -39,21 +39,31 @@ Wait returns IDs and counts and leaves claim, reply and consumption to their exi
 
 ## Extend a watch while work is underway
 
-A paired Grok agent sending a root task can opt into automatic extensions while it waits for the final reply. Give the original task a positive `replyWindow` and retain both IDs. The initial deadline starts at broker receipt. Each command below runs in the indicated agent's own paired context.
+Use `send --watch` (or `grok send --watch`) for a substantive question. It requests 120 seconds. To choose another duration, use `--reply-window '{"seconds":300}'`. A send without either flag requests no window. For new interactive root tasks, the broker starts the clock when the recipient's inbox first returns the task or when the recipient successfully claims it directly. Rereading, retrying a claim, and restarting the broker preserve that first timestamp. Previously stored tasks keep their admission-time deadlines.
+
+After claiming the task, the worker can report progress using the same private claim file as its final reply. On a bound or attached MCP session, call `triangle_report_progress` with the original `messageId`, `claimToken`, `eventId`, `seconds`, and a short `text` note. A stable event ID names one update within the original task. Exact retries return the first receipt. The broker authenticates the claim, orders the updates, and saves them with the task.
 
 ```sh
-# Requester, after sending the task
+# Requester: watch for the final answer.
 triangle-local grok wait --request-id "$request_id" --follow-message "$task_id" --json
 
-# Worker, before the current watch deadline
-printf '%s' 'Tests are still running' | triangle-local grok send --to "$requester" \
-  --request-id "$request_id" --in-reply-to "$task_id" --message-id "$progress_id" \
-  --reply-window '{"seconds":300}'
+# Paired Grok worker: extend while tests are running.
+printf '%s' 'Running the integration tests' | triangle-local grok progress \
+  --message-id "$task_id" --claim-file "$claim_file" --event-id tests --seconds 120
+
+# Bound desktop worker: the equivalent command takes --text or --text-file.
+triangle-local progress --message-id "$task_id" --claim-file "$claim_file" \
+  --event-id tests --seconds 120 --text 'Running the integration tests'
+
+# Requester: inspect receipts at any point.
+triangle-local grok status --message-id "$task_id"
 ```
 
-The progress message goes through normal send admission and remains in the requester's inbox. Use a fresh progress ID for each update and reuse it on retry. Only a depth-two update from the task's recipient back to its sender with both matching IDs can extend this wait. A positive update gives up to 600 seconds from broker receipt, with a 1,800-second ceiling from the original send. Zero closes the watch. A missed deadline stays closed. The worker finishes with a normal reply against its original claim.
+Progress leaves the worker's task open, creates no inbox item, and requires no acknowledgment. The wait keeps polling for the final reply. Its JSON summary includes the observed `progressIds` alongside `replyIds`. Status includes the note, sequence, and broker deadline for each receipt. Consuming the final reply hides receipts from normal status. Use `status --message-id "$task_id" --history` while the original record is retained.
 
-Each foreground call still ends within its own timeout budget. On exit 3, compare the JSON `watchDeadline` (Unix milliseconds) with the current time. If time remains, repeat the same wait. On a later live turn, repeating the command checks for an unconsumed final reply even after expiry. A watch timeout leaves the task and claim subject to their usual lease and recovery rules. An idle pull-only agent still needs a new turn to read its mailbox.
+A task accepts up to three extensions of 1–300 seconds each. Receipts can extend the watch up to ten minutes from the watch start. A worker can also close the watch with a new event ID and `--seconds 0`. Closure, expiry and a turn ending all leave the task available under its normal claim lease. The worker can still send its final reply. A replay never reopens a closed watch. Older peers can still use a correlated send with a reply window under the existing bounds. That older operation creates an inbox item for the requester.
+
+Each foreground wait has its own timeout budget of at most 760 seconds. While waiting for pickup, the caller still spends only its foreground timeout budget. A timeout with `watchDeadline: null` means the broker has not yet returned the task to the receiver or accepted its claim. If the caller wants to keep waiting, it can repeat the command with the same IDs. Once the watch has started, a chunk ending before its deadline can also be repeated. To retrieve a late final reply, use `grok replies --request-id "$request_id"`. To start a fresh bounded poll for that reply, use `grok wait --request-id "$request_id" --timeout 120` without `--follow-message`.
 
 ## Local pilot checklist
 

@@ -13,6 +13,20 @@ export const WINDOW_REQUEST = {
   description: "Ask a live peer to watch briefly. Empty requests its default; zero ends the window.",
   properties: { seconds: { type: "integer" }, reason: reasonField },
 };
+export const PROGRESS_TOOL = {
+  name: "triangle_report_progress",
+  description: "Extend or close the watch on a task you have claimed. Zero seconds closes the watch. Send the final answer separately.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    required: ["messageId", "claimToken", "eventId", "seconds", "text"],
+    properties: {
+      messageId: {type:"string"}, claimToken: {type:"string"},
+      eventId: {type:"string", description:"Stable ID for this update within the task. Reuse on retry."},
+      seconds: {type:"integer", minimum:0, maximum:300},
+      text: {type:"string", description:"Short progress note, at most 512 UTF-8 bytes."},
+    },
+  },
+};
 export const WINDOW_ACK = {
   type: "object", additionalProperties: false, required: ["acceptedSeconds"],
   properties: { acceptedSeconds: { type: "integer", minimum: 0, maximum: 600 },

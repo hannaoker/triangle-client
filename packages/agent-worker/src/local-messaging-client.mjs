@@ -297,6 +297,9 @@ export function createLocalControlClient({
     async claimInboxMessage({ messageId, claimId } = {}, options = {}) {
       return await callRpc("claim_inbox_message", { messageId, claimId }, options);
     },
+    async reportProgress({messageId, claimToken, eventId, seconds, text}, options = {}) {
+      return callRpc("report_progress", {messageId, claimToken, eventId, seconds, text}, options);
+    },
     async sendReply({ messageId, claimToken, text, replyId = null, metadata = {} } = {}, options = {}) {
       return await callRpc("send_reply", { messageId, claimToken, text, replyId, metadata }, options);
     },
@@ -349,8 +352,8 @@ export function createLocalControlClient({
       }, options);
     },
 
-    async getMessageStatus({ messageId, watchRequestId }, options = {}) {
-      return await callRpc("get_message_status", { messageId, watchRequestId }, options);
+    async getMessageStatus({ messageId, watchRequestId, progressHistory }, options = {}) {
+      return await callRpc("get_message_status", { messageId, watchRequestId, progressHistory }, options);
     },
 
     async listReplies({ requestId = null, inReplyTo = null, limit = 50 } = {}, options = {}) {
