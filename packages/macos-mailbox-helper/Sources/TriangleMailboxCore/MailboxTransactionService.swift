@@ -503,8 +503,17 @@ public struct MailboxTransactionService: Sendable {
         if let deliveryID, deliveryID != open.deliveryID {
             throw MailboxTransactionServiceError.unrelatedAcknowledgement
         }
-        // Receipt-only deliveries are claimed and acknowledged atomically in
-        // claimNext. A general ack requires a verified committed reply.
+        // Receipt-only deliveries claimed explicitly via MCP keep replyRequired == false;
+        // settle them through the same receipt-only ack path instead of requiring a reply.
+        if open.state == .claimed && open.replyRequired == false {
+            _ = try await settleReceiptOnly(
+                instanceID: instanceID,
+                open: open,
+                quarantined: try store.listQuarantined(instanceID: instanceID)
+            )
+            return
+        }
+        // Actionable deliveries require a verified committed reply before acknowledgement.
         guard open.state == .replied, open.replyEventID != nil else {
             throw MailboxTransactionServiceError.invalidState
         }

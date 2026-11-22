@@ -43,6 +43,7 @@ public enum MailboxTransactionContractCases {
         .init(name: "MCP rewriter ignores model claim and reply IDs", run: mcpRewriterIgnoresModelIDs),
         .init(name: "MCP rewriter resolves room_id from pending list", run: mcpRewriterResolvesRoomFromPendingList),
         .init(name: "MCP rewriter handles standalone ack when no transaction open", run: mcpRewriterStandaloneAck),
+        .init(name: "MCP rewriter settles claimed receipt-only delivery on ack", run: mcpRewriterAcksClaimedReceiptOnlyDelivery),
         .init(name: "transaction CLI parser surface", run: transactionCommandParser),
         .init(name: "no message content in storage or status", run: noContentInStorage),
     ]
@@ -1227,6 +1228,63 @@ public enum MailboxTransactionContractCases {
         try expect(respResult?["acknowledged"] as? Bool == true, "ack response missing acknowledged: true")
         try expect(try store.readOpen(instanceID: instanceID) == nil, "open transaction was not cleared after ack")
         try expect(transport.acks == [42], "transport ack was not recorded")
+    }
+
+    public static func mcpRewriterAcksClaimedReceiptOnlyDelivery() async throws {
+        let store = InMemoryMailboxTransactionStore()
+        let transport = RecordingMailboxTransactionTransport()
+        transport.pendingCandidates = [
+            try MailboxDeliveryCandidate(
+                deliveryID: 85,
+                roomID: room,
+                eventID: event,
+                roomSequence: 2,
+                replyRequired: false
+            ),
+        ]
+        let instanceID = ClientInstanceID.derive(profile: profile)
+        let rewriter = MCPTransactionRewriter(
+            instanceID: instanceID,
+            protocolOwnership: .selfServeDrain,
+            store: store,
+            transport: transport
+        )
+
+        let claimRaw = Data(#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"mesh.mailbox.claim","arguments":{"delivery_id":85}}}"#.utf8)
+        let claimOutcome = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.claim",
+                "arguments": ["delivery_id": 85],
+            ],
+            raw: claimRaw
+        )
+        guard case .respond = claimOutcome else {
+            throw ContractFailure("receipt-only claim did not respond")
+        }
+        try expect(try store.readOpen(instanceID: instanceID)?.replyRequired == false, "open transaction lost replyRequired: false")
+
+        let claimID = MailboxTransactionIdentifier.claimId(instanceID: instanceID, deliveryID: 85)
+        let ackRaw = Data(#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"mesh.mailbox.ack","arguments":{"delivery_ids":[85],"claims":[{"delivery_id":85,"claim_id":"\#(claimID)"}]}}}"#.utf8)
+        let ackOutcome = await rewriter.rewriteOutgoing(
+            requestMethod: "tools/call",
+            params: [
+                "name": "mesh.mailbox.ack",
+                "arguments": [
+                    "delivery_ids": [85],
+                    "claims": [["delivery_id": 85, "claim_id": claimID]],
+                ],
+            ],
+            raw: ackRaw
+        )
+        guard case .respond(let respData) = ackOutcome else {
+            throw ContractFailure("receipt-only ack did not respond cleanly")
+        }
+        let respObj = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
+        let respResult = respObj?["result"] as? [String: Any]
+        try expect(respResult?["acknowledged"] as? Bool == true, "receipt-only ack response missing acknowledged: true")
+        try expect(try store.readOpen(instanceID: instanceID) == nil, "open receipt transaction survived ack")
+        try expect(transport.acks == [85], "transport ack was not issued for receipt-only delivery")
     }
 
     public static func transactionCommandParser() async throws {
