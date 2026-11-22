@@ -861,6 +861,7 @@ export function createLocalControlServer({
             if (record.sender !== senderId || record.requestId !== params.watchRequestId || !record.phase)
               throw coded("invalid_request", "Watch requires your original request and message IDs");
             rawStatus.watchDeadline = journal.replyWindowDeadline(record);
+            if (record.watchStartedAt === null) rawStatus.watchPending = true;
           }
           const decoratedStatus = activeRouter.decorateStatus(rawStatus, { record });
           const resp = createSuccessResponse(

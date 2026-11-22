@@ -183,10 +183,10 @@ export async function waitForMatch(plan, client, grant, {now=Date.now, sleep=ms=
     if (plan.mode === 'request') {
       if (plan.followMessage) {
         const status = await client.getMessageStatus({messageId:plan.followMessage,watchRequestId:plan.requestId},{...rpc,timeout});
-        if (!Number.isSafeInteger(status.watchDeadline)) throw coded('invalid_request','An updated broker and a root request with a positive reply window are required');
+        if (!(status.watchPending === true && status.watchDeadline === null) && !Number.isSafeInteger(status.watchDeadline)) throw coded('invalid_request','An updated broker and a root request with a positive reply window are required');
         for (const event of status.progress ?? []) progressIds.add(event.eventId);
         watchDeadline = status.watchDeadline;
-        deadline = Math.min(chunkEnd, watchDeadline);
+        deadline = watchDeadline === null ? chunkEnd : Math.min(chunkEnd, watchDeadline);
       }
       const replies = await client.listReplies({requestId:plan.requestId,...(plan.followMessage && {inReplyTo:plan.followMessage}),limit:WAIT_LIST_LIMIT},{...rpc,timeout:budget()});
       ids = replies.map(r=>r.messageId); more = replies.length >= WAIT_LIST_LIMIT;
@@ -214,6 +214,7 @@ function waitSummary(plan, outcome) {
 }
 function waitLine(plan, outcome) {
   const what = plan.mode === 'request' ? `repl${outcome.ids.length===1?'y':'ies'} for request ${JSON.stringify(plan.requestId)}` : `inbox message${outcome.ids.length===1?'':'s'}`;
+  if (outcome.state === 'timeout' && plan.followMessage && outcome.watchDeadline === null) return 'grok wait: wait budget elapsed before receiver pickup';
   if (outcome.state === 'timeout' && plan.followMessage) return `grok wait: no final reply yet for ${JSON.stringify(plan.followMessage)}; watch deadline ${new Date(outcome.watchDeadline).toISOString()}`;
   if (outcome.state === 'timeout') return `grok wait: timeout after ${plan.timeoutMs/1000}s; no ${plan.mode === 'request' ? `unconsumed reply for request ${JSON.stringify(plan.requestId)}` : 'unclaimed inbox message'}`;
   return `grok wait: ready; ${outcome.ids.length}${outcome.more?'+':''} ${what}: ${outcome.ids.map(id=>JSON.stringify(id)).join(', ')}`;

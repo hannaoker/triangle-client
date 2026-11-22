@@ -386,6 +386,18 @@ function isRouteIntentMatch(existing, incomingPrincipal, incomingVia) {
   return storedVia === normIncomingVia;
 }
 
+// NULL keeps admission-time semantics for pre-upgrade rows and noninteractive work.
+const WATCH_AWAITING_PICKUP = -1;
+
+function replyWindowSeconds(metadata) {
+  const window = metadata?.replyWindow;
+  if (!window || typeof window !== "object" || Array.isArray(window) ||
+      Object.keys(window).some(key => !["seconds", "reason"].includes(key)) ||
+      (window.reason !== undefined && (typeof window.reason !== "string" || window.reason.length > 256)) ||
+      (window.seconds !== undefined && !Number.isSafeInteger(window.seconds))) return null;
+  return Math.max(0, Math.min(600, window.seconds ?? 600));
+}
+
 function mapMessageRow(row) {
   if (!row) return null;
   const metadata = row.metadata_json ? JSON.parse(row.metadata_json) : null;
@@ -401,6 +413,9 @@ function mapMessageRow(row) {
     text: row.text,
     metadata,
     loopDepth,
+    ...(row.watch_started_at != null && {
+      watchStartedAt: row.watch_started_at === WATCH_AWAITING_PICKUP ? null : row.watch_started_at,
+    }),
     phase: row.phase,
     reason: row.reason ?? null,
     runtimeError: row.runtime_error ?? null,
@@ -585,6 +600,7 @@ export function createLocalMessagingJournal({
     if (!discoveryColumns.includes(column)) db.exec(`ALTER TABLE local_discovered_sessions ADD COLUMN ${column} ${type}`);
   }
   const messageColumns = db.prepare("PRAGMA table_info(local_messages)").all().map((c) => c.name);
+  if (!messageColumns.includes("watch_started_at")) db.exec("ALTER TABLE local_messages ADD COLUMN watch_started_at INTEGER");
   if (!messageColumns.includes("progress_json")) {
     db.exec("ALTER TABLE local_messages ADD COLUMN progress_json TEXT");
   }
@@ -775,11 +791,12 @@ export function createLocalMessagingJournal({
       }
 
       const metadataJson = metadata ? JSON.stringify(metadata) : null;
+      const awaitsPickup = recipientType === "interactive" && metadata?._loopDepth === 1 && replyWindowSeconds(metadata) > 0;
       db.prepare(`
         INSERT INTO local_messages (
-          message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at, to_principal, resolved_via
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?, ?, ?)
-      `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now, to_principal, resolved_via);
+          message_id, sender, recipient, recipient_type, request_id, in_reply_to, text, metadata_json, canonical_hash, phase, created_at, updated_at, to_principal, resolved_via, watch_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued_local', ?, ?, ?, ?, ?)
+      `).run(messageId, sender, recipient, recipientType, requestId, inReplyTo ?? null, text, metadataJson, hash, now, now, to_principal, resolved_via, awaitsPickup ? WATCH_AWAITING_PICKUP : null);
 
       if (replyRoute) {
         if (typeof options.replySenderBindingId !== "string" || !options.replySenderBindingId) throw coded("session_fenced", "Authenticated sender child required");
@@ -995,18 +1012,11 @@ export function createLocalMessagingJournal({
 
   // Merge legacy inbox extensions and claim-bound receipts by broker arrival time.
   function replyWindowDeadline(record) {
-    const secondsFor = metadata => {
-      const window = metadata?.replyWindow;
-      if (!window || typeof window !== "object" || Array.isArray(window) ||
-          Object.keys(window).some(key => !["seconds", "reason"].includes(key)) ||
-          (window.reason !== undefined && (typeof window.reason !== "string" || window.reason.length > 256)) ||
-          (window.seconds !== undefined && !Number.isSafeInteger(window.seconds))) return null;
-      return Math.max(0, Math.min(600, window.seconds ?? 600));
-    };
-    const initial = secondsFor(record.metadata);
-    if (!initial || record.loopDepth !== 1) return null;
-    const hardEnd = record.createdAt + 1800000;
-    let deadline = record.createdAt + initial * 1000;
+    const initial = replyWindowSeconds(record.metadata);
+    if (!initial || record.loopDepth !== 1 || record.watchStartedAt === null) return null;
+    const start = record.watchStartedAt ?? record.createdAt;
+    const hardEnd = start + 1800000;
+    let deadline = start + initial * 1000;
     const updates = db.prepare(`
       SELECT created_at, metadata_json, rowid AS ord, NULL AS receipt_deadline FROM local_messages
       WHERE in_reply_to = ? AND request_id = ? AND sender = ? AND recipient = ?
@@ -1015,7 +1025,7 @@ export function createLocalMessagingJournal({
       SELECT json_extract(value,'$.createdAt'), NULL, key, json_extract(value,'$.watchDeadline')
         FROM json_each((SELECT progress_json FROM local_messages WHERE message_id=?))
       ORDER BY created_at, ord
-    `).iterate(record.messageId, record.requestId, record.recipient, record.sender, record.createdAt, hardEnd, record.messageId);
+    `).iterate(record.messageId, record.requestId, record.recipient, record.sender, start, hardEnd, record.messageId);
     for (const row of updates) {
       if (row.created_at >= deadline) break;
       if (row.receipt_deadline !== null) {
@@ -1025,7 +1035,7 @@ export function createLocalMessagingJournal({
       }
       const metadata = JSON.parse(row.metadata_json ?? "null");
       if (metadata?._loopDepth !== 2) continue;
-      const seconds = secondsFor(metadata);
+      const seconds = replyWindowSeconds(metadata);
       if (seconds === null) continue;
       if (seconds === 0) return row.created_at;
       deadline = Math.min(hardEnd, Math.max(deadline, row.created_at + seconds * 1000));
@@ -1935,6 +1945,8 @@ export function createLocalMessagingJournal({
 
       const row = candidateRows[i];
       const mapped = mapMessageRow(row);
+      const startsWatch = row.watch_started_at === WATCH_AWAITING_PICKUP;
+      if (startsWatch) mapped.watchStartedAt = currentTime;
       const rowBytes = Buffer.byteLength(JSON.stringify(mapped), "utf8") + 2;
 
       if (items.length > 0 && totalBytes + rowBytes > MAX_INBOX_PAYLOAD_BYTES) {
@@ -1947,6 +1959,10 @@ export function createLocalMessagingJournal({
         break;
       }
 
+      if (startsWatch) {
+        db.prepare("UPDATE local_messages SET watch_started_at=? WHERE message_id=? AND watch_started_at=?")
+          .run(currentTime, row.message_id, WATCH_AWAITING_PICKUP);
+      }
       items.push(mapped);
       totalBytes += rowBytes;
     }
@@ -2022,9 +2038,10 @@ export function createLocalMessagingJournal({
           claim_generation = ?,
           claim_operation_id = ?,
           lease_expires_at = ?,
+          watch_started_at = CASE WHEN watch_started_at = ? THEN ? ELSE watch_started_at END,
           updated_at = ?
       WHERE message_id = ? AND recipient = ? AND phase = 'queued_local' AND recipient_type = 'interactive'
-    `).run(claimToken, sessionId, generation, claimId, leaseExpiresAt, currentTime, messageId, requester);
+    `).run(claimToken, sessionId, generation, claimId, leaseExpiresAt, WATCH_AWAITING_PICKUP, currentTime, currentTime, messageId, requester);
 
     if (res.changes === 0) {
       return null;
@@ -2110,7 +2127,7 @@ export function createLocalMessagingJournal({
         const deadline = replyWindowDeadline(mapMessageRow(orig));
         if (deadline === null || deadline <= currentTime) throw coded("window_closed", "No open watch on this task");
         if (seconds && events.length >= 3) throw coded("progress_limit", "Three progress extensions already recorded");
-        const extensionEnd = Math.min(orig.created_at + 600_000, currentTime + seconds * 1000);
+        const extensionEnd = Math.min((orig.watch_started_at ?? orig.created_at) + 600_000, currentTime + seconds * 1000);
         const event = {
           eventId, kind: seconds ? "progress" : "close", seq: events.length + 1,
           createdAt: currentTime, note: text, seconds,

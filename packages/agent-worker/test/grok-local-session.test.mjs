@@ -425,9 +425,11 @@ test('a worker extends the live watch and its final reply survives a watcher res
       }
       assert.fail('expected an unfinished task');
     };
-    const initial = await chunk();
+    assert.equal(await chunk(),null);
     const claimFile = path.join(f.root,'long-claim.json');
     await f.run(ctxB,['grok','claim','--message-id','task','--claim-id','worker','--claim-file',claimFile]);
+    const initial = await chunk();
+    assert.ok(Number.isSafeInteger(initial));
     const watching = f.run(ctxA,[...wait,'--timeout','10']);
     const progress = ['grok','send','--to',alice.senderId,'--in-reply-to','task','--request-id','job',
       '--message-id','progress','--reply-window','{"seconds":10}'];
@@ -536,4 +538,60 @@ test('desktop worker can report three extensions on a 120-second watch and still
     assert.equal(close.seq,4);
     assert.equal((await f.run(ctxB,['grok','status','--message-id','support'])).phase,'executing');
   } finally { await f.close(); }
+});
+
+test('delayed receiver pickup starts one full window per returned or directly claimed task', async () => {
+  const { createLocalMessagingJournal } = await import('../src/local-messaging-journal.mjs');
+  const stateRoot = fs.mkdtempSync('/private/tmp/tri-pickup-');
+  let journal = createLocalMessagingJournal({stateRoot});
+  try {
+    const sent = 10_000, pickup = sent + 180_000;
+    const envelope = {sender:'alice', recipient:'bob', recipientType:'interactive', text:'work',
+      metadata:{_loopDepth:1,replyWindow:{seconds:120}}};
+    for (const id of ['a','b']) {
+      await journal.recordSend({...envelope,messageId:id,requestId:id},{now:sent});
+    }
+    const deadline = async id => journal.replyWindowDeadline(await journal.getRecord(id));
+    assert.equal(await deadline('a'),null);
+    assert.equal((await journal.listInbox({requester:'alice',now:pickup})).length,0);
+    const first = await journal.listInbox({requester:'bob',now:pickup,limit:1});
+    assert.deepEqual(first.map(row=>row.messageId),['a']);
+    assert.equal(await deadline('a'),pickup+120_000);
+    assert.equal(await deadline('b'),null,'the lookahead row is still unseen');
+
+    await journal.close();
+    journal = createLocalMessagingJournal({stateRoot});
+    await journal.listInbox({requester:'bob',now:pickup+130_000,limit:1});
+    assert.equal(await deadline('a'),pickup+120_000,'an expired window stays closed');
+    const claim = {requester:'bob',sessionId:'session',generation:1,claimId:'work'};
+    await journal.claimInboxMessage({...claim,messageId:'a',now:pickup+130_000});
+    assert.equal(await deadline('a'),pickup+120_000);
+    const direct = await journal.claimInboxMessage({...claim,messageId:'b',now:pickup+131_000});
+    await journal.claimInboxMessage({...claim,messageId:'b',now:pickup+132_000});
+    assert.equal(await deadline('b'),pickup+251_000,'direct claim starts once and retries preserve it');
+    const event = await journal.recordInteractiveProgress({...claim, messageId:'b', claimToken:direct.claimToken,
+      eventId:'ext', seconds:300, text:'Reviewing', now:pickup+134_000});
+    assert.equal(event.watchDeadline,pickup+434_000,'the extension budget also starts at pickup');
+    assert.equal(await deadline('b'),event.watchDeadline);
+  } finally {
+    await journal.close();
+    fs.rmSync(stateRoot,{recursive:true,force:true});
+  }
+});
+
+test('upgrading a queued interactive task preserves its original watch deadline', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createLocalMessagingJournal } = await import('../src/local-messaging-journal.mjs');
+  const stateRoot = fs.mkdtempSync('/private/tmp/tri-legacy-watch-');
+  let journal = createLocalMessagingJournal({stateRoot});
+  try {
+    await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'work',
+      messageId:'old',requestId:'old',metadata:{_loopDepth:1,replyWindow:{seconds:120}}},{now:1000});
+    await journal.close();
+    const db = new DatabaseSync(path.join(stateRoot,'local-messaging.sqlite'));
+    try { db.exec('ALTER TABLE local_messages DROP COLUMN watch_started_at'); } finally { db.close(); }
+    journal = createLocalMessagingJournal({stateRoot});
+    await journal.listInbox({requester:'bob',now:181_000});
+    assert.equal(journal.replyWindowDeadline(await journal.getRecord('old')),121_000);
+  } finally { await journal.close(); fs.rmSync(stateRoot,{recursive:true,force:true}); }
 });
