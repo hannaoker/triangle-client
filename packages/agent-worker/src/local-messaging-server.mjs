@@ -303,7 +303,7 @@ export function createLocalControlServer({
         !["worker", "conversation"].includes(entry.kind)) {
       throw coded("invalid_options", "Invalid recipient directory entry");
     }
-    directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown", ...(entry.harness === "grok" ? {harness:"grok",capabilities:{queueable:true,wakeCapable:false,pullInbox:true}} : {}) });
+    directory.set(entry.id, { id: entry.id, label: entry.label, kind: entry.kind, presence: "unknown", ...(["grok", "antigravity"].includes(entry.harness) ? {harness: entry.harness, capabilities:{queueable:true,wakeCapable:false,pullInbox:true}} : {}) });
   }
 
   const effectiveStateRoot = stateRoot || path.dirname(socketPath);
@@ -557,7 +557,7 @@ export function createLocalControlServer({
           // the scope applies once it is attached. Any other reader (the paired Claude, Grok) holds a fixed scope, so its
           // scope decides at all times. Whether the route is up is the row's own attachment evidence, not this answer.
           // Optional: it must never make an otherwise valid directory unreadable.
-          const aclDerivedScope = inboxBroker?.isDesktopSender?.(senderId) === true || sessionBroker?.isInteractiveSender?.(senderId) === true;
+          const aclDerivedScope = inboxBroker?.isDesktopSender?.(senderId) === true || sessionBroker?.isInteractiveSender?.(senderId) === true || interactiveBroker?.isDynamicScopeSender?.(senderId) === true;
           let explanations = null;
           try {
             const explained = activeRouter.describeAddresses?.(decoratedSessions.sessions.map(row => row.id), { permitted: id => policyIds.has(id) && (inScope(id) || (aclDerivedScope && unreachableSessions.has(id))) });
