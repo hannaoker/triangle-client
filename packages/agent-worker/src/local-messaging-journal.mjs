@@ -1052,28 +1052,19 @@ export function createLocalMessagingJournal({
     return items;
   }
 
-  function replyWindowLimits(record) {
+  // Merge legacy inbox extensions and claim-bound receipts by broker arrival time so deadline and budget agree.
+  function evaluateReplyWindow(record) {
     const limits = parseReplyWindowConfig(record?.metadata);
-    if (!limits || record.loopDepth !== 1 || !limits.initialSeconds) return null;
-    const events = progressEvents(record.messageId);
-    const extensionsUsed = events.filter((event) => event.kind === "progress").length;
-    return {
-      initialSeconds: limits.initialSeconds,
-      maxExtensions: limits.maxExtensions,
-      maxTotalSeconds: limits.maxTotalSeconds,
-      extensionsUsed,
-      extensionsRemaining: Math.max(0, limits.maxExtensions - extensionsUsed),
-    };
-  }
-
-  // Merge legacy inbox extensions and claim-bound receipts by broker arrival time.
-  function replyWindowDeadline(record) {
-    const limits = parseReplyWindowConfig(record.metadata);
-    if (!limits || !limits.initialSeconds || record.loopDepth !== 1 || record.watchStartedAt === null) return null;
+    if (!limits || !limits.initialSeconds || record.loopDepth !== 1) return null;
+    if (record.watchStartedAt === null) {
+      return { limits, deadline: null, extensionsUsed: 0 };
+    }
     const start = record.watchStartedAt ?? record.createdAt;
     const hardEnd = start + limits.legacyHardCapSeconds * 1000;
     let deadline = start + limits.initialSeconds * 1000;
     let extensionsUsed = 0;
+    const hasProgressReceipts = progressEvents(record.messageId).some((event) => event.kind === "progress");
+    const enforceMaxExtensions = limits.hasExplicitMaxExtensions || hasProgressReceipts;
     const updates = db.prepare(`
       SELECT created_at, metadata_json, 1 AS phase_order, rowid AS ord, NULL AS receipt_deadline FROM local_messages
       WHERE in_reply_to = ? AND request_id = ? AND sender = ? AND recipient = ?
@@ -1088,7 +1079,8 @@ export function createLocalMessagingJournal({
     for (const row of updates) {
       if (row.created_at >= deadline) break;
       if (row.receipt_deadline !== null) {
-        if (row.receipt_deadline === row.created_at) return row.created_at;
+        if (row.receipt_deadline === row.created_at) return { limits, deadline: row.created_at, extensionsUsed };
+        if (extensionsUsed >= limits.maxExtensions) continue;
         extensionsUsed += 1;
         deadline = Math.max(deadline, row.receipt_deadline);
         continue;
@@ -1097,12 +1089,29 @@ export function createLocalMessagingJournal({
       if (metadata?._loopDepth !== 2) continue;
       const seconds = replyWindowSeconds(metadata);
       if (seconds === null) continue;
-      if (seconds === 0) return row.created_at;
-      if (limits.hasExplicitMaxExtensions && extensionsUsed >= limits.maxExtensions) continue;
+      if (seconds === 0) return { limits, deadline: row.created_at, extensionsUsed };
+      if (enforceMaxExtensions && extensionsUsed >= limits.maxExtensions) continue;
       extensionsUsed += 1;
       deadline = Math.min(hardEnd, Math.max(deadline, row.created_at + seconds * 1000));
     }
-    return deadline;
+    return { limits, deadline, extensionsUsed };
+  }
+
+  function replyWindowLimits(record) {
+    const evaluated = evaluateReplyWindow(record);
+    if (!evaluated) return null;
+    const { limits, extensionsUsed } = evaluated;
+    return {
+      initialSeconds: limits.initialSeconds,
+      maxExtensions: limits.maxExtensions,
+      maxTotalSeconds: limits.maxTotalSeconds,
+      extensionsUsed,
+      extensionsRemaining: Math.max(0, limits.maxExtensions - extensionsUsed),
+    };
+  }
+
+  function replyWindowDeadline(record) {
+    return evaluateReplyWindow(record)?.deadline ?? null;
   }
 
   async function recoverQueued() {
@@ -2257,12 +2266,12 @@ export function createLocalMessagingJournal({
         }
         if (orig.phase !== "executing" || orig.lease_expires_at <= currentTime)
           throw coded("claim_failed", "Progress requires an active claim");
-        const mappedOrig = mapMessageRow(orig);
-        const limits = parseReplyWindowConfig(mappedOrig.metadata);
-        const deadline = replyWindowDeadline(mappedOrig);
-        if (!limits || deadline === null || deadline <= currentTime) throw coded("window_closed", "No open watch on this task");
-        const extensionCount = events.filter(event => event.kind === "progress").length;
-        if (seconds && extensionCount >= limits.maxExtensions) {
+        const evaluated = evaluateReplyWindow(mapMessageRow(orig));
+        if (!evaluated || evaluated.deadline === null || evaluated.deadline <= currentTime) {
+          throw coded("window_closed", "No open watch on this task");
+        }
+        const { limits, deadline, extensionsUsed } = evaluated;
+        if (seconds && extensionsUsed >= limits.maxExtensions) {
           throw coded("progress_limit", `Maximum ${limits.maxExtensions} progress extensions already recorded`);
         }
         const extensionEnd = Math.min((orig.watch_started_at ?? orig.created_at) + limits.maxTotalSeconds * 1000, currentTime + seconds * 1000);

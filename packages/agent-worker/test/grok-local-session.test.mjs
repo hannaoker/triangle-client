@@ -802,3 +802,78 @@ test('Stage 3 & compat: configurable replyWindow limits clamp/enforce maxExtensi
   await errorCode(f.run(ctxB,['grok','reply','--message-id','m3','--claim-file',claimFile,'--reply-id','rep3','--reply-window','{"seconds":30,"maxExtensions":1}'],'nope'),'invalid_arguments');
  }finally{await f.close();}
 });
+
+test('mixed-version legacy updates and progress receipts share the same extension count and remaining budget',async()=>{
+ const {createLocalMessagingJournal}=await import('../src/local-messaging-journal.mjs');
+ const stateRoot=fs.mkdtempSync('/private/tmp/tri-mixed-ext-');
+ const journal=createLocalMessagingJournal({stateRoot});
+ try{
+  // 1. Explicit maxExtensions: legacy updates and progress receipts consume the shared budget in sync
+  const start=10000;
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'explicit-mixed',messageId:'mix-exp',requestId:'req-exp',
+   metadata:{_loopDepth:1,replyWindow:{seconds:20,maxExtensions:2,maxTotalSeconds:180}}},{now:start});
+  const claim1=await journal.claimInboxMessage({messageId:'mix-exp',claimId:'c-exp',requester:'bob',sessionId:'s1',generation:1,now:start});
+  // Unrelated / invalid legacy messages must not consume budget
+  await journal.recordSend({sender:'bob',recipient:'alice',messageId:'exp-deep',requestId:'req-exp',inReplyTo:'mix-exp',text:'deep',
+   metadata:{_loopDepth:3,replyWindow:{seconds:20}}},{now:start+1000});
+  await journal.recordSend({sender:'charlie',recipient:'alice',messageId:'exp-foreign',requestId:'req-exp',inReplyTo:'mix-exp',text:'foreign',
+   metadata:{_loopDepth:2,replyWindow:{seconds:20}}},{now:start+1000});
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsUsed,0);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsRemaining,2);
+
+  // Legacy update #1 uses 1 of 2 extensions
+  await journal.recordSend({sender:'bob',recipient:'alice',messageId:'exp-u1',requestId:'req-exp',inReplyTo:'mix-exp',text:'legacy 1',
+   metadata:{_loopDepth:2,replyWindow:{seconds:20}}},{now:start+10000});
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('mix-exp')),start+30000);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsUsed,1);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsRemaining,1);
+
+  // Progress receipt #1 uses 2 of 2 extensions
+  await journal.recordInteractiveProgress({messageId:'mix-exp',claimToken:claim1.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'receipt 1',now:start+20000,eventId:'r1',seconds:20});
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('mix-exp')),start+40000);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsUsed,2);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsRemaining,0);
+
+  // Neither another progress receipt nor another legacy update can exceed maxExtensions: 2
+  await assert.rejects(()=>journal.recordInteractiveProgress({messageId:'mix-exp',claimToken:claim1.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'receipt 2',now:start+25000,eventId:'r2',seconds:30}),e=>e.code==='progress_limit');
+  await journal.recordSend({sender:'bob',recipient:'alice',messageId:'exp-u2',requestId:'req-exp',inReplyTo:'mix-exp',text:'legacy 2 ignored',
+   metadata:{_loopDepth:2,replyWindow:{seconds:60}}},{now:start+26000});
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('mix-exp')),start+40000);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-exp')).extensionsUsed,2);
+
+  // 2. Default maxExtensions (3) in legacy-first order
+  await journal.recordSend({sender:'carol',recipient:'dave',recipientType:'interactive',text:'default-legacy-first',messageId:'mix-def1',requestId:'req-def1',
+   metadata:{_loopDepth:1,replyWindow:{seconds:20}}},{now:start});
+  const claim2=await journal.claimInboxMessage({messageId:'mix-def1',claimId:'c-def1',requester:'dave',sessionId:'s2',generation:1,now:start});
+  await journal.recordSend({sender:'dave',recipient:'carol',messageId:'d1-u1',requestId:'req-def1',inReplyTo:'mix-def1',text:'u1',
+   metadata:{_loopDepth:2,replyWindow:{seconds:20}}},{now:start+5000});
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def1')).extensionsUsed,1);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def1')).extensionsRemaining,2);
+  await journal.recordInteractiveProgress({messageId:'mix-def1',claimToken:claim2.claimToken,sessionId:'s2',generation:1,requester:'dave',text:'p1',now:start+10000,eventId:'p1',seconds:20});
+  await journal.recordInteractiveProgress({messageId:'mix-def1',claimToken:claim2.claimToken,sessionId:'s2',generation:1,requester:'dave',text:'p2',now:start+15000,eventId:'p2',seconds:20});
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def1')).extensionsUsed,3);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def1')).extensionsRemaining,0);
+  await assert.rejects(()=>journal.recordInteractiveProgress({messageId:'mix-def1',claimToken:claim2.claimToken,sessionId:'s2',generation:1,requester:'dave',text:'p3',now:start+16000,eventId:'p3',seconds:30}),e=>e.code==='progress_limit');
+  await journal.recordSend({sender:'dave',recipient:'carol',messageId:'d1-u2',requestId:'req-def1',inReplyTo:'mix-def1',text:'u2 ignored',
+   metadata:{_loopDepth:2,replyWindow:{seconds:60}}},{now:start+17000});
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('mix-def1')),start+35000);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def1')).extensionsUsed,3);
+
+  // 3. Default maxExtensions (3) in receipt-first order
+  await journal.recordSend({sender:'erin',recipient:'frank',recipientType:'interactive',text:'default-receipt-first',messageId:'mix-def2',requestId:'req-def2',
+   metadata:{_loopDepth:1,replyWindow:{seconds:20}}},{now:start});
+  const claim3=await journal.claimInboxMessage({messageId:'mix-def2',claimId:'c-def2',requester:'frank',sessionId:'s3',generation:1,now:start});
+  await journal.recordInteractiveProgress({messageId:'mix-def2',claimToken:claim3.claimToken,sessionId:'s3',generation:1,requester:'frank',text:'p1',now:start+5000,eventId:'p1',seconds:20});
+  await journal.recordSend({sender:'frank',recipient:'erin',messageId:'d2-u1',requestId:'req-def2',inReplyTo:'mix-def2',text:'u1',
+   metadata:{_loopDepth:2,replyWindow:{seconds:20}}},{now:start+10000});
+  await journal.recordSend({sender:'frank',recipient:'erin',messageId:'d2-u2',requestId:'req-def2',inReplyTo:'mix-def2',text:'u2',
+   metadata:{_loopDepth:2,replyWindow:{seconds:20}}},{now:start+15000});
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def2')).extensionsUsed,3);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def2')).extensionsRemaining,0);
+  await journal.recordSend({sender:'frank',recipient:'erin',messageId:'d2-u3',requestId:'req-def2',inReplyTo:'mix-def2',text:'u3 ignored',
+   metadata:{_loopDepth:2,replyWindow:{seconds:60}}},{now:start+17000});
+  await assert.rejects(()=>journal.recordInteractiveProgress({messageId:'mix-def2',claimToken:claim3.claimToken,sessionId:'s3',generation:1,requester:'frank',text:'p2',now:start+18000,eventId:'p2',seconds:30}),e=>e.code==='progress_limit');
+  assert.equal(journal.replyWindowDeadline(await journal.getRecord('mix-def2')),start+35000);
+  assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def2')).extensionsUsed,3);
+ }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});
