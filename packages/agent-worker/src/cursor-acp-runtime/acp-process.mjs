@@ -63,6 +63,9 @@ export function createFakeAcpStdioProgram({
   emitCreatePlan = false,
   emitAskQuestion = false,
   durableStorePath = null,
+  promptDelayOnceMs = 0,
+  promptDelayOnceMarkerPath = null,
+  postTimeoutLeakText = null,
 } = {}) {
   const prefix =
     typeof idPrefix === "string" && idPrefix.length > 0
@@ -89,6 +92,9 @@ const emitPermission = ${JSON.stringify(emitPermission === true)};
 const emitCreatePlan = ${JSON.stringify(emitCreatePlan === true)};
 const emitAskQuestion = ${JSON.stringify(emitAskQuestion === true)};
 const durableStorePath = ${JSON.stringify(durableStorePath)};
+let remainingDelayOnceMs = ${JSON.stringify(Math.max(0, Math.trunc(promptDelayOnceMs || 0)))};
+const promptDelayOnceMarkerPath = ${JSON.stringify(promptDelayOnceMarkerPath)};
+const postTimeoutLeakText = ${JSON.stringify(postTimeoutLeakText ?? null)};
 const sessions = new Map();
 let counter = 0;
 let authenticated = false;
@@ -341,6 +347,32 @@ async function handle(message) {
             plan: "# Fake\\n",
             todos: [],
           });
+        }
+
+        const shouldDelayOnce =
+          remainingDelayOnceMs > 0 &&
+          (!promptDelayOnceMarkerPath || !existsSync(promptDelayOnceMarkerPath));
+        if (shouldDelayOnce) {
+          const delayMs = remainingDelayOnceMs;
+          remainingDelayOnceMs = 0;
+          if (promptDelayOnceMarkerPath) {
+            mkdirSync(path.dirname(promptDelayOnceMarkerPath), { recursive: true, mode: 0o700 });
+            writeFileSync(promptDelayOnceMarkerPath, "1\\n", { mode: 0o600 });
+          }
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          if (postTimeoutLeakText) {
+            write({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: {
+                sessionId: session.sessionId,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: postTimeoutLeakText },
+                },
+              },
+            });
+          }
         }
 
         if (cancelled) {
