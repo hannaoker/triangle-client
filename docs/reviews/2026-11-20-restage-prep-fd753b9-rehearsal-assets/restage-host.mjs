@@ -14,6 +14,7 @@
 //   probe-m2-m3 <bundle> <configPath> <workspace> <identityRoot> <rheaPrincipal>
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
@@ -282,7 +283,8 @@ async function journalReplyGuard([scratchStateRoot, sender, recipient]) {
   fs.mkdirSync(scratchStateRoot, { recursive: true, mode: 0o700 });
   fs.chmodSync(scratchStateRoot, 0o700);
   const { createLocalMessagingJournal } = await load("local-messaging-journal.mjs");
-  const journal = createLocalMessagingJournal({ stateRoot: scratchStateRoot });
+  const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
+  let journal = createLocalMessagingJournal({ stateRoot: scratchStateRoot });
   try {
     // 1. A new message must never reuse a reply's ID (`message_id_in_use`).
     await journal.recordSend({ sender, recipient, messageId: "jg-m1", requestId: "jg-r1", text: "first" });
@@ -301,16 +303,56 @@ async function journalReplyGuard([scratchStateRoot, sender, recipient]) {
       throw new Error("reply record was modified or shadowed");
     }
 
-    // 2. A message whose ID a reply already took still answers its exact retry as a duplicate.
-    await journal.recordSend({ sender, recipient, messageId: "jg-m2", requestId: "jg-r2", text: "orig" });
-    await journal.recordReply({ sender: recipient, recipient: sender, messageId: "jg-m2", requestId: "jg-r2", inReplyTo: "jg-m2", text: "reply same id" });
-    const retry = await journal.recordSend({ sender, recipient, messageId: "jg-m2", requestId: "jg-r2", text: "orig" });
+    // 2. Current admission refuses a reply taking an existing message's ID, and exact retries stay idempotent.
+    const legMsg = { sender, recipient, messageId: "jg-m2", requestId: "jg-r2", text: "orig" };
+    await journal.recordSend(legMsg);
+    let replyReuseCode = null;
+    try {
+      await journal.recordReply({ sender: recipient, recipient: sender, messageId: "jg-m2", requestId: "jg-r2", inReplyTo: "jg-m2", text: "reply same id" });
+    } catch (error) {
+      replyReuseCode = error?.code ?? null;
+    }
+    if (replyReuseCode !== "message_id_in_use") {
+      throw new Error(`expected reply rejection message_id_in_use, got ${replyReuseCode}`);
+    }
+    const retry = await journal.recordSend(legMsg);
     if (retry?.isDuplicate !== true) {
       throw new Error("expected exact retry of original message to succeed as duplicate");
     }
-    out({ ok: true, reuseCode, sameIdRetryIsDuplicate: true });
-  } finally {
+
+    // 3. Reopening a database containing a historical message/reply ID collision still answers exact retries as duplicate.
+    const histMsg = { sender, recipient, messageId: "jg-hist", requestId: "jg-r-hist", text: "historical-orig" };
+    await journal.recordSend(histMsg);
     await journal.close();
+    journal = null;
+
+    const db = new DatabaseSync(path.join(scratchStateRoot, "local-messaging.sqlite"));
+    try {
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO local_replies (
+          message_id, sender, recipient, request_id, in_reply_to, text, metadata_json, canonical_hash, consumed, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?)
+      `).run("jg-hist", recipient, sender, "jg-r-hist", "jg-hist", "historical-collision-reply", hex("historical-reply"), now, now);
+    } finally {
+      db.close();
+    }
+
+    journal = createLocalMessagingJournal({ stateRoot: scratchStateRoot });
+    const histRetry = await journal.recordSend(histMsg);
+    if (histRetry?.isDuplicate !== true) {
+      throw new Error("expected exact retry of message with historical reply-id collision to succeed as duplicate");
+    }
+
+    out({
+      ok: true,
+      reuseCode,
+      replyReuseCode,
+      sameIdRetryIsDuplicate: true,
+      historicalCollisionRetryIsDuplicate: true,
+    });
+  } finally {
+    if (journal) await journal.close();
   }
 }
 

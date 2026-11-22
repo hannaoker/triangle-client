@@ -162,7 +162,13 @@ test("restage-host.mjs prepare builds v2 config with alias and destination, and 
 
   // Direct journal & server reply-id reuse guards.
   const jGuard = await s.helper("journal-reply-guard", repo, path.join(s.base, "jg"), prep.senderId, prep.instances.helper);
-  assert.deepEqual(jGuard, { ok: true, reuseCode: "message_id_in_use", sameIdRetryIsDuplicate: true });
+  assert.deepEqual(jGuard, {
+    ok: true,
+    reuseCode: "message_id_in_use",
+    replyReuseCode: "message_id_in_use",
+    sameIdRetryIsDuplicate: true,
+    historicalCollisionRetryIsDuplicate: true,
+  });
 
   const sGuard = await s.helper("server-reply-guard", repo, path.join(s.base, "sg"), prep.senderId, prep.instances.helper);
   assert.deepEqual(sGuard, { ok: true, errorCode: "message_id_in_use", recordSendCalled: false, rateRolledBack: true });
