@@ -6,11 +6,13 @@ export function createLocalMessagingDispatcher({
   runRecipient,
   logger = {},
   runnerTimeoutMs = 3600000,
+  startupTimeoutMs = 60_000,
+  availabilityRetryMs = 5_000,
   maxConcurrent = 2,
   now = Date.now,
   compactIntervalMs = 3600000,
   // canRun(recipient) false: the recipient's runtime is not running. Its queued work is
-  // neither claimed nor failed; it stays queued_local until a start where it can run.
+  // retained until a later availability check succeeds.
   canRun = null,
 } = {}) {
   const runnable = typeof canRun === "function" ? canRun : () => true;
@@ -35,6 +37,8 @@ export function createLocalMessagingDispatcher({
   const activeRecipients = new Set();
   const activeExecutions = new Map(); // messageId -> executionPromise
 
+  const controllers = new Map();
+  let retryTimer;
   let pumpScheduled = false;
   let lastCompactionAt = null;
 
@@ -78,21 +82,31 @@ export function createLocalMessagingDispatcher({
     }
     while (activeExecutions.size < maxConcurrent) {
       const nextIndex = pendingQueue.findIndex(
-        (job) => !activeRecipients.has(job.recipient),
+        (job) => !activeRecipients.has(job.recipient) && runnable(job.recipient),
       );
       if (nextIndex === -1) {
+        if (!retryTimer && pendingQueue.some(job => !runnable(job.recipient))) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            schedulePump();
+          }, availabilityRetryMs);
+          retryTimer.unref();
+        }
         break;
       }
 
       const [job] = pendingQueue.splice(nextIndex, 1);
       activeRecipients.add(job.recipient);
 
-      const executionPromise = executeJob(job).catch(() => {
+      const cancellation = new AbortController();
+      controllers.set(job.messageId, cancellation);
+      const executionPromise = executeJob(job, cancellation.signal).catch(() => {
         logger.error?.("Local execution storage operation failed; durable state retained for recovery");
       });
       activeExecutions.set(job.messageId, executionPromise);
 
       executionPromise.finally(() => {
+        controllers.delete(job.messageId);
         activeExecutions.delete(job.messageId);
         activeRecipients.delete(job.recipient);
         inFlightMessageIds.delete(job.messageId);
@@ -104,7 +118,7 @@ export function createLocalMessagingDispatcher({
     checkDrain();
   }
 
-  async function executeJob(job) {
+  async function executeJob(job, cancellation) {
     let fullJob = { ...job };
     // Claim execution atomically
     const claim = await activeJournal.claimExecution(job.messageId);
@@ -115,32 +129,59 @@ export function createLocalMessagingDispatcher({
 
     fullJob = { ...job, ...claim };
 
+    if (cancellation.aborted) return;
     const abortController = new AbortController();
+    let started = false;
+    let rejectInterrupted;
+    const interrupted = new Promise((_, reject) => { rejectInterrupted = reject; });
+    const onCancel = () => {
+      abortController.abort(cancellation.reason);
+      rejectInterrupted(cancellation.reason);
+    };
+    cancellation.addEventListener("abort", onCancel, { once: true });
+    const startupTimer = setTimeout(() => {
+      const error = coded("startup_timeout", "Runner admission timed out");
+      abortController.abort(error);
+      rejectInterrupted(error);
+    }, startupTimeoutMs);
     let timeoutTimer = null;
     let timedOut = false;
+    let abortGraceTimer;
 
     const onStarted = () => {
+      abortController.signal.throwIfAborted();
+      if (started) return;
+      started = true;
+      clearTimeout(startupTimer);
       if (runnerTimeoutMs > 0 && !abortController.signal.aborted) {
         timeoutTimer = setTimeout(() => {
           timedOut = true;
-          abortController.abort(coded("runner_timeout", `Runner timed out after ${runnerTimeoutMs}ms`));
+          const error = coded("runner_timeout", `Runner timed out after ${runnerTimeoutMs}ms`);
+          abortController.abort(error);
+          // Allow an exiting runner to return late evidence, but bound an ignored abort.
+          abortGraceTimer = setTimeout(() => rejectInterrupted(error), 1000);
         }, runnerTimeoutMs);
       }
     };
 
     let result;
     try {
-      result = await runRecipient(fullJob, {
+      result = await Promise.race([interrupted, runRecipient(fullJob, {
         signal: abortController.signal,
         onStarted,
-      });
+      })]);
+      if (cancellation.aborted) return;
     } catch (err) {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
       const isTimeout =
         timedOut ||
         err?.code === "runner_timeout" ||
         err?.message?.includes("runner_timeout");
-      const reason = isTimeout ? "runner_timeout" : "runtime_error";
+      if (cancellation.aborted) return;
+      if (isTimeout || err?.code === "startup_timeout") {
+        await activeJournal.holdExecution(fullJob.messageId, isTimeout ? "runner_timeout" : "startup_timeout");
+        return;
+      }
+      const reason = "runtime_error";
       const runtimeError = err?.message || String(err);
       await activeJournal
         .recordExecutionFailure({
@@ -151,6 +192,9 @@ export function createLocalMessagingDispatcher({
         .catch(() => {});
       return;
     } finally {
+      cancellation.removeEventListener("abort", onCancel);
+      clearTimeout(startupTimer);
+      clearTimeout(abortGraceTimer);
       if (timeoutTimer) clearTimeout(timeoutTimer);
     }
 
@@ -198,9 +242,6 @@ export function createLocalMessagingDispatcher({
     if (stopping) {
       return;
     }
-    if (!runnable(job.recipient)) {
-      return;
-    }
     if (inFlightMessageIds.has(job.messageId)) {
       return;
     }
@@ -220,7 +261,6 @@ export function createLocalMessagingDispatcher({
     const recovery = await activeJournal.recoverQueued();
     if (recovery?.toRun) {
       for (const job of recovery.toRun) {
-        if (!runnable(job.recipient)) continue;
         if (!inFlightMessageIds.has(job.messageId)) {
           inFlightMessageIds.add(job.messageId);
           pendingQueue.push(job);
@@ -234,6 +274,8 @@ export function createLocalMessagingDispatcher({
 
   async function stop() {
     stopping = true;
+    clearTimeout(retryTimer);
+    retryTimer = null;
     // Only executions that already started are awaited. Queued jobs were never
     // claimed, so the journal still holds them for recovery.
     for (const job of pendingQueue.splice(0)) {
@@ -259,6 +301,15 @@ export function createLocalMessagingDispatcher({
   return {
     start,
     notifyAdmission,
+    cancel(messageId) {
+      const execution = controllers.get(messageId);
+      execution?.abort(coded("sender_cancelled", "Sender cancelled the request"));
+      const index = pendingQueue.findIndex(job => job.messageId === messageId);
+      if (index >= 0) {
+        pendingQueue.splice(index, 1);
+        inFlightMessageIds.delete(messageId);
+      }
+    },
     stop,
     status,
   };

@@ -290,3 +290,7 @@ export function boundRepliesToEnvelope(replies, maxBytes = MAX_PAYLOAD_BYTES - 1
   }
   return bounded;
 }
+
+export function ownerReconciliationPayload(nonce, operation, request) {
+  return Buffer.from(JSON.stringify(["triangle-local-owner-reconciliation-v1", nonce, operation, request]));
+}

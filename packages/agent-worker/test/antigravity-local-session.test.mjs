@@ -290,30 +290,25 @@ test("workspace session harness & exact-pair grants isolate attached Codex/Claud
     assert.equal(toClaudeDenied[1].result.isError, true);
     assert.match(toClaudeDenied[1].result.content[0].text, /recipient_not_allowed/);
 
-    // Revoking codex-sessions updates policy, flags restart required, and blocks exchange until restarted.
+    // The running host enforces the revoked grant on the next request.
     const revoked = updateAntigravityGrants("revoke", { alias: "mini", codexSessions: true }, f.configPath);
     assert.equal(revoked.changed, true);
-    assert.equal(revoked.requiresServiceRestart, true);
+    assert.equal(revoked.requiresServiceRestart, false);
     const updatedPolicy = readSessionMessagingPolicy(conf.sessionMessaging.integrationPath);
     assert.ok(!updatedPolicy.codex.allowedSenders.includes(ag.senderId));
 
-    // Host fails closed with binding_changed before restart, and enforces empty grants after restart.
+    // Status remains available under the new grants.
     const staleCall = await f.mcp("mini", [{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "triangle_get_status", arguments: {} } }]);
-    assert.equal(staleCall[1].result.isError, true);
-    assert.match(staleCall[1].result.content[0].text, /binding_changed/);
-    await f.stop();
-    await f.start();
-    const afterRestart = await f.mcp("mini", [
+    assert.equal(staleCall[1].result.isError, false);
+    const afterRevoke = await f.mcp("mini", [
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "triangle_send_message", arguments: { to: codexAddr, text: "late", messageId: "to-cdx-2", requestId: "req-cdx-2" } } },
     ]);
-    assert.equal(afterRestart[1].result.isError, true);
-    assert.match(afterRestart[1].result.content[0].text, /recipient_not_allowed/);
+    assert.equal(afterRevoke[1].result.isError, true);
+    assert.match(afterRevoke[1].result.content[0].text, /recipient_not_allowed/);
 
     // Exact session-* grant admits only that session, not a second session of the same harness.
     const exactSecond = updateAntigravityGrants("grant", { alias: "mini", recipients: [claudeAddr] }, f.configPath);
     assert.deepEqual(exactSecond.allowedRecipients, [claudeAddr]);
-    await f.stop();
-    await f.start();
     const exactSend = await f.mcp("mini", [
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "triangle_send_message", arguments: { to: claudeAddr, text: "exact", messageId: "to-cld-exact", requestId: "req-cld-exact" } } },
     ]);

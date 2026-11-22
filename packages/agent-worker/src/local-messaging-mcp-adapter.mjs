@@ -82,7 +82,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "triangle_cancel_message",
-    description: "Signal cancellation of a sent message (unsupported on local route).",
+    description: "Cancel your queued message or signal your executing runner to stop.",
     inputSchema: {
       type: "object",
       properties: {

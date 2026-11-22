@@ -16,9 +16,10 @@ import {activeMeshBindingMatches,createRegistrySnapshotProvider} from './router-
 
 export function loadLocalMessagingConfig(configPath) {
  const config=readPrivateJson(configPath);
- const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','wake','interactive','discovery','sessionMessaging','inbox','grok','antigravity'];
+ const keys=['version','enabled','stateRoot','bindingPath','integrationPath','recipients','runnerTimeoutMs','ownerReconciliationKey','wake','interactive','discovery','sessionMessaging','inbox','grok','antigravity'];
  if(!config||config.version!==1||config.enabled!==true||Object.keys(config).some(k=>!keys.includes(k))||!Array.isArray(config.recipients)||config.recipients.length<1||config.recipients.length>32)throw coded('invalid_local_config','Invalid local messaging configuration');
  for(const key of ['stateRoot','bindingPath','integrationPath'])if(typeof config[key]!=='string'||!config[key].startsWith('/')||config[key].includes('\0'))throw coded('invalid_local_config','Local paths must be absolute');
+ if(config.ownerReconciliationKey!==undefined&&(typeof config.ownerReconciliationKey!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(config.ownerReconciliationKey)))throw coded('invalid_local_config','Invalid Ed25519 owner reconciliation public key');
  if(config.runnerTimeoutMs!==undefined&&(!Number.isInteger(config.runnerTimeoutMs)||config.runnerTimeoutMs<1000||config.runnerTimeoutMs>86400000))throw coded('invalid_local_config','Invalid runner timeout');
  if(config.interactive!==undefined){
   if(!config.interactive||typeof config.interactive!=='object'||Array.isArray(config.interactive))throw coded('invalid_local_config','Invalid interactive configuration');
@@ -125,7 +126,6 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  // messaging down for everyone else: it takes no new work (the server refuses it before anything is
  // recorded) and its queued work stays queued until it runs again (the dispatcher skips it).
  const runnable=id=>typeof runners.get(id)?.run==='function';
- const unavailableRecipients=config.recipients.filter(r=>!runnable(r.instanceId)).map(r=>r.profile);
  for(const r of config.recipients)if(!runnable(r.instanceId))logger.notice?.('triangle_client_local_recipient_not_running',{profile:r.profile,instanceId:r.instanceId});
  const integration=readPrivateJson(config.integrationPath);
  const recipientIds=config.recipients.map(r=>r.instanceId);
@@ -186,7 +186,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
  const brokerFailureLimit=createPerSenderRateLimiter({maxRequestsPerWindow:30,windowMs:60000});
  let subsystem=null,journal=null,dispatcher=null,notifier=null,startPromise=null,closed=false;
  const broker=createDesktopCredentialBroker({bindingPath:config.bindingPath,integrationPath:config.integrationPath,recipients:codexAllowedRecipients,issue:(sender,opts)=>subsystem.issueTurnCredential(sender,opts)});
- function baseStatus(){return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients,...(unavailableRecipients.length?{unavailableRecipients}:{})};}
+ function baseStatus(){const unavailableRecipients=config.recipients.filter(r=>!runnable(r.instanceId)).map(r=>r.profile);return {route:'same-device',running:subsystem?.running??false,senderId:broker.senderId,threadId:broker.threadId,recipients:config.recipients,...(unavailableRecipients.length?{unavailableRecipients}:{})};}
  async function start() {
   if(closed)throw coded('local_host_closed','Local host is closed');
   if(startPromise)return startPromise;
@@ -315,7 +315,7 @@ export function createInstalledLocalMessagingHost({configPath,runners,gate,logge
      clock:clock??{now:()=>Date.now()},
     });
     const discoveryBroker=config.discovery?.enabled?createSessionDiscoveryBroker({integrationPath:config.discovery.integrationPath,journal,logger}):null;
-    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,runnerAvailable,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[]),...(antigravityBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,statusProvider:async()=>{const policy=replyPolicy(),pinning=!!sessionBroker&&(replyIdentityEnabled===null?policy.enabled===true:typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true);return {...baseStatus(),replyIdentity:{enabled:pinning,scope:'attached-chat-pairs',...(policy.error?{error:policy.error}:{} )},identity:{replyIdentity:describeReplyIdentity({attachedChats:!!sessionBroker,policy,pinning}),chats:describeChatBinding()},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null};},credentialBroker:async params=>{
+    subsystem=createLocalMessagingSubsystem({stateRoot:config.stateRoot,registry,journal,dispatcher,notifier,aclRules,logger,interactiveBroker,interactiveRecipients:sessionRecipients,runnerAvailable,recipientDirectory:[...recipientDirectory,...(grokBroker?.directory??[]),...(antigravityBroker?.directory??[])],discoveryBroker,sessionBroker,replyIdentityFactory:sessionBroker?({credentialValidator})=>createAttachedReplyIdentity({credentialValidator,sessionBroker,enabled:admissionEnabled}):null,ownerAcl,inboxBroker,ownerReconciliationKey:()=>loadLocalMessagingConfig(configPath).ownerReconciliationKey,statusProvider:async()=>{const policy=replyPolicy(),pinning=!!sessionBroker&&(replyIdentityEnabled===null?policy.enabled===true:typeof replyIdentityEnabled==='function'?!!replyIdentityEnabled():replyIdentityEnabled===true);return {...baseStatus(),replyIdentity:{enabled:pinning,scope:'attached-chat-pairs',...(policy.error?{error:policy.error}:{} )},identity:{replyIdentity:describeReplyIdentity({attachedChats:!!sessionBroker,policy,pinning}),chats:describeChatBinding()},discovery:discoveryBroker?await discoveryBroker.status():{enabled:false},journal:await journal.status(),dispatcher:dispatcher.status(),wake:await notifier?.status?.()??null};},credentialBroker:async params=>{
      try {broker.verify(params);}
      catch(error){if(error?.code==='unauthorized')brokerFailureLimit.checkAndConsume('failed');throw error;}
      brokerLimit.checkAndConsume('desktop');

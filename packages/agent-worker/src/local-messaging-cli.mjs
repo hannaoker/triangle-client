@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {ancestors} from './delivery-private-path.mjs';
-import {randomBytes,randomUUID,createHash} from 'node:crypto';
+import {createPrivateKey,sign,randomBytes,randomUUID,createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {readPrivateJson,writePrivateJson,withPrivateFileLock,sanitizeSessionTitle} from './local-messaging-auth-broker.mjs';
 import {resolveLocalSocketAddress} from './local-messaging-address.mjs';
@@ -14,7 +14,7 @@ import {createLocalMessagingMcpHandler,runMcpStdioSession} from './local-messagi
 import {readSessionMessagingPolicy,validateInteractiveIntegration,CLASS_GRANT_DIRECTIONS,UUID_PATTERN,HEX64_PATTERN} from './local-messaging-interactive-session.mjs';
 import {SUPPORTED_CLAUDE_VERSION} from './claude-session-delivery.mjs';
 import {coded} from './local-messaging-errors.mjs';
-import {cliWindowEnvelope} from './local-messaging-protocol.mjs';
+import {ownerReconciliationPayload,cliWindowEnvelope} from './local-messaging-protocol.mjs';
 import {setupGrok,disableGrok,runGrokCommand} from './grok-local-session.mjs';
 import {setupAntigravity,updateAntigravityGrants,disableAntigravity,runAntigravityMcp} from './antigravity-local-session.mjs';
 // An owner-set alias (AD.1): the same shape as ALIAS_PATTERN in identity-primitives.mjs, kept inline so this CLI needs no other module (a test pins the two together).
@@ -24,7 +24,7 @@ export function defaultLocalConfigPath(env=process.env){return path.join(env.HOM
 function parse(argv){
  const args=[...argv],command=args.shift()||'help',options={};
 if(command==='grok')options.operation=args.shift();
- const flags=new Set(['alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','event-id','seconds','timeout','follow-message','reply-window','reply-window-ack']);
+ const flags=new Set(['owner-key','alias','conversation-id','context-hash','config','thread-id','desktop-binding','recipient','state-root','text','text-file','to','message-id','request-id','in-reply-to','wait-ms','wake-id','generation','integration','expected-version','workspace','local-cli','workspace-messaging','sender','claim-id','claim-file','reply-id','limit','cursor','harness','registry-root','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','note','show-late-result','sender-harness','to-harness','confirm','event-id','seconds','timeout','follow-message','reply-window','reply-window-ack']);
  while(args.length){const flag=args.shift();if(flag==='--watch'||flag==='--history'||flag==='--include-progress'||flag==='--stream-progress'){
    const key=flag.slice(2);if(options[key]!==undefined)throw coded('invalid_arguments','Duplicate argument');
    options[key]=true;continue;
@@ -65,7 +65,7 @@ export function setupLocalMessaging(options,env=process.env){
  }
  writePrivateJson(integrationPath,{version:1,bindingId:createHash('sha256').update(senderId+'\0'+threadId).digest('hex').slice(0,32),senderId,threadId,secret});
  const previous=fs.existsSync(configPath)?readPrivateJson(configPath):{};
- const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging','inbox','grok','antigravity'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
+ const optional=Object.fromEntries(['wake','interactive','discovery','sessionMessaging','inbox','grok','antigravity','ownerReconciliationKey'].filter(key=>previous[key]!==undefined).map(key=>[key,previous[key]]));
  // Wake activation belongs to a specific sender/thread, never to a replacement binding.
  if(optional.wake&&bindingChanged)optional.wake={...optional.wake,enabled:false};
  if(optional.inbox&&bindingChanged)optional.inbox={...optional.inbox,enabled:false,bindingId:randomUUID()};
@@ -239,8 +239,7 @@ export function revokeInteractiveSession({ integrationPath }) {
  writePrivateJson(integrationPath, updated);
  return updated;
 }
-// Owner-only and offline, like reconcile-wake: no RPC and no MCP tool, because the owner CLI and the bound
-// conversation share one credential. The Triangle service must be stopped so the journal's owner lock is free.
+// Without an independent owner signature, these commands require the exclusive offline journal lock.
 function offlineJournalConfig(options,env){
  const config=readPrivateJson(options.config||defaultLocalConfigPath(env));
  if(config.version!==1||config.enabled!==true)throw coded('local_disabled','Local messaging is disabled');
@@ -249,9 +248,35 @@ function offlineJournalConfig(options,env){
 function onlyOptions(options,allowed){
  if(Object.keys(options).some(key=>!allowed.includes(key)))throw coded('invalid_arguments','Argument is not valid for this command');
 }
+async function onlineOwnerRequest(config, keyPath, operation, request) {
+ const key=createPrivateKey({key:readPrivateJson(keyPath),format:'jwk'});
+ if(key.asymmetricKeyType!=='ed25519')throw coded('invalid_arguments','Owner key must be Ed25519');
+ const binding=readPrivateJson(config.integrationPath);
+ const {socketPath}=resolveLocalSocketAddress({stateRoot:config.stateRoot});
+ const client=createLocalControlClient({socketPath,senderId:binding.senderId});
+ try {
+  await client.exchangeTurnBinding({bindingId:binding.bindingId,threadId:binding.threadId,secret:binding.secret});
+  const submit=async payload=>{
+   const {nonce}=await client.ownerReconciliationChallenge();
+   const signature=sign(null,ownerReconciliationPayload(nonce,operation,payload),key).toString('base64url');
+   return client.ownerReconciliation({operation,request:payload,signature});
+  };
+  if(operation!=='held'||request.messageId)return await submit(request);
+  const items=[];
+  let cursor=null;
+  do {
+   const page=await submit({cursor});
+   items.push(...page.items);
+   cursor=page.nextCursor;
+  } while(cursor);
+  return {items};
+ } finally {await client.close();}
+}
+
 export async function heldOffline(options,env=process.env){
- onlyOptions(options,['config','show-late-result']);
+ onlyOptions(options,['config','owner-key','show-late-result']);
  const config=offlineJournalConfig(options,env);
+ if(options['owner-key'])return onlineOwnerRequest(config,options['owner-key'],'held',options['show-late-result']?{messageId:options['show-late-result']}:{});
  const {listHeldRecords,readHeldLateResult}=await import('./local-messaging-journal.mjs');
  try {
   if(options['show-late-result'])return {lateResult:readHeldLateResult({stateRoot:config.stateRoot,messageId:options['show-late-result']})};
@@ -262,7 +287,7 @@ export async function heldOffline(options,env=process.env){
  }
 }
 export async function reconcileMessageOffline(options,env=process.env){
- onlyOptions(options,['config','message-id','reconcile-id','expect-version','action','expect-late-hash','expect-reply-id','note']);
+ onlyOptions(options,['config','owner-key','message-id','reconcile-id','expect-version','action','expect-late-hash','expect-reply-id','note']);
  const config=offlineJournalConfig(options,env);
  if(['message-id','reconcile-id','expect-version','action'].some(key=>!options[key]))throw coded('invalid_arguments','message-id, reconcile-id, expect-version and action are required');
  const {createLocalMessagingJournal,precheckReconcile,validateReconcileRequest}=await import('./local-messaging-journal.mjs');
@@ -270,6 +295,7 @@ export async function reconcileMessageOffline(options,env=process.env){
  let journal;
  try {
   try {validateReconcileRequest(request);} catch(error){throw error?.code==='invalid_params'?coded('invalid_arguments',error.message):error;}
+  if(options['owner-key'])return await onlineOwnerRequest(config,options['owner-key'],'reconcile-message',request);
   // Refuse what will fail before anything is opened: an open migrates the schema and holds every executing row.
   precheckReconcile({stateRoot:config.stateRoot,...request});
   journal=createLocalMessagingJournal({stateRoot:config.stateRoot,reconcileRequest:request});
@@ -545,7 +571,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  const {command,options}=parse(argv);
  const operation=command==='grok'?options.operation:command;
  // Flags of the owner reconciliation commands mean nothing elsewhere; a typo must fail instead of being ignored.
- if(!['held','reconcile-message'].includes(command)&&['reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
+ if(!['held','reconcile-message'].includes(command)&&['owner-key','reconcile-id','expect-version','expect-late-hash','expect-reply-id','action','show-late-result'].some(key=>options[key]!==undefined))throw coded('invalid_arguments','Argument is not valid for this command');
  if(options.note!==undefined&&!['held','reconcile-message'].includes(command)&&operation!=='close-watch')throw coded('invalid_arguments','Argument is not valid for this command');
  // grok wait flags (--inbox, --json, --timeout) mean nothing elsewhere; runGrokCommand rejects them on other grok operations.
  if(options.watch){
@@ -579,7 +605,7 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
  if(command==='revoke-antigravity'){output.write(JSON.stringify(updateAntigravityGrants('revoke',options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='disable-antigravity'){output.write(JSON.stringify(disableAntigravity(options,options.config||defaultLocalConfigPath(env)))+'\n');return 0;}
  if(command==='antigravity-mcp')return runAntigravityMcp(options,{configPath:options.config||defaultLocalConfigPath(env),input,output});
- if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|progress|close-watch|replies|consume|wait>, setup-antigravity, grant-antigravity, revoke-antigravity, disable-antigravity, antigravity-mcp, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, progress, close-watch, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  send/reply (including grok): --reply-window <JSON> (seconds, maxExtensions, maxTotalSeconds, reason); reply also accepts --reply-window-ack <JSON>\n  send --watch requests 120 seconds; status --message-id <task> --history includes retired progress\n  progress (including grok): --message-id <task> --claim-file <path> --event-id <id> --seconds <0-300>; use 0 to close the watch\n  close-watch (including grok): --message-id <task> --request-id <req> --event-id <id> [--note <text>]\n  replies [--include-progress] (including grok): include non-final progress receipts without claiming\n  grok wait --request-id <id> [--follow-message <original-id>] [--stream-progress] | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
+ if(command==='help'||command==='--help'){output.write('triangle-local: grant-session, revoke-session, grant-session-class, revoke-session-class, list-session-grants, setup-reply-identity, setup-router, setup-grok, disable-grok, grok <status|sessions|send|inbox|claim|reply|progress|close-watch|replies|consume|wait>, setup-antigravity, grant-antigravity, revoke-antigravity, disable-antigravity, antigravity-mcp, setup, setup-discovery, disable-discovery, setup-session-messaging, disable-session-messaging, setup-inbox, disable-inbox, inbox, claim, reply, progress, close-watch, status, discover, sessions, send, replies, consume, ack-wake, reconcile-wake, held, reconcile-message, mcp, claude-session-mcp, codex-session-mcp\n  held/reconcile-message: --owner-key <absolute private Ed25519 JWK path> uses the live service; configure ownerReconciliationKey with its public x value in local-messaging.json\n  send/reply (including grok): --reply-window <JSON> (seconds, maxExtensions, maxTotalSeconds, reason); reply also accepts --reply-window-ack <JSON>\n  send --watch requests 120 seconds; status --message-id <task> --history includes retired progress\n  progress (including grok): --message-id <task> --claim-file <path> --event-id <id> --seconds <0-300>; use 0 to close the watch\n  close-watch (including grok): --message-id <task> --request-id <req> --event-id <id> [--note <text>]\n  replies [--include-progress] (including grok): include non-final progress receipts without claiming\n  grok wait --request-id <id> [--follow-message <original-id>] [--stream-progress] | --inbox [--timeout <sec>] [--json]: read-only block until an unconsumed reply or unclaimed inbox message exists; default 750s, max 760s; exit 0 ready, 3 timeout, 1 error\n');return 0;}
  if(command==='setup-inbox'){output.write(JSON.stringify(setupDesktopInbox(options,env))+'\n');return 0;}
  if(command==='disable-inbox'){output.write(JSON.stringify(disableDesktopInbox(options,env))+'\n');return 0;}
  if(command==='setup-session-messaging'){output.write(JSON.stringify(setupWorkspaceMessaging(options,env))+'\n');return 0;}

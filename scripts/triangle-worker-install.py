@@ -681,7 +681,9 @@ def run_local_wrapper():
         fail("installed local messaging requires manifest v9")
     node = os.path.join(manifest["projectRoot"], "bin", "node")
     entry = os.path.join(manifest["projectRoot"], "packages/agent-worker/src/local-messaging-cli.mjs")
-    os.execve(node, [node, entry, *sys.argv[1:]], dict(os.environ))
+    env = dict(os.environ)
+    env.pop("NODE_OPTIONS", None)
+    os.execve(node, [node, entry, *sys.argv[1:]], env)
 
 
 def wrapper_interpreter(executable=None):

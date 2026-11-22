@@ -501,7 +501,7 @@ function updateAntigravityGrantsLocked(mode, options, config, io) {
     allowedRecipients: nextRecipients,
     allowedHarnesses: nextHarnesses,
     changed,
-    requiresServiceRestart: changed,
+    requiresServiceRestart: false,
   };
 }
 
@@ -559,9 +559,10 @@ export function createAntigravityBroker({ config, issue, getSessionBroker = () =
     if (
       b.senderId !== id ||
       b.alias !== entry.alias ||
-      JSON.stringify(b.allowedSenders) !== JSON.stringify(entry.allowedSenders) ||
-      JSON.stringify(b.allowedRecipients) !== JSON.stringify(entry.allowedRecipients) ||
-      JSON.stringify(b.allowedHarnesses) !== JSON.stringify(entry.allowedHarnesses)
+      b.bindingId !== entry.bindingId ||
+      b.secret !== entry.secret ||
+      b.sessionId !== entry.sessionId ||
+      b.generation !== entry.generation
     ) {
       throw coded("binding_changed", "Pairing changed; restart required");
     }

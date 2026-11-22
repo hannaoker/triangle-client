@@ -391,6 +391,9 @@ export function createLocalControlClient({
       return await this.ackNotification({ wakeId, generation }, options);
     },
 
+    ownerReconciliationChallenge() { return callRpc("owner_reconciliation_challenge"); },
+    ownerReconciliation(params) { return callRpc("owner_reconciliation", params); },
+
     async cancelMessage({ messageId }, options = {}) {
       return await callRpc("cancel_message", { messageId }, options);
     },

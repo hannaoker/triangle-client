@@ -1,7 +1,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
 import {
   validatePrivateDirectory,
   validatePrivateSocket,
@@ -9,6 +9,7 @@ import {
   getSocketInode,
 } from "./local-messaging-address.mjs";
 import {
+  ownerReconciliationPayload,
   encodeFrame,
   createMessageParser,
   createSuccessResponse,
@@ -28,6 +29,7 @@ export function describeMessageDelivery(record,{notification='unknown',recipient
  const view=(state,summary,nextAction)=>({state,summary,nextAction});
  if(record.phase==='completed')return view('completed','Completed in the local journal.','Retrieve the correlated reply if one was produced; verify its contents independently.');
  if(record.phase==='held')return view('held',record.hasLateResult?'Work is held; a late result is retained for owner review.':'Work is held; completion is uncertain.','Ask the owner to reconcile this request before starting another execution.');
+ if(record.phase==='cancelled')return view('cancelled','The sender cancelled this request.','Check any external effects before sending new work.');
  if(record.phase==='failed')return record.reason==='owner_marked_failed'?view('closed_by_owner','Closed by the owner without a result.','If the work is still needed, the sender should send a new request with new IDs; re-sending identical IDs does not restart it.'):view('unknown','The recorded state is not recognized by this reader.','Inspect the request with a compatible runtime before retrying.');
  if(record.phase==='reply_failed')return view('failed','Execution or reply failed; successful completion is not recorded.','Inspect the failure and ask the owner to reconcile execution and reply custody before retrying.');
  if(record.phase==='executing'){
@@ -234,6 +236,7 @@ export function createLocalControlServer({
   // is refused before anything is recorded; work it already has stays queued.
   runnerAvailable = null,
   statusProvider = null,
+  ownerReconciliationKey = null,
   recipientDirectory = [],
   discoveryBroker = null,
   sessionBroker = null,
@@ -1043,16 +1046,37 @@ export function createLocalControlServer({
           break;
         }
 
+        case "owner_reconciliation_challenge":
+        case "owner_reconciliation": {
+          const x = ownerReconciliationKey?.();
+          if (!x) throw coded("unauthorized", "Online owner reconciliation is disabled");
+          if (method === "owner_reconciliation_challenge") {
+            connection.ownerChallenge = {nonce: randomUUID(), expiresAt: Date.now() + 30_000, senderId};
+            socket.write(encodeFrame(createSuccessResponse(id, {nonce: connection.ownerChallenge.nonce})));
+            break;
+          }
+          const challenge = connection.ownerChallenge;
+          delete connection.ownerChallenge;
+          const {operation, request, signature} = params;
+          if (!challenge || challenge.senderId !== senderId || challenge.expiresAt <= Date.now() ||
+              typeof signature !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(signature) ||
+              !verify(null, ownerReconciliationPayload(challenge.nonce, operation, request),
+                createPublicKey({key: {kty: "OKP", crv: "Ed25519", x}, format: "jwk"}),
+                Buffer.from(signature, "base64url"))) {
+            throw coded("unauthorized", "Owner signature required");
+          }
+          let outcome;
+          if (operation === "held") outcome = journal.inspectHeld(request);
+          else if (operation === "reconcile-message") outcome = await journal.reconcileMessage(request);
+          else throw coded("invalid_request", "Unknown owner operation");
+          socket.write(encodeFrame(createSuccessResponse(id, outcome)));
+          break;
+        }
         case "cancel_message": {
-          const resp = createSuccessResponse(
-            id,
-            {
-              status: "unsupported",
-              message: "Cancellation is not supported for local route messages",
-            },
-            PROTOCOL_VERSION,
-          );
-          socket.write(encodeFrame(resp));
+          identifier(params.messageId, "messageId");
+          const outcome = journal.cancelMessage({messageId: params.messageId, requester: senderId});
+          if (outcome.status === "cancelled") activeDispatcher.cancel?.(params.messageId);
+          socket.write(encodeFrame(createSuccessResponse(id, outcome, PROTOCOL_VERSION)));
           break;
         }
 
