@@ -734,7 +734,15 @@ async function main() {
       check(gReuse.code !== 0 && gReuse.json?.state === "rejected" && gReuse.json?.error === "message_id_in_use", "grok reply-id reuse did not return rejected/message_id_in_use", gReuse);
 
       const jGuard = lastJsonLine((await helper(currentBundle(), ["journal-reply-guard", path.join(tmp, "jguard"), desktopSenderId, ids.helper])).stdout);
-      check(jGuard?.ok === true && jGuard.reuseCode === "message_id_in_use" && jGuard.sameIdRetryIsDuplicate === true, "journal reply guard failed", jGuard);
+      check(
+        jGuard?.ok === true &&
+          jGuard.reuseCode === "message_id_in_use" &&
+          jGuard.replyReuseCode === "message_id_in_use" &&
+          jGuard.sameIdRetryIsDuplicate === true &&
+          jGuard.historicalCollisionRetryIsDuplicate === true,
+        "journal reply guard failed",
+        jGuard,
+      );
       const sGuard = lastJsonLine((await helper(currentBundle(), ["server-reply-guard", path.join(tmp, "sguard"), desktopSenderId, ids.helper])).stdout);
       check(sGuard?.ok === true && sGuard.errorCode === "message_id_in_use" && sGuard.recordSendCalled === false && sGuard.rateRolledBack === true, "server reply guard failed", sGuard);
       return { serverRefused: ["helper", "gravity2"], grokRejected: true, journalDirectGuard: jGuard, serverDirectGuard: sGuard };
