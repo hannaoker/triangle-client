@@ -175,7 +175,18 @@ function collectReservedIds(config) {
   return new Set(reserved.filter((id) => typeof id === "string"));
 }
 
-function syncWorkspaceSessionPolicy({
+const DEFAULT_IO = Object.freeze({
+  readJson: readPrivateJson,
+  writeJson: writePrivateJson,
+  unlinkFile: (file) => fs.unlinkSync(file),
+  exists: (file) => fs.existsSync(file),
+});
+
+function resolveIo(io = {}) {
+  return { ...DEFAULT_IO, ...io };
+}
+
+function planWorkspaceSessionPolicy({
   config,
   senderId,
   allowedSenders,
@@ -192,7 +203,7 @@ function syncWorkspaceSessionPolicy({
   if (touchesWorkspace && !hasWorkspacePolicy) {
     throw coded("session_messaging_required", "Enable workspace session messaging first");
   }
-  if (!hasWorkspacePolicy) return;
+  if (!hasWorkspacePolicy) return null;
 
   const policyPath = config.sessionMessaging.integrationPath;
   const policy = readSessionMessagingPolicy(policyPath);
@@ -201,10 +212,10 @@ function syncWorkspaceSessionPolicy({
   }
 
   let version = policy.version;
-  let allowedPolicySenders = needsClaude
+  const allowedPolicySenders = needsClaude
     ? [...new Set([...policy.allowedSenders, senderId])]
     : policy.allowedSenders.filter((id) => id !== senderId);
-  let allowedPolicyRecipients = needsSessionSenders
+  const allowedPolicyRecipients = needsSessionSenders
     ? [...new Set([...policy.allowedRecipients, senderId])]
     : policy.allowedRecipients.filter((id) => id !== senderId);
 
@@ -223,7 +234,7 @@ function syncWorkspaceSessionPolicy({
   if (addedSessions.length > 0 || (removedSessions.length > 0 && Array.isArray(policy.exactPairs))) {
     const existing = Array.isArray(policy.exactPairs) ? [...policy.exactPairs] : [];
     const removeSet = new Set(removedSessions);
-    let filtered = existing.filter((p) => !(p.sender === senderId && removeSet.has(p.recipient)));
+    const filtered = existing.filter((p) => !(p.sender === senderId && removeSet.has(p.recipient)));
     for (const recipient of addedSessions) {
       if (!filtered.some((p) => p.sender === senderId && p.recipient === recipient)) {
         filtered.push({ sender: senderId, recipient });
@@ -248,22 +259,66 @@ function syncWorkspaceSessionPolicy({
     ...(nextCodex !== undefined ? { codex: nextCodex } : {}),
     ...(exactPairs !== undefined ? { exactPairs } : {}),
   };
-  writePrivateJson(policyPath, nextPolicy);
+  if (JSON.stringify(nextPolicy) === JSON.stringify(policy)) return null;
+  return { path: policyPath, existed: true, previousValue: policy, value: nextPolicy };
 }
 
-function withSessionLock(config, operation) {
-  return config.sessionMessaging?.enabled
-    ? withPrivateFileLock(config.sessionMessaging.integrationPath, operation)
-    : operation();
+function commitPrivateJsonUpdates(updates, io) {
+  const applied = [];
+  for (const update of updates) {
+    try {
+      io.writeJson(update.path, update.value);
+      applied.push(update);
+    } catch (writeErr) {
+      const rollbackErrors = [];
+      for (let i = applied.length - 1; i >= 0; i--) {
+        const entry = applied[i];
+        try {
+          if (entry.existed) {
+            io.writeJson(entry.path, entry.previousValue);
+          } else {
+            try {
+              io.unlinkFile(entry.path);
+            } catch (unlinkErr) {
+              if (unlinkErr?.code !== "ENOENT") throw unlinkErr;
+            }
+          }
+        } catch (rbErr) {
+          rollbackErrors.push(rbErr);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        const err = coded(
+          "antigravity_partial_update_rollback_failed",
+          "Antigravity multi-file update failed and rollback did not complete cleanly"
+        );
+        err.rollbackFailed = true;
+        err.failedPhase = update.label ?? "write";
+        err.cause = writeErr;
+        throw err;
+      }
+      throw writeErr;
+    }
+  }
 }
 
-export function setupAntigravity(options, configPath) {
-  const initialConfig = readPrivateJson(configPath);
-  return withSessionLock(initialConfig, () => setupAntigravityLocked(options, configPath));
+function withAntigravityLocks(configPath, io, operation) {
+  return withPrivateFileLock(configPath, () => {
+    const config = io.readJson(configPath);
+    return config.sessionMessaging?.enabled
+      ? withPrivateFileLock(config.sessionMessaging.integrationPath, () => operation(config))
+      : operation(config);
+  });
 }
 
-function setupAntigravityLocked(options, configPath) {
-  const config = readPrivateJson(configPath);
+export function setupAntigravity(options, configPath, io = undefined) {
+  const resolvedIo = resolveIo(io);
+  return withAntigravityLocks(configPath, resolvedIo, (config) =>
+    setupAntigravityLocked(options, configPath, config, resolvedIo)
+  );
+}
+
+function setupAntigravityLocked(options, configPath, config, io) {
   if (config.version !== 1 || config.enabled !== true) {
     throw coded("local_disabled", "Enable local messaging first");
   }
@@ -281,7 +336,7 @@ function setupAntigravityLocked(options, configPath) {
     throw coded("invalid_arguments", "Use grant/revoke commands to drop session harness access");
   }
 
-  const owner = readPrivateJson(config.integrationPath).senderId;
+  const owner = io.readJson(config.integrationPath).senderId;
   const senderId = hash(JSON.stringify(["triangle-antigravity-v1", owner, alias]));
   const reserved = collectReservedIds(config);
   if (entries.some((b) => b.senderId === senderId) || reserved.has(senderId)) {
@@ -289,7 +344,7 @@ function setupAntigravityLocked(options, configPath) {
   }
 
   const file = path.join(config.stateRoot, `antigravity-${alias}.json`);
-  if (fs.existsSync(file)) {
+  if (io.exists(file)) {
     throw coded("pairing_exists", "Pairing file already exists");
   }
 
@@ -309,7 +364,7 @@ function setupAntigravityLocked(options, configPath) {
     allowedHarnesses,
   };
 
-  syncWorkspaceSessionPolicy({
+  const policyUpdate = planWorkspaceSessionPolicy({
     config,
     senderId,
     allowedSenders,
@@ -317,11 +372,21 @@ function setupAntigravityLocked(options, configPath) {
     addedSessions: allowedRecipients.filter((id) => id.startsWith("session-")),
   });
 
-  writePrivateJson(file, binding);
-  writePrivateJson(configPath, {
-    ...config,
-    antigravity: { enabled: true, bindings: [...entries.map((b) => b.file), file] },
-  });
+  const updates = [
+    ...(policyUpdate ? [{ ...policyUpdate, label: "session_policy" }] : []),
+    { path: file, existed: false, value: binding, label: "pairing" },
+    {
+      path: configPath,
+      existed: true,
+      previousValue: config,
+      value: {
+        ...config,
+        antigravity: { enabled: true, bindings: [...entries.map((b) => b.file), file] },
+      },
+      label: "local_config",
+    },
+  ];
+  commitPrivateJsonUpdates(updates, io);
 
   return {
     senderId,
@@ -335,16 +400,17 @@ function setupAntigravityLocked(options, configPath) {
   };
 }
 
-export function updateAntigravityGrants(mode, options, configPath) {
+export function updateAntigravityGrants(mode, options, configPath, io = undefined) {
   if (mode !== "grant" && mode !== "revoke") {
     throw coded("invalid_arguments", "Unsupported Antigravity grant operation");
   }
-  const initialConfig = readPrivateJson(configPath);
-  return withSessionLock(initialConfig, () => updateAntigravityGrantsLocked(mode, options, configPath));
+  const resolvedIo = resolveIo(io);
+  return withAntigravityLocks(configPath, resolvedIo, (config) =>
+    updateAntigravityGrantsLocked(mode, options, config, resolvedIo)
+  );
 }
 
-function updateAntigravityGrantsLocked(mode, options, configPath) {
-  const config = readPrivateJson(configPath);
+function updateAntigravityGrantsLocked(mode, options, config, io) {
   if (config.version !== 1 || config.enabled !== true) {
     throw coded("local_disabled", "Enable local messaging first");
   }
@@ -402,7 +468,7 @@ function updateAntigravityGrantsLocked(mode, options, configPath) {
     JSON.stringify(nextHarnesses) !== JSON.stringify(binding.allowedHarnesses);
 
   if (changed) {
-    syncWorkspaceSessionPolicy({
+    const policyUpdate = planWorkspaceSessionPolicy({
       config,
       senderId: binding.senderId,
       allowedSenders: nextSenders,
@@ -410,12 +476,22 @@ function updateAntigravityGrantsLocked(mode, options, configPath) {
       addedSessions,
       removedSessions,
     });
-    writePrivateJson(file, {
-      ...binding,
-      allowedSenders: nextSenders,
-      allowedRecipients: nextRecipients,
-      allowedHarnesses: nextHarnesses,
-    });
+    const updates = [
+      ...(policyUpdate ? [{ ...policyUpdate, label: "session_policy" }] : []),
+      {
+        path: file,
+        existed: true,
+        previousValue: binding,
+        value: {
+          ...binding,
+          allowedSenders: nextSenders,
+          allowedRecipients: nextRecipients,
+          allowedHarnesses: nextHarnesses,
+        },
+        label: "pairing",
+      },
+    ];
+    commitPrivateJsonUpdates(updates, io);
   }
 
   return {
@@ -429,36 +505,43 @@ function updateAntigravityGrantsLocked(mode, options, configPath) {
   };
 }
 
-export function disableAntigravity(options, configPath) {
-  const initialConfig = readPrivateJson(configPath);
-  return withSessionLock(initialConfig, () => {
-    const config = readPrivateJson(configPath);
+export function disableAntigravity(options, configPath, io = undefined) {
+  const resolvedIo = resolveIo(io);
+  return withAntigravityLocks(configPath, resolvedIo, (config) => {
     const entry = selectAntigravityEntry(antigravityBindings(config), options.alias);
     const { file, ...binding } = entry;
+    let policyCleanupRequired = false;
+    let policyCleanupError = null;
     if (binding.enabled || !binding.revoked) {
-      if (config.sessionMessaging?.enabled) {
-        try {
-          syncWorkspaceSessionPolicy({
-            config,
-            senderId: binding.senderId,
-            allowedSenders: [],
-            allowedHarnesses: [],
-            removedSessions: binding.allowedRecipients.filter((id) => id.startsWith("session-")),
-          });
-        } catch {}
-      }
-      writePrivateJson(file, {
+      // Fence the pairing credential first so disable always succeeds even if workspace cleanup fails.
+      resolvedIo.writeJson(file, {
         ...binding,
         enabled: false,
         revoked: true,
         generation: binding.generation + 1,
         secret: randomBytes(32).toString("hex"),
       });
+      if (config.sessionMessaging?.enabled) {
+        try {
+          const policyUpdate = planWorkspaceSessionPolicy({
+            config,
+            senderId: binding.senderId,
+            allowedSenders: [],
+            allowedHarnesses: [],
+            removedSessions: binding.allowedRecipients.filter((id) => id.startsWith("session-")),
+          });
+          if (policyUpdate) resolvedIo.writeJson(policyUpdate.path, policyUpdate.value);
+        } catch (error) {
+          policyCleanupRequired = true;
+          policyCleanupError = typeof error?.code === "string" ? error.code : "policy_cleanup_failed";
+        }
+      }
     }
     return {
       alias: binding.alias,
       senderId: binding.senderId,
       disabled: true,
+      ...(policyCleanupRequired ? { policyCleanupRequired: true, policyCleanupError } : {}),
       activeClaims: "preserved; no automatic retry or reassignment",
     };
   });

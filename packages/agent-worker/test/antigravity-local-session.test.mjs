@@ -20,7 +20,10 @@ import {
   updateAntigravityGrants,
   disableAntigravity,
 } from "../src/antigravity-local-session.mjs";
-import { readPrivateJson, writePrivateJson } from "../src/local-messaging-auth-broker.mjs";
+import {
+  readPrivateJson,
+  writePrivateJson,
+} from "../src/local-messaging-auth-broker.mjs";
 import { createInstalledLocalMessagingHost, createDestinationPermissions, loadLocalMessagingConfig } from "../src/local-messaging-host.mjs";
 import { createProfiledReasonerGate } from "../src/concurrency-gate.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
@@ -346,4 +349,108 @@ test("createDestinationPermissions enforces Antigravity session and harness gran
   assert.equal(await perms.mayMessageHarness("ag", "codex"), true);
   assert.equal(await perms.mayMessageHarness("ag", "claude"), false);
   assert.equal(await perms.mayMessageIgnoringLiveness("ag", `session-${"b".repeat(64)}`), true);
+});
+
+test("multi-file setup and grant/revoke updates roll back cleanly on failure and remain retryable", async () => {
+  const f = fixture();
+  try {
+    const workspace = path.join(f.root, "ws-rollback");
+    fs.mkdirSync(workspace, { mode: 0o700 });
+    const wrapper = path.join(f.root, "local-cli-rb");
+    fs.writeFileSync(wrapper, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    setupSessionDiscovery({ config: f.configPath, workspace, "local-cli": wrapper });
+    setupSessionDiscovery({ config: f.configPath, workspace, "local-cli": wrapper, harness: "codex" });
+    setupWorkspaceMessaging({ config: f.configPath, workspace, "local-cli": wrapper });
+    setupWorkspaceMessaging({ config: f.configPath, workspace, "local-cli": wrapper, harness: "codex", senders: [ownerId] });
+
+    const confBefore = readPrivateJson(f.configPath);
+    const policyPath = confBefore.sessionMessaging.integrationPath;
+    const policyBefore = readPrivateJson(policyPath);
+    const pairingPath = path.join(f.stateRoot, "antigravity-rb.json");
+
+    // 1. Setup fails while writing pairing file -> rolls back session-messaging.json.
+    assert.throws(
+      () =>
+        setupAntigravity({ alias: "rb", codexSessions: true }, f.configPath, {
+          writeJson: (target, value) => {
+            if (target === pairingPath) throw new Error("injected pairing write failure");
+            return writePrivateJson(target, value);
+          },
+        }),
+      /injected pairing write failure/
+    );
+    assert.deepEqual(readPrivateJson(policyPath), policyBefore);
+    assert.equal(fs.existsSync(pairingPath), false);
+    assert.deepEqual(readPrivateJson(f.configPath), confBefore);
+
+    // 2. Setup fails while writing local-messaging.json -> unlinks newly created pairing file and restores session policy.
+    assert.throws(
+      () =>
+        setupAntigravity({ alias: "rb", codexSessions: true }, f.configPath, {
+          writeJson: (target, value) => {
+            if (target === f.configPath) throw new Error("injected config write failure");
+            return writePrivateJson(target, value);
+          },
+        }),
+      /injected config write failure/
+    );
+    assert.deepEqual(readPrivateJson(policyPath), policyBefore);
+    assert.equal(fs.existsSync(pairingPath), false, "orphan pairing file must be unlinked so retry works");
+    assert.deepEqual(readPrivateJson(f.configPath), confBefore);
+
+    // 3. Retry after clean rollback succeeds without pairing_exists.
+    const created = setupAntigravity({ alias: "rb", codexSessions: true }, f.configPath);
+    assert.equal(fs.existsSync(pairingPath), true);
+    const bindingAfterSetup = readAntigravityBinding(pairingPath);
+    const policyAfterSetup = readPrivateJson(policyPath);
+    assert.ok(policyAfterSetup.codex.allowedSenders.includes(created.senderId));
+
+    // 4. Revoke fails while updating pairing file -> rolls back session-messaging.json cleanly.
+    assert.throws(
+      () =>
+        updateAntigravityGrants("revoke", { alias: "rb", codexSessions: true }, f.configPath, {
+          writeJson: (target, value) => {
+            if (target === pairingPath) throw new Error("injected grant pairing failure");
+            return writePrivateJson(target, value);
+          },
+        }),
+      /injected grant pairing failure/
+    );
+    assert.deepEqual(readPrivateJson(policyPath), policyAfterSetup);
+    assert.deepEqual(readAntigravityBinding(pairingPath), bindingAfterSetup);
+
+    // 5. Rollback failure surfaces explicit rollbackFailed error code.
+    assert.throws(
+      () =>
+        updateAntigravityGrants("revoke", { alias: "rb", codexSessions: true }, f.configPath, {
+          writeJson: (target, value) => {
+            if (target === pairingPath) throw new Error("primary write failure");
+            if (target === policyPath && value.codex.allowedSenders.includes(created.senderId)) {
+              throw new Error("rollback write failure");
+            }
+            return writePrivateJson(target, value);
+          },
+        }),
+      (err) => err.code === "antigravity_partial_update_rollback_failed" && err.rollbackFailed === true
+    );
+    // Restore consistent state, then test disable policy cleanup failure reporting.
+    writePrivateJson(policyPath, policyAfterSetup);
+    const disabled = disableAntigravity({ alias: "rb" }, f.configPath, {
+      writeJson: (target, value) => {
+        if (target === policyPath) {
+          const e = new Error("injected policy write failure");
+          e.code = "policy_write_failed";
+          throw e;
+        }
+        return writePrivateJson(target, value);
+      },
+    });
+    assert.equal(disabled.disabled, true);
+    assert.equal(disabled.policyCleanupRequired, true);
+    assert.equal(disabled.policyCleanupError, "policy_write_failed");
+    assert.equal(readAntigravityBinding(pairingPath).enabled, false);
+    assert.equal(readAntigravityBinding(pairingPath).revoked, true);
+  } finally {
+    await f.close();
+  }
 });
