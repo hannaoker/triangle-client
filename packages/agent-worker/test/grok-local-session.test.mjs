@@ -877,3 +877,47 @@ test('mixed-version legacy updates and progress receipts share the same extensio
   assert.equal(journal.replyWindowLimits(await journal.getRecord('mix-def2')).extensionsUsed,3);
  }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
+
+test('unfiltered listReplyProgress keeps newer active and unconsumed progress visible past 100 consumed requests',async()=>{
+ const {createLocalMessagingJournal}=await import('../src/local-messaging-journal.mjs');
+ const stateRoot=fs.mkdtempSync('/private/tmp/tri-progress-limit-');
+ const journal=createLocalMessagingJournal({stateRoot});
+ try{
+  const base=50_000;
+  for(let i=0;i<105;i++){
+   const msgId=`old-msg-${String(i).padStart(3,'0')}`;
+   const reqId=`old-req-${String(i).padStart(3,'0')}`;
+   const replyId=`old-rep-${String(i).padStart(3,'0')}`;
+   // Advance past the 600s pair exchange rate-limit window every turn.
+   const ts=base+i*700_000;
+   await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:`work ${i}`,messageId:msgId,requestId:reqId,
+    metadata:{_loopDepth:1,replyWindow:{seconds:60}}},{now:ts});
+   const claim=await journal.claimInboxMessage({messageId:msgId,claimId:`old-c-${i}`,requester:'bob',sessionId:'s1',generation:1,now:ts+1});
+   await journal.recordInteractiveProgress({messageId:msgId,claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:`note ${i}`,now:ts+2,eventId:`old-p-${i}`,seconds:30});
+   await journal.recordInteractiveReply({messageId:msgId,claimToken:claim.claimToken,sessionId:'s1',generation:1,requester:'bob',text:`done ${i}`,replyId,now:ts+3});
+   await journal.consumeReply({requester:'alice',messageId:replyId});
+  }
+
+  // Active request #106 and unconsumed completed request #107 must still surface in unfiltered listReplyProgress.
+  const activeBase=base+105*700_000;
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'active 106',messageId:'new-msg-106',requestId:'new-req-106',
+   metadata:{_loopDepth:1,replyWindow:{seconds:60}}},{now:activeBase});
+  const claim106=await journal.claimInboxMessage({messageId:'new-msg-106',claimId:'c-106',requester:'bob',sessionId:'s1',generation:1,now:activeBase+1});
+  await journal.recordInteractiveProgress({messageId:'new-msg-106',claimToken:claim106.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'still visible active',now:activeBase+2,eventId:'p-106',seconds:30});
+
+  await journal.recordSend({sender:'alice',recipient:'bob',recipientType:'interactive',text:'unconsumed 107',messageId:'new-msg-107',requestId:'new-req-107',
+   metadata:{_loopDepth:1,replyWindow:{seconds:60}}},{now:activeBase+700_000});
+  const claim107=await journal.claimInboxMessage({messageId:'new-msg-107',claimId:'c-107',requester:'bob',sessionId:'s1',generation:1,now:activeBase+700_001});
+  await journal.recordInteractiveProgress({messageId:'new-msg-107',claimToken:claim107.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'still visible unconsumed',now:activeBase+700_002,eventId:'p-107',seconds:30});
+  await journal.recordInteractiveReply({messageId:'new-msg-107',claimToken:claim107.claimToken,sessionId:'s1',generation:1,requester:'bob',text:'reply 107',replyId:'rep-107',now:activeBase+700_003});
+
+  const unfiltered=journal.listReplyProgress({requester:'alice'});
+  assert.deepEqual(unfiltered.map(p=>p.messageId),['new-msg-106','new-msg-107']);
+  assert.deepEqual(unfiltered.map(p=>p.eventId),['p-106','p-107']);
+
+  // progressHistory: true continues to expose historical entries.
+  const history=journal.listReplyProgress({requester:'alice',progressHistory:true});
+  assert.equal(history.length,100);
+  assert.equal(history[0].messageId,'old-msg-000');
+ }finally{await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
+});

@@ -244,8 +244,15 @@ export function createHeadlessCursorAcpRuntime({
       waitMs: poolAcquireWaitMs,
     });
 
+    let activeSlotId = null;
+    let activeProcessHandle = null;
+    let activeSessionId = null;
+    let promptAttempted = false;
+
     try {
       const ready = await lease.ready();
+      activeSlotId = ready.slotId;
+      activeProcessHandle = ready.processHandle;
       const processHandle = ready.processHandle;
       const cwd =
         typeof workingDirectory === "string" && workingDirectory.startsWith("/")
@@ -268,6 +275,7 @@ export function createHeadlessCursorAcpRuntime({
         profileInstanceId,
         cwd,
       });
+      activeSessionId = sessionId;
 
       resolvedRegistry.upsert(profileInstanceId, roomId, {
         cursorSessionId: sessionId,
@@ -276,11 +284,13 @@ export function createHeadlessCursorAcpRuntime({
       });
 
       const config = await applySessionConfig(processHandle, sessionId);
+      promptAttempted = true;
       const turn = await processHandle.sessionPrompt({
         sessionId,
         text,
         timeoutMs: promptTimeoutMs,
       });
+      promptAttempted = false;
 
       const assistantText = turn.assistantText?.trim() ?? "";
       if (assistantText.length === 0 || assistantText === "[NO_REPLY]") {
@@ -336,6 +346,17 @@ export function createHeadlessCursorAcpRuntime({
         expectedSettlementOrder: replyBeforeAckStages(),
       });
     } catch (error) {
+      if (
+        promptAttempted &&
+        (error?.code === "request_timeout" || error?.outcome === "unknown")
+      ) {
+        await abortAndRecycleTimedOutSlot({
+          slotId: activeSlotId,
+          processHandle: activeProcessHandle,
+          sessionId: activeSessionId,
+          error,
+        });
+      }
       try {
         resolvedRegistry.upsert(profileInstanceId, roomId, {
           executionState: "idle",
@@ -347,6 +368,44 @@ export function createHeadlessCursorAcpRuntime({
       throw error;
     } finally {
       lease.release();
+    }
+  }
+
+  /**
+   * Cancel and recycle the ACP child slot after a prompt timeout so any
+   * still-streaming session/update notifications cannot bleed into the next turn.
+   */
+  async function abortAndRecycleTimedOutSlot({ slotId, processHandle, sessionId, error }) {
+    logger.info?.({
+      msg: "cursor_acp_turn_timeout_recycling_slot",
+      slotId: slotId ?? null,
+      code: error?.code ?? null,
+    });
+    if (sessionId && typeof processHandle?.sessionCancel === "function") {
+      let cancelTimer = null;
+      try {
+        await Promise.race([
+          processHandle.sessionCancel({ sessionId }),
+          new Promise((resolve) => {
+            cancelTimer = setTimeout(resolve, 500);
+          }),
+        ]);
+      } catch {
+        // Best-effort cancel before restarting the slot process.
+      } finally {
+        if (cancelTimer != null) clearTimeout(cancelTimer);
+      }
+    }
+    if (slotId != null && typeof workerPool.restartSlot === "function") {
+      try {
+        await workerPool.restartSlot(slotId);
+      } catch (restartError) {
+        logger.error?.({
+          msg: "cursor_acp_timeout_slot_restart_failed",
+          slotId,
+          code: restartError?.code ?? null,
+        });
+      }
     }
   }
 

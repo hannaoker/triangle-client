@@ -432,3 +432,85 @@ test("crash-boundary: ack-committed before local clear recovers to idle", async 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("prompt timeout cancels and recycles the ACP slot so late chunks cannot bleed into retry", async () => {
+  const home = tempHome();
+  const store = path.join(home, "sessions.json");
+  let runtime = null;
+  try {
+    const fake = createFakeAcpStdioProgram({
+      idPrefix: "timeout-recycle",
+      durableStorePath: store,
+      promptDelayOnceMs: 250,
+      promptDelayOnceMarkerPath: path.join(home, "prompt-delayed-once.flag"),
+      postTimeoutLeakText: "LEAK_FROM_TIMED_OUT_TURN",
+    });
+    const proxy = createProxyRecorder();
+    const logs = [];
+    runtime = createHeadlessCursorAcpRuntime({
+      profileConfig: createDefaultCursorAcpShadowProfile({
+        workingDirectory: path.join(home, "cwd"),
+      }),
+      enableShadow: true,
+      transactionProxy: proxy,
+      command: fake.command,
+      args: fake.args,
+      cursorHome: path.join(home, "cursor-home"),
+      env: { HOME: home, PATH: process.env.PATH },
+      promptTimeoutMs: 60,
+      logger: {
+        info(entry) {
+          logs.push(entry);
+        },
+        error(entry) {
+          logs.push(entry);
+        },
+      },
+    });
+
+    await runtime.start();
+    const initialPid = runtime.status().pool.slots[0].pid;
+
+    await assert.rejects(
+      () =>
+        runtime.runDelivery({
+          profileInstanceId: PROFILE_INSTANCE_ID,
+          roomId: ROOM_ID,
+          deliveryId: "delivery_timeout_1",
+          numericDeliveryId: 1,
+          text: "first timed out turn",
+          inboundEventId: INBOUND_EVENT_ID,
+        }),
+      (error) => error.code === "request_timeout",
+    );
+
+    const recycledPid = runtime.status().pool.slots[0].pid;
+    assert.notEqual(recycledPid, initialPid, "timed-out slot child must be replaced before reuse");
+    assert.ok(
+      logs.some((entry) => entry?.msg === "cursor_acp_turn_timeout_recycling_slot"),
+      "expected timeout slot recycle log",
+    );
+    assert.deepEqual(proxy.calls, [], "timed-out turn must not reply or ack");
+
+    const retryResult = await runtime.runDelivery({
+      profileInstanceId: PROFILE_INSTANCE_ID,
+      roomId: ROOM_ID,
+      deliveryId: "delivery_retry_2",
+      numericDeliveryId: 2,
+      text: "clean retry turn",
+      inboundEventId: INBOUND_EVENT_ID,
+    });
+    assert.equal(retryResult.status, "completed");
+    assert.doesNotMatch(retryResult.assistantText, /LEAK_FROM_TIMED_OUT_TURN/);
+    assert.match(retryResult.assistantText, /clean retry turn/);
+    assert.deepEqual(
+      proxy.calls.map((call) => call.op),
+      ["reply", "ack"],
+    );
+  } finally {
+    if (runtime) {
+      await runtime.stop().catch(() => {});
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+});
