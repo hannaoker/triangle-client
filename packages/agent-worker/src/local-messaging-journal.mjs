@@ -1032,6 +1032,10 @@ export function createLocalMessagingJournal({
     }
     let sql = "SELECT * FROM local_messages WHERE sender = ? AND progress_json IS NOT NULL";
     const params = [requester];
+    if (!progressHistory) {
+      sql +=
+        " AND (phase IS NOT 'completed' OR EXISTS (SELECT 1 FROM local_replies r WHERE r.in_reply_to = local_messages.message_id AND r.consumed = 0))";
+    }
     if (requestId) {
       sql += " AND request_id = ?";
       params.push(requestId);
