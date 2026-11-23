@@ -6,6 +6,7 @@ import os from "node:os";
 import net from "node:net";
 import crypto from "node:crypto";
 import { createLocalControlServer } from "../src/local-messaging-server.mjs";
+import { createLocalMessagingDispatcher } from "../src/local-messaging-dispatcher.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
 import { createTestMemoryJournal, createTestRecoverableDispatcher, createTestSqliteJournal } from "./local-messaging-fixtures.mjs";
 import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
@@ -178,9 +179,6 @@ test("local control server and client lifecycle, send, retrieval, and reconnect"
 
     const afterConsume = await client2.listReplies({ requestId: "req-001" });
     assert.equal(afterConsume.length, 0);
-
-    const cancelRes = await client2.cancelMessage({ messageId: "msg-001" });
-    assert.equal(cancelRes.status, "unsupported");
 
     await client2.close();
   } finally {
@@ -1193,5 +1191,38 @@ test("a refused reply-id collision preserves exact message retries through the s
     await server.close();
     await journal.close();
     fs.rmSync(env.tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("only the sender can cancel queued and executing messages, including an unresponsive runner", async () => {
+  const env = setupEnvironment();
+  const journal = createLocalMessagingJournal({stateRoot:env.tmpDir});
+  const {promise:started, resolve:markStarted} = Promise.withResolvers();
+  const dispatcher = createLocalMessagingDispatcher({journal, runRecipient: (job, {signal,onStarted}) => {
+    onStarted();
+    markStarted(signal);
+    return new Promise(() => {});
+  }});
+  const server = createLocalControlServer({socketPath:env.socketPath, journal, dispatcher,
+    acl:env.acl, credentialValidator:env.validator});
+  const clientFor = senderId => createLocalControlClient({socketPath:env.socketPath,senderId,turnCredential:env.issuer.issue({senderId})});
+  const sender = clientFor("desktop-codex"), foreign = clientFor("eve");
+  try {
+    await server.start();
+    for (const id of ["one","two"]) await sender.sendMessage({to:"gravity2",text:id,messageId:id,requestId:id});
+    const signal = await started;
+    await assert.rejects(foreign.cancelMessage({messageId:"one"}), {code:"not_found"});
+    assert.equal(signal.aborted,false);
+    for (const id of ["two","one","one"]) {
+      assert.equal((await sender.cancelMessage({messageId:id})).status,"cancelled");
+      assert.equal((await sender.getMessageStatus({messageId:id})).phase,"cancelled");
+    }
+    assert.equal(signal.aborted,true);
+    assert.equal(dispatcher.status().active,0);
+    assert.deepEqual(await journal.listReplies({requester:"desktop-codex"}),[]);
+  } finally {
+    dispatcher.cancel("one");
+    await sender.close(); await foreign.close(); await server.close();
+    fs.rmSync(env.tmpDir,{recursive:true,force:true});
   }
 });

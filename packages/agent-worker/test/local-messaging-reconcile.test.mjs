@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { execFile, execSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { createLocalMessagingJournal, listHeldRecords, precheckReconcile, readHeldLateResult } from "../src/local-messaging-journal.mjs";
 import { describeMessageDelivery } from "../src/local-messaging-server.mjs";
+import { createInstalledLocalMessagingHost } from "../src/local-messaging-host.mjs";
 import { localState } from "../src/transport-adapter-contract.mjs";
 import { setupLocalMessaging, runLocalMessagingCLI, reconcileMessageOffline } from "../src/local-messaging-cli.mjs";
 import { readPrivateJson, writePrivateJson } from "../src/local-messaging-auth-broker.mjs";
@@ -645,4 +646,70 @@ test("eligibility changed after precheck is refused under the new owner lock bef
     assert.deepEqual(fs.readFileSync(file),before,'locked pre-initialization refusal leaves unrelated executing record untouched');
     assert.equal(listHeldRecords({stateRoot:f.root}).find(r=>r.messageId==='raced-running').phase,'executing','rejected open released its owner lock');
   }finally{await f.close();f.cleanup();}
+});
+
+test("online owner reconciliation requires the pinned signing key and uses the running journal", async () => {
+  const f = cliFixture();
+  let host;
+  try {
+    const keyPath = path.join(f.root, "owner.json");
+    const makeKey = () => generateKeyPairSync("ed25519").privateKey.export({format: "jwk"});
+    const key = makeKey();
+    writePrivateJson(keyPath, makeKey());
+    writePrivateJson(f.configPath, {...f.config, ownerReconciliationKey: key.x});
+    const journal = createLocalMessagingJournal({stateRoot: f.config.stateRoot});
+    await journal.recordSend({sender:"alice", recipient:"worker", messageId:"review", requestId:"req", text:"work"});
+    await journal.holdExecution("review", "runner_timeout");
+    await journal.close();
+    host = createInstalledLocalMessagingHost({configPath:f.configPath, runners:new Map(), gate:{}});
+    await host.start();
+    const cli = (...args) => f.cli([...args, "--owner-key", keyPath]);
+    await assert.rejects(cli("held"), {code:"unauthorized"});
+    writePrivateJson(keyPath, key);
+    const {items} = await cli("held");
+    assert.deepEqual(items.map(row => row.messageId), ["review"]);
+    const args = ["reconcile-message", "--message-id", "review", "--reconcile-id", "online-1",
+      "--expect-version", items[0].version, "--action", "mark-failed"];
+    assert.equal((await cli(...args)).outcomePhase, "failed");
+    assert.equal((await cli(...args)).isDuplicate, true);
+    assert.deepEqual((await cli("held")).items, []);
+    writePrivateJson(f.configPath, f.config);
+    await assert.rejects(cli("held"), {code:"unauthorized"});
+  } finally { await host?.stop(); f.cleanup(); }
+});
+
+test("online held listing crosses a page boundary and accepts reviewed late output exactly once", async () => {
+  const f = cliFixture();
+  let host;
+  try {
+    const key = generateKeyPairSync("ed25519").privateKey.export({format: "jwk"});
+    const keyPath = path.join(f.root, "owner.json");
+    writePrivateJson(keyPath, key);
+    writePrivateJson(f.configPath, {...f.config, ownerReconciliationKey: key.x});
+    const ids = Array.from({length: 33}, (_, i) => "held-" + String(i).padStart(2, "0"));
+    const target = ids.at(-1);
+    const journal = createLocalMessagingJournal({stateRoot: f.config.stateRoot});
+    try {
+      for (const id of ids) {
+        await journal.recordSend({sender: "sender-" + id, recipient: "worker", messageId: id, requestId: id, text: "work"});
+        await journal.holdExecution(id, "runner_timeout", id === target ? {lateResultText: "late output"} : {});
+      }
+    } finally { await journal.close(); }
+    host = createInstalledLocalMessagingHost({configPath: f.configPath, runners: new Map(), gate: {}});
+    await host.start();
+    const cli = (...args) => f.cli([...args, "--owner-key", keyPath]);
+    const {items} = await cli("held");
+    assert.deepEqual(items.map(item => item.messageId), ids);
+    const {lateResult} = await cli("held", "--show-late-result", target);
+    assert.equal(lateResult.text, "late output");
+    assert.equal(lateResult.untrusted, true);
+    const args = ["reconcile-message", "--message-id", target, "--reconcile-id", "online-accept",
+      "--expect-version", items.at(-1).version, "--action", "accept-late-result", "--expect-late-hash", lateResult.sha256];
+    const first = await cli(...args);
+    const retry = await cli(...args);
+    assert.equal(first.outcomePhase, "completed");
+    assert.equal(retry.isDuplicate, true);
+    assert.equal(retry.replyMessageId, first.replyMessageId);
+    assert.deepEqual((await cli("held")).items.map(item => item.messageId), ids.slice(0, -1));
+  } finally { await host?.stop(); f.cleanup(); }
 });

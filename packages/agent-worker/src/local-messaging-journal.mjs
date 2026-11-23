@@ -340,6 +340,10 @@ export function readHeldLateResult({ stateRoot, messageId } = {}) {
   if (typeof messageId !== "string" || !RECONCILE_MESSAGE_ID_PATTERN.test(messageId)) throw coded("invalid_params", "A valid messageId is required");
   const row = withReadOnlyJournal(stateRoot, (db) => db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId));
   if (!row) throw coded("not_found", `Message ${messageId} not found`);
+  return lateResultView(row);
+}
+
+function lateResultView(row) {
   if (!row.late_result_text) throw coded("late_result_missing", "The record has no late result");
   return {
     messageId: row.message_id,
@@ -865,6 +869,7 @@ export function createLocalMessagingJournal({
       throw coded("invalid_reply_correlation", `Original message ${inReplyTo} not found`);
     }
 
+    if (orig.phase === "cancelled") throw coded("execution_not_active", "Message was cancelled");
     if (recipient !== orig.sender) {
       throw coded("invalid_reply_recipient", `Reply recipient ${recipient} does not match original sender ${orig.sender}`);
     }
@@ -1141,6 +1146,19 @@ export function createLocalMessagingJournal({
     };
   }
 
+  function cancelMessage({messageId, requester}) {
+    assertNotClosed();
+    const row = db.prepare("SELECT phase FROM local_messages WHERE message_id = ? AND sender = ?").get(messageId, requester);
+    if (!row) throw coded("not_found", "Sent message not found");
+    if (row.phase === "cancelled") return {status: "cancelled"};
+    // A claimed interactive session has no runner AbortController.
+    const changed = db.prepare(`
+      UPDATE local_messages SET phase = 'cancelled', reason = 'sender_cancelled', updated_at = ?
+      WHERE message_id = ? AND sender = ? AND (phase = 'queued_local' OR (phase = 'executing' AND recipient_type = 'runner'))
+    `).run(Date.now(), messageId, requester);
+    return changed.changes ? {status: "cancelled"} : {status: "not_cancellable", phase: row.phase};
+  }
+
   async function claimExecution(messageId) {
     assertNotClosed();
     const now = Date.now();
@@ -1167,7 +1185,7 @@ export function createLocalMessagingJournal({
     const now = Date.now();
     // A result that arrives after the deadline is kept for the owner, never delivered.
     db.prepare(
-      "UPDATE local_messages SET phase = 'held', reason = ?, late_result_text = COALESCE(?, late_result_text), updated_at = ? WHERE message_id = ?"
+      "UPDATE local_messages SET phase = 'held', reason = ?, late_result_text = COALESCE(?, late_result_text), updated_at = ? WHERE message_id = ? AND phase IN ('queued_local', 'executing', 'held')"
     ).run(reason, typeof lateResultText === "string" ? lateResultText : null, now, messageId);
     const row = db.prepare("SELECT * FROM local_messages WHERE message_id = ?").get(messageId);
     return row ? mapMessageRow(row) : null;
@@ -1368,7 +1386,7 @@ export function createLocalMessagingJournal({
     const replies = db.prepare("DELETE FROM local_replies WHERE consumed = 1 AND updated_at <= ?").run(cutoff);
     const messages = db.prepare(`
       DELETE FROM local_messages
-      WHERE phase IN ('completed', 'failed') AND updated_at <= ?
+      WHERE phase IN ('completed', 'failed', 'cancelled') AND updated_at <= ?
         AND NOT EXISTS (SELECT 1 FROM local_replies r WHERE r.in_reply_to = local_messages.message_id)
     `).run(cutoff);
 
@@ -2570,6 +2588,7 @@ export function createLocalMessagingJournal({
     visibleProgress,
     closeWatch,
     recoverQueued,
+    cancelMessage,
     claimExecution,
     completeExecution,
     completeExecutionWithReply,
@@ -2578,6 +2597,17 @@ export function createLocalMessagingJournal({
     getHeldView,
     getReconciliation,
     reconcileMessage,
+    inspectHeld({messageId, cursor = null} = {}) {
+      assertNotClosed();
+      if (messageId !== undefined) {
+        const row = db.prepare("SELECT * FROM local_messages WHERE phase = 'held' AND message_id = ?").get(messageId);
+        if (!row) throw coded("not_found", "Held message not found");
+        return {lateResult: lateResultView(row)};
+      }
+      const rows = db.prepare("SELECT * FROM local_messages WHERE phase = 'held' AND message_id > ? ORDER BY message_id LIMIT 33").all(cursor ?? "");
+      const items = rows.slice(0, 32).map(row => heldView(row, replyIdsFor(db, row.message_id)));
+      return {items, nextCursor: rows.length > 32 ? items.at(-1).messageId : null};
+    },
     listInbox,
     claimInboxMessage,
     recordInteractiveReply: args => recordClaimResponse(args),

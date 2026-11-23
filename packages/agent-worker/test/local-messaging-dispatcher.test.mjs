@@ -636,9 +636,9 @@ test('the dispatcher compacts finished records at start and at most hourly, and 
  }finally{await dispatcher.stop();await journal.close();fs.rmSync(stateRoot,{recursive:true,force:true});}
 });
 
-test('the dispatcher exposes exactly one name per hook: start, stop, notifyAdmission (plus status)',()=>{
+test('the dispatcher exposes its lifecycle, admission, cancellation and status hooks',()=>{
  const dispatcher=createLocalMessagingDispatcher({journal:{completeExecutionWithReply(){}},runRecipient:async()=>{}});
- assert.deepEqual(Object.keys(dispatcher).sort(),['notifyAdmission','start','status','stop']);
+ assert.deepEqual(Object.keys(dispatcher).sort(),['cancel','notifyAdmission','start','status','stop']);
 });
 
 test("canRun false leaves a recipient's queued work queued: neither recovery nor admission claims or fails it", async () => {
@@ -650,9 +650,10 @@ test("canRun false leaves a recipient's queued work queued: neither recovery nor
     for (const [messageId, recipient] of [["off-a", "gravity2"], ["on-b", "other"]]) {
       await journal.recordSend({ sender: "desktop", recipient, messageId, requestId: `r-${messageId}`, text: `work ${messageId}`, metadata: {} });
     }
+    let available = false;
     dispatcher = createLocalMessagingDispatcher({
-      journal,
-      canRun: (recipient) => recipient !== "gravity2",
+      journal, availabilityRetryMs: 10,
+      canRun: (recipient) => available || recipient !== "gravity2",
       runRecipient: async (job) => { ran.push(job.messageId); return { status: "completed", text: "ok" }; },
     });
     await dispatcher.start();
@@ -661,9 +662,7 @@ test("canRun false leaves a recipient's queued work queued: neither recovery nor
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(ran, ["on-b"], "only the runnable recipient ran");
     assert.equal((await journal.getRecord("off-a")).phase, "queued_local", "the other work is still queued, not failed or held");
-    await dispatcher.stop();
-    dispatcher = createLocalMessagingDispatcher({ journal, runRecipient: async (job) => { ran.push(job.messageId); return { status: "completed", text: "ok" }; } });
-    await dispatcher.start();
+    available = true;
     await waitFor(async () => (await journal.getRecord("off-a"))?.phase === "completed", { message: "queued work runs once its recipient can run" });
     assert.deepEqual(ran, ["on-b", "off-a"]);
   } finally {
@@ -671,4 +670,22 @@ test("canRun false leaves a recipient's queued work queued: neither recovery nor
     await journal.close();
     fs.rmSync(stateRoot, { recursive: true, force: true });
   }
+});
+
+test("a stalled admission releases its slot and fences a delayed start", async () => {
+  const stateRoot = createIsolatedStateRoot(), journal = createLocalMessagingJournal({stateRoot});
+  let delayedStart;
+  const dispatcher = createLocalMessagingDispatcher({journal, startupTimeoutMs:15, maxConcurrent:1,
+    runRecipient(job, {onStarted}) {
+      if (job.messageId === "stalled") { delayedStart = onStarted; return new Promise(() => {}); }
+      onStarted();
+      return {status:"completed",text:"done"};
+    }});
+  try {
+    for (const messageId of ["stalled","next"]) await journal.recordSend({sender:"a", recipient:"b", messageId, requestId:messageId,text:"work"});
+    await dispatcher.start();
+    await waitFor(async () => (await journal.getRecord("next")).phase === "completed");
+    assert.equal((await journal.getRecord("stalled")).reason,"startup_timeout");
+    assert.throws(delayedStart,{code:"startup_timeout"});
+  } finally { await dispatcher.stop(); await journal.close(); fs.rmSync(stateRoot,{recursive:true,force:true}); }
 });
