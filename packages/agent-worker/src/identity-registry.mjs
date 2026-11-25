@@ -377,228 +377,6 @@ export function emptyIdentityRegistry({ now } = {}) {
   });
 }
 
-function validateBindingRecord(key, binding, seenBindingIds) {
-  if (!isPlainObject(binding)) {
-    throw codedError("invalid_registry", "binding_not_object");
-  }
-  for (const k of Object.keys(binding)) {
-    if (!BINDING_KEYS.has(k)) {
-      throw codedError("invalid_registry", "unknown_binding_key");
-    }
-  }
-  if (!hasExactKeys(binding, BINDING_KEYS)) {
-    throw codedError("invalid_registry", "missing_binding_key");
-  }
-  if (binding.schema !== LOCAL_PROFILE_BINDING_SCHEMA) {
-    throw codedError("invalid_registry", "invalid_binding_schema");
-  }
-  if (typeof binding.binding_id !== "string" || !BINDING_ID_PATTERN.test(binding.binding_id)) {
-    throw codedError("invalid_registry", "invalid_binding_id");
-  }
-  if (seenBindingIds.has(binding.binding_id)) {
-    throw codedError("invalid_registry", "duplicate_binding_id");
-  }
-  seenBindingIds.add(binding.binding_id);
-
-  if (binding.trust_mode !== "mesh-managed") {
-    throw codedError("invalid_registry", "invalid_trust_mode");
-  }
-  if (typeof binding.principal_id !== "string" || !AGENT_ID_PATTERN.test(binding.principal_id)) {
-    throw codedError("invalid_registry", "invalid_principal_id");
-  }
-  if (!isValidProfileName(binding.profile_name)) {
-    throw codedError("invalid_registry", "invalid_profile_name");
-  }
-  if (
-    typeof binding.profile_instance_id !== "string" ||
-    !INSTANCE_ID_PATTERN.test(binding.profile_instance_id)
-  ) {
-    throw codedError("invalid_registry", "invalid_profile_instance_id");
-  }
-  const derivedInstanceId = deriveClientInstanceId(binding.profile_name);
-  if (binding.profile_instance_id !== derivedInstanceId) {
-    throw codedError("invalid_registry", "profile_instance_id_mismatch");
-  }
-  if (key !== binding.profile_instance_id) {
-    throw codedError("invalid_registry", "binding_key_mismatch");
-  }
-  if (!isValidBareHttpsOrigin(binding.authority_origin)) {
-    throw codedError("invalid_registry", "invalid_authority_origin");
-  }
-  if (
-    typeof binding.binding_generation !== "number" ||
-    !Number.isSafeInteger(binding.binding_generation) ||
-    binding.binding_generation < 1
-  ) {
-    throw codedError("invalid_registry", "invalid_binding_generation");
-  }
-  const issuedMs = parseIsoUtc(binding.issued_at);
-  if (issuedMs === null) {
-    throw codedError("invalid_registry", "invalid_issued_at");
-  }
-  if (binding.revoked_at !== null) {
-    const revokedMs = parseIsoUtc(binding.revoked_at);
-    if (revokedMs === null) {
-      throw codedError("invalid_registry", "invalid_revoked_at");
-    }
-    if (revokedMs < issuedMs) {
-      throw codedError("invalid_registry", "revoked_before_issued");
-    }
-  }
-
-  const proof = binding.proof;
-  if (!isPlainObject(proof)) {
-    throw codedError("invalid_registry", "invalid_proof");
-  }
-  for (const k of Object.keys(proof)) {
-    if (!PROOF_KEYS.has(k)) {
-      throw codedError("invalid_registry", "unknown_proof_key");
-    }
-  }
-  if (!hasExactKeys(proof, PROOF_KEYS)) {
-    throw codedError("invalid_registry", "missing_proof_key");
-  }
-  if (
-    proof.kind !== "disk_observation" ||
-    proof.observed_on_disk !== true ||
-    proof.verified_live_authority !== false
-  ) {
-    throw codedError("invalid_registry", "invalid_proof_values");
-  }
-
-  return {
-    schema: LOCAL_PROFILE_BINDING_SCHEMA,
-    binding_id: binding.binding_id,
-    trust_mode: "mesh-managed",
-    principal_id: binding.principal_id,
-    profile_name: binding.profile_name,
-    profile_instance_id: binding.profile_instance_id,
-    authority_origin: binding.authority_origin,
-    binding_generation: binding.binding_generation,
-    issued_at: binding.issued_at,
-    revoked_at: binding.revoked_at,
-    proof: {
-      kind: "disk_observation",
-      observed_on_disk: true,
-      verified_live_authority: false,
-    },
-  };
-}
-
-/**
- * Validates an identity registry value against the closed `identity_registry_v1` schema.
- * Returns a deep-frozen copy on success, or throws a coded `invalid_registry` error
- * with a bounded reason (never echoing caller input).
- */
-function validateIdentityRegistryV1(value) {
-  if (!isPlainObject(value)) {
-    throw codedError("invalid_registry", "registry_not_object");
-  }
-  for (const k of Object.keys(value)) {
-    if (!REGISTRY_TOP_KEYS.has(k)) {
-      throw codedError("invalid_registry", "unknown_registry_key");
-    }
-  }
-  if (!hasExactKeys(value, REGISTRY_TOP_KEYS)) {
-    throw codedError("invalid_registry", "missing_registry_key");
-  }
-  if (value.schema !== IDENTITY_REGISTRY_SCHEMA) {
-    throw codedError("invalid_registry", "invalid_registry_schema");
-  }
-  if (
-    typeof value.sequence !== "number" ||
-    !Number.isSafeInteger(value.sequence) ||
-    value.sequence < 0
-  ) {
-    throw codedError("invalid_registry", "invalid_sequence");
-  }
-
-  const createdMs = parseIsoUtc(value.createdAt);
-  if (createdMs === null) {
-    throw codedError("invalid_registry", "invalid_created_at");
-  }
-  const updatedMs = parseIsoUtc(value.updatedAt);
-  if (updatedMs === null) {
-    throw codedError("invalid_registry", "invalid_updated_at");
-  }
-  if (updatedMs < createdMs) {
-    throw codedError("invalid_registry", "updated_before_created");
-  }
-
-  const auditHead = value.auditHead;
-  if (!isPlainObject(auditHead)) {
-    throw codedError("invalid_registry", "invalid_audit_head");
-  }
-  for (const k of Object.keys(auditHead)) {
-    if (!AUDIT_HEAD_KEYS.has(k)) {
-      throw codedError("invalid_registry", "unknown_audit_head_key");
-    }
-  }
-  if (!hasExactKeys(auditHead, AUDIT_HEAD_KEYS)) {
-    throw codedError("invalid_registry", "missing_audit_head_key");
-  }
-  if (
-    typeof auditHead.sequence !== "number" ||
-    !Number.isSafeInteger(auditHead.sequence) ||
-    auditHead.sequence < 0 ||
-    auditHead.sequence !== value.sequence
-  ) {
-    throw codedError("invalid_registry", "invalid_audit_head_sequence");
-  }
-  if (typeof auditHead.hash !== "string" || !HEX_64_PATTERN.test(auditHead.hash)) {
-    throw codedError("invalid_registry", "invalid_audit_head_hash");
-  }
-  if (value.sequence === 0 && auditHead.hash !== ZERO_HASH_64) {
-    throw codedError("invalid_registry", "invalid_zero_sequence_hash");
-  }
-  if (value.sequence > 0 && auditHead.hash === ZERO_HASH_64) {
-    throw codedError("invalid_registry", "invalid_nonzero_sequence_hash");
-  }
-
-  const rawBindings = value.bindings;
-  if (!isPlainObject(rawBindings)) {
-    throw codedError("invalid_registry", "bindings_not_object");
-  }
-  const bindingKeys = Object.keys(rawBindings).sort(compareCodeUnits);
-  if (bindingKeys.length > MAX_REGISTRY_BINDINGS) {
-    throw codedError("invalid_registry", "too_many_bindings");
-  }
-
-  const seenBindingIds = new Set();
-  const cleanBindings = {};
-  for (const k of bindingKeys) {
-    if (!INSTANCE_ID_PATTERN.test(k)) {
-      throw codedError("invalid_registry", "invalid_binding_map_key");
-    }
-    cleanBindings[k] = validateBindingRecord(k, rawBindings[k], seenBindingIds);
-  }
-
-  const cleanRegistry = {
-    schema: IDENTITY_REGISTRY_SCHEMA,
-    sequence: value.sequence,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-    auditHead: {
-      sequence: auditHead.sequence,
-      hash: auditHead.hash,
-    },
-    bindings: cleanBindings,
-  };
-
-  const serializedBytes = Buffer.byteLength(`${canonicalJson(cleanRegistry)}\n`, "utf8");
-  if (serializedBytes > MAX_REGISTRY_BYTES) {
-    throw codedError("invalid_registry", "registry_oversized");
-  }
-
-  return deepFreeze(cleanRegistry);
-}
-
-/* -------------------------------------------------------------------------------------------------
- * identity_registry_v2 (D1.0). Kept apart from the v1 validator above so the v1 path stays exactly as it was.
- * Shapes follow the identity design (4.1 bindings, 4.4 pairings) as decided in the D1 plan; nothing here
- * produces these records or verifies a signature. Cross-record rules are structural only.
- * ---------------------------------------------------------------------------------------------- */
-
 // Canonical unpadded base64url of exactly `byteLength` bytes: one representation per value, no malleable tail bits.
 function isCanonicalBase64Url(value, byteLength) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
@@ -610,19 +388,21 @@ function isPrincipalId(value) {
   return typeof value === "string" && (AGENT_ID_PATTERN.test(value) || PEER_ID_PATTERN.test(value));
 }
 
-function validateBindingRecordV2(key, binding, seenBindingIds) {
+function validateBindingRecord(key, binding, seenBindingIds, isV2) {
+  const keys = isV2 ? BINDING_KEYS_V2 : BINDING_KEYS;
+  const schema = isV2 ? LOCAL_PROFILE_BINDING_SCHEMA_V2 : LOCAL_PROFILE_BINDING_SCHEMA;
   if (!isPlainObject(binding)) {
     throw codedError("invalid_registry", "binding_not_object");
   }
   for (const k of Object.keys(binding)) {
-    if (!BINDING_KEYS_V2.has(k)) {
+    if (!keys.has(k)) {
       throw codedError("invalid_registry", "unknown_binding_key");
     }
   }
-  if (!hasExactKeys(binding, BINDING_KEYS_V2)) {
+  if (!hasExactKeys(binding, keys)) {
     throw codedError("invalid_registry", "missing_binding_key");
   }
-  if (binding.schema !== LOCAL_PROFILE_BINDING_SCHEMA_V2) {
+  if (binding.schema !== schema) {
     throw codedError("invalid_registry", "invalid_binding_schema");
   }
   if (typeof binding.binding_id !== "string" || !BINDING_ID_PATTERN.test(binding.binding_id)) {
@@ -634,7 +414,7 @@ function validateBindingRecordV2(key, binding, seenBindingIds) {
   seenBindingIds.add(binding.binding_id);
 
   const mode = binding.trust_mode;
-  if (mode !== "mesh-managed" && mode !== "serverless-peer") {
+  if (mode !== "mesh-managed" && !(isV2 && mode === "serverless-peer")) {
     throw codedError("invalid_registry", "invalid_trust_mode");
   }
   const pattern = mode === "mesh-managed" ? AGENT_ID_PATTERN : PEER_ID_PATTERN;
@@ -660,7 +440,7 @@ function validateBindingRecordV2(key, binding, seenBindingIds) {
     if (!isValidBareHttpsOrigin(binding.authority_origin)) {
       throw codedError("invalid_registry", "invalid_authority_origin");
     }
-    if (binding.principal_public_key !== null) {
+    if (isV2 && binding.principal_public_key !== null) {
       throw codedError("invalid_registry", "invalid_principal_public_key");
     }
   } else {
@@ -726,14 +506,14 @@ function validateBindingRecordV2(key, binding, seenBindingIds) {
   }
 
   return {
-    schema: LOCAL_PROFILE_BINDING_SCHEMA_V2,
+    schema,
     binding_id: binding.binding_id,
     trust_mode: mode,
     principal_id: binding.principal_id,
     profile_name: binding.profile_name,
     profile_instance_id: binding.profile_instance_id,
     authority_origin: binding.authority_origin,
-    principal_public_key: binding.principal_public_key,
+    ...(isV2 ? { principal_public_key: binding.principal_public_key } : {}),
     binding_generation: binding.binding_generation,
     issued_at: binding.issued_at,
     revoked_at: binding.revoked_at,
@@ -995,19 +775,23 @@ function validateDestinationRecord(principalId, record) {
   return { harness: record.harness, workspace: record.workspace, set_at: record.set_at, generation: record.generation };
 }
 
-function validateIdentityRegistryV2(value) {
+/** Read either closed registry schema and return a deep-frozen copy. */
+export function validateIdentityRegistry(value) {
   if (!isPlainObject(value)) {
     throw codedError("invalid_registry", "registry_not_object");
   }
+  const isV2 = value.schema === IDENTITY_REGISTRY_SCHEMA_V2;
+  const schema = isV2 ? IDENTITY_REGISTRY_SCHEMA_V2 : IDENTITY_REGISTRY_SCHEMA;
+  const keys = isV2 ? REGISTRY_TOP_KEYS_V2 : REGISTRY_TOP_KEYS;
   for (const k of Object.keys(value)) {
-    if (!REGISTRY_TOP_KEYS_V2.has(k)) {
+    if (!keys.has(k)) {
       throw codedError("invalid_registry", "unknown_registry_key");
     }
   }
-  if (!hasExactKeys(value, REGISTRY_TOP_KEYS_V2)) {
+  if (!hasExactKeys(value, keys)) {
     throw codedError("invalid_registry", "missing_registry_key");
   }
-  if (value.schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
+  if (value.schema !== schema) {
     throw codedError("invalid_registry", "invalid_registry_schema");
   }
   if (
@@ -1076,9 +860,9 @@ function validateIdentityRegistryV2(value) {
     if (!INSTANCE_ID_PATTERN.test(k)) {
       throw codedError("invalid_registry", "invalid_binding_map_key");
     }
-    const clean = validateBindingRecordV2(k, value.bindings[k], seenBindingIds);
+    const clean = validateBindingRecord(k, value.bindings[k], seenBindingIds, isV2);
     cleanBindings[k] = clean;
-    localPrincipals.add(clean.principal_id);
+    if (isV2) localPrincipals.add(clean.principal_id);
     if (clean.trust_mode === "serverless-peer") {
       serverlessPrincipals.add(clean.principal_id);
       if (clean.revoked_at === null) {
@@ -1091,6 +875,28 @@ function validateIdentityRegistryV2(value) {
     }
   }
 
+  const cleanRegistry = {
+    schema,
+    sequence: value.sequence,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    auditHead: {
+      sequence: auditHead.sequence,
+      hash: auditHead.hash,
+    },
+    bindings: cleanBindings,
+  };
+  if (isV2) {
+    Object.assign(cleanRegistry, validateRegistryCollections(value, localPrincipals, serverlessPrincipals, livePeerKeys));
+  }
+  const serializedBytes = Buffer.byteLength(`${canonicalJson(cleanRegistry)}\n`, "utf8");
+  if (serializedBytes > MAX_REGISTRY_BYTES) {
+    throw codedError("invalid_registry", "registry_oversized");
+  }
+  return deepFreeze(cleanRegistry);
+}
+
+function validateRegistryCollections(value, localPrincipals, serverlessPrincipals, livePeerKeys) {
   // Pairings.
   if (!isPlainObject(value.pairings)) {
     throw codedError("invalid_registry", "pairings_not_object");
@@ -1175,36 +981,7 @@ function validateIdentityRegistryV2(value) {
     cleanDestinations[k] = clean;
   }
 
-  const cleanRegistry = {
-    schema: IDENTITY_REGISTRY_SCHEMA_V2,
-    sequence: value.sequence,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-    auditHead: {
-      sequence: auditHead.sequence,
-      hash: auditHead.hash,
-    },
-    bindings: cleanBindings,
-    pairings: cleanPairings,
-    aliases: cleanAliases,
-    destinations: cleanDestinations,
-  };
-  const serializedBytes = Buffer.byteLength(`${canonicalJson(cleanRegistry)}\n`, "utf8");
-  if (serializedBytes > MAX_REGISTRY_BYTES) {
-    throw codedError("invalid_registry", "registry_oversized");
-  }
-  return deepFreeze(cleanRegistry);
-}
-
-/**
- * Validates an identity registry value against the closed `identity_registry_v1` or `identity_registry_v2` schema,
- * chosen by its `schema` field. Any other value is refused exactly as before (`invalid_registry_schema`).
- */
-export function validateIdentityRegistry(value) {
-  if (isPlainObject(value) && value.schema === IDENTITY_REGISTRY_SCHEMA_V2) {
-    return validateIdentityRegistryV2(value);
-  }
-  return validateIdentityRegistryV1(value);
+  return { pairings: cleanPairings, aliases: cleanAliases, destinations: cleanDestinations };
 }
 
 /**
