@@ -727,6 +727,10 @@ public enum ClientSupervisorContractCases {
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
         let headlessWake = try require(bootstrap.headlessWakes.first, "headlessWake missing for non-Mini Codex")
+        let encoded = try require(fixture.process.standardInput, "bootstrap missing")
+        let document = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        let wake = try require((document?["headlessWakes"] as? [[String: Any]])?.first, "missing Codex wake")
+        try expect(wake["cursorHome"] == nil && wake["shadowTestProfile"] == nil && wake["allowedRoomId"] == nil, "unexpected Codex wake keys")
         try expect(headlessWake.profile == "codex-bob-test", "production Codex profile was not selected")
         try expect(headlessWake.allowedRoomId == nil, "global room pin was applied")
         try expect(headlessWake.allowedRoomId != "room_77aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "classic room_77 was used as a drain pin")
@@ -772,6 +776,9 @@ public enum ClientSupervisorContractCases {
         try expect(bootstrap.headlessWakes.isEmpty, "cursor-acp leaked into Codex headlessWakes")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
+        let document = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        let wake = try require((document?["cursorAcpWakes"] as? [[String: Any]])?.first, "missing Cursor wake")
+        try expect(wake["codexHome"] == nil && wake["allowedRoomId"] == nil, "unexpected Cursor wake keys")
         try expect(!raw.contains(fixture.specifications[1].token), "cursor-acp mailbox token leaked")
         try expect(raw.contains("cursorAcpWakes"), "cursorAcpWakes key missing")
     }

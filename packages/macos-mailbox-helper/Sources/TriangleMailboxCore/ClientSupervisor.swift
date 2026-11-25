@@ -421,18 +421,11 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        let headlessWakes: [PreparedHeadlessWakeBootstrap]
+        let headlessWakes: [PreparedRuntimeWake]
+        let cursorAcpWakes: [PreparedRuntimeWake]
         do {
-            headlessWakes = try await prepareHeadlessWakes(members: headlessMembers, omitted: &omitted)
-        } catch let error as ClientSupervisorError {
-            throw error
-        } catch {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-
-        let cursorAcpWakes: [PreparedCursorAcpWakeBootstrap]
-        do {
-            cursorAcpWakes = try await prepareCursorAcpWakes(members: cursorAcpMembers, omitted: &omitted)
+            headlessWakes = try await prepareRuntimeWakes(runtimeWakeLane(.codex), members: headlessMembers, omitted: &omitted)
+            cursorAcpWakes = try await prepareRuntimeWakes(runtimeWakeLane(.cursorAcp), members: cursorAcpMembers, omitted: &omitted)
         } catch let error as ClientSupervisorError {
             throw error
         } catch {
@@ -987,19 +980,6 @@ public struct ClientSupervisor: Sendable {
         let foreignDrainReason: String?
     }
 
-    private struct PreparedRuntimeWake {
-        let profile: String
-        let profileInstanceId: String
-        let installationId: String
-        let workingDirectory: String
-        let home: String
-        let stateRoot: String
-        let command: String
-        let pollIntervalMs: Int
-        let shadowTestProfile: Bool
-        let agentId: String
-    }
-
     private func runtimeWakeLane(_ lane: BindingLane) -> RuntimeWakeLane {
         switch lane {
         case .codex:
@@ -1074,64 +1054,19 @@ public struct ClientSupervisor: Sendable {
             prepared.append(PreparedRuntimeWake(
                 profile: member.profile.value,
                 profileInstanceId: member.instanceID.value,
+                helperPath: helperExecutableURL.path,
                 installationId: binding.installationID.value,
                 workingDirectory: binding.workingDirectory,
-                home: binding.home,
+                codexHome: lane.bindingLane == .codex ? binding.home : nil,
+                cursorHome: lane.bindingLane == .cursorAcp ? binding.home : nil,
                 stateRoot: entry.stateRoot,
                 command: binding.command,
                 pollIntervalMs: binding.pollIntervalMs,
-                shadowTestProfile: entry.shadowTestProfile,
+                shadowTestProfile: lane.bindingLane == .cursorAcp ? entry.shadowTestProfile : nil,
                 agentId: credential.agentID.value
             ))
         }
         return prepared
-    }
-
-    private func prepareHeadlessWakes(
-        members: [ClientInstance],
-        omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> [PreparedHeadlessWakeBootstrap] {
-        try await prepareRuntimeWakes(runtimeWakeLane(.codex), members: members, omitted: &omitted).map { wake in
-            PreparedHeadlessWakeBootstrap(
-                profile: wake.profile,
-                profileInstanceId: wake.profileInstanceId,
-                helperPath: helperExecutableURL.path,
-                installationId: wake.installationId,
-                allowedRoomId: nil,
-                workingDirectory: wake.workingDirectory,
-                codexHome: wake.home,
-                stateRoot: wake.stateRoot,
-                command: wake.command,
-                pollIntervalMs: wake.pollIntervalMs,
-                agentId: wake.agentId
-            )
-        }
-    }
-
-    private func prepareCursorAcpWakes(
-        members: [ClientInstance],
-        omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> [PreparedCursorAcpWakeBootstrap] {
-        // agentId + installationId are emitted only for this set: enabled,
-        // enrolled, and present in cursor-acp-runtime-binding.json.
-        // shadowTestProfile is optional (missing means false) and does not
-        // exclude the profile. That is the same gate as watch-grant membership.
-        // Unbound profiles are omitted above and stay off the install watch.
-        try await prepareRuntimeWakes(runtimeWakeLane(.cursorAcp), members: members, omitted: &omitted).map { wake in
-            PreparedCursorAcpWakeBootstrap(
-                profile: wake.profile,
-                profileInstanceId: wake.profileInstanceId,
-                helperPath: helperExecutableURL.path,
-                installationId: wake.installationId,
-                workingDirectory: wake.workingDirectory,
-                cursorHome: wake.home,
-                stateRoot: wake.stateRoot,
-                command: wake.command,
-                pollIntervalMs: wake.pollIntervalMs,
-                shadowTestProfile: wake.shadowTestProfile,
-                agentId: wake.agentId
-            )
-        }
     }
 
     public func run() async throws {
@@ -1202,8 +1137,8 @@ private struct PreparedBootstrap: Encodable {
     let eventWake: PreparedEventWakeBootstrap?
     let appServerWake: PreparedAppServerWakeBootstrap?
     let grokBotWake: PreparedGrokBotWakeBootstrap?
-    let headlessWakes: [PreparedHeadlessWakeBootstrap]
-    let cursorAcpWakes: [PreparedCursorAcpWakeBootstrap]
+    let headlessWakes: [PreparedRuntimeWake]
+    let cursorAcpWakes: [PreparedRuntimeWake]
     let localMessaging: PreparedLocalMessagingBootstrap?
 
     private enum CodingKeys: String, CodingKey {
@@ -1334,73 +1269,20 @@ private struct PreparedGrokBotBinding: Encodable {
     let wakeMode: String
 }
 
-private struct PreparedHeadlessWakeBootstrap: Encodable {
-    let profile: String
-    let profileInstanceId: String
-    let helperPath: String
-    let installationId: String
-    let allowedRoomId: String?
-    let workingDirectory: String
-    let codexHome: String
-    let stateRoot: String
-    let command: String
-    let pollIntervalMs: Int
-    /// MESH agent id for install-watch fan-out (Phase 2). Membership stay gated.
-    let agentId: String
-
-    private enum CodingKeys: String, CodingKey {
-        case profile, profileInstanceId, helperPath, installationId, allowedRoomId, workingDirectory, codexHome, stateRoot, command, pollIntervalMs, agentId
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(profile, forKey: .profile)
-        try container.encode(profileInstanceId, forKey: .profileInstanceId)
-        try container.encode(helperPath, forKey: .helperPath)
-        try container.encode(installationId, forKey: .installationId)
-        try container.encodeIfPresent(allowedRoomId, forKey: .allowedRoomId)
-        try container.encode(workingDirectory, forKey: .workingDirectory)
-        try container.encode(codexHome, forKey: .codexHome)
-        try container.encode(stateRoot, forKey: .stateRoot)
-        try container.encode(command, forKey: .command)
-        try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
-        try container.encode(agentId, forKey: .agentId)
-    }
-}
-
-private struct PreparedCursorAcpWakeBootstrap: Encodable {
+// Synthesized Encodable omits nil keys, keeping each provider's bootstrap schema.
+private struct PreparedRuntimeWake: Encodable {
     let profile: String
     let profileInstanceId: String
     let helperPath: String
     let installationId: String
     let workingDirectory: String
-    let cursorHome: String
+    let codexHome: String?
+    let cursorHome: String?
     let stateRoot: String
     let command: String
     let pollIntervalMs: Int
-    let shadowTestProfile: Bool
-    /// MESH agent id for the shared install-watch fan-out. The Node supervisor
-    /// routes hints for this id to the existing Cursor ACP drain kick.
+    let shadowTestProfile: Bool?
     let agentId: String
-
-    private enum CodingKeys: String, CodingKey {
-        case profile, profileInstanceId, helperPath, installationId, workingDirectory, cursorHome, stateRoot, command, pollIntervalMs, shadowTestProfile, agentId
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(profile, forKey: .profile)
-        try container.encode(profileInstanceId, forKey: .profileInstanceId)
-        try container.encode(helperPath, forKey: .helperPath)
-        try container.encode(installationId, forKey: .installationId)
-        try container.encode(workingDirectory, forKey: .workingDirectory)
-        try container.encode(cursorHome, forKey: .cursorHome)
-        try container.encode(stateRoot, forKey: .stateRoot)
-        try container.encode(command, forKey: .command)
-        try container.encode(pollIntervalMs, forKey: .pollIntervalMs)
-        try container.encode(shadowTestProfile, forKey: .shadowTestProfile)
-        try container.encode(agentId, forKey: .agentId)
-    }
 }
 
 public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProcessRunning, @unchecked Sendable {
