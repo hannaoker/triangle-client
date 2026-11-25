@@ -830,6 +830,16 @@ function cursorAcpWake(overrides = {}) {
   };
 }
 
+test("bootstrap refuses two providers claiming the same profile instance", () => {
+  const codex = headlessWake();
+  const cursor = cursorAcpWake({ profile: codex.profile });
+  const parse = (lanes) => parseClientSupervisorBootstrap(JSON.stringify(bootstrap(lanes)));
+  assert.doesNotThrow(() => parse({ cursorAcpWakes: [cursor] }));
+  assert.doesNotThrow(() => parse({ headlessWakes: [codex], cursorAcpWakes: [cursorAcpWake()] }));
+  assert.throws(() => parse({ headlessWakes: [codex], cursorAcpWakes: [cursor] }), /Invalid Triangle Client bootstrap/);
+  assert.throws(() => parse({ headlessWakes: null }), /Invalid Triangle Client bootstrap/);
+});
+
 test("CLI keeps Cursor ACP off the install dispatcher even with agentId and installationId", async () => {
   const wakes = [cursorAcpWake({
     agentId: "agent_cursor_acp_001",
