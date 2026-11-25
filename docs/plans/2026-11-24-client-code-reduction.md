@@ -49,6 +49,10 @@ The repeat scan visits baseline files in path order, compares files with the sam
 
 **Working-tree progress after PR #203.** These changes save 45 additional application lines, bringing the count to 79,182 across the original 231 files.
 
+**Supervisor startup checkpoint.** PR #205 brings the merged count to 79,064. Swift selects ordinary workers from the instance store, resolves their adapter and credential, and supplies the isolated runner environment. A headless profile instead needs a matching provider binding, verified identity, and a passing dedicated-drain check. The Node CLI checks the private bootstrap before reporting readiness. The supervisor creates an ordinary mailbox client and a concurrency-limited command runner, or admits the provider's claimer and constructs a headless drain. Work begins after parent activation.
+
+**Node prototype.** Both CLI and direct supervisor callers now use the same runner environment, app-server binding, and headless list validation. The CLI retains exact wire keys, bounded input, duplicate JSON-key rejection, secret confinement, and cross-lane instance exclusion. Direct callers still receive independent validation. The prototype measures 78,957 application lines across 231 files, 107 below PR #205. A comparison against its parent returned identical serialized results or rejection messages across 901 valid and mutated bootstrap inputs.
+
 ## Four product guarantees
 
 These are acceptance criteria for the reduced client. The route evidence below identifies differences and an existing gap.

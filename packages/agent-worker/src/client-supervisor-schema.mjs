@@ -3,12 +3,10 @@ import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { validateBinding } from "./shared-codex-app-server.mjs";
 import { validateGrokBotBinding } from "./grok-bot-wake.mjs";
 import {
-  hasHeadlessWakeKeys,
   HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
   normalizeHeadlessWakeConfig,
 } from "./codex-runtime/headless-drain-service.mjs";
 import {
-  hasCursorAcpWakeKeys,
   normalizeCursorAcpWakeConfig,
 } from "./cursor-acp-runtime/headless-drain-service.mjs";
 
@@ -67,8 +65,6 @@ export const HEADLESS_WAKE_KEYS = EXACT_HEADLESS_WAKE_KEYS;
 export const PROFILE_WAKE_LANES = Object.freeze({
   headless: Object.freeze({
     bootstrapKey: "headlessWakes",
-    siblingKey: "cursorAcpWakes",
-    hasKeys: hasHeadlessWakeKeys,
     normalize: (wake) => validateHeadlessWake(wake),
     countMessage: "headlessWakes must contain between 0 and 100 entries",
     duplicateProfile: "duplicate headless profile",
@@ -87,8 +83,6 @@ export const PROFILE_WAKE_LANES = Object.freeze({
   }),
   cursorAcp: Object.freeze({
     bootstrapKey: "cursorAcpWakes",
-    siblingKey: "headlessWakes",
-    hasKeys: hasCursorAcpWakeKeys,
     normalize: (wake) => validateCursorAcpWake(wake),
     countMessage: "cursorAcpWakes must contain between 0 and 100 entries",
     duplicateProfile: "duplicate cursor-acp profile",
