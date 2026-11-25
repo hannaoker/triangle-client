@@ -344,41 +344,35 @@ export function waitForAppServerTurnCompleted(
 }
 
 /**
- * Create a CodexAppServerProcess owner.
- *
- * `command`/`args` default to `codex app-server` but tests inject the fake.
- * `codexHome` is supplied only via sanitized child env — never argv.
+ * One supervised stdio NDJSON JSON-RPC child.
+ * Callers keep their method set, inbound policy, close-timer lifetime, and status shape.
  */
-export function createCodexAppServerProcess({
-  command = "codex",
-  args = ["app-server"],
-  codexHome,
-  env = process.env,
+export function createNdjsonRpcSession({
+  role,
+  command,
+  args,
+  buildChildEnv,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   spawnImpl = spawn,
   now = () => Date.now(),
+  unrefCloseFallback = false,
+  onInbound,
+  onChildExit = () => {},
+  onStopped = () => {},
 } = {}) {
   positiveInteger(requestTimeoutMs, "requestTimeoutMs");
-  const resolvedHome = resolveTriangleCodexHome({
-    override: codexHome,
-    home: env.HOME,
-    allowCreate: true,
-  });
-  assertNoSecretMaterial(command, "command");
-  assertNoSecretMaterial(args, "args");
-  assertNoSecretMaterial(resolvedHome, "codexHome");
-
+  if (typeof onInbound !== "function") {
+    throw new TypeError("onInbound must be a function");
+  }
   const nextId = createRequestIdFactory(1);
   const pending = new Map();
   const listeners = new Set();
   let child = null;
   let readline = null;
-  let initialized = false;
   let closing = false;
   let childExited = false;
   let stderrBytes = 0;
   let lastStderr = "";
-  let serverInfo = null;
 
   function failPending(error) {
     for (const entry of pending.values()) {
@@ -396,6 +390,17 @@ export function createCodexAppServerProcess({
         // listener isolation
       }
     }
+  }
+
+  function writeMessage(message) {
+    if (!child?.stdin || child.killed) {
+      throw createCodedError("not_connected", `${role} child is not connected`);
+    }
+    child.stdin.write(encodeNdjsonLine(message));
+  }
+
+  function respond(id, result) {
+    writeMessage({ jsonrpc: "2.0", id, result });
   }
 
   function handleLine(line) {
@@ -425,17 +430,12 @@ export function createCodexAppServerProcess({
       entry.resolve(message.result);
       return;
     }
-    if (kind === "notification" || kind === "request") {
-      emitEvent({ type: "message", method: message.method, params: message.params ?? {}, id: message.id });
-    }
+    onInbound(message, kind, { emitEvent, respond });
   }
 
   async function start() {
-    if (child) throw createCodedError("already_started", "App Server process already started");
-    const childEnv = buildSanitizedCodexChildEnv({
-      codexHome: resolvedHome,
-      parentEnv: env,
-    });
+    if (child) throw createCodedError("already_started", `${role} process already started`);
+    const childEnv = buildChildEnv();
     childExited = false;
     child = spawnImpl(command, args, {
       env: childEnv,
@@ -447,9 +447,8 @@ export function createCodexAppServerProcess({
     });
     child.on("exit", (code, signal) => {
       childExited = true;
-      const error = createCodedError("child_exited", "App Server child exited", { code, signal });
-      failPending(error);
-      initialized = false;
+      failPending(createCodedError("child_exited", `${role} child exited`, { code, signal }));
+      onChildExit();
       emitEvent({ type: "exit", code, signal });
     });
     child.stderr.setEncoding("utf8");
@@ -462,19 +461,12 @@ export function createCodexAppServerProcess({
     });
     readline = createInterface({ input: child.stdout, crlfDelay: Infinity });
     readline.on("line", handleLine);
-    return Object.freeze({ pid: child.pid ?? null, codexHome: resolvedHome });
-  }
-
-  function writeMessage(message) {
-    if (!child?.stdin || child.killed) {
-      throw createCodedError("not_connected", "App Server child is not connected");
-    }
-    child.stdin.write(encodeNdjsonLine(message));
+    return Object.freeze({ pid: child.pid ?? null });
   }
 
   function call(method, params = {}, { timeoutMs = requestTimeoutMs } = {}) {
     if (!child) {
-      return Promise.reject(createCodedError("not_connected", "App Server child is not started"));
+      return Promise.reject(createCodedError("not_connected", `${role} child is not started`));
     }
     const id = nextId();
     const request = encodeJsonRpcRequest(id, method, params);
@@ -498,21 +490,10 @@ export function createCodexAppServerProcess({
     writeMessage(encodeJsonRpcNotification(method, params));
   }
 
-  async function initialize(clientInfo = { name: "triangle-codex-runtime", version: "0.1.0" }) {
-    const result = await call("initialize", {
-      clientInfo,
-      capabilities: {},
-    });
-    await notify("initialized", {});
-    initialized = true;
-    serverInfo = result?.serverInfo ?? null;
-    return result;
-  }
-
   async function close({ signal = "SIGTERM", timeoutMs = 5_000 } = {}) {
     if (closing) return;
     closing = true;
-    failPending(createCodedError("closing", "App Server process is closing"));
+    failPending(createCodedError("closing", `${role} process is closing`));
     try {
       readline?.close();
     } catch {
@@ -522,7 +503,7 @@ export function createCodexAppServerProcess({
     const current = child;
     if (childExited) {
       child = null;
-      initialized = false;
+      onStopped();
       return;
     }
     const exited = new Promise((resolve) => {
@@ -549,13 +530,14 @@ export function createCodexAppServerProcess({
         // ignore
       }
     }, timeoutMs);
-    await Promise.race([
-      exited,
-      new Promise((resolve) => setTimeout(resolve, timeoutMs + 100)),
-    ]);
+    const waitFallback = new Promise((resolve) => {
+      const fallbackTimer = setTimeout(resolve, timeoutMs + 100);
+      if (unrefCloseFallback) fallbackTimer.unref?.();
+    });
+    await Promise.race([exited, waitFallback]);
     clearTimeout(timer);
     child = null;
-    initialized = false;
+    onStopped();
   }
 
   function onEvent(listener) {
@@ -563,31 +545,111 @@ export function createCodexAppServerProcess({
     return () => listeners.delete(listener);
   }
 
-  function status() {
-    return Object.freeze({
+  function snapshot() {
+    return {
       started: child != null,
-      initialized,
       pid: child?.pid ?? null,
-      codexHome: resolvedHome,
       pending: pending.size,
-      serverInfo,
       stderrBytes,
-      lastStderrRedacted: lastStderr.replace(/mesh_(?:watch_)?[A-Za-z0-9_-]{8,}/g, "[redacted]"),
+      lastStderr,
+    };
+  }
+
+  return Object.freeze({ start, call, notify, close, onEvent, snapshot });
+}
+
+/**
+ * Create a CodexAppServerProcess owner.
+ *
+ * `command`/`args` default to `codex app-server` but tests inject the fake.
+ * `codexHome` is supplied only via sanitized child env — never argv.
+ */
+export function createCodexAppServerProcess({
+  command = "codex",
+  args = ["app-server"],
+  codexHome,
+  env = process.env,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  spawnImpl = spawn,
+  now = () => Date.now(),
+} = {}) {
+  positiveInteger(requestTimeoutMs, "requestTimeoutMs");
+  const resolvedHome = resolveTriangleCodexHome({
+    override: codexHome,
+    home: env.HOME,
+    allowCreate: true,
+  });
+  assertNoSecretMaterial(command, "command");
+  assertNoSecretMaterial(args, "args");
+  assertNoSecretMaterial(resolvedHome, "codexHome");
+
+  let initialized = false;
+  let serverInfo = null;
+  const session = createNdjsonRpcSession({
+    role: "App Server",
+    command,
+    args,
+    buildChildEnv() {
+      return buildSanitizedCodexChildEnv({ codexHome: resolvedHome, parentEnv: env });
+    },
+    requestTimeoutMs,
+    spawnImpl,
+    now,
+    onChildExit() {
+      initialized = false;
+    },
+    onStopped() {
+      initialized = false;
+    },
+    onInbound(message, kind, { emitEvent }) {
+      if (kind === "notification" || kind === "request") {
+        emitEvent({
+          type: "message",
+          method: message.method,
+          params: message.params ?? {},
+          id: message.id,
+        });
+      }
+    },
+  });
+
+  async function initialize(clientInfo = { name: "triangle-codex-runtime", version: "0.1.0" }) {
+    const result = await session.call("initialize", { clientInfo, capabilities: {} });
+    await session.notify("initialized", {});
+    initialized = true;
+    serverInfo = result?.serverInfo ?? null;
+    return result;
+  }
+
+  function status() {
+    const snap = session.snapshot();
+    return Object.freeze({
+      started: snap.started,
+      initialized,
+      pid: snap.pid,
+      codexHome: resolvedHome,
+      pending: snap.pending,
+      serverInfo,
+      stderrBytes: snap.stderrBytes,
+      lastStderrRedacted: snap.lastStderr.replace(/mesh_(?:watch_)?[A-Za-z0-9_-]{8,}/g, "[redacted]"),
     });
   }
 
   return Object.freeze({
-    start,
+    start: async () => {
+      const started = await session.start();
+      return Object.freeze({ pid: started.pid, codexHome: resolvedHome });
+    },
     initialize,
-    call,
-    notify,
-    close,
-    onEvent,
+    call: session.call,
+    notify: session.notify,
+    close: session.close,
+    onEvent: session.onEvent,
     status,
-    threadStart: (params) => call("thread/start", params),
-    threadResume: (params) => call("thread/resume", params),
-    threadRead: (params) => call("thread/read", params),
-    turnStart: (params) => call("turn/start", params),
-    turnInterrupt: (params) => call("turn/interrupt", params),
+    threadStart: (params) => session.call("thread/start", params),
+    threadResume: (params) => session.call("thread/resume", params),
+    threadRead: (params) => session.call("thread/read", params),
+    turnStart: (params) => session.call("turn/start", params),
+    turnInterrupt: (params) => session.call("turn/interrupt", params),
   });
 }

@@ -1,3 +1,4 @@
+import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -5,7 +6,6 @@ import path from "node:path";
 import os from "node:os";
 import {
   createTestMemoryJournal,
-  createTestSqliteJournal,
 } from "./local-messaging-fixtures.mjs";
 import { validateJournalAdapter, REQUIRED_JOURNAL_METHODS } from "../src/local-messaging-journal-contract.mjs";
 import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
@@ -41,15 +41,15 @@ test("the journal contract requires the execution transitions the server and dis
 
 for (const [name, createJournal] of [
   ["MemoryJournal", () => createTestMemoryJournal()],
-  ["SqliteJournal", () => {
+  ["SqliteJournal", (t) => {
     const realTmp = fs.realpathSync(os.tmpdir());
     const tmp = fs.mkdtempSync(path.join(realTmp, "triangle-journal-test-"));
-    const dbPath = path.join(tmp, "local-messages.sqlite");
-    return createTestSqliteJournal({ dbPath });
+    t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+    return createLocalMessagingJournal({ stateRoot: tmp });
   }],
 ]) {
-  test(`${name}: records send with complete immutable envelope comparison and deterministic metadata`, async () => {
-    const journal = createJournal();
+  test(`${name}: records send with complete immutable envelope comparison and deterministic metadata`, async (t) => {
+    const journal = createJournal(t);
     try {
       const record1 = await journal.recordSend({
         sender: "alice",
@@ -126,8 +126,8 @@ for (const [name, createJournal] of [
     }
   });
 
-  test(`${name}: reply persistence verifies original request and rejects forged recipients and correlation`, async () => {
-    const journal = createJournal();
+  test(`${name}: reply persistence verifies original request and rejects forged recipients and correlation`, async (t) => {
+    const journal = createJournal(t);
     try {
       // Alice sends request to Bob
       await journal.recordSend({
@@ -203,8 +203,8 @@ for (const [name, createJournal] of [
     }
   });
 
-  test(`${name}: enforces foreign reply isolation and explicit consumption`, async () => {
-    const journal = createJournal();
+  test(`${name}: enforces foreign reply isolation and explicit consumption`, async (t) => {
+    const journal = createJournal(t);
     try {
       await journal.recordSend({
         sender: "alice",
@@ -271,8 +271,8 @@ for (const [name, createJournal] of [
     }
   });
 
-  test(`${name}: records runtime failure separately from custody receipt`, async () => {
-    const journal = createJournal();
+  test(`${name}: records runtime failure separately from custody receipt`, async (t) => {
+    const journal = createJournal(t);
     try {
       await journal.recordSend({
         sender: "alice",
@@ -289,7 +289,7 @@ for (const [name, createJournal] of [
       });
 
       const record = await journal.getRecord("msg-2");
-      assert.equal(record.phase, "reply_failed");
+      assert.equal(record.phase, "held");
       assert.equal(record.reason, "adapter_process_crashed");
       assert.equal(record.runtimeError, "Runner crashed");
     } finally {
@@ -297,8 +297,8 @@ for (const [name, createJournal] of [
     }
   });
 
-  test(`${name}: satisfies the journal contract and moves work through claim, complete, hold and recovery`, async () => {
-    const journal = createJournal();
+  test(`${name}: satisfies the journal contract and moves work through claim, complete, hold and recovery`, async (t) => {
+    const journal = createJournal(t);
     try {
       assert.equal(validateJournalAdapter(journal), journal);
       for (const id of ["a", "b", "c", "d"]) {

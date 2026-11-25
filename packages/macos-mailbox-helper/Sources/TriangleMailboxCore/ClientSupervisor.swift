@@ -191,8 +191,8 @@ public struct ClientSupervisor: Sendable {
             ?? clientRoot.appendingPathComponent("headless-runtime-binding.json")
         self.cursorAcpRuntimeBindingURL = cursorAcpRuntimeBindingURL
             ?? clientRoot.appendingPathComponent("cursor-acp-runtime-binding.json")
-        self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? Self.probeDedicatedHeadlessDrain
-        self.isDedicatedCursorAcpDrainLoaded = isDedicatedCursorAcpDrainLoaded ?? Self.probeDedicatedCursorAcpDrain
+        self.isDedicatedHeadlessDrainLoaded = isDedicatedHeadlessDrainLoaded ?? { Self.probeLaunchAgent("dev.thetriangle.codex-headless-drain.\($0)") }
+        self.isDedicatedCursorAcpDrainLoaded = isDedicatedCursorAcpDrainLoaded ?? { Self.probeLaunchAgent("dev.thetriangle.cursor-acp-drain.\($0)") }
         self.localMessagingConfigURL = localMessagingConfigURL ?? clientRoot.appendingPathComponent("local-messaging.json")
         self.parentEnvironment = parentEnvironment
     }
@@ -245,26 +245,8 @@ public struct ClientSupervisor: Sendable {
         } catch { throw ClientSupervisorError.invalidBootstrap }
     }
 
-    private static func probeDedicatedHeadlessDrain(_ profile: String) -> Bool {
+    private static func probeLaunchAgent(_ label: String) -> Bool {
         let uid = getuid()
-        let label = "dev.thetriangle.codex-headless-drain.\(profile)"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", "gui/\(uid)/\(label)"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
-    }
-
-    private static func probeDedicatedCursorAcpDrain(_ profile: String) -> Bool {
-        let uid = getuid()
-        let label = "dev.thetriangle.cursor-acp-drain.\(profile)"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = ["print", "gui/\(uid)/\(label)"]
@@ -552,22 +534,28 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
+    private func assertHelperExecutable() throws {
+        guard helperExecutableURL.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+        else { throw ClientSupervisorError.runtimeUnavailable }
+    }
+
+    private func requireInstallationID() throws -> InstallationID {
+        do {
+            return try installationIdentity.resolve()
+        } catch {
+            throw ClientSupervisorError.runtimeUnavailable
+        }
+    }
+
     private func prepareEventWake(
         wakeMembers: [ClientInstance],
         omitted: inout [OmittedClientSupervisorInstance]
     ) async throws -> PreparedEventWakeBootstrap? {
         guard !wakeMembers.isEmpty else { return nil }
-        guard helperExecutableURL.path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
-        else { throw ClientSupervisorError.runtimeUnavailable }
+        try assertHelperExecutable()
         guard wakeCursorURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
-
-        let installationID: InstallationID
-        do {
-            installationID = try installationIdentity.resolve()
-        } catch {
-            throw ClientSupervisorError.runtimeUnavailable
-        }
+        let installationID = try requireInstallationID()
 
         var profiles: [PreparedEventWakeProfile] = []
         var drains: [PreparedBootstrapInstance] = []
@@ -630,42 +618,45 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
-    private func prepareAppServerWake(
-        members: [ClientInstance],
-        omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> PreparedAppServerWakeBootstrap? {
-        guard !members.isEmpty else { return nil }
-        guard helperExecutableURL.path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
-        else { throw ClientSupervisorError.runtimeUnavailable }
-        guard appServerBindingURL.path.hasPrefix("/"),
-              appServerWakeCursorURL.path.hasPrefix("/"),
-              appServerAuthTokenURL.path.hasPrefix("/")
-        else { throw ClientSupervisorError.invalidBootstrap }
+    /// Files and reason codes for one operator-provisioned binding lane.
+    /// `bindingURL` is read after the absolute-path and readability checks.
+    private struct BoundWakeLane {
+        let bindingURL: URL
+        let absolutePaths: [URL]
+        let readablePaths: [URL]
+        let missingReason: String
+        let mismatchReason: String
+        let requireProfileMatch: Bool
+    }
 
-        // Binding file is operator-provisioned (shared App Server keep-alive). Absent → skip.
-        guard FileManager.default.isReadableFile(atPath: appServerBindingURL.path),
-              FileManager.default.isReadableFile(atPath: appServerAuthTokenURL.path)
-        else {
+    private struct BoundWakePrimary {
+        let installationID: InstallationID
+        let primary: ClientInstance
+        let credential: VerifiedCredential
+        let object: [String: Any]
+    }
+
+    private func loadBoundWakePrimary(
+        members: [ClientInstance],
+        lane: BoundWakeLane,
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> BoundWakePrimary? {
+        guard !members.isEmpty else { return nil }
+        try assertHelperExecutable()
+        guard lane.absolutePaths.allSatisfy({ $0.path.hasPrefix("/") }) else {
+            throw ClientSupervisorError.invalidBootstrap
+        }
+        guard lane.readablePaths.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else {
             for instance in members {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "app_server_binding_missing"
-                ))
+                omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: lane.missingReason))
             }
             return nil
         }
 
-        let installationID: InstallationID
-        do {
-            installationID = try installationIdentity.resolve()
-        } catch {
-            throw ClientSupervisorError.runtimeUnavailable
-        }
-
+        let installationID = try requireInstallationID()
         let bindingData: Data
         do {
-            bindingData = try Data(contentsOf: appServerBindingURL)
+            bindingData = try Data(contentsOf: lane.bindingURL)
         } catch {
             throw ClientSupervisorError.invalidBootstrap
         }
@@ -678,10 +669,7 @@ public struct ClientSupervisor: Sendable {
         let matched = sortedMembers.first(where: { $0.instanceID.value == bindingInstanceIdHint })
         guard let primary = matched ?? (sortedMembers.count == 1 ? sortedMembers.first : nil) else {
             for instance in sortedMembers {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "app_server_binding_mismatch"
-                ))
+                omitted.append(.init(instanceID: instance.instanceID.value, reasonCode: lane.mismatchReason))
             }
             return nil
         }
@@ -693,16 +681,43 @@ public struct ClientSupervisor: Sendable {
             return nil
         }
 
-        let bindingInstanceId = object["instanceId"] as? String
-        let bindingAgentId = object["agentId"] as? String
-        let bindingInstallationId = object["installationId"] as? String
-        guard bindingInstanceId == primary.instanceID.value,
-              bindingAgentId == credential.agentID.value,
-              bindingInstallationId == installationID.value
-        else {
-            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "app_server_binding_mismatch"))
+        let identityMatches = (object["instanceId"] as? String) == primary.instanceID.value
+            && (object["agentId"] as? String) == credential.agentID.value
+            && (object["installationId"] as? String) == installationID.value
+            && (!lane.requireProfileMatch || (object["profile"] as? String) == primary.profile.value)
+        guard identityMatches else {
+            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: lane.mismatchReason))
             return nil
         }
+        return BoundWakePrimary(
+            installationID: installationID,
+            primary: primary,
+            credential: credential,
+            object: object
+        )
+    }
+
+    private func prepareAppServerWake(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> PreparedAppServerWakeBootstrap? {
+        // Binding file is operator-provisioned (shared App Server keep-alive). Absent → skip.
+        guard let loaded = try await loadBoundWakePrimary(
+            members: members,
+            lane: BoundWakeLane(
+                bindingURL: appServerBindingURL,
+                absolutePaths: [appServerBindingURL, appServerWakeCursorURL, appServerAuthTokenURL],
+                readablePaths: [appServerBindingURL, appServerAuthTokenURL],
+                missingReason: "app_server_binding_missing",
+                mismatchReason: "app_server_binding_mismatch",
+                requireProfileMatch: false
+            ),
+            omitted: &omitted
+        ) else { return nil }
+        let object = loaded.object
+        let primary = loaded.primary
+        let credential = loaded.credential
+        let installationID = loaded.installationID
 
         guard let adapterVersion = object["adapterVersion"] as? String,
               adapterVersion == "1",
@@ -746,79 +761,23 @@ public struct ClientSupervisor: Sendable {
         members: [ClientInstance],
         omitted: inout [OmittedClientSupervisorInstance]
     ) async throws -> PreparedGrokBotWakeBootstrap? {
-        guard !members.isEmpty else { return nil }
-        guard helperExecutableURL.path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
-        else { throw ClientSupervisorError.runtimeUnavailable }
-        guard grokBotBindingURL.path.hasPrefix("/"),
-              grokBotWakeCursorURL.path.hasPrefix("/"),
-              grokBotWebhookURLPath.path.hasPrefix("/"),
-              grokBotWebhookKeyPath.path.hasPrefix("/")
-        else { throw ClientSupervisorError.invalidBootstrap }
-
         // Binding + webhook files are operator-provisioned. Absent → skip.
-        guard FileManager.default.isReadableFile(atPath: grokBotBindingURL.path),
-              FileManager.default.isReadableFile(atPath: grokBotWebhookURLPath.path),
-              FileManager.default.isReadableFile(atPath: grokBotWebhookKeyPath.path)
-        else {
-            for instance in members {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "grok_bot_binding_missing"
-                ))
-            }
-            return nil
-        }
-
-        let installationID: InstallationID
-        do {
-            installationID = try installationIdentity.resolve()
-        } catch {
-            throw ClientSupervisorError.runtimeUnavailable
-        }
-
-        let bindingData: Data
-        do {
-            bindingData = try Data(contentsOf: grokBotBindingURL)
-        } catch {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-        guard let object = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any] else {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-
-        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
-        let bindingInstanceIdHint = object["instanceId"] as? String
-        let matched = sortedMembers.first(where: { $0.instanceID.value == bindingInstanceIdHint })
-        guard let primary = matched ?? (sortedMembers.count == 1 ? sortedMembers.first : nil) else {
-            for instance in sortedMembers {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "grok_bot_binding_mismatch"
-                ))
-            }
-            return nil
-        }
-        let credential: VerifiedCredential
-        do {
-            credential = try await workerCredential(for: primary.profile)
-        } catch {
-            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "credential_ineligible"))
-            return nil
-        }
-
-        let bindingInstanceId = object["instanceId"] as? String
-        let bindingAgentId = object["agentId"] as? String
-        let bindingInstallationId = object["installationId"] as? String
-        let bindingProfile = object["profile"] as? String
-        guard bindingInstanceId == primary.instanceID.value,
-              bindingAgentId == credential.agentID.value,
-              bindingInstallationId == installationID.value,
-              bindingProfile == primary.profile.value
-        else {
-            omitted.append(.init(instanceID: primary.instanceID.value, reasonCode: "grok_bot_binding_mismatch"))
-            return nil
-        }
+        guard let loaded = try await loadBoundWakePrimary(
+            members: members,
+            lane: BoundWakeLane(
+                bindingURL: grokBotBindingURL,
+                absolutePaths: [grokBotBindingURL, grokBotWakeCursorURL, grokBotWebhookURLPath, grokBotWebhookKeyPath],
+                readablePaths: [grokBotBindingURL, grokBotWebhookURLPath, grokBotWebhookKeyPath],
+                missingReason: "grok_bot_binding_missing",
+                mismatchReason: "grok_bot_binding_mismatch",
+                requireProfileMatch: true
+            ),
+            omitted: &omitted
+        ) else { return nil }
+        let object = loaded.object
+        let primary = loaded.primary
+        let credential = loaded.credential
+        let installationID = loaded.installationID
 
         guard let adapterVersion = object["adapterVersion"] as? String,
               adapterVersion == "1",
@@ -861,196 +820,62 @@ public struct ClientSupervisor: Sendable {
         )
     }
 
-    private func prepareHeadlessWakes(
-        members: [ClientInstance],
-        omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> [PreparedHeadlessWakeBootstrap] {
-        guard !members.isEmpty else { return [] }
-        guard helperExecutableURL.path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
-        else { throw ClientSupervisorError.runtimeUnavailable }
-        guard headlessRuntimeBindingURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
-
-        guard FileManager.default.isReadableFile(atPath: headlessRuntimeBindingURL.path) else {
-            for instance in members {
-                omitted.append(.init(
-                    instanceID: instance.instanceID.value,
-                    reasonCode: "headless_runtime_binding_missing"
-                ))
+    private func containsSymlinkComponent(_ path: String) -> Bool {
+        var current = "/"
+        for component in (path as NSString).pathComponents.dropFirst() {
+            current = (current as NSString).appendingPathComponent(component)
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: current) else {
+                continue // A staged suffix may not exist yet.
             }
-            return []
-        }
-
-        let bindingData: Data
-        do {
-            bindingData = try Data(contentsOf: headlessRuntimeBindingURL)
-        } catch {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-        guard let object = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any] else {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-
-        let installationID: InstallationID
-        do {
-            installationID = try installationIdentity.resolve()
-        } catch {
-            throw ClientSupervisorError.runtimeUnavailable
-        }
-
-        let topLevelKeys: Set<String> = ["version", "common", "profiles"]
-        let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", "codexHome", "command", "pollIntervalMs"]
-        let profileKeys: Set<String> = ["profile", "instanceId", "stateRoot"]
-        guard Set(object.keys) == topLevelKeys,
-              object["version"] as? Int == 2,
-              let common = object["common"] as? [String: Any],
-              Set(common.keys) == commonKeys,
-              let profileObjects = object["profiles"] as? [[String: Any]],
-              !profileObjects.isEmpty,
-              profileObjects.count <= 100,
-              profileObjects.allSatisfy({ Set($0.keys) == profileKeys })
-        else { throw ClientSupervisorError.invalidBootstrap }
-
-        let pollIntervalMs: Int
-        if let number = common["pollIntervalMs"] as? NSNumber,
-           number.doubleValue.isFinite,
-           number.doubleValue.rounded(.towardZero) == number.doubleValue,
-           number.doubleValue >= Double(Int.min),
-           number.doubleValue <= Double(Int.max) {
-            pollIntervalMs = number.intValue
-        } else {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-
-        guard let adapterVersion = common["adapterVersion"] as? String,
-              adapterVersion == "1",
-              let bindingInstallationId = common["installationId"] as? String,
-              bindingInstallationId == installationID.value,
-              let workingDirectory = common["workingDirectory"] as? String,
-              workingDirectory.hasPrefix("/"),
-              !workingDirectory.contains("\0"),
-              let codexHome = common["codexHome"] as? String,
-              codexHome.hasPrefix("/"),
-              !codexHome.contains("\0"),
-              let command = common["command"] as? String,
-              command.hasPrefix("/"),
-              !command.contains("\0"),
-              (100...60_000).contains(pollIntervalMs)
-        else { throw ClientSupervisorError.invalidBootstrap }
-
-        struct BindingEntry {
-            let profile: String
-            let instanceId: String
-            let stateRoot: String
-        }
-        func containsSymlinkComponent(_ path: String) -> Bool {
-            var current = "/"
-            for component in (path as NSString).pathComponents.dropFirst() {
-                current = (current as NSString).appendingPathComponent(component)
-                guard let attributes = try? FileManager.default.attributesOfItem(atPath: current) else {
-                    continue // A staged suffix may not exist yet.
-                }
-                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
-                    return true
-                }
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                return true
             }
-            return false
         }
-        let entries: [BindingEntry] = try profileObjects.map { entry in
-            guard let profile = entry["profile"] as? String,
-                  let instanceId = entry["instanceId"] as? String,
-                  let stateRoot = entry["stateRoot"] as? String,
-                  stateRoot.hasPrefix("/"),
-                  !stateRoot.contains("\0")
-            else { throw ClientSupervisorError.invalidBootstrap }
-            let standardizedStateRoot = URL(fileURLWithPath: stateRoot).standardizedFileURL.path
-            guard stateRoot == standardizedStateRoot,
-                  !containsSymlinkComponent(standardizedStateRoot)
-            else { throw ClientSupervisorError.invalidBootstrap }
-            return BindingEntry(profile: profile, instanceId: instanceId, stateRoot: standardizedStateRoot)
-        }
-        guard Set(entries.map(\.profile)).count == entries.count,
-              Set(entries.map(\.instanceId)).count == entries.count,
-              Set(entries.map(\.stateRoot)).count == entries.count
-        else { throw ClientSupervisorError.invalidBootstrap }
-
-        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
-        let memberProfiles = Set(sortedMembers.map { $0.profile.value })
-        guard entries.allSatisfy({ memberProfiles.contains($0.profile) }) else {
-            throw ClientSupervisorError.invalidBootstrap
-        }
-        var prepared: [PreparedHeadlessWakeBootstrap] = []
-        var credentialTokens: Set<String> = []
-        var credentialAgentIds: Set<String> = []
-        for member in sortedMembers {
-            guard member.runtimeAdapter == .codex else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "grok_bot_not_in_codex_pool"))
-                continue
-            }
-            guard let entry = entries.first(where: { $0.profile == member.profile.value }),
-                  entry.instanceId == member.instanceID.value
-            else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "headless_runtime_binding_mismatch"))
-                continue
-            }
-            if isDedicatedHeadlessDrainLoaded(member.profile.value) {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "dedicated_headless_drain_loaded"))
-                continue
-            }
-            let credential: VerifiedCredential
-            do {
-                credential = try await workerCredential(for: member.profile)
-            } catch {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
-                continue
-            }
-            guard !credential.agentID.value.isEmpty else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "credential_ineligible"))
-                continue
-            }
-            guard credentialTokens.insert(credential.workloadID.value).inserted,
-                  credentialAgentIds.insert(credential.agentID.value).inserted
-            else { throw ClientSupervisorError.invalidBootstrap }
-            prepared.append(PreparedHeadlessWakeBootstrap(
-                profile: member.profile.value,
-                profileInstanceId: member.instanceID.value,
-                helperPath: helperExecutableURL.path,
-                installationId: installationID.value,
-                allowedRoomId: nil,
-                workingDirectory: workingDirectory,
-                codexHome: codexHome,
-                stateRoot: entry.stateRoot,
-                command: command,
-                pollIntervalMs: pollIntervalMs,
-                agentId: credential.agentID.value
-            ))
-        }
-        return prepared
+        return false
     }
 
-    private func prepareCursorAcpWakes(
+    private struct BindingEntry {
+        let profile: String
+        let instanceId: String
+        let stateRoot: String
+        let shadowTestProfile: Bool
+    }
+
+    private enum BindingLane { case codex, cursorAcp }
+
+    private struct HeadlessBinding {
+        let installationID: InstallationID
+        let workingDirectory: String
+        let home: String
+        let command: String
+        let pollIntervalMs: Int
+        let profiles: [String: BindingEntry]
+    }
+
+    private func readHeadlessBinding(
+        _ lane: BindingLane,
         members: [ClientInstance],
         omitted: inout [OmittedClientSupervisorInstance]
-    ) async throws -> [PreparedCursorAcpWakeBootstrap] {
-        guard !members.isEmpty else { return [] }
-        guard helperExecutableURL.path.hasPrefix("/"),
-              FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
-        else { throw ClientSupervisorError.runtimeUnavailable }
-        guard cursorAcpRuntimeBindingURL.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
+    ) throws -> HeadlessBinding? {
+        guard !members.isEmpty else { return nil }
+        let isCursor = lane == .cursorAcp
+        let url = isCursor ? cursorAcpRuntimeBindingURL : headlessRuntimeBindingURL
+        try assertHelperExecutable()
+        guard url.path.hasPrefix("/") else { throw ClientSupervisorError.invalidBootstrap }
 
-        guard FileManager.default.isReadableFile(atPath: cursorAcpRuntimeBindingURL.path) else {
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
             for instance in members {
                 omitted.append(.init(
                     instanceID: instance.instanceID.value,
-                    reasonCode: "cursor_acp_runtime_binding_missing"
+                    reasonCode: isCursor ? "cursor_acp_runtime_binding_missing" : "headless_runtime_binding_missing"
                 ))
             }
-            return []
+            return nil
         }
 
         let bindingData: Data
         do {
-            bindingData = try Data(contentsOf: cursorAcpRuntimeBindingURL)
+            bindingData = try Data(contentsOf: url)
         } catch {
             throw ClientSupervisorError.invalidBootstrap
         }
@@ -1058,20 +883,16 @@ public struct ClientSupervisor: Sendable {
             throw ClientSupervisorError.invalidBootstrap
         }
 
-        let installationID: InstallationID
-        do {
-            installationID = try installationIdentity.resolve()
-        } catch {
-            throw ClientSupervisorError.runtimeUnavailable
-        }
+        let installationID = try requireInstallationID()
 
         let topLevelKeys: Set<String> = ["version", "common", "profiles"]
-        let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", "cursorHome", "command", "pollIntervalMs"]
+        let homeKey = isCursor ? "cursorHome" : "codexHome"
+        let commonKeys: Set<String> = ["adapterVersion", "installationId", "workingDirectory", homeKey, "command", "pollIntervalMs"]
         let requiredProfileKeys: Set<String> = ["profile", "instanceId", "stateRoot"]
-        let optionalProfileKeys: Set<String> = ["shadowTestProfile"]
+        let optionalProfileKeys: Set<String> = isCursor ? ["shadowTestProfile"] : []
         let allowedProfileKeys = requiredProfileKeys.union(optionalProfileKeys)
         guard Set(object.keys) == topLevelKeys,
-              object["version"] as? Int == 1,
+              object["version"] as? Int == (isCursor ? 1 : 2),
               let common = object["common"] as? [String: Any],
               Set(common.keys) == commonKeys,
               let profileObjects = object["profiles"] as? [[String: Any]],
@@ -1101,34 +922,15 @@ public struct ClientSupervisor: Sendable {
               let workingDirectory = common["workingDirectory"] as? String,
               workingDirectory.hasPrefix("/"),
               !workingDirectory.contains("\0"),
-              let cursorHome = common["cursorHome"] as? String,
-              cursorHome.hasPrefix("/"),
-              !cursorHome.contains("\0"),
+              let home = common[homeKey] as? String,
+              home.hasPrefix("/"),
+              !home.contains("\0"),
               let command = common["command"] as? String,
               command.hasPrefix("/"),
               !command.contains("\0"),
               (100...60_000).contains(pollIntervalMs)
         else { throw ClientSupervisorError.invalidBootstrap }
 
-        struct BindingEntry {
-            let profile: String
-            let instanceId: String
-            let stateRoot: String
-            let shadowTestProfile: Bool
-        }
-        func containsSymlinkComponent(_ path: String) -> Bool {
-            var current = "/"
-            for component in (path as NSString).pathComponents.dropFirst() {
-                current = (current as NSString).appendingPathComponent(component)
-                guard let attributes = try? FileManager.default.attributesOfItem(atPath: current) else {
-                    continue
-                }
-                if attributes[.type] as? FileAttributeType == .typeSymbolicLink {
-                    return true
-                }
-            }
-            return false
-        }
         let entries: [BindingEntry] = try profileObjects.map { entry in
             let shadowTestProfile: Bool
             if entry.keys.contains("shadowTestProfile") {
@@ -1161,31 +963,98 @@ public struct ClientSupervisor: Sendable {
               Set(entries.map(\.stateRoot)).count == entries.count
         else { throw ClientSupervisorError.invalidBootstrap }
 
-        let sortedMembers = members.sorted(by: { $0.profile.value < $1.profile.value })
-        let memberProfiles = Set(sortedMembers.map { $0.profile.value })
+        let memberProfiles = Set(members.map { $0.profile.value })
         guard entries.allSatisfy({ memberProfiles.contains($0.profile) }) else {
             throw ClientSupervisorError.invalidBootstrap
         }
-        var prepared: [PreparedCursorAcpWakeBootstrap] = []
+        return HeadlessBinding(
+            installationID: installationID, workingDirectory: workingDirectory, home: home,
+            command: command, pollIntervalMs: pollIntervalMs,
+            profiles: Dictionary(uniqueKeysWithValues: entries.map { ($0.profile, $0) })
+        )
+    }
+
+    /// Admission rules shared by the Codex headless and Cursor ACP wake lanes.
+    /// Each lane still encodes its own bootstrap keys.
+    private struct RuntimeWakeLane {
+        let bindingLane: BindingLane
+        let adapter: RuntimeAdapter
+        let adapterMismatchReason: String
+        let bindingMismatchReason: String
+        let ownDrainLoaded: @Sendable (String) -> Bool
+        let ownDrainReason: String
+        let foreignDrainLoaded: (@Sendable (String) -> Bool)?
+        let foreignDrainReason: String?
+    }
+
+    private struct PreparedRuntimeWake {
+        let profile: String
+        let profileInstanceId: String
+        let installationId: String
+        let workingDirectory: String
+        let home: String
+        let stateRoot: String
+        let command: String
+        let pollIntervalMs: Int
+        let shadowTestProfile: Bool
+        let agentId: String
+    }
+
+    private func runtimeWakeLane(_ lane: BindingLane) -> RuntimeWakeLane {
+        switch lane {
+        case .codex:
+            return RuntimeWakeLane(
+                bindingLane: .codex,
+                adapter: .codex,
+                adapterMismatchReason: "grok_bot_not_in_codex_pool",
+                bindingMismatchReason: "headless_runtime_binding_mismatch",
+                ownDrainLoaded: isDedicatedHeadlessDrainLoaded,
+                ownDrainReason: "dedicated_headless_drain_loaded",
+                foreignDrainLoaded: nil,
+                foreignDrainReason: nil
+            )
+        case .cursorAcp:
+            return RuntimeWakeLane(
+                bindingLane: .cursorAcp,
+                adapter: .cursorAcp,
+                adapterMismatchReason: "cursor_acp_adapter_mismatch",
+                bindingMismatchReason: "cursor_acp_runtime_binding_mismatch",
+                ownDrainLoaded: isDedicatedCursorAcpDrainLoaded,
+                ownDrainReason: "dedicated_cursor_acp_drain_loaded",
+                foreignDrainLoaded: isDedicatedHeadlessDrainLoaded,
+                foreignDrainReason: "codex_drain_blocks_cursor_acp"
+            )
+        }
+    }
+
+    private func prepareRuntimeWakes(
+        _ lane: RuntimeWakeLane,
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> [PreparedRuntimeWake] {
+        guard let binding = try readHeadlessBinding(lane.bindingLane, members: members, omitted: &omitted) else { return [] }
+        var prepared: [PreparedRuntimeWake] = []
         var credentialTokens: Set<String> = []
         var credentialAgentIds: Set<String> = []
-        for member in sortedMembers {
-            guard member.runtimeAdapter == .cursorAcp else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_adapter_mismatch"))
+        for member in members.sorted(by: { $0.profile.value < $1.profile.value }) {
+            guard member.runtimeAdapter == lane.adapter else {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: lane.adapterMismatchReason))
                 continue
             }
-            guard let entry = entries.first(where: { $0.profile == member.profile.value }),
+            guard let entry = binding.profiles[member.profile.value],
                   entry.instanceId == member.instanceID.value
             else {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "cursor_acp_runtime_binding_mismatch"))
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: lane.bindingMismatchReason))
                 continue
             }
-            if isDedicatedCursorAcpDrainLoaded(member.profile.value) {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "dedicated_cursor_acp_drain_loaded"))
+            if lane.ownDrainLoaded(member.profile.value) {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: lane.ownDrainReason))
                 continue
             }
-            if isDedicatedHeadlessDrainLoaded(member.profile.value) {
-                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: "codex_drain_blocks_cursor_acp"))
+            if let foreignDrainLoaded = lane.foreignDrainLoaded,
+               let foreignDrainReason = lane.foreignDrainReason,
+               foreignDrainLoaded(member.profile.value) {
+                omitted.append(.init(instanceID: member.instanceID.value, reasonCode: foreignDrainReason))
                 continue
             }
             let credential: VerifiedCredential
@@ -1202,26 +1071,67 @@ public struct ClientSupervisor: Sendable {
             guard credentialTokens.insert(credential.workloadID.value).inserted,
                   credentialAgentIds.insert(credential.agentID.value).inserted
             else { throw ClientSupervisorError.invalidBootstrap }
-            // agentId + installationId are emitted only for this set: enabled,
-            // enrolled, and present in cursor-acp-runtime-binding.json.
-            // shadowTestProfile is optional (missing means false) and does not
-            // exclude the profile. That is the same gate as watch-grant membership.
-            // Unbound profiles are omitted above and stay off the install watch.
-            prepared.append(PreparedCursorAcpWakeBootstrap(
+            prepared.append(PreparedRuntimeWake(
                 profile: member.profile.value,
                 profileInstanceId: member.instanceID.value,
-                helperPath: helperExecutableURL.path,
-                installationId: installationID.value,
-                workingDirectory: workingDirectory,
-                cursorHome: cursorHome,
+                installationId: binding.installationID.value,
+                workingDirectory: binding.workingDirectory,
+                home: binding.home,
                 stateRoot: entry.stateRoot,
-                command: command,
-                pollIntervalMs: pollIntervalMs,
+                command: binding.command,
+                pollIntervalMs: binding.pollIntervalMs,
                 shadowTestProfile: entry.shadowTestProfile,
                 agentId: credential.agentID.value
             ))
         }
         return prepared
+    }
+
+    private func prepareHeadlessWakes(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> [PreparedHeadlessWakeBootstrap] {
+        try await prepareRuntimeWakes(runtimeWakeLane(.codex), members: members, omitted: &omitted).map { wake in
+            PreparedHeadlessWakeBootstrap(
+                profile: wake.profile,
+                profileInstanceId: wake.profileInstanceId,
+                helperPath: helperExecutableURL.path,
+                installationId: wake.installationId,
+                allowedRoomId: nil,
+                workingDirectory: wake.workingDirectory,
+                codexHome: wake.home,
+                stateRoot: wake.stateRoot,
+                command: wake.command,
+                pollIntervalMs: wake.pollIntervalMs,
+                agentId: wake.agentId
+            )
+        }
+    }
+
+    private func prepareCursorAcpWakes(
+        members: [ClientInstance],
+        omitted: inout [OmittedClientSupervisorInstance]
+    ) async throws -> [PreparedCursorAcpWakeBootstrap] {
+        // agentId + installationId are emitted only for this set: enabled,
+        // enrolled, and present in cursor-acp-runtime-binding.json.
+        // shadowTestProfile is optional (missing means false) and does not
+        // exclude the profile. That is the same gate as watch-grant membership.
+        // Unbound profiles are omitted above and stay off the install watch.
+        try await prepareRuntimeWakes(runtimeWakeLane(.cursorAcp), members: members, omitted: &omitted).map { wake in
+            PreparedCursorAcpWakeBootstrap(
+                profile: wake.profile,
+                profileInstanceId: wake.profileInstanceId,
+                helperPath: helperExecutableURL.path,
+                installationId: wake.installationId,
+                workingDirectory: wake.workingDirectory,
+                cursorHome: wake.home,
+                stateRoot: wake.stateRoot,
+                command: wake.command,
+                pollIntervalMs: wake.pollIntervalMs,
+                shadowTestProfile: wake.shadowTestProfile,
+                agentId: wake.agentId
+            )
+        }
     }
 
     public func run() async throws {
@@ -1583,8 +1493,10 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
                     expectedDigest: expectedDigest
                 )
                 try readinessOutput.fileHandleForReading.close()
-                try writeReadinessMarker(generation: generation, configDigest: expectedDigest)
-                try writeActivationMarker(generation: generation, configDigest: expectedDigest)
+                try writeMarker(at: readinessMarkerURL, timestampKey: "readyAtMilliseconds", temporaryPrefix: "ready",
+                                generation: generation, configDigest: expectedDigest)
+                try writeMarker(at: activationMarkerURL, timestampKey: "activatedAtMilliseconds", temporaryPrefix: "activate",
+                                generation: generation, configDigest: expectedDigest)
             }
         } catch {
             try? input.fileHandleForWriting.close()
@@ -1634,8 +1546,8 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
         return generation.lowercased()
     }
 
-    private func writeReadinessMarker(generation: String, configDigest: String) throws {
-        let parent = readinessMarkerURL.deletingLastPathComponent()
+    private func writeMarker(at url: URL, timestampKey: String, temporaryPrefix: String, generation: String, configDigest: String) throws {
+        let parent = url.deletingLastPathComponent()
         var metadata = stat()
         guard lstat(parent.path, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR,
@@ -1647,10 +1559,10 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
             "generation": generation,
             "parentPid": Int(parentPID),
             "configDigest": configDigest,
-            "readyAtMilliseconds": Int64(Date().timeIntervalSince1970 * 1000),
+            timestampKey: Int64(Date().timeIntervalSince1970 * 1000),
         ]
         let data = try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
-        let temporary = parent.appendingPathComponent(".ready-\(UUID().uuidString).tmp")
+        let temporary = parent.appendingPathComponent(".\(temporaryPrefix)-\(UUID().uuidString).tmp")
         let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else { throw ClientSupervisorError.processFailed }
         do {
@@ -1669,48 +1581,7 @@ public final class FoundationClientSupervisorProcessRunner: ClientSupervisorProc
             close(descriptor); unlink(temporary.path); throw error
         }
         close(descriptor)
-        guard rename(temporary.path, readinessMarkerURL.path) == 0 else { unlink(temporary.path); throw ClientSupervisorError.processFailed }
-        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard directory >= 0, fsync(directory) == 0 else { if directory >= 0 { close(directory) }; throw ClientSupervisorError.processFailed }
-        close(directory)
-    }
-
-    private func writeActivationMarker(generation: String, configDigest: String) throws {
-        let parent = activationMarkerURL.deletingLastPathComponent()
-        var metadata = stat()
-        guard lstat(parent.path, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFDIR,
-              metadata.st_uid == getuid(), metadata.st_mode & 0o777 == 0o700,
-              parent.standardizedFileURL.resolvingSymlinksInPath().path == parent.standardizedFileURL.path
-        else { throw ClientSupervisorError.processFailed }
-        let document: [String: Any] = [
-            "version": 1,
-            "generation": generation,
-            "parentPid": Int(parentPID),
-            "configDigest": configDigest,
-            "activatedAtMilliseconds": Int64(Date().timeIntervalSince1970 * 1000),
-        ]
-        let data = try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
-        let temporary = parent.appendingPathComponent(".activate-\(UUID().uuidString).tmp")
-        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else { throw ClientSupervisorError.processFailed }
-        do {
-            guard fchmod(descriptor, 0o600) == 0 else { throw ClientSupervisorError.processFailed }
-            try data.withUnsafeBytes { raw in
-                var offset = 0
-                while offset < data.count {
-                    let count = Darwin.write(descriptor, raw.baseAddress!.advanced(by: offset), data.count - offset)
-                    if count < 0 && errno == EINTR { continue }
-                    guard count > 0 else { throw ClientSupervisorError.processFailed }
-                    offset += count
-                }
-            }
-            guard fsync(descriptor) == 0 else { throw ClientSupervisorError.processFailed }
-        } catch {
-            close(descriptor); unlink(temporary.path); throw error
-        }
-        close(descriptor)
-        guard rename(temporary.path, activationMarkerURL.path) == 0 else { unlink(temporary.path); throw ClientSupervisorError.processFailed }
+        guard rename(temporary.path, url.path) == 0 else { unlink(temporary.path); throw ClientSupervisorError.processFailed }
         let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0, fsync(directory) == 0 else { if directory >= 0 { close(directory) }; throw ClientSupervisorError.processFailed }
         close(directory)

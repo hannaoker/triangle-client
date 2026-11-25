@@ -390,6 +390,7 @@ export function createLocalControlServer({
     const { id, method, params = {}, credential, senderId: claimedSenderId } = msg;
     if (typeof id === "undefined") return; // Notifications ignored per spec
 
+    const reply = (result) => socket.write(encodeFrame(createSuccessResponse(id, result)));
     const reject = (responseId, error) => {
       try {
         socket.write(encodeFrame(createErrorResponse(responseId, error, msg.protocol_version || PROTOCOL_VERSION)));
@@ -453,19 +454,20 @@ export function createLocalControlServer({
         case "detach_session": {
           if(!sessionBroker)throw coded('unsupported','Workspace messaging is not enabled');
           const result=method==='attach_session'?await sessionBroker.attach(params):await sessionBroker.detach(params);
-          socket.write(encodeFrame(createSuccessResponse(id,result)));break;
+          reply(result);
+          break;
         }
         case "discovery_challenge":
         case "discovery_report": {
           if(!discoveryBroker)throw coded("unsupported", "Session discovery is not enabled");
           const result=method==="discovery_challenge"
             ? discoveryBroker.challenge(params) : await discoveryBroker.report(params);
-          socket.write(encodeFrame(createSuccessResponse(id,result)));
+          reply(result);
           break;
         }
         case "local_status": {
           if (claims?.senderType === "interactive" || (interactiveBroker && interactiveBroker.isInteractiveSender(senderId))) {
-            socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims))));
+            reply(await ownSessionStatus(senderId, claims));
             break;
           }
           if (typeof statusProvider !== "function") throw coded("unsupported", "No local host status provider");
@@ -482,7 +484,7 @@ export function createLocalControlServer({
             ...baseStatus,
             router: baseStatus.router ?? routerBlock,
           };
-          socket.write(encodeFrame(createSuccessResponse(id, decoratedStatus)));
+          reply(decoratedStatus);
           break;
         }
         case "session_status": {
@@ -496,7 +498,7 @@ export function createLocalControlServer({
           if (!interactive && !bound) throw coded("unsupported", "Session status is available to interactive and bound conversations");
           // Acknowledgments check the wake binding's generation, which moves on a rebind; the inbox claim's stays 1.
           const generation = bound ? (await journal.getWakeBinding?.(senderId))?.generation ?? claims.generation : claims.generation;
-          socket.write(encodeFrame(createSuccessResponse(id, await ownSessionStatus(senderId, claims, generation))));
+          reply(await ownSessionStatus(senderId, claims, generation));
           break;
         }
         case "exchange_session": {
@@ -504,25 +506,17 @@ export function createLocalControlServer({
             throw coded("unsupported", "No interactive session broker configured");
           }
           const grant = await interactiveBroker.exchange(params);
-          socket.write(encodeFrame(createSuccessResponse(id, grant)));
+          reply(grant);
           break;
         }
         case "issue_turn": {
           if (typeof credentialBroker !== "function") throw coded("unsupported", "No desktop credential broker configured");
           const grant = await credentialBroker(params);
-          socket.write(encodeFrame(createSuccessResponse(id, grant)));
+          reply(grant);
           break;
         }
         case "hello": {
-          const resp = createSuccessResponse(
-            id,
-            {
-              server: "triangle-local-control",
-              protocol_version: PROTOCOL_VERSION,
-            },
-            PROTOCOL_VERSION,
-          );
-          socket.write(encodeFrame(resp));
+          reply({ server: "triangle-local-control", protocol_version: PROTOCOL_VERSION });
           break;
         }
 
@@ -594,8 +588,7 @@ export function createLocalControlServer({
               payload.entries = explained.map(({ id: rId, principal, principalState, route, send }) => ({ id: rId, principal, principalState, route, send }));
             }
           } catch {}
-          const resp = createSuccessResponse(id, payload, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(payload);
           break;
         }
 
@@ -803,12 +796,7 @@ export function createLocalControlServer({
                 }
               : resolution;
             const decoratedReceipt = activeRouter.decorateSend(rawReceipt, { resolution: duplicateResolution, record });
-            const resp = createSuccessResponse(
-              id,
-              decoratedReceipt,
-              PROTOCOL_VERSION,
-            );
-            socket.write(encodeFrame(resp));
+            reply(decoratedReceipt);
           } catch (admissionErr) {
             // Rollback reservation on rejected admission or conflict
             rateReservation?.rollback?.();
@@ -871,12 +859,7 @@ export function createLocalControlServer({
             if (record.watchStartedAt === null) rawStatus.watchPending = true;
           }
           const decoratedStatus = activeRouter.decorateStatus(rawStatus, { record });
-          const resp = createSuccessResponse(
-            id,
-            decoratedStatus,
-            PROTOCOL_VERSION,
-          );
-          socket.write(encodeFrame(resp));
+          reply(decoratedStatus);
           break;
         }
 
@@ -918,8 +901,7 @@ export function createLocalControlServer({
             }
           }
           const payload = progress !== undefined ? { replies: bounded, progress } : { replies: bounded };
-          const resp = createSuccessResponse(id, payload, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(payload);
           break;
         }
 
@@ -931,8 +913,7 @@ export function createLocalControlServer({
             requester: senderId,
             messageId,
           });
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -975,8 +956,7 @@ export function createLocalControlServer({
             throw coded("unsupported", "Wake notifications are not configured on this host");
           }
 
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -999,8 +979,7 @@ export function createLocalControlServer({
             generation: claims.generation,
             bindingId: claims.bindingId,
           });
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -1041,8 +1020,7 @@ export function createLocalControlServer({
             bindingId: claims.bindingId,
             result,
           });
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -1052,7 +1030,7 @@ export function createLocalControlServer({
           if (!x) throw coded("unauthorized", "Online owner reconciliation is disabled");
           if (method === "owner_reconciliation_challenge") {
             connection.ownerChallenge = {nonce: randomUUID(), expiresAt: Date.now() + 30_000, senderId};
-            socket.write(encodeFrame(createSuccessResponse(id, {nonce: connection.ownerChallenge.nonce})));
+            reply({nonce: connection.ownerChallenge.nonce});
             break;
           }
           const challenge = connection.ownerChallenge;
@@ -1069,14 +1047,14 @@ export function createLocalControlServer({
           if (operation === "held") outcome = journal.inspectHeld(request);
           else if (operation === "reconcile-message") outcome = await journal.reconcileMessage(request);
           else throw coded("invalid_request", "Unknown owner operation");
-          socket.write(encodeFrame(createSuccessResponse(id, outcome)));
+          reply(outcome);
           break;
         }
         case "cancel_message": {
           identifier(params.messageId, "messageId");
           const outcome = journal.cancelMessage({messageId: params.messageId, requester: senderId});
           if (outcome.status === "cancelled") activeDispatcher.cancel?.(params.messageId);
-          socket.write(encodeFrame(createSuccessResponse(id, outcome, PROTOCOL_VERSION)));
+          reply(outcome);
           break;
         }
 
@@ -1101,8 +1079,7 @@ export function createLocalControlServer({
                 }),
                 nextCursor: result.nextCursor ?? null,
               };
-          const resp = createSuccessResponse(id, decorated, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(decorated);
           break;
         }
 
@@ -1133,8 +1110,7 @@ export function createLocalControlServer({
           const safeOutcome = { ...outcome };
           delete safeOutcome.to_principal;
           delete safeOutcome.resolved_via;
-          const resp = createSuccessResponse(id, safeOutcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(safeOutcome);
           break;
         }
 
@@ -1155,8 +1131,7 @@ export function createLocalControlServer({
             eventId,
             ...(params.text !== undefined ? { text: params.text } : {}),
           });
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -1195,8 +1170,7 @@ export function createLocalControlServer({
             metadata: route ? withoutPayloadProvenance(metadata) : metadata,
           });
           if (!progress) notifier?.notifyObligationChange?.();
-          const resp = createSuccessResponse(id, outcome, PROTOCOL_VERSION);
-          socket.write(encodeFrame(resp));
+          reply(outcome);
           break;
         }
 
@@ -1204,10 +1178,7 @@ export function createLocalControlServer({
           throw coded("method_not_found", `Unknown method: ${method}`);
       }
     } catch (err) {
-      const errResp = createErrorResponse(id, err, msg?.protocol_version || PROTOCOL_VERSION);
-      try {
-        socket.write(encodeFrame(errResp));
-      } catch {}
+      reject(id, err);
     } finally {
       connection.ids.delete(id);
       connection.active -= 1;

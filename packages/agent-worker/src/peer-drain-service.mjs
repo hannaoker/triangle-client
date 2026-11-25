@@ -1,15 +1,6 @@
-import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  openSync,
-} from "node:fs";
-import { privateDir, privateFile } from "./peer/private-path.mjs";
-import { openDeliveryJournal, activeStateRoots } from "./shared-delivery-journal.mjs";
+import { privateDir } from "./delivery-private-path.mjs";
+import { openDeliveryJournal } from "./shared-delivery-journal.mjs";
 
 export const PEER_ENVELOPE_PROTOCOL = "triangle.peer/1";
 export const MAX_PAYLOAD_BYTES = 256 * 1024;
@@ -228,37 +219,22 @@ export function createPeerDrainService({
   }
 
   privateDir(stateRoot, { create: true });
-  if (activeStateRoots.has(stateRoot)) {
-    throw coded("drain_busy", "Another peer drain service is active on this state directory");
-  }
-
-  // Defensive deep clone of routes
   const routesMap = new Map();
-  if (routes instanceof Map) {
-    for (const [k, v] of routes.entries()) {
-      routesMap.set(k, Object.freeze({ id: v.id, addrs: Object.freeze([...(v.addrs ?? [])]) }));
-    }
-  } else if (routes && typeof routes === "object") {
-    for (const [k, v] of Object.entries(routes)) {
-      routesMap.set(k, Object.freeze({ id: v.id, addrs: Object.freeze([...(v.addrs ?? [])]) }));
-    }
+  const entries = routes instanceof Map ? routes : Object.entries(routes && typeof routes === "object" ? routes : {});
+  for (const [key, route] of entries) {
+    routesMap.set(key, Object.freeze({ id: route.id, addrs: Object.freeze([...(route.addrs ?? [])]) }));
   }
 
   let deliveryJournal;
   try {
-    deliveryJournal = openDeliveryJournal({
-      stateRoot,
-      dbName: "peer-drain.sqlite",
-      ownerDbName: "peer-drain-owner.sqlite",
-      busyCode: "drain_busy",
-    });
+    deliveryJournal = openDeliveryJournal({ stateRoot });
   } catch (error) {
     if (error.code === "drain_busy" || error.code === "unsafe_path") {
       throw error;
     }
     throw coded("journal_unavailable", error.message);
   }
-  const { db, lock } = deliveryJournal;
+  const { db } = deliveryJournal;
   try {
 
     const userVersion = db.prepare("PRAGMA user_version").get().user_version;
@@ -364,8 +340,6 @@ export function createPeerDrainService({
     if (userVersion === 0) {
       db.exec("PRAGMA user_version = 1;");
     }
-
-    chmodSync(path.join(stateRoot, "peer-drain.sqlite"), 0o600);
 
     // Startup recovery (F2, §3):
     // If execution was in progress when process died, inference outcome is unknown.

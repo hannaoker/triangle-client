@@ -7,19 +7,13 @@
  */
 
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 
+import { createNdjsonRpcSession } from "../codex-runtime/app-server-process.mjs";
 import {
   ACP_AUTH_METHOD_CURSOR_LOGIN,
   assertAcpMode,
   assertNoSecretMaterial,
-  classifyJsonRpcMessage,
-  createRequestIdFactory,
-  encodeJsonRpcNotification,
-  encodeJsonRpcRequest,
-  encodeNdjsonLine,
   extractAcpAssistantText,
-  parseNdjsonLine,
 } from "./acp-protocol.mjs";
 import {
   assertCursorSocketPathsFit,
@@ -31,14 +25,6 @@ import { createUnattendedAcpPolicy } from "./unattended-policy.mjs";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_PROMPT_TIMEOUT_MS = 120_000;
-const MAX_STDERR_BYTES = 16_384;
-
-function createCodedError(code, message, extra = {}) {
-  const error = new Error(message);
-  error.code = code;
-  Object.assign(error, extra);
-  return error;
-}
 
 function positiveInteger(value, name, minimum = 1) {
   if (!Number.isSafeInteger(value) || value < minimum) {
@@ -497,168 +483,71 @@ export function createCursorAcpProcess({
     }
   }
 
-  const nextId = createRequestIdFactory(1);
-  const pending = new Map();
-  const listeners = new Set();
-  let child = null;
-  let readline = null;
   let initialized = false;
   let authenticated = false;
-  let closing = false;
-  let childExited = false;
-  let stderrBytes = 0;
-  let lastStderr = "";
   let agentCapabilities = null;
   let authMethods = null;
-
-  function failPending(error) {
-    for (const entry of pending.values()) {
-      clearTimeout(entry.timer);
-      entry.reject(error);
-    }
-    pending.clear();
-  }
-
-  function emitEvent(event) {
-    for (const listener of listeners) {
-      try {
-        listener(event);
-      } catch {
-        // listener isolation
-      }
-    }
-  }
-
-  function writeMessage(message) {
-    if (!child?.stdin || child.killed) {
-      throw createCodedError("not_connected", "ACP child is not connected");
-    }
-    child.stdin.write(encodeNdjsonLine(message));
-  }
-
-  function respondToServerRequest(id, result) {
-    writeMessage({ jsonrpc: "2.0", id, result });
-  }
-
-  function handleLine(line) {
-    let message;
-    try {
-      message = parseNdjsonLine(line);
-    } catch (error) {
-      emitEvent({ type: "protocol_error", error });
-      return;
-    }
-    if (message == null) return;
-    const kind = classifyJsonRpcMessage(message);
-    if (kind === "response" || kind === "error") {
-      const entry = pending.get(message.id);
-      if (!entry) return;
-      pending.delete(message.id);
-      clearTimeout(entry.timer);
-      if (kind === "error") {
-        entry.reject(
-          createCodedError("rpc_error", message.error?.message ?? "JSON-RPC error", {
-            rpcCode: message.error?.code,
-            data: message.error?.data,
-          }),
-        );
-        return;
-      }
-      entry.resolve(message.result);
-      return;
-    }
-    if (kind === "request") {
-      emitEvent({
-        type: "server_request",
-        method: message.method,
-        params: message.params ?? {},
-        id: message.id,
+  const session = createNdjsonRpcSession({
+    role: "ACP",
+    command,
+    args,
+    buildChildEnv() {
+      return buildSanitizedCursorChildEnv({
+        cursorHome: resolvedHome,
+        cursorDataDir: resolvedDataDir,
+        parentEnv: env,
       });
-      const answered = unattendedPolicy.answer(message.method, message.params ?? {});
-      if (answered == null) {
-        respondToServerRequest(message.id, {
-          outcome: { outcome: "cancelled", reason: "triangle-unattended-unsupported" },
-        });
-        return;
-      }
-      respondToServerRequest(message.id, answered.result);
-      return;
-    }
-    if (kind === "notification") {
-      emitEvent({
-        type: "message",
-        method: message.method,
-        params: message.params ?? {},
-      });
-    }
-  }
-
-  async function start() {
-    if (child) throw createCodedError("already_started", "ACP process already started");
-    const childEnv = buildSanitizedCursorChildEnv({
-      cursorHome: resolvedHome,
-      cursorDataDir: resolvedDataDir,
-      parentEnv: env,
-    });
-    childExited = false;
-    child = spawnImpl(command, args, {
-      env: childEnv,
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: false,
-    });
-    child.on("error", (error) => {
-      failPending(createCodedError("spawn_failed", error.message, { cause: error }));
-    });
-    child.on("exit", (code, signal) => {
-      childExited = true;
-      const error = createCodedError("child_exited", "ACP child exited", { code, signal });
-      failPending(error);
+    },
+    requestTimeoutMs,
+    spawnImpl,
+    now,
+    unrefCloseFallback: true,
+    onChildExit() {
       initialized = false;
       authenticated = false;
-      emitEvent({ type: "exit", code, signal });
-    });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      const text = String(chunk);
-      stderrBytes += Buffer.byteLength(text);
-      if (lastStderr.length < MAX_STDERR_BYTES) {
-        lastStderr = (lastStderr + text).slice(0, MAX_STDERR_BYTES);
+    },
+    onStopped() {
+      initialized = false;
+      authenticated = false;
+    },
+    onInbound(message, kind, { emitEvent, respond }) {
+      if (kind === "request") {
+        emitEvent({
+          type: "server_request",
+          method: message.method,
+          params: message.params ?? {},
+          id: message.id,
+        });
+        const answered = unattendedPolicy.answer(message.method, message.params ?? {});
+        if (answered == null) {
+          respond(message.id, {
+            outcome: { outcome: "cancelled", reason: "triangle-unattended-unsupported" },
+          });
+          return;
+        }
+        respond(message.id, answered.result);
+        return;
       }
-    });
-    readline = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    readline.on("line", handleLine);
+      if (kind === "notification") {
+        emitEvent({
+          type: "message",
+          method: message.method,
+          params: message.params ?? {},
+        });
+      }
+    },
+  });
+
+  async function start() {
+    const started = await session.start();
     return Object.freeze({
-      pid: child.pid ?? null,
+      pid: started.pid,
       cursorHome: resolvedHome,
       cursorDataDir: resolvedDataDir,
     });
   }
 
-  function call(method, params = {}, { timeoutMs = requestTimeoutMs } = {}) {
-    if (!child) {
-      return Promise.reject(createCodedError("not_connected", "ACP child is not started"));
-    }
-    const id = nextId();
-    const request = encodeJsonRpcRequest(id, method, params);
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(createCodedError("request_timeout", `${method} timed out`, { outcome: "unknown" }));
-      }, timeoutMs);
-      pending.set(id, { resolve, reject, timer, method, startedAt: now() });
-      try {
-        writeMessage(request);
-      } catch (error) {
-        clearTimeout(timer);
-        pending.delete(id);
-        reject(error);
-      }
-    });
-  }
-
-  async function notify(method, params = {}) {
-    writeMessage(encodeJsonRpcNotification(method, params));
-  }
+  const { call, notify, onEvent, close } = session;
 
   async function initialize() {
     const result = await call("initialize", {
@@ -682,7 +571,7 @@ export function createCursorAcpProcess({
   }
 
   async function ensureReady() {
-    if (!child) await start();
+    if (!session.snapshot().started) await start();
     if (!initialized) await initialize();
     if (!authenticated) await authenticate();
   }
@@ -773,66 +662,10 @@ export function createCursorAcpProcess({
     await notify("session/cancel", { sessionId });
   }
 
-  async function close({ signal = "SIGTERM", timeoutMs = 5_000 } = {}) {
-    if (closing) return;
-    closing = true;
-    failPending(createCodedError("closing", "ACP process is closing"));
-    try {
-      readline?.close();
-    } catch {
-      // ignore
-    }
-    if (!child) return;
-    const current = child;
-    if (childExited) {
-      child = null;
-      initialized = false;
-      authenticated = false;
-      return;
-    }
-    const exited = new Promise((resolve) => {
-      if (childExited || current.exitCode != null || current.signalCode != null) {
-        resolve();
-        return;
-      }
-      current.once("exit", () => resolve());
-    });
-    try {
-      current.stdin?.end();
-    } catch {
-      // ignore
-    }
-    try {
-      current.kill(signal);
-    } catch {
-      // ignore
-    }
-    const timer = setTimeout(() => {
-      try {
-        current.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }, timeoutMs);
-    const waitFallback = new Promise((resolve) => {
-      const fallbackTimer = setTimeout(resolve, timeoutMs + 100);
-      fallbackTimer.unref?.();
-    });
-    await Promise.race([exited, waitFallback]);
-    clearTimeout(timer);
-    child = null;
-    initialized = false;
-    authenticated = false;
-  }
-
-  function onEvent(listener) {
-    listeners.add(listener);
-    return () => listeners.delete(listener);
-  }
-
   function status() {
+    const snap = session.snapshot();
     return Object.freeze({
-      started: child != null,
+      started: snap.started,
       initialized,
       authenticated,
       cursorHome: resolvedHome,
@@ -840,9 +673,9 @@ export function createCursorAcpProcess({
       cursorDataDirSource: dataDirSource,
       agentCapabilities,
       authMethods,
-      stderrBytes,
-      lastStderr,
-      pid: child?.pid ?? null,
+      stderrBytes: snap.stderrBytes,
+      lastStderr: snap.lastStderr,
+      pid: snap.pid,
     });
   }
 

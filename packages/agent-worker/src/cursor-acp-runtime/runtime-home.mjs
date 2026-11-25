@@ -154,15 +154,6 @@ export function resolveTriangleCursorHome({
 
   assertNotForbidden(resolved);
 
-  try {
-    const mode = statSync(resolved).mode & 0o777;
-    if (mode !== 0o700 && process.platform !== "win32") {
-      // Soft diagnostic; Darwin store enforces 0700.
-    }
-  } catch {
-    // ignore
-  }
-
   return resolved;
 }
 

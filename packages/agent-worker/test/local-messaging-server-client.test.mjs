@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import { createLocalControlServer } from "../src/local-messaging-server.mjs";
 import { createLocalMessagingDispatcher } from "../src/local-messaging-dispatcher.mjs";
 import { createLocalControlClient } from "../src/local-messaging-client.mjs";
-import { createTestMemoryJournal, createTestRecoverableDispatcher, createTestSqliteJournal } from "./local-messaging-fixtures.mjs";
+import { createTestMemoryJournal, createTestRecoverableDispatcher } from "./local-messaging-fixtures.mjs";
 import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import { createOwnerAcl } from "../src/local-messaging-acl.mjs";
 import {
@@ -226,7 +226,7 @@ test("get_message_status enforces requester ownership and redacts runtime errors
     // 1. Authorized sender gets status with redacted fixed error message (never raw error/token)
     const status = await codexClient.getMessageStatus({ messageId: "msg-status-1" });
     assert.equal(status.messageId, "msg-status-1");
-    assert.equal(status.phase, "reply_failed");
+    assert.equal(status.phase, "held");
     assert.equal(status.reason, "runner_failed");
     assert.equal(status.runtimeError, "Execution failure occurred"); // fixed redacted message!
     assert.ok(!status.runtimeError.includes("SECRET_TOKEN"));
@@ -578,10 +578,9 @@ test("recoverable dispatcher: persistent queued records recovered once, uncertai
   const realTmp = fs.realpathSync(os.tmpdir());
   const tmpDir = fs.mkdtempSync(path.join(realTmp, "triangle-recov-test-"));
   fs.chmodSync(tmpDir, 0o700);
-  const dbPath = path.join(tmpDir, "recoverable.sqlite");
   const socketPath = path.join(tmpDir, "local-control.sock");
 
-  const journal = createTestSqliteJournal({ dbPath });
+  let journal = createLocalMessagingJournal({ stateRoot: tmpDir });
 
   // 1. Pre-seed journal with:
   // - a queued record before start
@@ -594,24 +593,16 @@ test("recoverable dispatcher: persistent queued records recovered once, uncertai
     text: "queued before start",
   });
 
-  // Pre-seed uncertain record in SQLite
-  const db = new (await import("node:sqlite")).DatabaseSync(dbPath);
-  db.prepare(`
-    INSERT INTO local_messages (message_id, sender, recipient, request_id, in_reply_to, text, metadata, phase, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    "msg-uncertain-started",
-    "desktop-codex",
-    "gravity2",
-    "req-unc-1",
-    null,
-    "uncertain started job",
-    "{}",
-    "started",
-    Date.now(),
-    Date.now(),
-  );
-  db.close();
+  await journal.recordSend({
+    sender: "desktop-codex",
+    recipient: "gravity2",
+    messageId: "msg-uncertain-started",
+    requestId: "req-unc-1",
+    text: "uncertain started job",
+  });
+  await journal.claimExecution("msg-uncertain-started");
+  await journal.close();
+  journal = createLocalMessagingJournal({ stateRoot: tmpDir });
 
   const dispatchedJobs = [];
   const slowExecutionResolve = [];
