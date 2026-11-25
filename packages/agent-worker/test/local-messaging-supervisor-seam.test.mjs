@@ -1,10 +1,11 @@
+import { createLocalMessagingJournal } from "../src/local-messaging-journal.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createLocalMessagingSubsystem } from "../src/local-messaging-supervisor-seam.mjs";
-import { createTestMemoryJournal, createTestRecoverableDispatcher, createTestSqliteJournal, waitFor } from "./local-messaging-fixtures.mjs";
+import { createTestMemoryJournal, createTestRecoverableDispatcher, waitFor } from "./local-messaging-fixtures.mjs";
 import { LocalMessagingError } from "../src/local-messaging-errors.mjs";
 import { createPairExchangeLimiter } from "../src/local-messaging-rate-limiter.mjs";
 
@@ -259,10 +260,9 @@ test("MCP refresh uses the current credential on the real socket", { skip: proce
 test("completed work is never executed again after a restart, and a retry after the restart is a duplicate", { skip: process.platform === "win32" }, async () => {
   const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-restart-"));
   fs.chmodSync(stateRoot, 0o700);
-  const dbPath = path.join(stateRoot, "journal.sqlite");
   const runs = [];
   async function boot() {
-    const journal = createTestSqliteJournal({ dbPath });
+    const journal = createLocalMessagingJournal({ stateRoot });
     const dispatcher = createTestRecoverableDispatcher({
       journal,
       execute: async (job) => {
@@ -300,7 +300,6 @@ test("completed work is never executed again after a restart, and a retry after 
 });
 
 test("the server never dispatches a duplicate send whose stored phase is not queued_local", { skip: process.platform === "win32" }, async () => {
-  const { createLocalMessagingJournal } = await import("../src/local-messaging-journal.mjs");
   const stateRoot = fs.mkdtempSync(path.join(fs.realpathSync(process.platform === "darwin" ? "/private/tmp" : os.tmpdir()), "triangle-dup-phase-"));
   const journal = createLocalMessagingJournal({ stateRoot });
   const notified = [];

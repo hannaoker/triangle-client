@@ -3,10 +3,14 @@ import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { validateBinding } from "./shared-codex-app-server.mjs";
 import { validateGrokBotBinding } from "./grok-bot-wake.mjs";
 import {
+  hasHeadlessWakeKeys,
   HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
   normalizeHeadlessWakeConfig,
 } from "./codex-runtime/headless-drain-service.mjs";
-import { normalizeCursorAcpWakeConfig } from "./cursor-acp-runtime/headless-drain-service.mjs";
+import {
+  hasCursorAcpWakeKeys,
+  normalizeCursorAcpWakeConfig,
+} from "./cursor-acp-runtime/headless-drain-service.mjs";
 
 export const INSTANCE_ID = /^[a-f0-9]{64}$/;
 export const AGENT_ID = /^[A-Za-z0-9._:-]{1,120}$/;
@@ -58,6 +62,95 @@ export const GROK_BOT_BINDING_KEYS = Object.freeze([
   "wakeMode",
 ]);
 export const HEADLESS_WAKE_KEYS = EXACT_HEADLESS_WAKE_KEYS;
+
+// Codex headless and Cursor ACP share admission shape. Bootstrap key names stay on the lane.
+export const PROFILE_WAKE_LANES = Object.freeze({
+  headless: Object.freeze({
+    bootstrapKey: "headlessWakes",
+    siblingKey: "cursorAcpWakes",
+    hasKeys: hasHeadlessWakeKeys,
+    normalize: (wake) => validateHeadlessWake(wake),
+    countMessage: "headlessWakes must contain between 0 and 100 entries",
+    duplicateProfile: "duplicate headless profile",
+    duplicateInstance: "duplicate headless instanceId",
+    duplicateState: "duplicate headless stateRoot",
+    secretKeys: Object.freeze([
+      "profile",
+      "profileInstanceId",
+      "helperPath",
+      "allowedRoomId",
+      "workingDirectory",
+      "codexHome",
+      "stateRoot",
+      "command",
+    ]),
+  }),
+  cursorAcp: Object.freeze({
+    bootstrapKey: "cursorAcpWakes",
+    siblingKey: "headlessWakes",
+    hasKeys: hasCursorAcpWakeKeys,
+    normalize: (wake) => validateCursorAcpWake(wake),
+    countMessage: "cursorAcpWakes must contain between 0 and 100 entries",
+    duplicateProfile: "duplicate cursor-acp profile",
+    duplicateInstance: "duplicate cursor-acp instanceId",
+    duplicateState: "duplicate cursor-acp stateRoot",
+    secretKeys: Object.freeze([
+      "profile",
+      "profileInstanceId",
+      "helperPath",
+      "workingDirectory",
+      "cursorHome",
+      "stateRoot",
+      "command",
+      "agentId",
+      "installationId",
+    ]),
+  }),
+});
+
+function requireInstallationId(value, label) {
+  if (typeof value !== "string" || !INSTALLATION_ID.test(value)) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function requireAbsolutePath(value, label) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.includes("\0")) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function requireActorProfile(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
+    throw new TypeError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function requireBoolean(value, message) {
+  if (typeof value !== "boolean") throw new TypeError(message);
+  return value;
+}
+
+function validateUniqueProfileWakes(values, lane) {
+  const list = values ?? [];
+  if (!Array.isArray(list) || list.length > 100) throw new TypeError(lane.countMessage);
+  const normalized = list.map(lane.normalize).sort((a, b) => a.profile.localeCompare(b.profile));
+  const profiles = new Set();
+  const instanceIds = new Set();
+  const stateRoots = new Set();
+  for (const wake of normalized) {
+    if (profiles.has(wake.profile)) throw new TypeError(lane.duplicateProfile);
+    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError(lane.duplicateInstance);
+    if (stateRoots.has(wake.stateRoot)) throw new TypeError(lane.duplicateState);
+    profiles.add(wake.profile);
+    instanceIds.add(wake.profileInstanceId);
+    stateRoots.add(wake.stateRoot);
+  }
+  return Object.freeze(normalized);
+}
 
 export function isRenewableWatchCredentialError(error) {
   const rejectedCode = typeof error?.rejectedCode === "string"
@@ -149,21 +242,11 @@ export function validateEventWake(eventWake) {
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new TypeError("eventWake schema is invalid");
   }
-  if (typeof eventWake.installationId !== "string" || !INSTALLATION_ID.test(eventWake.installationId)) {
-    throw new TypeError("eventWake.installationId is invalid");
-  }
-  if (typeof eventWake.helperPath !== "string" || !eventWake.helperPath.startsWith("/") || eventWake.helperPath.includes("\0")) {
-    throw new TypeError("eventWake.helperPath is invalid");
-  }
-  if (typeof eventWake.cursorPath !== "string" || !eventWake.cursorPath.startsWith("/") || eventWake.cursorPath.includes("\0")) {
-    throw new TypeError("eventWake.cursorPath is invalid");
-  }
-  if (typeof eventWake.actorProfile !== "string" || eventWake.actorProfile.length === 0 || eventWake.actorProfile.includes("\0")) {
-    throw new TypeError("eventWake.actorProfile is invalid");
-  }
-  if (typeof eventWake.ensureBeforeWatch !== "boolean") {
-    throw new TypeError("eventWake.ensureBeforeWatch must be a boolean");
-  }
+  requireInstallationId(eventWake.installationId, "eventWake.installationId");
+  requireAbsolutePath(eventWake.helperPath, "eventWake.helperPath");
+  requireAbsolutePath(eventWake.cursorPath, "eventWake.cursorPath");
+  requireActorProfile(eventWake.actorProfile, "eventWake.actorProfile");
+  requireBoolean(eventWake.ensureBeforeWatch, "eventWake.ensureBeforeWatch must be a boolean");
   if (!Array.isArray(eventWake.profiles) || eventWake.profiles.length < 1 || eventWake.profiles.length > 100) {
     throw new TypeError("eventWake.profiles must contain between 1 and 100 entries");
   }
@@ -220,24 +303,12 @@ export function validateAppServerWake(appServerWake) {
   if (!hasExactKeys(appServerWake, APP_SERVER_WAKE_KEYS)) {
     throw new TypeError("appServerWake schema is invalid");
   }
-  if (typeof appServerWake.installationId !== "string" || !INSTALLATION_ID.test(appServerWake.installationId)) {
-    throw new TypeError("appServerWake.installationId is invalid");
-  }
-  if (typeof appServerWake.helperPath !== "string" || !appServerWake.helperPath.startsWith("/") || appServerWake.helperPath.includes("\0")) {
-    throw new TypeError("appServerWake.helperPath is invalid");
-  }
-  if (typeof appServerWake.cursorPath !== "string" || !appServerWake.cursorPath.startsWith("/") || appServerWake.cursorPath.includes("\0")) {
-    throw new TypeError("appServerWake.cursorPath is invalid");
-  }
-  if (typeof appServerWake.bindingPath !== "string" || !appServerWake.bindingPath.startsWith("/") || appServerWake.bindingPath.includes("\0")) {
-    throw new TypeError("appServerWake.bindingPath is invalid");
-  }
-  if (typeof appServerWake.actorProfile !== "string" || appServerWake.actorProfile.length === 0 || appServerWake.actorProfile.includes("\0")) {
-    throw new TypeError("appServerWake.actorProfile is invalid");
-  }
-  if (typeof appServerWake.ensureBeforeWatch !== "boolean") {
-    throw new TypeError("appServerWake.ensureBeforeWatch must be a boolean");
-  }
+  requireInstallationId(appServerWake.installationId, "appServerWake.installationId");
+  requireAbsolutePath(appServerWake.helperPath, "appServerWake.helperPath");
+  requireAbsolutePath(appServerWake.cursorPath, "appServerWake.cursorPath");
+  requireAbsolutePath(appServerWake.bindingPath, "appServerWake.bindingPath");
+  requireActorProfile(appServerWake.actorProfile, "appServerWake.actorProfile");
+  requireBoolean(appServerWake.ensureBeforeWatch, "appServerWake.ensureBeforeWatch must be a boolean");
   if (!hasExactKeys(appServerWake.binding, APP_SERVER_BINDING_KEYS)) {
     throw new TypeError("appServerWake.binding schema is invalid");
   }
@@ -283,30 +354,14 @@ export function validateGrokBotWake(grokBotWake) {
   if (!hasExactKeys(grokBotWake, GROK_BOT_WAKE_KEYS)) {
     throw new TypeError("grokBotWake schema is invalid");
   }
-  if (typeof grokBotWake.installationId !== "string" || !INSTALLATION_ID.test(grokBotWake.installationId)) {
-    throw new TypeError("grokBotWake.installationId is invalid");
-  }
-  if (typeof grokBotWake.helperPath !== "string" || !grokBotWake.helperPath.startsWith("/") || grokBotWake.helperPath.includes("\0")) {
-    throw new TypeError("grokBotWake.helperPath is invalid");
-  }
-  if (typeof grokBotWake.cursorPath !== "string" || !grokBotWake.cursorPath.startsWith("/") || grokBotWake.cursorPath.includes("\0")) {
-    throw new TypeError("grokBotWake.cursorPath is invalid");
-  }
-  if (typeof grokBotWake.bindingPath !== "string" || !grokBotWake.bindingPath.startsWith("/") || grokBotWake.bindingPath.includes("\0")) {
-    throw new TypeError("grokBotWake.bindingPath is invalid");
-  }
-  if (typeof grokBotWake.webhookUrlPath !== "string" || !grokBotWake.webhookUrlPath.startsWith("/") || grokBotWake.webhookUrlPath.includes("\0")) {
-    throw new TypeError("grokBotWake.webhookUrlPath is invalid");
-  }
-  if (typeof grokBotWake.webhookKeyPath !== "string" || !grokBotWake.webhookKeyPath.startsWith("/") || grokBotWake.webhookKeyPath.includes("\0")) {
-    throw new TypeError("grokBotWake.webhookKeyPath is invalid");
-  }
-  if (typeof grokBotWake.actorProfile !== "string" || grokBotWake.actorProfile.length === 0 || grokBotWake.actorProfile.includes("\0")) {
-    throw new TypeError("grokBotWake.actorProfile is invalid");
-  }
-  if (typeof grokBotWake.ensureBeforeWatch !== "boolean") {
-    throw new TypeError("grokBotWake.ensureBeforeWatch must be a boolean");
-  }
+  requireInstallationId(grokBotWake.installationId, "grokBotWake.installationId");
+  requireAbsolutePath(grokBotWake.helperPath, "grokBotWake.helperPath");
+  requireAbsolutePath(grokBotWake.cursorPath, "grokBotWake.cursorPath");
+  requireAbsolutePath(grokBotWake.bindingPath, "grokBotWake.bindingPath");
+  requireAbsolutePath(grokBotWake.webhookUrlPath, "grokBotWake.webhookUrlPath");
+  requireAbsolutePath(grokBotWake.webhookKeyPath, "grokBotWake.webhookKeyPath");
+  requireActorProfile(grokBotWake.actorProfile, "grokBotWake.actorProfile");
+  requireBoolean(grokBotWake.ensureBeforeWatch, "grokBotWake.ensureBeforeWatch must be a boolean");
   if (!hasExactKeys(grokBotWake.binding, GROK_BOT_BINDING_KEYS)) {
     throw new TypeError("grokBotWake.binding schema is invalid");
   }
@@ -339,17 +394,7 @@ export function validateHeadlessWake(headlessWake) {
 }
 
 export function validateHeadlessWakes(headlessWakes) {
-  const values = headlessWakes ?? [];
-  if (!Array.isArray(values) || values.length > 100) throw new TypeError("headlessWakes must contain between 0 and 100 entries");
-  const normalized = values.map(validateHeadlessWake).sort((a, b) => a.profile.localeCompare(b.profile));
-  const profiles = new Set(); const instanceIds = new Set(); const stateRoots = new Set();
-  for (const wake of normalized) {
-    if (profiles.has(wake.profile)) throw new TypeError("duplicate headless profile");
-    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate headless instanceId");
-    if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate headless stateRoot");
-    profiles.add(wake.profile); instanceIds.add(wake.profileInstanceId); stateRoots.add(wake.stateRoot);
-  }
-  return Object.freeze(normalized);
+  return validateUniqueProfileWakes(headlessWakes, PROFILE_WAKE_LANES.headless);
 }
 export function validateCursorAcpWake(cursorAcpWake) {
   if (cursorAcpWake == null) return null;
@@ -357,17 +402,7 @@ export function validateCursorAcpWake(cursorAcpWake) {
 }
 
 export function validateCursorAcpWakes(cursorAcpWakes) {
-  const values = cursorAcpWakes ?? [];
-  if (!Array.isArray(values) || values.length > 100) throw new TypeError("cursorAcpWakes must contain between 0 and 100 entries");
-  const normalized = values.map(validateCursorAcpWake).sort((a, b) => a.profile.localeCompare(b.profile));
-  const profiles = new Set(); const instanceIds = new Set(); const stateRoots = new Set();
-  for (const wake of normalized) {
-    if (profiles.has(wake.profile)) throw new TypeError("duplicate cursor-acp profile");
-    if (instanceIds.has(wake.profileInstanceId)) throw new TypeError("duplicate cursor-acp instanceId");
-    if (stateRoots.has(wake.stateRoot)) throw new TypeError("duplicate cursor-acp stateRoot");
-    profiles.add(wake.profile); instanceIds.add(wake.profileInstanceId); stateRoots.add(wake.stateRoot);
-  }
-  return Object.freeze(normalized);
+  return validateUniqueProfileWakes(cursorAcpWakes, PROFILE_WAKE_LANES.cursorAcp);
 }
 export const PEER_WAKE_REQUIRED_KEYS = Object.freeze([
   "allowedPeers",

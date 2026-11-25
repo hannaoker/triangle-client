@@ -1,11 +1,15 @@
-/**
- * Persistent unattended drain for one explicitly enabled headless Codex profile.
- *
- * The trusted helper owns mailbox credentials and the open claim. This module
- * only composes its durable delivery resolver with HeadlessCodexRuntime; reply
- * and ack ordering remains inside the runtime + trusted transaction proxy.
- */
+const lane = {
+  requiredMethods: ["recoverAfterRestart", "runDelivery", "stop"],
+  logPrefix: "triangle_headless_drain",
+  blockedCode: "headless_drain_recovery_blocked",
+  showPollInterval: false,
+};
 
+export function createHeadlessCodexDrain(options) {
+  return createHeadlessDrain(lane, options);
+}
+
+// The provider owns its runtime and claim. Each call owns its own timer and in-flight state.
 function codedError(code, message, extra = {}) {
   const error = new Error(message);
   error.code = code;
@@ -20,7 +24,7 @@ function validateInstanceId(value) {
   return value;
 }
 
-export function createHeadlessCodexDrain({
+export function createHeadlessDrain(lane, {
   runtime,
   resolveDelivery,
   profileInstanceId,
@@ -39,7 +43,7 @@ export function createHeadlessCodexDrain({
   if (runtime == null || typeof runtime.start !== "function") {
     throw new TypeError("runtime.start is required");
   }
-  for (const method of ["recoverAfterRestart", "runDelivery", "stop"]) {
+  for (const method of lane.requiredMethods) {
     if (typeof runtime[method] !== "function") {
       throw new TypeError(`runtime.${method} is required`);
     }
@@ -101,7 +105,7 @@ export function createHeadlessCodexDrain({
           try {
             await onDeliveryFailure(error, delivery);
           } catch (recordError) {
-            logger.error?.("triangle_headless_drain_failure_record_failed", {
+            logger.error?.(`${lane.logPrefix}_failure_record_failed`, {
               code: recordError?.code ?? null,
             });
           }
@@ -122,7 +126,7 @@ export function createHeadlessCodexDrain({
         queueMicrotask(() => {
           if (!started || stopping || inFlight != null) return;
           drainOnce(trailingReason).catch((error) => {
-            logger.error?.("triangle_headless_drain_trailing_failed", {
+            logger.error?.(`${lane.logPrefix}_trailing_failed`, {
               code: error?.code ?? null,
               reason: trailingReason,
             });
@@ -177,7 +181,7 @@ export function createHeadlessCodexDrain({
     const startedDrain = drainOnce(reason);
     if (startedDrain && typeof startedDrain.then === "function") {
       startedDrain.catch((error) => {
-        logger.error?.("triangle_headless_drain_kick_failed", {
+        logger.error?.(`${lane.logPrefix}_kick_failed`, {
           code: error?.code ?? null,
           reason,
         });
@@ -196,7 +200,7 @@ export function createHeadlessCodexDrain({
         const tick = idlePolicy ? idlePolicy.evaluateTick() : { skip: false, reason: "timer" };
         if (!tick.skip) await drainOnce(tick.reason);
       } catch (error) {
-        logger.error?.("triangle_headless_drain_failed", {
+        logger.error?.(`${lane.logPrefix}_failed`, {
           code: error?.code ?? null,
         });
       } finally {
@@ -212,10 +216,12 @@ export function createHeadlessCodexDrain({
     pendingKickReason = null;
     await runtime.start();
     try {
-      const recovered = await runtime.recoverAfterRestart({ profileInstanceId });
+      const recovered = typeof runtime.recoverAfterRestart === "function"
+        ? await runtime.recoverAfterRestart({ profileInstanceId })
+        : null;
       if ((recovered?.quarantined ?? 0) > 0) {
         throw codedError(
-          "headless_drain_recovery_blocked",
+          lane.blockedCode,
           "restart recovery found quarantined work; refusing new mailbox claims",
           { quarantined: recovered.quarantined },
         );
@@ -255,6 +261,7 @@ export function createHeadlessCodexDrain({
       draining: inFlight != null,
       pendingKick: pendingKickReason != null,
       pendingKickReason,
+      ...(lane.showPollInterval ? { pollIntervalMs } : {}),
       profileInstanceId,
       lastResult,
       idle: idlePolicy?.status?.() ?? null,

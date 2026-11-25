@@ -21,8 +21,7 @@ import {
 } from "./install-watch-dispatcher.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { createProductionAppServerDeliveryResolver } from "./shared-codex-app-server.mjs";
-import { hasHeadlessWakeKeys, normalizeHeadlessWakeConfig } from "./codex-runtime/headless-drain-service.mjs";
-import { hasCursorAcpWakeKeys, normalizeCursorAcpWakeConfig } from "./cursor-acp-runtime/headless-drain-service.mjs";
+import { PROFILE_WAKE_LANES } from "./client-supervisor-schema.mjs";
 
 const MAX_BOOTSTRAP_BYTES = 1024 * 1024;
 const INSTANCE_ID = /^[a-f0-9]{64}$/;
@@ -266,74 +265,56 @@ function mailboxOwnerOutsideValues(owner, includeSecrets) {
   return values;
 }
 
-function appServerWakeOutsideValues(appServerWake) {
-  if (!appServerWake) return [];
-  return [
-    appServerWake.installationId,
-    appServerWake.helperPath,
-    appServerWake.cursorPath,
-    appServerWake.bindingPath,
-    appServerWake.actorProfile,
-    appServerWake.authTokenFile,
-    appServerWake.authTokenEnv,
-    appServerWake.binding?.adapterVersion,
-    appServerWake.binding?.installationId,
-    appServerWake.binding?.instanceId,
-    appServerWake.binding?.agentId,
-    appServerWake.binding?.roomScope,
-    appServerWake.binding?.serverIdentity,
-    appServerWake.binding?.endpoint,
-    appServerWake.binding?.threadId,
-  ].filter((value) => typeof value === "string");
+function stringFields(record, keys) {
+  if (!record || typeof record !== "object") return [];
+  const values = [];
+  for (const key of keys) {
+    if (typeof record[key] === "string") values.push(record[key]);
+  }
+  return values;
 }
 
-function grokBotWakeOutsideValues(grokBotWake) {
-  if (!grokBotWake) return [];
+const SINGLE_WAKE_SECRET_SCANS = Object.freeze([
+  Object.freeze({
+    keys: Object.freeze([
+      "installationId", "helperPath", "cursorPath", "bindingPath", "actorProfile", "authTokenFile", "authTokenEnv",
+    ]),
+    nestedKeys: Object.freeze([
+      "adapterVersion", "installationId", "instanceId", "agentId", "roomScope", "serverIdentity", "endpoint", "threadId",
+    ]),
+  }),
+  Object.freeze({
+    keys: Object.freeze([
+      "installationId", "helperPath", "cursorPath", "bindingPath", "webhookUrlPath", "webhookKeyPath", "actorProfile",
+    ]),
+    nestedKeys: Object.freeze([
+      "adapterVersion", "installationId", "instanceId", "agentId", "profile", "grokAgentId", "wakeMode",
+    ]),
+  }),
+]);
+
+function wakeSecretValues(record, scan) {
+  if (!record) return [];
   return [
-    grokBotWake.installationId,
-    grokBotWake.helperPath,
-    grokBotWake.cursorPath,
-    grokBotWake.bindingPath,
-    grokBotWake.webhookUrlPath,
-    grokBotWake.webhookKeyPath,
-    grokBotWake.actorProfile,
-    grokBotWake.binding?.adapterVersion,
-    grokBotWake.binding?.installationId,
-    grokBotWake.binding?.instanceId,
-    grokBotWake.binding?.agentId,
-    grokBotWake.binding?.profile,
-    grokBotWake.binding?.grokAgentId,
-    grokBotWake.binding?.wakeMode,
-  ].filter((value) => typeof value === "string");
+    ...stringFields(record, scan.keys),
+    ...stringFields(record.binding, scan.nestedKeys),
+  ];
 }
 
-function headlessWakeOutsideValues(headlessWake) {
-  if (!headlessWake) return [];
-  return [
-    headlessWake.profile,
-    headlessWake.profileInstanceId,
-    headlessWake.helperPath,
-    headlessWake.allowedRoomId,
-    headlessWake.workingDirectory,
-    headlessWake.codexHome,
-    headlessWake.stateRoot,
-    headlessWake.command,
-  ].filter((value) => typeof value === "string");
+function isAbsoluteBootstrapPath(value) {
+  return typeof value === "string" && value.startsWith("/") && !value.includes("\0");
 }
 
-function cursorAcpWakeOutsideValues(cursorAcpWake) {
-  if (!cursorAcpWake) return [];
-  return [
-    cursorAcpWake.profile,
-    cursorAcpWake.profileInstanceId,
-    cursorAcpWake.helperPath,
-    cursorAcpWake.workingDirectory,
-    cursorAcpWake.cursorHome,
-    cursorAcpWake.stateRoot,
-    cursorAcpWake.command,
-    cursorAcpWake.agentId,
-    cursorAcpWake.installationId,
-  ].filter((value) => typeof value === "string");
+function hasBootstrapWatchIdentity(wake, absoluteKeys) {
+  return typeof wake.installationId === "string"
+    && INSTALLATION_ID.test(wake.installationId)
+    && isAbsoluteBootstrapPath(wake.helperPath)
+    && isAbsoluteBootstrapPath(wake.cursorPath)
+    && absoluteKeys.every((key) => isAbsoluteBootstrapPath(wake[key]))
+    && typeof wake.actorProfile === "string"
+    && wake.actorProfile.length > 0
+    && !wake.actorProfile.includes("\0")
+    && typeof wake.ensureBeforeWatch === "boolean";
 }
 
 function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes) {
@@ -362,20 +343,18 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
       }
-      for (const candidate of appServerWakeOutsideValues(appServerWake)) {
+      for (const candidate of wakeSecretValues(appServerWake, SINGLE_WAKE_SECRET_SCANS[0])) {
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
-      for (const candidate of grokBotWakeOutsideValues(grokBotWake)) {
+      for (const candidate of wakeSecretValues(grokBotWake, SINGLE_WAKE_SECRET_SCANS[1])) {
         if (candidate.includes(secret)) throw invalidBootstrap();
       }
-      for (const headlessWake of headlessWakes ?? []) {
-        for (const candidate of headlessWakeOutsideValues(headlessWake)) {
-          if (candidate.includes(secret)) throw invalidBootstrap();
-        }
-      }
-      for (const cursorAcpWake of cursorAcpWakes ?? []) {
-        for (const candidate of cursorAcpWakeOutsideValues(cursorAcpWake)) {
-          if (candidate.includes(secret)) throw invalidBootstrap();
+      const profileWakes = { headlessWakes, cursorAcpWakes };
+      for (const lane of Object.values(PROFILE_WAKE_LANES)) {
+        for (const wake of profileWakes[lane.bootstrapKey] ?? []) {
+          for (const candidate of stringFields(wake, lane.secretKeys)) {
+            if (candidate.includes(secret)) throw invalidBootstrap();
+          }
         }
       }
     }
@@ -385,18 +364,7 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
 function validateEventWake(eventWake, seenWorkerIds) {
   if (!hasExactKeys(eventWake, EXACT_EVENT_WAKE_KEYS)) throw invalidBootstrap();
   if (
-    typeof eventWake.installationId !== "string"
-    || !INSTALLATION_ID.test(eventWake.installationId)
-    || typeof eventWake.helperPath !== "string"
-    || !eventWake.helperPath.startsWith("/")
-    || eventWake.helperPath.includes("\0")
-    || typeof eventWake.cursorPath !== "string"
-    || !eventWake.cursorPath.startsWith("/")
-    || eventWake.cursorPath.includes("\0")
-    || typeof eventWake.actorProfile !== "string"
-    || eventWake.actorProfile.length === 0
-    || eventWake.actorProfile.includes("\0")
-    || typeof eventWake.ensureBeforeWatch !== "boolean"
+    !hasBootstrapWatchIdentity(eventWake, [])
     || !Array.isArray(eventWake.profiles)
     || eventWake.profiles.length < 1
     || eventWake.profiles.length > 100
@@ -438,21 +406,7 @@ function validateEventWake(eventWake, seenWorkerIds) {
 function validateAppServerWake(appServerWake, seenWorkerIds, eventWake) {
   if (!hasExactKeys(appServerWake, EXACT_APP_SERVER_WAKE_KEYS)) throw invalidBootstrap();
   if (
-    typeof appServerWake.installationId !== "string"
-    || !INSTALLATION_ID.test(appServerWake.installationId)
-    || typeof appServerWake.helperPath !== "string"
-    || !appServerWake.helperPath.startsWith("/")
-    || appServerWake.helperPath.includes("\0")
-    || typeof appServerWake.cursorPath !== "string"
-    || !appServerWake.cursorPath.startsWith("/")
-    || appServerWake.cursorPath.includes("\0")
-    || typeof appServerWake.bindingPath !== "string"
-    || !appServerWake.bindingPath.startsWith("/")
-    || appServerWake.bindingPath.includes("\0")
-    || typeof appServerWake.actorProfile !== "string"
-    || appServerWake.actorProfile.length === 0
-    || appServerWake.actorProfile.includes("\0")
-    || typeof appServerWake.ensureBeforeWatch !== "boolean"
+    !hasBootstrapWatchIdentity(appServerWake, ["bindingPath"])
     || !hasExactKeys(appServerWake.binding, EXACT_APP_SERVER_BINDING_KEYS)
   ) {
     throw invalidBootstrap();
@@ -498,27 +452,7 @@ function validateAppServerWake(appServerWake, seenWorkerIds, eventWake) {
 function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWake) {
   if (!hasExactKeys(grokBotWake, EXACT_GROK_BOT_WAKE_KEYS)) throw invalidBootstrap();
   if (
-    typeof grokBotWake.installationId !== "string"
-    || !INSTALLATION_ID.test(grokBotWake.installationId)
-    || typeof grokBotWake.helperPath !== "string"
-    || !grokBotWake.helperPath.startsWith("/")
-    || grokBotWake.helperPath.includes("\0")
-    || typeof grokBotWake.cursorPath !== "string"
-    || !grokBotWake.cursorPath.startsWith("/")
-    || grokBotWake.cursorPath.includes("\0")
-    || typeof grokBotWake.bindingPath !== "string"
-    || !grokBotWake.bindingPath.startsWith("/")
-    || grokBotWake.bindingPath.includes("\0")
-    || typeof grokBotWake.webhookUrlPath !== "string"
-    || !grokBotWake.webhookUrlPath.startsWith("/")
-    || grokBotWake.webhookUrlPath.includes("\0")
-    || typeof grokBotWake.webhookKeyPath !== "string"
-    || !grokBotWake.webhookKeyPath.startsWith("/")
-    || grokBotWake.webhookKeyPath.includes("\0")
-    || typeof grokBotWake.actorProfile !== "string"
-    || grokBotWake.actorProfile.length === 0
-    || grokBotWake.actorProfile.includes("\0")
-    || typeof grokBotWake.ensureBeforeWatch !== "boolean"
+    !hasBootstrapWatchIdentity(grokBotWake, ["bindingPath", "webhookUrlPath", "webhookKeyPath"])
     || !hasExactKeys(grokBotWake.binding, EXACT_GROK_BOT_BINDING_KEYS)
   ) {
     throw invalidBootstrap();
@@ -552,42 +486,47 @@ function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWak
   }
 }
 
-function validateHeadlessWake(headlessWake, seenWorkerIds, eventWake, appServerWake, grokBotWake, cursorAcpWakes = []) {
-  if (!hasHeadlessWakeKeys(headlessWake)) throw invalidBootstrap();
-  let normalized;
-  try {
-    normalized = normalizeHeadlessWakeConfig(headlessWake);
-  } catch {
-    throw invalidBootstrap();
+function acceptProfileWakeLane(bootstrap, lane, seen) {
+  if (!Object.hasOwn(bootstrap, lane.bootstrapKey)) return;
+  const wakes = bootstrap[lane.bootstrapKey];
+  if (!Array.isArray(wakes) || wakes.length > 100) throw invalidBootstrap();
+  const siblings = bootstrap[lane.siblingKey] ?? [];
+  const profiles = new Set();
+  const instanceIds = new Set();
+  const stateRoots = new Set();
+  const normalizedWakes = [];
+  for (const wake of wakes) {
+    if (!lane.hasKeys(wake)) throw invalidBootstrap();
+    let normalized;
+    try {
+      normalized = lane.normalize(wake);
+    } catch {
+      throw invalidBootstrap();
+    }
+    if (
+      normalized == null
+      || seen.has(normalized.profileInstanceId)
+      || bootstrap.eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
+      || bootstrap.appServerWake?.binding?.instanceId === normalized.profileInstanceId
+      || bootstrap.grokBotWake?.binding?.instanceId === normalized.profileInstanceId
+      || siblings.some((entry) => entry.profileInstanceId === normalized.profileInstanceId)
+    ) {
+      throw invalidBootstrap();
+    }
+    if (
+      profiles.has(normalized.profile)
+      || instanceIds.has(normalized.profileInstanceId)
+      || stateRoots.has(normalized.stateRoot)
+    ) {
+      throw invalidBootstrap();
+    }
+    profiles.add(normalized.profile);
+    instanceIds.add(normalized.profileInstanceId);
+    stateRoots.add(normalized.stateRoot);
+    normalizedWakes.push(Object.freeze(normalized));
   }
-  if (
-    seenWorkerIds.has(normalized.profileInstanceId)
-    || eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
-    || appServerWake?.binding?.instanceId === normalized.profileInstanceId
-    || grokBotWake?.binding?.instanceId === normalized.profileInstanceId
-    || cursorAcpWakes.some((wake) => wake.profileInstanceId === normalized.profileInstanceId)
-  ) {
-    throw invalidBootstrap();
-  }
-}
-
-function validateCursorAcpWake(cursorAcpWake, seenWorkerIds, eventWake, appServerWake, grokBotWake, headlessWakes = []) {
-  if (!hasCursorAcpWakeKeys(cursorAcpWake)) throw invalidBootstrap();
-  let normalized;
-  try {
-    normalized = normalizeCursorAcpWakeConfig(cursorAcpWake);
-  } catch {
-    throw invalidBootstrap();
-  }
-  if (
-    seenWorkerIds.has(normalized.profileInstanceId)
-    || eventWake?.profiles?.some((profile) => profile.instanceId === normalized.profileInstanceId)
-    || appServerWake?.binding?.instanceId === normalized.profileInstanceId
-    || grokBotWake?.binding?.instanceId === normalized.profileInstanceId
-    || headlessWakes.some((wake) => wake.profileInstanceId === normalized.profileInstanceId)
-  ) {
-    throw invalidBootstrap();
-  }
+  normalizedWakes.sort((a, b) => a.profile.localeCompare(b.profile));
+  bootstrap[lane.bootstrapKey] = Object.freeze(normalizedWakes);
 }
 
 export function parseClientSupervisorBootstrap(text) {
@@ -623,52 +562,8 @@ export function parseClientSupervisorBootstrap(text) {
       // Mini Bob / Grok webhook wake path is removed.
       throw invalidBootstrap();
     }
-    if (Object.hasOwn(bootstrap, "headlessWakes")) {
-      if (!Array.isArray(bootstrap.headlessWakes) || bootstrap.headlessWakes.length > 100) throw invalidBootstrap();
-      const profiles = new Set();
-      const instanceIds = new Set();
-      const stateRoots = new Set();
-      for (const wake of bootstrap.headlessWakes) {
-        validateHeadlessWake(
-          wake,
-          seen,
-          bootstrap.eventWake,
-          bootstrap.appServerWake,
-          bootstrap.grokBotWake,
-          bootstrap.cursorAcpWakes ?? [],
-        );
-        const normalized = normalizeHeadlessWakeConfig(wake);
-        if (profiles.has(normalized.profile) || instanceIds.has(normalized.profileInstanceId) || stateRoots.has(normalized.stateRoot)) throw invalidBootstrap();
-        profiles.add(normalized.profile); instanceIds.add(normalized.profileInstanceId); stateRoots.add(normalized.stateRoot);
-      }
-      bootstrap.headlessWakes = bootstrap.headlessWakes
-        .map((wake) => Object.freeze(normalizeHeadlessWakeConfig(wake)))
-        .sort((a, b) => a.profile.localeCompare(b.profile));
-      Object.freeze(bootstrap.headlessWakes);
-    }
-    if (Object.hasOwn(bootstrap, "cursorAcpWakes")) {
-      if (!Array.isArray(bootstrap.cursorAcpWakes) || bootstrap.cursorAcpWakes.length > 100) throw invalidBootstrap();
-      const profiles = new Set();
-      const instanceIds = new Set();
-      const stateRoots = new Set();
-      for (const wake of bootstrap.cursorAcpWakes) {
-        validateCursorAcpWake(
-          wake,
-          seen,
-          bootstrap.eventWake,
-          bootstrap.appServerWake,
-          bootstrap.grokBotWake,
-          bootstrap.headlessWakes ?? [],
-        );
-        const normalized = normalizeCursorAcpWakeConfig(wake);
-        if (profiles.has(normalized.profile) || instanceIds.has(normalized.profileInstanceId) || stateRoots.has(normalized.stateRoot)) throw invalidBootstrap();
-        profiles.add(normalized.profile); instanceIds.add(normalized.profileInstanceId); stateRoots.add(normalized.stateRoot);
-      }
-      bootstrap.cursorAcpWakes = bootstrap.cursorAcpWakes
-        .map((wake) => Object.freeze(normalizeCursorAcpWakeConfig(wake)))
-        .sort((a, b) => a.profile.localeCompare(b.profile));
-      Object.freeze(bootstrap.cursorAcpWakes);
-    }
+    acceptProfileWakeLane(bootstrap, PROFILE_WAKE_LANES.headless, seen);
+    acceptProfileWakeLane(bootstrap, PROFILE_WAKE_LANES.cursorAcp, seen);
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")

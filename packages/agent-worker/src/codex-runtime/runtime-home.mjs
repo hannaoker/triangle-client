@@ -6,7 +6,7 @@
  * A failed shared-home probe never falls back to the user's ~/.codex.
  */
 
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import { loadRuntimeManifest } from "./runtime-manifest.mjs";
@@ -88,15 +88,6 @@ export function resolveTriangleCodexHome({
       "codex_home_user_fallback_forbidden",
       "dedicated Triangle CODEX_HOME must not resolve to ~/.codex",
     );
-  }
-
-  try {
-    const mode = statSync(resolved).mode & 0o777;
-    if (mode !== 0o700 && process.platform !== "win32") {
-      // Soft diagnostic only in Phase 0; Darwin helper store enforces 0700.
-    }
-  } catch {
-    // ignore
   }
 
   return resolved;

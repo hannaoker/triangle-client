@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createCodexAppServerProcess,
   createFakeAppServerStdioProgram,
+  createNdjsonRpcSession,
   waitForAppServerTurnCompleted,
 } from "../../src/codex-runtime/app-server-process.mjs";
 import {
@@ -114,6 +115,66 @@ test("pending calls fail when the child exits", async () => {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("createNdjsonRpcSession requires a timeout and an inbound handler", () => {
+  assert.throws(
+    () => createNdjsonRpcSession({ onInbound() {}, requestTimeoutMs: 0 }),
+    /requestTimeoutMs must be an integer >= 1/,
+  );
+  assert.throws(
+    () => createNdjsonRpcSession({ requestTimeoutMs: 1_000 }),
+    /onInbound must be a function/,
+  );
+  const session = createNdjsonRpcSession({
+    role: "test",
+    command: process.execPath,
+    args: ["-e", "process.exit(0)"],
+    buildChildEnv: () => ({ ...process.env }),
+    onInbound() {},
+  });
+  assert.equal(typeof session.close, "function");
+});
+
+test("Codex close fallback timer stays referenced", async () => {
+  await assertCloseFallbackUnref(false);
+});
+
+test("Cursor close fallback timer is unreferenced", async () => {
+  await assertCloseFallbackUnref(true);
+});
+
+async function assertCloseFallbackUnref(unrefCloseFallback) {
+  const timeoutMs = 30;
+  const fallbackDelay = timeoutMs + 100;
+  const unrefDelays = [];
+  const originalSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, delay, ...args) => {
+    const timer = originalSetTimeout(fn, delay, ...args);
+    const unref = timer.unref?.bind(timer);
+    if (typeof unref === "function") {
+      timer.unref = () => {
+        unrefDelays.push(delay);
+        return unref();
+      };
+    }
+    return timer;
+  };
+  const session = createNdjsonRpcSession({
+    role: "test",
+    command: process.execPath,
+    args: ["-e", "process.on('SIGTERM',()=>{}); process.stdin.resume(); setInterval(()=>{}, 1000);"],
+    buildChildEnv: () => ({ ...process.env }),
+    unrefCloseFallback,
+    onInbound() {},
+  });
+  try {
+    await session.start();
+    await session.close({ signal: "SIGTERM", timeoutMs });
+    assert.equal(unrefDelays.includes(fallbackDelay), unrefCloseFallback);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+}
 
 test("refuses user ~/.codex as dedicated runtime home", () => {
   const home = tempHome();

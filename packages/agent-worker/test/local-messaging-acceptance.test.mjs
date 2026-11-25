@@ -8,12 +8,11 @@ import {
   createTurnCapabilityIssuer,
 } from "../src/local-messaging-credentials.mjs";
 
-test("real separate-process Unix socket client/server acceptance with test SQLite persistence fixture", { skip: process.platform === "win32" }, async () => {
+test("real separate-process Unix socket client/server acceptance with production SQLite journal", { skip: process.platform === "win32" }, async () => {
   const realTmp = fs.realpathSync(os.tmpdir());
   const tmpDir = fs.mkdtempSync(path.join(realTmp, "triangle-acceptance-"));
   fs.chmodSync(tmpDir, 0o700);
   const socketPath = path.join(tmpDir, "local-control.sock");
-  const dbPath = path.join(tmpDir, "journal.sqlite");
   const secret = "acceptance-secret-32-chars-long-test-key!";
 
   const issuer = createTurnCapabilityIssuer({ secret });
@@ -21,13 +20,14 @@ test("real separate-process Unix socket client/server acceptance with test SQLit
 
   // Server script executed in separate child process
   const serverScript = `
+    import { createLocalMessagingJournal } from "${new URL("../src/local-messaging-journal.mjs", import.meta.url).href}";
     import { createLocalControlServer } from "${new URL("../src/local-messaging-server.mjs", import.meta.url).href}";
-    import { createTestSqliteJournal, createTestRecoverableDispatcher } from "${new URL("../test/local-messaging-fixtures.mjs", import.meta.url).href}";
+    import { createTestRecoverableDispatcher } from "${new URL("../test/local-messaging-fixtures.mjs", import.meta.url).href}";
     import { createOwnerAcl } from "${new URL("../src/local-messaging-acl.mjs", import.meta.url).href}";
     import { createTurnCapabilityValidator } from "${new URL("../src/local-messaging-credentials.mjs", import.meta.url).href}";
     import { createPerSenderRateLimiter, createConversationLoopTracker } from "${new URL("../src/local-messaging-rate-limiter.mjs", import.meta.url).href}";
 
-    const journal = createTestSqliteJournal({ dbPath: "${dbPath}" });
+    const journal = createLocalMessagingJournal({ stateRoot: "${tmpDir}" });
     const acl = createOwnerAcl({ rules: { "desktop-codex": ["gravity2"] } });
     const validator = createTurnCapabilityValidator({ secret: "${secret}" });
     const rateLimiter = createPerSenderRateLimiter({ maxRequestsPerWindow: 20 });
