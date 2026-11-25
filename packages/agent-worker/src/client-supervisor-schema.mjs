@@ -1,7 +1,6 @@
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import { validateMailboxClientOptions } from "./mailbox-client.mjs";
 import { validateBinding } from "./shared-codex-app-server.mjs";
-import { validateGrokBotBinding } from "./grok-bot-wake.mjs";
 import {
   HEADLESS_WAKE_KEYS as EXACT_HEADLESS_WAKE_KEYS,
   normalizeHeadlessWakeConfig,
@@ -339,45 +338,6 @@ export function validateAppServerWake(appServerWake) {
     ensureBeforeWatch: appServerWake.ensureBeforeWatch,
     authTokenFile: appServerWake.authTokenFile,
     authTokenEnv: appServerWake.authTokenEnv,
-    binding,
-  });
-}
-
-export function validateGrokBotWake(grokBotWake) {
-  if (grokBotWake == null) return null;
-  if (!hasExactKeys(grokBotWake, GROK_BOT_WAKE_KEYS)) {
-    throw new TypeError("grokBotWake schema is invalid");
-  }
-  requireInstallationId(grokBotWake.installationId, "grokBotWake.installationId");
-  requireAbsolutePath(grokBotWake.helperPath, "grokBotWake.helperPath");
-  requireAbsolutePath(grokBotWake.cursorPath, "grokBotWake.cursorPath");
-  requireAbsolutePath(grokBotWake.bindingPath, "grokBotWake.bindingPath");
-  requireAbsolutePath(grokBotWake.webhookUrlPath, "grokBotWake.webhookUrlPath");
-  requireAbsolutePath(grokBotWake.webhookKeyPath, "grokBotWake.webhookKeyPath");
-  requireActorProfile(grokBotWake.actorProfile, "grokBotWake.actorProfile");
-  requireBoolean(grokBotWake.ensureBeforeWatch, "grokBotWake.ensureBeforeWatch must be a boolean");
-  if (!hasExactKeys(grokBotWake.binding, GROK_BOT_BINDING_KEYS)) {
-    throw new TypeError("grokBotWake.binding schema is invalid");
-  }
-  const binding = validateGrokBotBinding(grokBotWake.binding);
-  if (!binding.enabled) {
-    throw new TypeError("grokBotWake.binding.enabled must be true");
-  }
-  if (binding.installationId !== grokBotWake.installationId) {
-    throw new TypeError("grokBotWake binding installationId mismatch");
-  }
-  if (binding.profile !== grokBotWake.actorProfile) {
-    throw new TypeError("grokBotWake binding profile mismatch");
-  }
-  return Object.freeze({
-    installationId: grokBotWake.installationId,
-    helperPath: grokBotWake.helperPath,
-    cursorPath: grokBotWake.cursorPath,
-    bindingPath: grokBotWake.bindingPath,
-    webhookUrlPath: grokBotWake.webhookUrlPath,
-    webhookKeyPath: grokBotWake.webhookKeyPath,
-    actorProfile: grokBotWake.actorProfile,
-    ensureBeforeWatch: grokBotWake.ensureBeforeWatch,
     binding,
   });
 }

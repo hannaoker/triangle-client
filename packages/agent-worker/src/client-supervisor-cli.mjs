@@ -244,33 +244,6 @@ function stringFields(record, keys) {
   return values;
 }
 
-const SINGLE_WAKE_SECRET_SCANS = Object.freeze([
-  Object.freeze({
-    keys: Object.freeze([
-      "installationId", "helperPath", "cursorPath", "bindingPath", "actorProfile", "authTokenFile", "authTokenEnv",
-    ]),
-    nestedKeys: Object.freeze([
-      "adapterVersion", "installationId", "instanceId", "agentId", "roomScope", "serverIdentity", "endpoint", "threadId",
-    ]),
-  }),
-  Object.freeze({
-    keys: Object.freeze([
-      "installationId", "helperPath", "cursorPath", "bindingPath", "webhookUrlPath", "webhookKeyPath", "actorProfile",
-    ]),
-    nestedKeys: Object.freeze([
-      "adapterVersion", "installationId", "instanceId", "agentId", "profile", "grokAgentId", "wakeMode",
-    ]),
-  }),
-]);
-
-function wakeSecretValues(record, scan) {
-  if (!record) return [];
-  return [
-    ...stringFields(record, scan.keys),
-    ...stringFields(record.binding, scan.nestedKeys),
-  ];
-}
-
 function isAbsoluteBootstrapPath(value) {
   return typeof value === "string" && value.startsWith("/") && !value.includes("\0");
 }
@@ -286,7 +259,7 @@ function hasBootstrapWatchIdentity(wake) {
     && typeof wake.ensureBeforeWatch === "boolean";
 }
 
-function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, grokBotWake, headlessWakes, cursorAcpWakes) {
+function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, headlessWakes, cursorAcpWakes) {
   const owners = [
     ...instances,
     ...(eventWake?.drains ?? []),
@@ -312,11 +285,10 @@ function assertMailboxTokensAreConfined(instances, eventWake, appServerWake, gro
           if (candidate.includes(secret)) throw invalidBootstrap();
         }
       }
-      for (const candidate of wakeSecretValues(appServerWake, SINGLE_WAKE_SECRET_SCANS[0])) {
-        if (candidate.includes(secret)) throw invalidBootstrap();
-      }
-      for (const candidate of wakeSecretValues(grokBotWake, SINGLE_WAKE_SECRET_SCANS[1])) {
-        if (candidate.includes(secret)) throw invalidBootstrap();
+      if (appServerWake) {
+        for (const candidate of [...Object.values(appServerWake), ...Object.values(appServerWake.binding)]) {
+          if (typeof candidate === "string" && candidate.includes(secret)) throw invalidBootstrap();
+        }
       }
       const profileWakes = { headlessWakes, cursorAcpWakes };
       for (const lane of Object.values(PROFILE_WAKE_LANES)) {
@@ -416,17 +388,12 @@ export function parseClientSupervisorBootstrap(text) {
       if (!wake || seen.has(wake.binding.instanceId)) throw invalidBootstrap();
       seen.add(wake.binding.instanceId);
     }
-    if (Object.hasOwn(bootstrap, "grokBotWake")) {
-      // Mini Bob / Grok webhook wake path is removed.
-      throw invalidBootstrap();
-    }
     acceptProfileWakeLane(bootstrap, "headlessWakes", validateHeadlessWakes, seen);
     acceptProfileWakeLane(bootstrap, "cursorAcpWakes", validateCursorAcpWakes, seen);
     if (
       bootstrap.instances.length < 1
       && !Object.hasOwn(bootstrap, "eventWake")
       && !Object.hasOwn(bootstrap, "appServerWake")
-      && !Object.hasOwn(bootstrap, "grokBotWake")
       && !Object.hasOwn(bootstrap, "headlessWakes")
       && !Object.hasOwn(bootstrap, "cursorAcpWakes")
     ) {
@@ -436,7 +403,6 @@ export function parseClientSupervisorBootstrap(text) {
       bootstrap.instances,
       bootstrap.eventWake,
       bootstrap.appServerWake,
-      bootstrap.grokBotWake,
       bootstrap.headlessWakes,
       bootstrap.cursorAcpWakes,
     );
