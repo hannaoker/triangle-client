@@ -11,8 +11,6 @@ import {
   createClientSupervisor,
   createHeadlessProgressJournal,
   defaultHeadlessProgressClientRoot,
-  GROK_BOT_BINDING_KEYS as EXACT_GROK_BOT_BINDING_KEYS,
-  GROK_BOT_WAKE_KEYS as EXACT_GROK_BOT_WAKE_KEYS,
 } from "./client-supervisor.mjs";
 import { createRunnerEnvironment } from "./command-runner.mjs";
 import {
@@ -47,8 +45,6 @@ const BINDING_ENDPOINT = /^wss?:\/\/[^\s\0]{1,500}$/i;
 const BINDING_SERVER_IDENTITY = /^[A-Za-z0-9._:/+=-]{1,200}$/;
 const BINDING_THREAD_ID = /^[A-Za-z0-9._:-]{8,120}$/;
 const BINDING_ROOM_SCOPE = /^[A-Za-z0-9._:-]{1,120}$/;
-const GROK_AGENT_ID = /^[A-Za-z0-9._:-]{8,120}$/;
-const GROK_BOT_PROFILE = /^[A-Za-z0-9._-]{1,64}$/;
 
 export function monitorParentProcess({
   expectedParentPid,
@@ -446,43 +442,6 @@ function validateAppServerWake(appServerWake, seenWorkerIds, eventWake) {
   } else {
     if (appServerWake.authTokenFile !== null) throw invalidBootstrap();
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(appServerWake.authTokenEnv)) throw invalidBootstrap();
-  }
-}
-
-function validateGrokBotWake(grokBotWake, seenWorkerIds, eventWake, appServerWake) {
-  if (!hasExactKeys(grokBotWake, EXACT_GROK_BOT_WAKE_KEYS)) throw invalidBootstrap();
-  if (
-    !hasBootstrapWatchIdentity(grokBotWake, ["bindingPath", "webhookUrlPath", "webhookKeyPath"])
-    || !hasExactKeys(grokBotWake.binding, EXACT_GROK_BOT_BINDING_KEYS)
-  ) {
-    throw invalidBootstrap();
-  }
-  const binding = grokBotWake.binding;
-  if (
-    binding.adapterVersion !== "1"
-    || binding.enabled !== true
-    || typeof binding.installationId !== "string"
-    || !INSTALLATION_ID.test(binding.installationId)
-    || binding.installationId !== grokBotWake.installationId
-    || typeof binding.instanceId !== "string"
-    || !INSTANCE_ID.test(binding.instanceId)
-    || typeof binding.agentId !== "string"
-    || !AGENT_ID.test(binding.agentId)
-    || typeof binding.profile !== "string"
-    || !GROK_BOT_PROFILE.test(binding.profile)
-    || binding.profile !== grokBotWake.actorProfile
-    || typeof binding.grokAgentId !== "string"
-    || !GROK_AGENT_ID.test(binding.grokAgentId)
-    || binding.wakeMode !== "webhook"
-  ) {
-    throw invalidBootstrap();
-  }
-  if (
-    seenWorkerIds.has(binding.instanceId)
-    || eventWake?.profiles?.some((profile) => profile.instanceId === binding.instanceId)
-    || appServerWake?.binding?.instanceId === binding.instanceId
-  ) {
-    throw invalidBootstrap();
   }
 }
 

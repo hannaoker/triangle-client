@@ -78,6 +78,18 @@ test('installed CLI send uses an owner-set alias only when discovery lists it, a
    });
    assert.equal(discoveries-asked,roundTrips,name+': round trips to the server');
   }
+
+  // Checking several enabled harnesses for one unknown session needs one directory read.
+  writePrivateJson(configPath, {
+    ...config, sessionMessaging: { enabled: true }, grok: { enabled: true }, antigravity: { enabled: true },
+  });
+  asked = discoveries;
+  await assert.rejects(send('session-' + '9'.repeat(64), 'unknown-session'), error => {
+    assert.equal(JSON.parse(error.stderr).error, 'recipient_not_allowed');
+    assert.equal(error.stdout, '');
+    return true;
+  });
+  assert.equal(discoveries - asked, 1);
  }finally{await subsystem?.stop();fs.rmSync(root,{recursive:true,force:true});}
 });
 

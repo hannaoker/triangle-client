@@ -153,7 +153,6 @@ async function runHost([configPath]) {
   );
   const host = hostModule.createInstalledLocalMessagingHost({ configPath, runners, gate: createProfiledReasonerGate() });
   await host.start();
-  out({ ready: true, pid: process.pid, bundleRoot, node: process.version });
   const stop = async () => {
     // A host that fails to stop says so in its exit status; the driver requires a clean stop.
     let code = 0;
@@ -167,6 +166,7 @@ async function runHost([configPath]) {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
+  out({ ready: true, pid: process.pid, bundleRoot, node: process.version });
   setInterval(() => {}, 1 << 30);
 }
 

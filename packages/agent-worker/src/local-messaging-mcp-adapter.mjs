@@ -1,5 +1,5 @@
 import readline from "node:readline";
-import { randomUUID } from "node:crypto";
+import { sendMcpMessage } from "./local-messaging-client.mjs";
 import { sanitizeError } from "./local-messaging-errors.mjs";
 import {
   MAX_FRAME_BYTES,
@@ -221,28 +221,9 @@ export function createLocalMessagingMcpHandler({
                 break;
               }
 
-              case "triangle_send_message": {
-                // Generated here, not by the client, so even a failed call can say what to retry with.
-                const windowFields = windowEnvelope(args, "send");
-                const messageId = args.messageId || randomUUID();
-                const requestId = args.requestId || randomUUID();
-                try {
-                  const res = await client.sendMessage({
-                    ...windowFields,
-                    to: args.to,
-                    text: args.text,
-                    messageId,
-                    requestId,
-                    inReplyTo: args.inReplyTo,
-                  }, rpcOptions);
-                  resultData = { messageId, requestId, ...res };
-                } catch (sendError) {
-                  const failure = sendError instanceof Error ? sendError : new Error(String(sendError));
-                  failure.retryIds = { messageId, requestId };
-                  throw failure;
-                }
+              case "triangle_send_message":
+                resultData = await sendMcpMessage(client, args, rpcOptions);
                 break;
-              }
 
               case "triangle_get_status": {
                 // No argument is this conversation's own view, never the host status the owner CLI gets.
