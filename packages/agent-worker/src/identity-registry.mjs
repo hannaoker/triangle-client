@@ -2103,126 +2103,50 @@ function appendAuditEntrySync(root, auditPath, committedByteLength, uncommittedT
   }
 }
 
-// `alias_set` and `alias_clear` change the alias map at the subject key and nothing else. `alias_set` only creates: a name that
-// exists is refused, so a target changes only by clear then set, each step audited. The record's `set_at` is the entry's own time
-// and its `generation` the sequence the entry commits at, which never repeats, because the audit entry cannot record a target
-// and a retargeted name must still be distinguishable from the one it replaced. The target must be the principal of an active
-// `mesh-managed` binding (writer policy: the reader accepts any principal the registry knows, so old aliases stay readable).
-function assertAliasMutation(oldRegistry, nextRegistry, action, subject) {
+// An alias or destination can only be created or cleared at its own key.
+// A retarget requires two audited writes. The committed sequence identifies the new rule.
+function assertRoutingRuleMutation(oldRegistry, nextRegistry, action, subject, kind) {
   const mismatch = () => codedError("invalid_registry", "mutation_does_not_match_action");
   if (oldRegistry.schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
     throw codedError("invalid_registry", "action_not_available");
   }
-  for (const name of ["bindings", "pairings", "destinations"]) {
-    if (canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
+  const table = kind === "alias" ? "aliases" : "destinations";
+  for (const name of ["bindings", "pairings", "aliases", "destinations"]) {
+    if (name !== table && canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
       throw mismatch();
     }
   }
-  const oldAliases = oldRegistry.aliases;
-  const nextAliases = nextRegistry.aliases;
-  for (const [name, record] of Object.entries(oldAliases)) {
-    if (name === subject) continue;
-    if (!Object.hasOwn(nextAliases, name) || canonicalJson(nextAliases[name]) !== canonicalJson(record)) {
+  const before = oldRegistry[table];
+  const after = nextRegistry[table];
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (key === subject) continue;
+    if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key) || canonicalJson(before[key]) !== canonicalJson(after[key])) {
       throw mismatch();
     }
   }
-  for (const name of Object.keys(nextAliases)) {
-    if (name !== subject && !Object.hasOwn(oldAliases, name)) {
-      throw mismatch();
-    }
-  }
-  const existed = Object.hasOwn(oldAliases, subject);
-  const exists = Object.hasOwn(nextAliases, subject);
-  if (action === "alias_clear") {
-    if (!existed) {
-      throw codedError("invalid_registry", "alias_not_found");
-    }
-    if (exists) {
-      throw mismatch();
-    }
-    return null;
-  }
-  if (existed) {
-    throw codedError("alias_conflict", "alias_exists");
-  }
-  if (!exists) {
-    throw mismatch();
-  }
-  const record = nextAliases[subject];
-  if (record.set_at !== nextRegistry.updatedAt || record.generation !== nextRegistry.sequence) {
-    throw mismatch();
-  }
-  const target = record.principal_id;
-  const active = Object.values(nextRegistry.bindings).some(
-    (binding) => binding.revoked_at === null && binding.trust_mode === "mesh-managed" && binding.principal_id === target,
-  );
-  if (!active) {
-    throw codedError("invalid_registry", "alias_target_not_active");
-  }
-  return null;
-}
 
-// `destination_set` and `destination_clear` change the destinations map at the subject principal key and nothing else.
-// `destination_set` only creates: a principal that already has a rule is refused (`destination_conflict` / `destination_exists`),
-// so changing a destination requires clear then set, each step audited. The record's `set_at` is the entry's own time and its
-// `generation` the sequence the entry commits at. The principal must hold an active `mesh-managed` binding (`peer_` deferred to AD.2).
-function assertDestinationMutation(oldRegistry, nextRegistry, action, subject) {
-  const mismatch = () => codedError("invalid_registry", "mutation_does_not_match_action");
-  if (oldRegistry.schema !== IDENTITY_REGISTRY_SCHEMA_V2) {
-    throw codedError("invalid_registry", "action_not_available");
-  }
-  for (const name of ["bindings", "pairings", "aliases"]) {
-    if (canonicalJson(nextRegistry[name]) !== canonicalJson(oldRegistry[name])) {
-      throw mismatch();
-    }
-  }
-  const oldDestinations = oldRegistry.destinations;
-  const nextDestinations = nextRegistry.destinations;
-  for (const [principalId, record] of Object.entries(oldDestinations)) {
-    if (principalId === subject) continue;
-    if (!Object.hasOwn(nextDestinations, principalId) || canonicalJson(nextDestinations[principalId]) !== canonicalJson(record)) {
-      throw mismatch();
-    }
-  }
-  for (const principalId of Object.keys(nextDestinations)) {
-    if (principalId !== subject && !Object.hasOwn(oldDestinations, principalId)) {
-      throw mismatch();
-    }
-  }
-  const existed = Object.hasOwn(oldDestinations, subject);
-  const exists = Object.hasOwn(nextDestinations, subject);
-  if (action === "destination_clear") {
-    if (!existed) {
-      throw codedError("invalid_registry", "destination_not_found");
-    }
-    if (exists) {
-      throw mismatch();
-    }
+  const existed = Object.hasOwn(before, subject);
+  const exists = Object.hasOwn(after, subject);
+  if (action === `${kind}_clear`) {
+    if (!existed) throw codedError("invalid_registry", `${kind}_not_found`);
+    if (exists) throw mismatch();
     return null;
   }
-  if (existed) {
-    throw codedError("destination_conflict", "destination_exists");
-  }
-  if (!exists) {
-    throw mismatch();
-  }
-  const record = nextDestinations[subject];
+  if (existed) throw codedError(`${kind}_conflict`, `${kind}_exists`);
+  if (!exists) throw mismatch();
+  const record = after[subject];
   if (record.set_at !== nextRegistry.updatedAt || record.generation !== nextRegistry.sequence) {
     throw mismatch();
   }
-  const ofPrincipal = Object.values(nextRegistry.bindings).filter((binding) => binding.principal_id === subject);
-  const activeMesh = ofPrincipal.some(
-    (binding) => binding.revoked_at === null && binding.trust_mode === "mesh-managed",
-  );
-  if (!activeMesh) {
-    const anyMesh = ofPrincipal.some((binding) => binding.trust_mode === "mesh-managed");
-    const anyPeer = ofPrincipal.some((binding) => binding.trust_mode === "serverless-peer");
-    if (anyPeer && !anyMesh) {
-      throw codedError("invalid_registry", "destination_target_not_mesh_managed");
-    }
-    throw codedError("invalid_registry", "destination_target_not_active");
+
+  const target = kind === "alias" ? record.principal_id : subject;
+  const bindings = Object.values(nextRegistry.bindings).filter((binding) => binding.principal_id === target);
+  if (bindings.some((binding) => binding.revoked_at === null && binding.trust_mode === "mesh-managed")) return null;
+  if (kind === "destination" && bindings.some((binding) => binding.trust_mode === "serverless-peer")
+      && !bindings.some((binding) => binding.trust_mode === "mesh-managed")) {
+    throw codedError("invalid_registry", "destination_target_not_mesh_managed");
   }
-  return null;
+  throw codedError("invalid_registry", `${kind}_target_not_active`);
 }
 
 function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action, subject) {
@@ -2257,10 +2181,10 @@ function assertMutationMatchesAction(current, oldRegistry, nextRegistry, action,
     throw codedError("invalid_registry", "mutate_modified_schema");
   }
   if (ALIAS_ACTIONS.has(action)) {
-    return assertAliasMutation(oldRegistry, nextRegistry, action, subject);
+    return assertRoutingRuleMutation(oldRegistry, nextRegistry, action, subject, "alias");
   }
   if (DESTINATION_ACTIONS.has(action)) {
-    return assertDestinationMutation(oldRegistry, nextRegistry, action, subject);
+    return assertRoutingRuleMutation(oldRegistry, nextRegistry, action, subject, "destination");
   }
   if (storedV2) {
     // Bind and revoke leave the other collections alone; the alias and destination actions have their own checks above and

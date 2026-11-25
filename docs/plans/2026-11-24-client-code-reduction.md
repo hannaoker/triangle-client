@@ -53,6 +53,10 @@ The repeat scan visits baseline files in path order, compares files with the sam
 
 **Node prototype.** Both CLI and direct supervisor callers now use the same runner environment, app-server binding, and headless list validation. The CLI retains exact wire keys, bounded input, duplicate JSON-key rejection, secret confinement, and cross-lane instance exclusion. Direct callers still receive independent validation. The prototype measures 78,957 application lines across 231 files, 107 below PR #205. A comparison against its parent returned identical serialized results or rejection messages across 901 valid and mutated bootstrap inputs.
 
+**Identity resolution audit after PR #206.** The merged baseline for this slice is 78,957. Installation inventory observes local profiles and custody evidence. Identity inventory projects those observations for diagnostics. A send reads the registry snapshot and the server's recipient directory. The resolver intersects active MESH bindings with local recipients, and the router filters alias visibility and ambiguous candidates by sender permission. A configured chat destination also requires a confirmed mapping for the binding generation and authority, permission to see it, and a matching live session. Inventory observations cannot establish those facts.
+
+The working prototype removes 76 lines by sharing the registry's checks for creating and clearing aliases and destination rules. Each audited write may change only its subject record. It removes another 28 lines by sharing the empty snapshot implementation for missing and unreadable registries while preserving their distinct states and errors. The application count is 78,853 across 231 files.
+
 ## Four product guarantees
 
 These are acceptance criteria for the reduced client. The route evidence below identifies differences and an existing gap.

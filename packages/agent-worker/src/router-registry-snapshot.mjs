@@ -47,37 +47,9 @@ function defaultStatRegistry(root) {
   }
 }
 
-function createAbsentSnapshot(readAt) {
+function createEmptySnapshot(state, errorCode, readAt) {
   return deepFreeze({
-    state: "absent",
-    sequence: 0,
-    schema: null,
-    errorCode: null,
-    readAt,
-    bindingsFor(_principalId) {
-      return EMPTY_ARRAY;
-    },
-    bindingForInstance(_instanceId) {
-      return null;
-    },
-    aliasFor(_name) {
-      return null;
-    },
-    aliasesFor(_principalId) {
-      return EMPTY_ARRAY;
-    },
-    destinationFor(_principalId) {
-      return null;
-    },
-    destinations() {
-      return EMPTY_ARRAY;
-    },
-  });
-}
-
-function createUnreadableSnapshot(errorCode, readAt) {
-  return deepFreeze({
-    state: "unreadable",
+    state,
     sequence: 0,
     schema: null,
     errorCode,
@@ -303,15 +275,15 @@ export function createRegistrySnapshotProvider({
     try {
       const result = readRegistry({ root });
       if (result?.state === "absent") {
-        snapshot = createAbsentSnapshot(currentTime);
+        snapshot = createEmptySnapshot("absent", null, currentTime);
       } else if (result?.state === "ok") {
         snapshot = createOkSnapshot(result.registry, currentTime);
       } else {
-        snapshot = createUnreadableSnapshot("invalid_registry_result", currentTime);
+        snapshot = createEmptySnapshot("unreadable", "invalid_registry_result", currentTime);
       }
     } catch (err) {
       const errorCode = typeof err?.code === "string" && err.code.length > 0 ? err.code : "unknown";
-      snapshot = createUnreadableSnapshot(errorCode, currentTime);
+      snapshot = createEmptySnapshot("unreadable", errorCode, currentTime);
     }
 
     cachedSnapshot = snapshot;
