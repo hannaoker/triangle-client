@@ -33,7 +33,7 @@ public enum ClientSupervisorContractCases {
         .init(name: "mcp-interactive stays excluded from eventWake membership", run: mcpInteractiveExcludedFromEventWake),
         .init(name: "mcp-interactive emits appServerWake when binding present", run: mcpInteractiveAppServerWakeBootstrap),
         .init(name: "mcp-interactive without binding stays omitted", run: mcpInteractiveAppServerBindingMissing),
-        .init(name: "grok-bot emits grokBotWake when binding present", run: grokBotWakeBootstrap),
+        .init(name: "retired webhook with a binding does not block the worker", run: grokBotWakeBootstrap),
         .init(name: "grok-bot without binding stays omitted", run: grokBotBindingMissing),
         .init(name: "headless-app-server emits sorted headlessWakes for every Codex profile", run: headlessWakeBootstrap),
         .init(name: "cursor-acp emits cursorAcpWakes for shadow test profile", run: cursorAcpWakeBootstrap),
@@ -439,21 +439,13 @@ public enum ClientSupervisorContractCases {
         try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[1].profile)
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
-        try expect(bootstrap.instances.count == 1, "worker count wrong with grokBotWake")
-        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
-        let grokBotWake = try require(bootstrap.grokBotWake, "grokBotWake missing")
+        let workerID = ClientInstanceID.derive(profile: fixture.specifications[0].profile).value
+        try expect(bootstrap.instances.map(\.instanceId) == [workerID], "expected the enabled worker to launch")
         let bob = fixture.specifications[1]
-        let bobID = ClientInstanceID.derive(profile: bob.profile).value
-        try expect(grokBotWake.actorProfile == bob.profile.value, "wrong grokBotWake actor")
-        try expect(grokBotWake.binding.instanceId == bobID, "binding instance mismatch")
-        try expect(grokBotWake.binding.agentId == bob.agentID.value, "binding agent mismatch")
-        try expect(grokBotWake.binding.profile == bob.profile.value, "binding profile mismatch")
-        try expect(grokBotWake.binding.wakeMode == "webhook", "wakeMode should be webhook")
-        try expect(grokBotWake.ensureBeforeWatch == true, "ensureBeforeWatch should be true")
-        try expect(grokBotWake.webhookUrlPath.hasSuffix("grok-bot-webhook.url"), "webhook url path wrong")
-        try expect(grokBotWake.webhookKeyPath.hasSuffix("grok-bot-webhook.key"), "webhook key path wrong")
         let encoded = try require(fixture.process.standardInput, "bootstrap missing")
         let raw = String(decoding: encoded, as: UTF8.self)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        try expect(object != nil && object?["grokBotWake"] == nil, "retired webhook reached Node bootstrap")
         try expect(!raw.contains(bob.token), "bob mailbox token leaked into grokBotWake")
         try expect(!raw.contains("webhook-secret-key"), "webhook key leaked into bootstrap")
     }
@@ -467,8 +459,8 @@ public enum ClientSupervisorContractCases {
         let launch = try await fixture.supervisor.prepareEnabledInstances()
         let bobID = ClientInstanceID.derive(profile: fixture.specifications[1].profile).value
         try expect(launch.omitted.contains {
-            $0.instanceID == bobID && $0.reasonCode == "grok_bot_binding_missing"
-        }, "missing grok-bot binding was not recorded")
+            $0.instanceID == bobID && $0.reasonCode == "grok_bot_webhook_retired"
+        }, "retired webhook was not recorded")
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
         try expect(bootstrap.grokBotWake == nil, "grokBotWake emitted without binding file")
@@ -749,11 +741,9 @@ public enum ClientSupervisorContractCases {
         try fixture.instanceStore.setDeliveryMode(.headlessAppServer, profile: fixture.specifications[1].profile)
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
-        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
+        try expect(bootstrap.grokBotWake == nil, "unexpected retired webhook")
         try expect(!bootstrap.headlessWakes.isEmpty, "headlessWake missing beside grok-bot")
-        try expect(bootstrap.grokBotWake?.actorProfile == "bob", "grok-bot actor drifted")
         try expect(bootstrap.headlessWakes.first?.profile == "codex-headless", "Codex drain claimed grok-bot")
-        try expect(bootstrap.headlessWakes.first?.profileInstanceId != bootstrap.grokBotWake?.binding.instanceId, "grok-bot entered the Codex pool")
     }
 
     public static func cursorAcpWakeBootstrap() async throws {
@@ -880,12 +870,11 @@ public enum ClientSupervisorContractCases {
         try fixture.instanceStore.setDeliveryMode(.headlessCursorAcp, profile: fixture.specifications[2].profile)
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
-        try expect(bootstrap.grokBotWake != nil, "grokBotWake missing")
+        try expect(bootstrap.grokBotWake == nil, "unexpected retired webhook")
         try expect(bootstrap.headlessWakes.map(\.profile) == ["codex-headless"], "Codex wake drifted")
         try expect(bootstrap.cursorAcpWakes.map(\.profile) == ["cursor-acp-shadow-test"], "Cursor ACP wake drifted")
         let cursorId = try require(bootstrap.cursorAcpWakes.first?.profileInstanceId, "cursor instance missing")
         try expect(bootstrap.headlessWakes.first?.profileInstanceId != cursorId, "Cursor ACP shared Codex instance id")
-        try expect(bootstrap.grokBotWake?.binding.instanceId != cursorId, "Cursor ACP shared grok-bot instance id")
     }
 
     public static func noEligibleProfile() async throws {

@@ -1,6 +1,6 @@
 # Triangle Client reduction target
 
-Keep MESH, same-machine messaging, and direct peer delivery. Use 79,865 physical lines at commit `47462cc` as the application-source baseline. The 50% ceiling is 39,932 lines, requiring a reduction of 39,933. The earlier 80,685 and 17,916 figures were exploratory estimates with different file selections. Use the pinned counts below for progress.
+Keep MESH, same-machine messaging, and direct peer delivery. Use 79,865 physical lines at commit `47462cc` as the application-source baseline. The revised target is to retain 80% of baseline: at most 63,892 lines, a reduction of 15,973 (20%). The earlier 80,685 and 17,916 figures were exploratory estimates with different file selections. Use the pinned counts below for progress.
 
 ## Reproducing the baseline
 
@@ -39,9 +39,9 @@ The repeat scan visits baseline files in path order, compares files with the sam
 
 **Other candidates.** A separate pairwise comparison using contiguous blocks of at least four identical lines found 199 matching lines in the two drain service wrappers, 56 in the worker pools and 259 in the two protocol process modules. These counts overlap the global scan. They require individual contract checks before a net estimate. In Swift, 225 repeated lines occur inside ClientSupervisor.swift, which has parallel Codex and Cursor wake preparation as well as launch and marker handling. No replacement has been measured there yet.
 
-**Language opportunity.** The portable credential stores are 137 Swift lines and 256 Node lines. The macOS transaction service and store together occupy 1,249 lines; the Linux transaction and store total 553, with another 277 in its transport. Their responsibilities and callers differ. Even deleting all 1,386 Swift lines across the three named files would cover only 3.5% of the target before replacement and migration costs.
+**Language opportunity.** The portable credential stores are 137 Swift lines and 256 Node lines. The macOS transaction service and store together occupy 1,249 lines; the Linux transaction and store total 553, with another 277 in its transport. Their responsibilities and callers differ. Even deleting all 1,386 Swift lines across the three named files would cover only 8.7% of the revised reduction before replacement and migration costs.
 
-**Merged checkpoint.** PR #203 at `ff35d0f` measures 79,227 application lines across the original 231 files, down 638 from 79,865. Reaching 39,932 requires another 39,295 lines. The merged work covers the shared drain and JSON-RPC session, supervisor wake admission and binding validation, and local and peer cleanup.
+**Merged checkpoint.** PR #203 at `ff35d0f` measures 79,227 application lines across the original 231 files, down 638 from 79,865. At this checkpoint, reaching the revised ceiling of 63,892 would require another 15,335 lines. The merged work covers the shared drain and JSON-RPC session, supervisor wake admission and binding validation, and local and peer cleanup.
 
 **Installed supervisor trace.** The Swift helper prepares the enabled profiles. The Node supervisor CLI validates the bootstrap, constructs one supervisor, waits for activation, and enters its watch loop. Ordinary worker instances use a mailbox client with their runner. Event-driven drains have their own mailbox clients. The installation watch starts from a bound shared app-server profile or a qualifying headless Codex profile. Cursor can join that watch. Same-machine messaging is enabled by its own bootstrap configuration. Direct peer runs through the experimental peer supervisor. The retired Grok webhook is rejected at bootstrap and by the supervisor constructor. Its standalone module still has a package export and appears in installer and launcher manifests. Only the unreachable private CLI validator was removed.
 
@@ -58,6 +58,8 @@ The repeat scan visits baseline files in path order, compares files with the sam
 The working prototype removes 76 lines by sharing the registry's checks for creating and clearing aliases and destination rules. Each audited write may change only its subject record. It removes another 28 lines by sharing the empty snapshot implementation for missing and unreadable registries while preserving their distinct states and errors. The application count is 78,853 across 231 files.
 
 **Versioned registry readers.** PR #207 landed the identity routing checks at 78,853 application lines. Sharing the v1 and v2 registry header, audit head and binding validation removes a further 223 lines, bringing the count to 78,630. Each version retains its exact field set. Only v2 accepts peer bindings and validates pairings, aliases and destinations. The identity and router suites passed 301 cases, and the old and new readers returned equal records or equal error codes, messages and reasons for 749 valid and mutated inputs.
+
+**Retired Grok webhook launch.** Swift records an enabled legacy webhook profile as `grok_bot_webhook_retired` and prepares the remaining workers and wake profiles. The Node bootstrap rejects the obsolete key. The separately exported webhook module and its versioned installer entries are still present. This change brings application source to 78,372 lines, 1,493 below baseline and 14,480 above the revised ceiling.
 
 ## Four product guarantees
 
