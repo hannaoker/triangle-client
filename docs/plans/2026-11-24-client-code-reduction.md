@@ -57,6 +57,8 @@ The repeat scan visits baseline files in path order, compares files with the sam
 
 The working prototype removes 76 lines by sharing the registry's checks for creating and clearing aliases and destination rules. Each audited write may change only its subject record. It removes another 28 lines by sharing the empty snapshot implementation for missing and unreadable registries while preserving their distinct states and errors. The application count is 78,853 across 231 files.
 
+**Versioned registry readers.** PR #207 landed the identity routing checks at 78,853 application lines. Sharing the v1 and v2 registry header, audit head and binding validation removes a further 223 lines, bringing the count to 78,630. Each version retains its exact field set. Only v2 accepts peer bindings and validates pairings, aliases and destinations. The identity and router suites passed 301 cases, and the old and new readers returned equal records or equal error codes, messages and reasons for 749 valid and mutated inputs.
+
 ## Four product guarantees
 
 These are acceptance criteria for the reduced client. The route evidence below identifies differences and an existing gap.
