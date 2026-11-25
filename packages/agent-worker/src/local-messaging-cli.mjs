@@ -743,12 +743,20 @@ export async function runLocalMessagingCLI(argv,{env=process.env,input=process.s
      }
     }catch{}
    }
-   if(!to&&config.sessionMessaging?.enabled&&/^session-[a-f0-9]{64}$/.test(options.to||'')){
-    const sessions=await client.listSessions(rpcOptions);
-    if(sessions.some(row=>row.id===options.to&&row.capabilities?.reachable===true))to=options.to;
+   const target = options.to;
+   const sessionAddress = config.sessionMessaging?.enabled && /^session-[a-f0-9]{64}$/.test(target || '');
+   if (!to && (sessionAddress || config.grok?.enabled || config.antigravity?.enabled)) {
+    const sessions = await client.listSessions(rpcOptions);
+    if (sessionAddress && sessions.some(row => row.id === target && row.capabilities?.reachable === true)) {
+     to = target;
+    } else if (config.grok?.enabled && sessions.some(row =>
+     row.id === target && row.harness === 'grok' && row.capabilities?.queueable)) {
+     to = target;
+    } else if (config.antigravity?.enabled) {
+     to = sessions.find(row => row.harness === 'antigravity' && row.capabilities?.queueable &&
+      (row.id === target || row.label === `Antigravity · ${target}`))?.id;
+    }
    }
-   if(!to&&config.grok?.enabled){const sessions=await client.listSessions(rpcOptions);if(sessions.some(row=>row.id===options.to&&row.harness==='grok'&&row.capabilities?.queueable))to=options.to;}
-   if(!to&&config.antigravity?.enabled){const sessions=await client.listSessions(rpcOptions);const match=sessions.find(row=>row.harness==='antigravity'&&row.capabilities?.queueable&&(row.id===options.to||row.label===`Antigravity · ${options.to}`));if(match)to=match.id;}
    // An owner-set alias is used only if discovery lists it for this sender (the check the session and Grok forms above make); the server then resolves it.
    // Any other alias-shaped name is refused below as it always was, without a round trip and without the 'outcome unknown' of a server error.
    if(!to&&ALIAS_NAME_PATTERN.test(options.to||'')){const details=await client.discoverRecipientDetails(rpcOptions);if(details.entries?.some(entry=>entry.send?.aliases?.includes(options.to)))to=options.to;}

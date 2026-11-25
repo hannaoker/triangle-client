@@ -4,8 +4,27 @@ import {
   encodeFrame,
   createMessageParser,
   PROTOCOL_VERSION,
+  windowEnvelope,
 } from "./local-messaging-protocol.mjs";
 import { coded } from "./local-messaging-errors.mjs";
+
+// Keep the generated IDs available to the caller even if the admission receipt is lost.
+export async function sendMcpMessage(client, args, options) {
+  const fields = windowEnvelope(args, "send");
+  const messageId = args.messageId || crypto.randomUUID();
+  const requestId = args.requestId || crypto.randomUUID();
+  try {
+    const receipt = await client.sendMessage({
+      to: args.to, text: args.text, inReplyTo: args.inReplyTo, messageId, requestId, ...fields,
+    }, options);
+    return { messageId, requestId, ...receipt };
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    failure.retryIds = { messageId, requestId };
+    failure.toolName = "triangle_send_message";
+    throw failure;
+  }
+}
 
 // Same shape as AGENT_ID_PATTERN in identity-primitives.mjs, kept inline so the client needs no registry module.
 const PRINCIPAL_PATTERN = /^agent_[a-f0-9]{32}$/;

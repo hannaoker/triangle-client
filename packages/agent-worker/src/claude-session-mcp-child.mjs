@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { readPrivateJson } from "./local-messaging-auth-broker.mjs";
 import { resolveLocalSocketAddress } from "./local-messaging-address.mjs";
-import { createLocalControlClient } from "./local-messaging-client.mjs";
+import { createLocalControlClient, sendMcpMessage } from "./local-messaging-client.mjs";
 import {
   probeClaudeSession,
   createClaudeSessionDelivery,
@@ -178,20 +178,8 @@ async function runSessionTool({ client, credential, name, args, generation }) {
     }
     case "triangle_ack_notification":
       return await client.ackWake({ wakeId: args.wakeId, generation: args.generation ?? generation }, { credential });
-    case "triangle_send_message": {
-      const windowFields = windowEnvelope(args, "send");
-      const messageId = args.messageId || randomUUID();
-      const requestId = args.requestId || randomUUID();
-      try {
-        const res = await client.sendMessage({ to: args.to, text: args.text, messageId, requestId, inReplyTo: args.inReplyTo, ...windowFields }, { credential });
-        return { messageId, requestId, ...res };
-      } catch (err) {
-        const failure = err instanceof Error ? err : new Error(String(err));
-        failure.retryIds = { messageId, requestId };
-        failure.toolName = "triangle_send_message";
-        throw failure;
-      }
-    }
+    case "triangle_send_message":
+      return await sendMcpMessage(client, args, { credential });
     case "triangle_list_sessions":
       return { sessions: await client.listSessions({ credential }) };
     case "triangle_list_recipients":
