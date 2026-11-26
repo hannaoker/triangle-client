@@ -84,12 +84,10 @@ public struct ClientSupervisor: Sendable {
         "PATH", "LANG", "LC_ALL", "NO_COLOR",
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
         "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
-        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
     private static let productionOptInEnvironmentKeys: Set<String> = [
         "TRIANGLE_CODEX_POOL_ENABLE", "TRIANGLE_CODEX_POOL_SIZE", "TRIANGLE_DESKTOP_HANDOFF_ENABLE",
         "TRIANGLE_CURSOR_ACP_SHADOW_ENABLE",
-        "TRIANGLE_GROK_BOT_FILTER_RECEIPTS",
     ]
 
     /// Forwards only the production pool and idle-handoff opt-in from the helper
@@ -927,7 +925,13 @@ public struct ClientSupervisor: Sendable {
     public func preflight() async throws {
         let launch = try await prepareEnabledInstances()
         // The local route is isolated: its omission never blocks the MESH lanes.
-        guard !launch.omitted.contains(where: { !$0.reasonCode.hasPrefix("delivery_mode_") && !$0.reasonCode.hasPrefix("local_messaging_") }) else {
+        let hasUnexpectedOmission = launch.omitted.contains { omission in
+            let reason = omission.reasonCode
+            return reason != "grok_bot_webhook_retired"
+                && !reason.hasPrefix("delivery_mode_")
+                && !reason.hasPrefix("local_messaging_")
+        }
+        guard !hasUnexpectedOmission else {
             throw ClientSupervisorError.invalidBootstrap
         }
     }

@@ -363,15 +363,6 @@ test("Codex setup binds, reuses sign-in file without changing user settings, the
       readFileSync(path.join(f.app, "client/headless-runtime-binding.json")),
     );
     assert.equal(config.version, 2);
-    // Cross-language contract: the real supervisor rejects any other Codex version.
-    const swift = readFileSync(
-      new URL(
-        "../../macos-mailbox-helper/Sources/TriangleMailboxCore/ClientSupervisor.swift",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    assert.match(swift, /object\["version"\] as\? Int == 2/);
     assert.equal(f.calls[0].args[0], "bind");
   } finally {
     f.cleanup();

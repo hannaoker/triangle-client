@@ -316,6 +316,14 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
     }
 
     public func resolve(_ worker: WorkerKind, instance: ClientInstance) throws -> WorkerCommand {
+        try resolve(worker, instance: instance, requiring: [])
+    }
+
+    private func resolve(
+        _ worker: WorkerKind,
+        instance: ClientInstance,
+        requiring additionalArtifacts: Set<String>
+    ) throws -> WorkerCommand {
         let expectedAdapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
         guard instance.runtimeAdapter == expectedAdapter,
               instance.instanceID == .derive(profile: instance.profile)
@@ -343,6 +351,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             }
         }()
         guard let requiredArtifacts = Self.artifactPaths(for: worker, manifestVersion: manifest.version),
+              additionalArtifacts.isSubset(of: requiredArtifacts),
               Set(manifest.environment.keys) == requiredReleaseEnvironment,
               Set(manifest.environment.keys).isSubset(of: Self.allowedEnvironment),
               manifest.environment["TRIANGLE_PROJECT_ROOT"] == manifest.projectRoot,
@@ -454,11 +463,6 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         }
     }
 
-    /// Resolves the integrity-verified cursor-acp headless drain shipped in an
-    /// installed supervisor-capable worker bundle (manifest v5+, which carries
-    /// `packages/agent-worker/src/cursor-acp-runtime/*`). The Cursor `agent`
-    /// CLI itself is pinned per install in cursor-acp-runtime-binding.json and
-    /// validated by ClientSupervisor when the drain is bootstrapped.
     /// A harness-independent v8 host. Its content address uses "supervisor",
     /// and its environment contains no worker selectors or credentials.
     private func resolveSupervisorHost(script: String) throws -> WorkerCommand {
@@ -518,12 +522,14 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         return lstat(applicationRoot.appendingPathComponent("worker-runtime/supervisor.manifest.json").path, &metadata) == 0
     }
 
+    /// The drain and its shared Codex modules must belong to the verified bundle.
     public func resolveCursorAcpDrain(for instance: ClientInstance) throws -> WorkerCommand {
         guard instance.runtimeAdapter == .cursorAcp,
               instance.instanceID == .derive(profile: instance.profile)
         else { throw WorkerLauncherError.invalidManifest }
+        let script = "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs"
         if hasSupervisorManifest {
-            return try resolveSupervisorHost(script: "packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
+            return try resolveSupervisorHost(script: script)
         }
         let runtime = try checkedDirectory(applicationRoot.appendingPathComponent("worker-runtime", isDirectory: true), exactMode: 0o700)
         var lastError: Error = WorkerLauncherError.invalidManifest
@@ -532,19 +538,19 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
             let adapter: RuntimeAdapter = worker == .codex ? .codex : (worker == .hermes ? .hermes : .antigravity)
             do {
                 let host = try ClientInstance(profile: instance.profile, runtimeAdapter: adapter)
-                // Full manifest, hash, and content-address verification.
-                let base = try resolve(worker, instance: host)
-                let drain = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/cursor-acp-runtime/headless-drain-service.mjs")
-                try checkedFile(drain, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
-                let supervisor = base.workingDirectory.appendingPathComponent("packages/agent-worker/src/client-supervisor-cli.mjs")
-                try checkedFile(supervisor, beneath: base.workingDirectory, exactMode: 0o600, executable: false)
+                // v5/v6 Hermes and Antigravity manifests omit the shared Codex runtime.
+                let base = try resolve(worker, instance: host, requiring: [
+                    script,
+                    "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
+                    "packages/agent-worker/src/codex-runtime/headless-drain.mjs",
+                ])
                 var environment: [String: String] = [:]
                 for key in ["PATH", "LANG", "LC_ALL", "NO_COLOR"] {
                     if let value = base.environment[key] { environment[key] = value }
                 }
                 return WorkerCommand(
                     executable: base.executable,
-                    arguments: [drain.path],
+                    arguments: [base.workingDirectory.appendingPathComponent(script).path],
                     workingDirectory: base.workingDirectory,
                     environment: environment
                 )

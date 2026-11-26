@@ -27,6 +27,7 @@ public enum WatchGrantContractCases {
             .init(name: "watch grant revoke clears local binding", run: revokeClearsBinding),
             .init(name: "watch grant excludes mcp-interactive actors", run: excludesInteractiveActor),
             .init(name: "watch grant allows mcp-interactive notify members", run: includesInteractiveMember),
+            .init(name: "watch grant excludes retired webhook profiles", run: excludesRetiredWebhook),
             .init(name: "watch grant includes bound cursor-acp notify members without requiring shadowTestProfile", run: includesCursorAcpMember),
             .init(name: "watch grant fails closed without keychain", run: failsClosedWithoutStore),
             .init(name: "watch grant failure diagnosis is structured and secret-free", run: failureDiagnosis),
@@ -526,6 +527,27 @@ public enum WatchGrantContractCases {
             status.agentIDs.contains(fixture.actorAgentID.value),
             "event-driven actor missing from grant"
         )
+    }
+
+    public static func excludesRetiredWebhook() async throws {
+        let fixture = try await Fixture()
+        try fixture.instances.setDeliveryMode(.grokBot, profile: fixture.memberProfile)
+        for actor in [fixture.actorProfile, fixture.memberProfile] {
+            do {
+                _ = try await fixture.service.ensureGrant(
+                    installationID: fixture.installationID,
+                    actorProfile: actor,
+                    memberProfiles: [fixture.actorProfile, fixture.memberProfile]
+                )
+                throw ContractFailure("retired webhook was accepted in an explicit grant")
+            } catch WatchGrantServiceError.noEventDrivenMembers {}
+        }
+        let automatic = try await fixture.service.ensureGrant(
+            installationID: fixture.installationID,
+            actorProfile: fixture.actorProfile,
+            memberProfiles: nil
+        )
+        try expect(automatic.agentIDs == [fixture.actorAgentID.value], "automatic grant included the retired webhook")
     }
 
     public static func failsClosedWithoutStore() async throws {

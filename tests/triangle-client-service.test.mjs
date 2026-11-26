@@ -192,6 +192,7 @@ test("install accepts legacy and delivery-mode registry records but rejects unkn
   enabledProfile(f, "b", "mcp-interactive");
   enabledProfile(f, "d", "event-driven");
   enabledProfile(f, "h", "headless-app-server");
+  enabledProfile(f, "g", "grok-bot");
   let result = run("install", f.env);
   assert.equal(result.status, 0, result.stderr);
 
@@ -208,6 +209,16 @@ test("manual start cannot launch an empty staged client", (t) => {
   result = run("start", f.env);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(path.join(f.state, "dev.thetriangle.client")), false);
+});
+
+test("install and manual start keep a retired webhook-only client stopped", (t) => {
+  const f = fixture(t);
+  enabledProfile(f, "g", "grok-bot");
+  for (const action of ["install", "start"]) {
+    const result = run(action, f.env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.existsSync(path.join(f.state, "dev.thetriangle.client")), false);
+  }
 });
 
 test("launchctl loaded state without a fresh coordinator readiness marker never retires legacy", (t) => {

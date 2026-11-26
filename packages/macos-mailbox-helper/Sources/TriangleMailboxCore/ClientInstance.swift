@@ -79,12 +79,11 @@ public struct ClientInstance: Codable, Equatable, Sendable {
         participatesInWorkerPolling
             || participatesInEventDrivenWake
             || participatesInAppServerWake
-            || participatesInGrokBotWake
             || participatesInHeadlessWake
             || participatesInCursorAcpWake
     }
-    /// Installation watch grant notify members: event-driven drains, bound App Server /
-    /// Grok Bot hosts, and bound headless Codex drains.
+    /// Installation watch grant notify members: event-driven drains, bound App Server
+    /// hosts, and bound headless Codex drains.
     /// Cursor ACP is not a member from this flag. Grant membership uses the same
     /// binding gate as the supervisor wake (`cursor-acp-runtime-binding.json`):
     /// enabled, enrolled, and listed. `shadowTestProfile` is optional and does not
@@ -93,7 +92,6 @@ public struct ClientInstance: Codable, Equatable, Sendable {
     public var participatesInWatchGrantNotify: Bool {
         participatesInEventDrivenWake
             || participatesInAppServerWake
-            || participatesInGrokBotWake
             || participatesInHeadlessWake
     }
 

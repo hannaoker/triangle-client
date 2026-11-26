@@ -291,16 +291,15 @@ public struct WatchGrantService: Sendable {
                 throw ClientInstanceStoreError.unsafeStorage
             }
             // Auto membership: event-driven drains + App Server-bound
-            // mcp-interactive + Grok Bot-bound + headless-runtime-bound Codex
+            // mcp-interactive + headless-runtime-bound Codex
             // + cursor-acp-runtime-bound profiles. Cursor ACP uses that binding
             // gate on the explicit path too — enabled alone is not membership.
             // shadowTestProfile does not exclude a listed profile.
             let eventDriven = instances.filter(\.participatesInEventDrivenWake)
             let boundInteractive = Self.appServerBoundInteractiveMembers(from: instances)
-            let boundGrokBot = Self.grokBotBoundMembers(from: instances)
             let boundHeadless = Self.headlessBoundCodexMembers(from: instances)
             let boundCursorAcp = cursorAcpBoundMembers(from: instances)
-            profiles = (eventDriven + boundInteractive + boundGrokBot + boundHeadless + boundCursorAcp).map(\.profile)
+            profiles = (eventDriven + boundInteractive + boundHeadless + boundCursorAcp).map(\.profile)
         } else {
             profiles = [actorProfile]
         }
@@ -317,7 +316,6 @@ public struct WatchGrantService: Sendable {
                 throw ClientInstanceStoreError.unsafeStorage
             }
             // mcp-interactive App Server hosts are notify-only; they cannot act.
-            // grok-bot may act (Bob owns post-wake claim/reply/ack outside this adapter).
             // cursor-acp may be a notify member and must never be the grant actor.
             if actorInstance.deliveryMode == .mcpInteractive || actorInstance.deliveryMode == .router {
                 throw WatchGrantServiceError.interactiveDeliveryExcluded
@@ -470,22 +468,6 @@ public struct WatchGrantService: Sendable {
               !boundInstanceId.isEmpty
         else { return [] }
         return interactive.filter { $0.instanceID.value == boundInstanceId }
-    }
-
-    /// grok-bot profiles whose instanceId matches the durable Grok Bot wake binding.
-    private static func grokBotBoundMembers(from instances: [ClientInstance]) -> [ClientInstance] {
-        let grokBots = instances.filter(\.participatesInGrokBotWake)
-        guard !grokBots.isEmpty else { return [] }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let bindingURL = home
-            .appendingPathComponent("Library/Application Support/The Triangle/client/grok-bot-binding.json")
-        guard FileManager.default.isReadableFile(atPath: bindingURL.path),
-              let data = try? Data(contentsOf: bindingURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let boundInstanceId = object["instanceId"] as? String,
-              !boundInstanceId.isEmpty
-        else { return [] }
-        return grokBots.filter { $0.instanceID.value == boundInstanceId }
     }
 
     /// Headless Codex profiles whose instanceId appears in headless-runtime-binding.json.

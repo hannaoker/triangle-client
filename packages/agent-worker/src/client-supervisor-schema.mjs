@@ -78,6 +78,8 @@ export const PROFILE_WAKE_LANES = Object.freeze({
       "codexHome",
       "stateRoot",
       "command",
+      "agentId",
+      "installationId",
     ]),
   }),
   cursorAcp: Object.freeze({
