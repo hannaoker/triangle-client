@@ -63,6 +63,8 @@ The working prototype removes 76 lines by sharing the registry's checks for crea
 
 **Review follow-up.** Preflight accepts the retired webhook omission when an eligible lane remains. The retired mode is excluded from service startup and new watch grant membership. Cursor readiness requires the shared Codex runtime files in the verified manifest, which rules out v5/v6 Hermes and Antigravity bundles as Cursor hosts. Application source is at 78,362 lines, 14,470 above the revised ceiling.
 
+**Webhook retirement.** The standalone Grok webhook had no production callers in the Triangle workspace. Runtime manifest v17 removes the bridge, its private package export, and the obsolete binding installer. Each earlier manifest keeps its exact artifact set. Grok's pull-only same-machine adapter remains a separate entry point. Application source is at 77,502 lines across 230 files, down 860 from the previous checkpoint and 13,610 above the revised ceiling.
+
 ## Four product guarantees
 
 These are acceptance criteria for the reduced client. The route evidence below identifies differences and an existing gap.

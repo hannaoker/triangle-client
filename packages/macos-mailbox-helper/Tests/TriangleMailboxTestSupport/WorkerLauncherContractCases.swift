@@ -283,7 +283,7 @@ public enum WorkerLauncherContractCases {
 
     public static func standaloneSupervisorResolvesCursorAndRejectsCorruption() throws {
         let cursor = try ClientInstance(profile: ProfileName("cursor-only"), runtimeAdapter: .cursorAcp)
-        for version in [8, 9, 10, 11, 12, 13, 14, 15, 16] {
+        for version in 8...17 {
         let fixture = try ResolverFixture(manifestVersion: version, supervisor: true); defer { fixture.cleanup() }
         let resolver = FileWorkerCommandResolver(applicationRoot: fixture.applicationRoot)
         let coordinator = try resolver.resolveCoordinator(for: [cursor])
@@ -576,7 +576,7 @@ private final class ResolverFixture {
             "packages/agent-worker/src/runtime.mjs",
             "packages/agent-worker/runners/runner-common.mjs",
         ]
-        if manifestVersion == 4 || manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 || manifestVersion == 16 {
+        if (4...17).contains(manifestVersion) {
             artifactNames += [
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -587,12 +587,14 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/profile-scheduler.mjs",
                 "packages/agent-worker/src/shared-codex-app-server.mjs",
                 "packages/agent-worker/src/app-server-bind-cli.mjs",
-                "packages/agent-worker/src/grok-bot-wake.mjs",
                 "packages/agent-worker/src/install-watch-dispatcher.mjs",
                 "packages/agent-worker/src/wake-client.mjs",
             ]
         }
-        if manifestVersion == 5 || manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 || manifestVersion == 16 {
+        if (4...16).contains(manifestVersion) {
+            artifactNames.append("packages/agent-worker/src/grok-bot-wake.mjs")
+        }
+        if (5...17).contains(manifestVersion) {
             artifactNames += [
                 "packages/agent-worker/src/claimer-cross-runtime.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -627,12 +629,12 @@ private final class ResolverFixture {
                 "packages/agent-worker/src/codex-runtime/manifest/runtime-manifest.json",
             ]
         }
-        if manifestVersion == 6 || manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 || manifestVersion == 16 {
+        if (6...17).contains(manifestVersion) {
             artifactNames += [
                 "packages/agent-worker/src/client-supervisor-schema.mjs",
             ]
         }
-        if manifestVersion == 7 || manifestVersion == 8 || manifestVersion == 9 || manifestVersion == 10 || manifestVersion == 11 || manifestVersion == 12 || manifestVersion == 13 || manifestVersion == 14 || manifestVersion == 15 || manifestVersion == 16 {
+        if (7...17).contains(manifestVersion) {
             artifactNames += [
                 "packages/agent-worker/src/claimer-advisory-lock.mjs",
                 "packages/agent-worker/src/open-transaction-recovery.mjs",

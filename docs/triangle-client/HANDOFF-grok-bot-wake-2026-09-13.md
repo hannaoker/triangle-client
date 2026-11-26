@@ -1,5 +1,8 @@
 # Local Cursor handoff: native Grok Bot wake for `bob`
 
+> Historical handoff. Client runtime v17 removed the webhook bridge and setup script.
+> See the [webhook retirement note](2026-09-30-grok-webhook-wake-retired.md).
+
 From Tech Lead / prior architecture split, 2026-09-13 (PT). Tech Lead drives
 Mini operator steps. Cloud agents edit sources + Node tests; full Mac helper
 rebuild is optional verification on Mini.

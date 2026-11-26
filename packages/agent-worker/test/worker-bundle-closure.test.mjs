@@ -280,15 +280,15 @@ test("v12 adds only the Grok participant module to every exact artifact set", ()
  assert.match(swift,/if manifestVersion >= 12 \{\s*artifacts\.formUnion\(\["packages\/agent-worker\/src\/grok-local-session\.mjs"\]\)/);
 });
 
-test("v13-v16 preserve earlier exact artifact sets and add router, reply identity, chat mapping, and Antigravity session modules", () => {
+test("v13-v16 extend the artifact sets and v17 removes only the retired Grok webhook", () => {
   const code = [
     "import importlib.util,json,sys",
     "s=importlib.util.spec_from_file_location('twi',sys.argv[1])",
     "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)",
-    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13,14,15,16]} for a in ['codex','hermes','antigravity','supervisor']}}))",
+    "print(json.dumps({'version':m.CURRENT_MANIFEST_VERSION,'sets':{a:{v:m.expected_artifacts(a,v) for v in [12,13,14,15,16,17]} for a in ['codex','hermes','antigravity','supervisor']}}))",
   ].join("\n");
   const contract = JSON.parse(execFileSync(python, ["-c", code, installer], { encoding: "utf8" }));
-  assert.equal(contract.version, 16);
+  assert.equal(contract.version, 17);
   const additions = [
     "unified-router",
     "recipient-resolver",
@@ -313,6 +313,10 @@ test("v13-v16 preserve earlier exact artifact sets and add router, reply identit
     assert.deepEqual(versions[16].filter(p => !versions[15].includes(p)).sort(), r4.sort(), agent);
     assert.deepEqual(versions[15].filter(p => !versions[16].includes(p)), [], agent);
     assert.equal(versions[16].length, agent === "supervisor" ? 92 : 94, agent);
+    assert.deepEqual(versions[17].filter(p => !versions[16].includes(p)), [], agent);
+    assert.deepEqual(versions[16].filter(p => !versions[17].includes(p)), [
+      "packages/agent-worker/src/grok-bot-wake.mjs",
+    ], agent);
   }
   const swift = readFileSync(path.join(repoRoot, "packages/macos-mailbox-helper/Sources/TriangleMailboxCore/WorkerLauncher.swift"), "utf8");
   assert.match(swift, /if manifestVersion >= 13 \{\s*artifacts\.formUnion\(\[/);

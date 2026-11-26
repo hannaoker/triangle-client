@@ -2,6 +2,11 @@
 
 Status: **retired on Mini**. Do not re-enable without a new wake design.
 
+Client runtime manifest v17 removes the webhook bridge and its setup script.
+Older installed bundles retain their original manifest and hash checks.
+Grok's pull-only local session adapter is a separate delivery path.
+For a source install, update the macOS helper before staging a v17 bundle.
+
 ## Why
 
 Bob’s unattended path POSTed MESH wake hints to a Grok Bot routine webhook:
@@ -29,9 +34,8 @@ This is distinct from Cursor Automations (Agents Window). The product surface is
 3. `scripts/macos/install-grok-bot-wake-binding.sh` refuses unless
    `TRIANGLE_ACK_GROK_WEBHOOK_RETIRED_OVERRIDE=1`.
 
-Code for `grokBotWake` / `deliveryMode: grok-bot` remains for a future host; it
-must not be re-bound to `api2.cursor.sh/automations/webhook/*` until a stable
-trigger exists.
+Existing `deliveryMode: grok-bot` profile records remain readable. The
+supervisor reports them as retired and skips webhook startup.
 
 ## Bob unattended wake
 

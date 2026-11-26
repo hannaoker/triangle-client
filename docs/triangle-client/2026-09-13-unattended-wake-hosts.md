@@ -245,7 +245,8 @@ never commit secrets):
 | `grok-bot-webhook.key` | Bearer key (`0600`) |
 | `grok-bot-wake-cursor.json` | `{"cursor":N}` |
 
-Install helper: `scripts/macos/install-grok-bot-wake-binding.sh`.
+The former setup script was removed in client runtime v17. See the
+[webhook retirement note](2026-09-30-grok-webhook-wake-retired.md).
 
 ## Next work (in order)
 

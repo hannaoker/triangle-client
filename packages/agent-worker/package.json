@@ -14,7 +14,6 @@
     "./shared-codex-app-server": "./src/shared-codex-app-server.mjs",
     "./app-server-host-support": "./src/app-server-host-support.mjs",
     "./cursor-acp-runtime": "./src/cursor-acp-runtime/index.mjs",
-    "./grok-bot-wake": "./src/grok-bot-wake.mjs",
     "./wake-client": "./src/wake-client.mjs",
     "./profile-scheduler": "./src/profile-scheduler.mjs",
     "./outbound-client": "./src/outbound-client.mjs"
