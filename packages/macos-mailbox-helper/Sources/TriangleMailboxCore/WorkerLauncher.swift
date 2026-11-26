@@ -165,7 +165,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/wake-client.mjs",
             ])
         }
-        if (5...16).contains(manifestVersion) {
+        if (5...17).contains(manifestVersion) {
             var artifacts = legacy.union([
                 "packages/agent-worker/src/authenticated-app-server-transport.mjs",
                 "packages/agent-worker/src/client-supervisor-cli.mjs",
@@ -177,7 +177,6 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/profile-scheduler.mjs",
                 "packages/agent-worker/src/shared-codex-app-server.mjs",
                 "packages/agent-worker/src/app-server-bind-cli.mjs",
-                "packages/agent-worker/src/grok-bot-wake.mjs",
                 "packages/agent-worker/src/install-watch-dispatcher.mjs",
                 "packages/agent-worker/src/wake-client.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -192,6 +191,9 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
                 "packages/agent-worker/src/cursor-acp-runtime/unattended-policy.mjs",
                 "packages/agent-worker/src/cursor-acp-runtime/worker-pool.mjs",
             ])
+            if manifestVersion <= 16 {
+                artifacts.insert("packages/agent-worker/src/grok-bot-wake.mjs")
+            }
             // v6 schema extraction; v5 bundles omit it.
             if manifestVersion >= 6 {
                 artifacts.insert("packages/agent-worker/src/client-supervisor-schema.mjs")
@@ -478,7 +480,7 @@ public struct FileWorkerCommandResolver: WorkerCommandResolving, ClientSuperviso
         let required = Self.artifactPaths(for: .codex, manifestVersion: manifest.version)?.subtracting([
             "packages/agent-worker/runners/codex-runner.mjs", "agents/codex/worker/agent-worker.json",
         ])
-        guard (8...16).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
+        guard (8...17).contains(manifest.version), let required, Set(manifest.artifacts.keys) == required,
               manifest.environment == ["PATH": manifest.projectRoot + "/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"]
         else { throw WorkerLauncherError.invalidManifest }
         let project = try checkedDirectory(URL(fileURLWithPath: manifest.projectRoot), exactMode: 0o700)

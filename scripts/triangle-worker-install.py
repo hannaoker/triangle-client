@@ -15,6 +15,7 @@ import re
 import subprocess
 
 AGENTS = {"codex", "hermes", "antigravity"}
+RETIRED_GROK_WEBHOOK_ARTIFACT = "packages/agent-worker/src/grok-bot-wake.mjs"
 LEGACY_COMMON_ARTIFACTS = [
     "packages/agent-worker/src/cli.mjs",
     "packages/agent-worker/src/command-runner.mjs",
@@ -32,7 +33,6 @@ SUPERVISOR_ARTIFACTS = [
     "packages/agent-worker/src/profile-scheduler.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
     "packages/agent-worker/src/app-server-bind-cli.mjs",
-    "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/install-watch-dispatcher.mjs",
     "packages/agent-worker/src/wake-client.mjs",
     "packages/agent-worker/src/cursor-acp-runtime/acp-process.mjs",
@@ -109,7 +109,7 @@ ROUTER_ARTIFACTS = [
 REPLY_IDENTITY_ARTIFACTS = ['packages/agent-worker/src/local-reply-route-contract.mjs', 'packages/agent-worker/src/local-reply-route-store.mjs', 'packages/agent-worker/src/local-sender-authentication.mjs']
 CHAT_MAPPING_ARTIFACTS = ['packages/agent-worker/src/local-chat-mapping.mjs']
 ANTIGRAVITY_SESSION_ARTIFACTS = ['packages/agent-worker/src/antigravity-local-session.mjs']
-CURRENT_MANIFEST_VERSION = 16
+CURRENT_MANIFEST_VERSION = 17
 CODEX_HEADLESS_ARTIFACTS = [
     "packages/agent-worker/src/codex-runtime/app-server-process.mjs",
     "packages/agent-worker/src/codex-runtime/app-server-protocol.mjs",
@@ -252,24 +252,26 @@ def copy_regular(source, destination, destination_mode=0o600):
 
 def expected_artifacts(agent, version=CURRENT_MANIFEST_VERSION):
     if agent == "supervisor":
-        if version not in {8, 9, 10, 11, 12, 13, 14, 15, 16}:
+        if version not in range(8, CURRENT_MANIFEST_VERSION + 1):
             fail("unsupported supervisor manifest version")
         return expected_artifacts("codex", version)[:-2]
     if agent not in AGENTS:
         fail("invalid worker kind")
     if version == 3:
         common = LEGACY_COMMON_ARTIFACTS
-    elif version in {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}:
+    elif version in range(4, CURRENT_MANIFEST_VERSION + 1):
         common = COMMON_ARTIFACTS
     else:
         fail("unsupported manifest version")
-    extras = (["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version in {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} else [])
+    # Existing immutable manifests still validate the retired webhook's hash.
+    extras = [RETIRED_GROK_WEBHOOK_ARTIFACT] if 4 <= version <= 16 else []
+    extras += ["packages/agent-worker/src/claimer-cross-runtime.mjs"] if version >= 5 else []
     # The coordinator (client-supervisor-cli.mjs) may launch from any worker's
     # bundle and statically imports codex-runtime/headless-drain-service.mjs, so
     # v7 ships codex-runtime in every bundle; v5/v6 keep their exact sets.
-    extras += CODEX_HEADLESS_ARTIFACTS if (version in {7, 8, 9, 10, 11, 12, 13, 14, 15, 16} or (version in {5, 6} and agent == "codex")) else []
-    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version in {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} else []
-    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version in {7, 8, 9, 10, 11, 12, 13, 14, 15, 16} else []
+    extras += CODEX_HEADLESS_ARTIFACTS if (version >= 7 or (version in {5, 6} and agent == "codex")) else []
+    extras += SUPERVISOR_SCHEMA_ARTIFACTS if version >= 6 else []
+    extras += HEADLESS_OWNERSHIP_ARTIFACTS if version >= 7 else []
     extras += WORKLOAD_CORE_ARTIFACTS if version >= 8 else []
     extras += LOCAL_MESSAGING_ARTIFACTS if version >= 9 else []
     extras += WAKE_NOTIFICATION_ARTIFACTS if version >= 10 else []
@@ -429,7 +431,7 @@ def strict_manifest(path, agent):
     }
     if agent == "supervisor":
         expected_environment = {"PATH", "LANG", "LC_ALL"}
-    if value["version"] not in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
+    if value["version"] not in range(3, CURRENT_MANIFEST_VERSION + 1) or set(value["artifacts"]) != set(expected_artifacts(agent, value["version"])):
         fail("manifest contract mismatch")
     if not isinstance(value["environment"], dict) or set(value["environment"]) != expected_environment:
         fail("manifest environment mismatch")

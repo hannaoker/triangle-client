@@ -158,7 +158,7 @@ test("clean runtime preparation installs a complete strict application-owned bun
   const runtime = path.join(fixture.applicationRoot, "worker-runtime");
   const manifestPath = path.join(runtime, "codex.manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(manifest.version, 16);
+  assert.equal(manifest.version, 17);
   for (const relative of WORKLOAD_CORE_RELATIVES) assert.ok(manifest.artifacts[relative], relative);
   assert.equal(mode(runtime), 0o700);
   assert.equal(mode(manifestPath), 0o600);
@@ -181,7 +181,6 @@ test("clean runtime preparation installs a complete strict application-owned bun
     "packages/agent-worker/src/client-supervisor.mjs",
     "packages/agent-worker/src/command-runner.mjs",
     "packages/agent-worker/src/concurrency-gate.mjs",
-    "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/helper-transaction-proxy.mjs",
     "packages/agent-worker/src/helper-watch-transport.mjs",
     "packages/agent-worker/src/install-watch-dispatcher.mjs",
@@ -269,7 +268,6 @@ test("helper-only upgrade validates and renders an exact legacy version-3 runtim
     "packages/agent-worker/src/open-transaction-recovery.mjs",
     "packages/agent-worker/src/profile-scheduler.mjs",
     "packages/agent-worker/src/shared-codex-app-server.mjs",
-    "packages/agent-worker/src/grok-bot-wake.mjs",
     "packages/agent-worker/src/wake-client.mjs",
     ...WORKLOAD_CORE_RELATIVES,
     ...LOCAL_MESSAGING_RELATIVES,
@@ -360,7 +358,7 @@ test("LaunchAgent install rejects an existing symlink target without touching it
   assert.equal(fs.readFileSync(destination, "utf8"), "outside\n");
 });
 
-test("prepare-runtime upgrades to manifest v14 while v6 without ownership or workload modules stays valid", { skip: darwinOnly }, (t) => {
+test("prepare-runtime upgrades to manifest v17 while the exact legacy v6 set stays valid", { skip: darwinOnly }, (t) => {
   const fixture = makeInstallFixture(t);
   const installer = path.join(root, "scripts/triangle-worker-install.py");
   const prepared = spawnSync("/bin/bash", [servicePath, "prepare-runtime", "codex"], {
@@ -370,7 +368,7 @@ test("prepare-runtime upgrades to manifest v14 while v6 without ownership or wor
   assert.equal(prepared.status, 0, prepared.stderr);
   const manifestPath = path.join(fixture.applicationRoot, "worker-runtime", "codex.manifest.json");
   const v7 = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(v7.version, 16);
+  assert.equal(v7.version, 17);
   assert.ok(v7.artifacts["packages/agent-worker/src/client-supervisor-schema.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/claimer-advisory-lock.mjs"]);
   assert.ok(v7.artifacts["packages/agent-worker/src/open-transaction-recovery.mjs"]);
@@ -387,6 +385,11 @@ test("prepare-runtime upgrades to manifest v14 while v6 without ownership or wor
     delete v6.artifacts[relative];
     fs.rmSync(path.join(projectRoot, relative));
   }
+  // A historical manifest still pins the retired module.
+  const webhook = "packages/agent-worker/src/grok-bot-wake.mjs";
+  const historicalSource = "// historical webhook fixture\n";
+  fs.writeFileSync(path.join(projectRoot, webhook), historicalSource, { mode: 0o600 });
+  v6.artifacts[webhook] = crypto.createHash("sha256").update(historicalSource).digest("hex");
   v6.version = 6;
   const addressInput = [
     "codex",
@@ -428,7 +431,7 @@ test("prepare-runtime upgrades to manifest v14 while v6 without ownership or wor
   });
   assert.equal(upgraded.status, 0, upgraded.stderr);
   const after = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  assert.equal(after.version, 16);
+  assert.equal(after.version, 17);
   for (const relative of ownershipRelatives) {
     assert.ok(after.artifacts[relative]);
   }
