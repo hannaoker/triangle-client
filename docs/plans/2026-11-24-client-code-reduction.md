@@ -61,6 +61,8 @@ The working prototype removes 76 lines by sharing the registry's checks for crea
 
 **Retired Grok webhook launch.** Swift records an enabled legacy webhook profile as `grok_bot_webhook_retired` and prepares the remaining workers and wake profiles. The Node bootstrap rejects the obsolete key. The separately exported webhook module and its versioned installer entries are still present. This change brings application source to 78,372 lines, 1,493 below baseline and 14,480 above the revised ceiling.
 
+**Review follow-up.** Preflight accepts the retired webhook omission when an eligible lane remains. The retired mode is excluded from service startup and new watch grant membership. Cursor readiness requires the shared Codex runtime files in the verified manifest, which rules out v5/v6 Hermes and Antigravity bundles as Cursor hosts. Application source is at 78,362 lines, 14,470 above the revised ceiling.
+
 ## Four product guarantees
 
 These are acceptance criteria for the reduced client. The route evidence below identifies differences and an existing gap.

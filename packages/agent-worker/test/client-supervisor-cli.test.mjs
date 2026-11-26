@@ -873,6 +873,22 @@ test("CLI keeps Cursor ACP off the install dispatcher even with agentId and inst
   assert.equal(received.useInstallWatchDispatcher, false);
 });
 
+test("headless wake identity fields exclude mailbox credential material", () => {
+  const owner = instance();
+  const credential = owner.mailbox.workloadPrivateKey;
+  const wake = headlessWake({
+    agentId: "agent_headless_codex_001",
+    installationId: "inst_N7VhDq3mQ2",
+  });
+  const parse = (identity) => parseClientSupervisorBootstrap(JSON.stringify(bootstrap({
+    instances: [owner],
+    headlessWakes: [{ ...wake, ...identity }],
+  })));
+  assert.doesNotThrow(() => parse({}));
+  assert.throws(() => parse({ agentId: credential }), /Invalid Triangle Client bootstrap/);
+  assert.throws(() => parse({ installationId: `inst_${credential}` }), /Invalid Triangle Client bootstrap/);
+});
+
 test("CLI opts into install dispatcher for headlessWakes with agentId and installationId", async () => {
   const wakes = [headlessWake({
     stateRoot: "/private/headless-state/bob",

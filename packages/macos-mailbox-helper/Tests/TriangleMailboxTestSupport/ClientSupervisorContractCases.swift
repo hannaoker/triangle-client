@@ -437,6 +437,7 @@ public enum ClientSupervisorContractCases {
             provisionGrokBotBinding: true
         )
         try fixture.instanceStore.setDeliveryMode(.grokBot, profile: fixture.specifications[1].profile)
+        try await fixture.supervisor.preflight()
         try await fixture.supervisor.run()
         let bootstrap = try fixture.process.decodedBootstrap()
         let workerID = ClientInstanceID.derive(profile: fixture.specifications[0].profile).value
@@ -496,6 +497,18 @@ public enum ClientSupervisorContractCases {
         try expect(!raw.contains(fixture.specifications[1].token), "first headless mailbox token leaked")
         try expect(!raw.contains(fixture.specifications[2].token), "second headless mailbox token leaked")
         try expect(!raw.contains("headlessWake\""), "legacy singleton headlessWake was emitted")
+
+        let binding = fixture.helperRoot.appendingPathComponent("headless-runtime-binding.json")
+        var object = try require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: binding)) as? [String: Any],
+            "missing headless binding"
+        )
+        object["version"] = 1
+        try JSONSerialization.data(withJSONObject: object).write(to: binding)
+        do {
+            try await fixture.supervisor.preflight()
+            throw SupervisorContractFailure("supervisor accepted a Codex v1 binding")
+        } catch ClientSupervisorError.invalidBootstrap {}
     }
 
     public static func headlessWakeBindingEntryMissing() async throws {

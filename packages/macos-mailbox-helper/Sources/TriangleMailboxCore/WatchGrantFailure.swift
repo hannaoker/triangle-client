@@ -111,8 +111,7 @@ public struct WatchGrantFailureDiagnosis: Codable, Equatable, Sendable,
 
     public static let interactiveExclusionNotes: [String] = [
         "mcp-interactive profiles may be watch grant members for App Server notify-only wakes.",
-        "grok-bot profiles may be watch grant members for native Grok Bot webhook wakes.",
-        "Watch grant actors must stay event-driven or grok-bot; mcp-interactive cannot act as the grant actor.",
+        "Use an event-driven or eligible headless Codex profile as the grant actor.",
     ]
 
     public static func from(_ error: WatchGrantServiceError) -> WatchGrantFailureDiagnosis {
@@ -404,7 +403,7 @@ public struct WatchCommandHelp: Codable, Equatable, Sendable {
             notes = [
                 "Creates/joins/finalizes an installation-scoped watch grant for notify members.",
                 "Optional repeatable --member-profile selects an explicit notify set (must include the actor); omit for auto membership.",
-                "Bound headless Codex, mcp-interactive, and grok-bot profiles may be notify members; mcp-interactive cannot act as the grant actor; Cursor ACP is excluded until a kick path exists.",
+                "Bound headless Codex, mcp-interactive, and Cursor ACP profiles may join event-driven profiles as notify members. App Server interactive and Cursor ACP profiles are notify-only.",
                 "Failures emit secret-free JSON on stderr with code, gate, and operatorAction.",
             ]
         case .watchStatus:

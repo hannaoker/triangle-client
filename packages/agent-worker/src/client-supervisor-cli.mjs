@@ -727,7 +727,6 @@ export async function runClientSupervisorCLI({
         localMessaging: bootstrap.localMessaging ?? null,
         eventWake: bootstrap.eventWake ?? null,
         appServerWake: bootstrap.appServerWake ?? null,
-        grokBotWake: bootstrap.grokBotWake ?? null,
         headlessWakes: bootstrap.headlessWakes ?? [],
         cursorAcpWakes: bootstrap.cursorAcpWakes ?? [],
         maxConcurrentReasoners: bootstrap.maxConcurrentReasoners,
